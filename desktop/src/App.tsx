@@ -78,6 +78,10 @@ export default function App() {
 
   const hasMap = mapState?.status === 'ok' || mapState?.status === 'compressed';
   const isCompressed = mapState?.status === 'compressed';
+  const canDecompress = hasMap && isCompressed;
+  const canRecompress = hasMap && !isCompressed;
+  const canExtract = hasMap;
+  const canInject = hasMap;
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -94,10 +98,10 @@ export default function App() {
           {
             label: 'Tools',
             items: [
-              { label: 'Decompress Map', onClick: handleDecompress, disabled: !hasMap || !isCompressed },
-              { label: 'Recompress Map', onClick: handleRecompress, disabled: !hasMap || isCompressed },
-              { label: 'Extract Tags...', onClick: () => notImplemented('Extract Tags'), disabled: !hasMap },
-              { label: 'Inject Tags...', onClick: () => notImplemented('Inject Tags'), disabled: !hasMap },
+              { label: 'Decompress Map', onClick: handleDecompress, disabled: !canDecompress },
+              { label: 'Recompress Map', onClick: handleRecompress, disabled: !canRecompress },
+              { label: 'Extract Tags...', onClick: () => notImplemented('Extract Tags'), disabled: !canExtract },
+              { label: 'Inject Tags...', onClick: () => notImplemented('Inject Tags'), disabled: !canInject },
             ],
           },
           { label: 'Help', items: [{ label: 'About', onClick: () => window.opence.showAbout() }] },
@@ -105,8 +109,10 @@ export default function App() {
       />
       <Toolbar
         onOpen={handleOpen}
-        hasMap={hasMap}
-        isCompressed={isCompressed}
+        canDecompress={canDecompress}
+        canRecompress={canRecompress}
+        canExtract={canExtract}
+        canInject={canInject}
         onDecompress={handleDecompress}
         onRecompress={handleRecompress}
         onExtract={() => notImplemented('Extract Tags')}

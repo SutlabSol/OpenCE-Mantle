@@ -2,8 +2,10 @@ import type { CSSProperties } from 'react';
 
 interface Props {
   onOpen: () => void;
-  hasMap: boolean;
-  isCompressed: boolean;
+  canDecompress: boolean;
+  canRecompress: boolean;
+  canExtract: boolean;
+  canInject: boolean;
   onDecompress: () => void;
   onRecompress: () => void;
   onExtract: () => void;
@@ -11,7 +13,7 @@ interface Props {
   progress: { stage: string; percent: number } | null;
 }
 
-export default function Toolbar({ onOpen, hasMap, isCompressed, onDecompress, onRecompress, onExtract, onInject, progress }: Props) {
+export default function Toolbar({ onOpen, canDecompress, canRecompress, canExtract, canInject, onDecompress, onRecompress, onExtract, onInject, progress }: Props) {
   return (
     <div
       data-testid="sparkedit-toolbar"
@@ -26,11 +28,11 @@ export default function Toolbar({ onOpen, hasMap, isCompressed, onDecompress, on
     >
       <ToolbarButton testid="open-map-toolbar-button" label="Open Map" onClick={onOpen} />
       <Divider />
-      <ToolbarButton testid="decompress-button-toolbar" label="Decompress" onClick={onDecompress} disabled={!hasMap || !isCompressed} />
-      <ToolbarButton testid="recompress-button" label="Recompress" onClick={onRecompress} disabled={!hasMap || isCompressed} />
+      <ToolbarButton testid="decompress-button-toolbar" label="Decompress" onClick={onDecompress} disabled={!canDecompress} />
+      <ToolbarButton testid="recompress-button" label="Recompress" onClick={onRecompress} disabled={!canRecompress} />
       <Divider />
-      <ToolbarButton testid="toolbar-extract-button" label="Extract Tags" onClick={onExtract} disabled={!hasMap} />
-      <ToolbarButton testid="toolbar-inject-button" label="Inject Tags" onClick={onInject} disabled={!hasMap} />
+      <ToolbarButton testid="toolbar-extract-button" label="Extract Tags" onClick={onExtract} disabled={!canExtract} />
+      <ToolbarButton testid="toolbar-inject-button" label="Inject Tags" onClick={onInject} disabled={!canInject} />
       <div style={{ flex: 1 }} />
       {progress && (
         <div style={{ width: 200, display: 'flex', alignItems: 'center', gap: 8 }}>

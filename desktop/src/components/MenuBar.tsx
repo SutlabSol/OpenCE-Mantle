@@ -56,25 +56,31 @@ export default function MenuBar({ menus }: { menus: Menu[] }) {
               }}
             >
               {menu.items.map((item) => (
-                <div
+                <button
                   key={item.label}
                   data-testid={`menu-item-${menu.label.toLowerCase()}-${item.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}
+                  disabled={item.disabled}
                   onClick={() => {
-                    if (item.disabled) return;
                     setOpenMenu(null);
                     item.onClick();
                   }}
                   style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    background: 'transparent',
+                    border: 'none',
                     padding: '7px 16px',
                     color: item.disabled ? 'var(--text-dim)' : 'var(--text-primary)',
                     cursor: item.disabled ? 'default' : 'pointer',
                     fontSize: 12.5,
+                    fontFamily: 'var(--ui-font)',
                   }}
                   onMouseEnter={(e) => !item.disabled && (e.currentTarget.style.background = 'var(--selection-bg)')}
                   onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                 >
                   {item.label}
-                </div>
+                </button>
               ))}
             </div>
           )}
