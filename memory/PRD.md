@@ -125,3 +125,71 @@ Chimera zstd scheme documented in Milestone 1. Will pause again for review once 
 M1 + M2 complete and validated against real maps. Proceeding to M3 (GUI shell: Electron +
 React, Open Map, info panel, Decompress button, tag browser) - the first visible, clickable
 version of the app. Will pause again for review once M3 is testable end-to-end.
+
+## New context from user (2026-07): target runtime is OpenCE
+User: "this tool is for the xbox port of Halo OpenCE only" +
+https://github.com/OpenCommunityEdition/OpenCE. Investigated the repo directly (its own
+`docs/custom_edition_caches.md` and `tools/map_validate.c`/`tools/test_cache_file_formats.py`
+are extremely detailed, rigorous, CC0-licensed references independently verified against 24
+real sample caches). Key findings, all GOOD NEWS for the existing implementation:
+- OpenCE's native builds load standard Halo Custom Edition caches, **version 609** - exactly
+  what M1/M2 already target. No format pivot needed.
+- Confirms our struct layout byte-for-byte: tag data header 0x28 bytes, tag instance 0x20
+  bytes, resource-map flag at offset 0x18.
+- OpenCE's own loader does NOT support compressed Custom Edition maps (checks explicitly for
+  "no compression"). Matches the user's instruction to de-prioritize Chimera compression -
+  core's compress/decompress (M2) remains implemented (harmless, already tested), just not
+  on the critical path.
+- Only bitmap, sound, font, unicode_string_list, and hud_message_text tags may be
+  resource-map-indexed under OpenCE's stricter validation - relevant for M4 extraction logic.
+- Gave us the exact CRC32 algorithm for M6: "CRC-32 of the structure BSPs (packed from
+  0x800), the model data, and the tag data, not inverted."
+- OpenCE refuses maps with OpenSauce (`yelo`) flags set - relevant for M6 export validation.
+- Scenario structure BSP (`sbsp`) tags live in their own file region, loaded at a different
+  runtime address than the normal tag data base - NOT resolvable via the standard
+  tag_data_offset-relative pointer formula. Found this the hard way (see tag-footprints below).
+
+## Core addition: tag footprint estimation (2026-07)
+Added `core/src/map/tag-footprints.ts` (`estimateTagFootprints`), citing OpenCE's own
+`tools/custom_edition_tag_footprints.py` technique: a tag's estimated size is the distance
+from its resolved file offset to the next tag's. Explicitly excludes `scenario_structure_bsp`
+tags (null size - they live in a separate file region, confirmed by OpenCE's docs; including
+them in the naive calculation produced a 1GB bogus footprint sum in testing, caught by a
+sanity-check unit test against the real bloodgulch.map). 30 core tests passing.
+
+### M3 — GUI shell: DONE (2026-07, this session)
+Electron + React (Vite) app in `/app/desktop` (named "desktop", not the brief's literal
+"/app", to avoid colliding with this sandbox's own root path).
+- `electron/main.ts` - BrowserWindow, native menu (File: Open Map/Save As stub/Recent Maps/
+  Exit; Tools: Decompress/Recompress Map, Extract/Inject Tags stubs; Help: About), IPC
+  handlers, recent-maps persistence (`recent-maps.ts`, JSON in userData).
+- `electron/preload.ts` - typed `window.opence` API via contextBridge (contextIsolation on,
+  nodeIntegration off). Renderer never touches `fs` - drag-and-drop resolves a path via
+  `webUtils.getPathForFile` in preload, then asks main to load it.
+- `electron/map-worker.ts` - all parsing/zstd work runs in a `worker_threads` Worker (one per
+  task), so the UI thread never blocks; reports staged progress (reading/parsing/writing).
+- React renderer (`src/`): `WelcomeDropZone`, `Toolbar` (progress bar inline), `MapInfoPanel`
+  (scenario/build/map type/version/size/tag count/CRC32), `CompressedBanner` + Decompress
+  button, `UnsupportedBanner`, `TagBrowser` (search across path/class/tag ID, group-by-class
+  or group-by-folder toggle, multi-select checkboxes, size column via tag footprints),
+  `LogPanel`. Dark, technical theme (Barlow Condensed + JetBrains Mono, amber/olive accents) -
+  deliberately plain/functional per the brief ("plain native-feeling layout beats fancy
+  styling"), not a generic AI-slop theme.
+- Extract/Inject/Save-As are present in the UI (menu + toolbar) but explicitly log "coming in
+  a later milestone" rather than silently doing nothing (M4/M5/M6 not built yet).
+- Verified in this sandbox (headless Linux, no display):
+  - `tsc --noEmit` clean on the renderer, `tsc -p electron/tsconfig.json` clean, `vite build`
+    succeeds.
+  - Renderer UI visually verified via screenshot against the Vite dev server (with a dev-only
+    mock of `window.opence` mirroring real bloodgulch.map data) - welcome screen, loaded map
+    info panel, tag browser grouping/search all render and behave correctly.
+  - The actual Electron shell (main + preload + renderer + worker, NOT just the renderer) was
+    smoke-tested under Xvfb: launches without JS errors, all processes (main/renderer/GPU)
+    stay up.
+  - Full native-window visual QA and the `electron-builder` Windows packaging step still need
+    to happen on the user's own machine (documented in `/app/README.md`), since this sandbox
+    has no Windows and no real display.
+
+## Next action for user
+M1+M2+M3 done. Review the GUI shell (screenshots shared in chat). Confirm before starting M4
+(dependency walker + extract tags with dependencies).

@@ -90,3 +90,4 @@ sample_maps/bitmaps.map
 credentials.json
 *.key
 .credentials
+desktop/node_modules/electron/dist/electron
