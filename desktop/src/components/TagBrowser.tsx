@@ -19,6 +19,10 @@ function topFolder(path: string): string {
   return parts.length > 1 ? parts[0] : '(root)';
 }
 
+function slugify(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group';
+}
+
 export default function TagBrowser({ tags, onNotImplemented }: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
@@ -47,13 +51,21 @@ export default function TagBrowser({ tags, onNotImplemented }: Props) {
 
   const toggleGroup = (key: string) => {
     const next = new Set(openGroups);
-    next.has(key) ? next.delete(key) : next.add(key);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
     setOpenGroups(next);
   };
 
   const toggleSelect = (index: number) => {
     const next = new Set(selected);
-    next.has(index) ? next.delete(index) : next.add(index);
+    if (next.has(index)) {
+      next.delete(index);
+    } else {
+      next.add(index);
+    }
     setSelected(next);
   };
 
@@ -115,7 +127,7 @@ export default function TagBrowser({ tags, onNotImplemented }: Props) {
           return (
             <div key={key}>
               <div
-                data-testid={`tag-group-${key}`}
+                data-testid={`tag-group-${slugify(key)}`}
                 onClick={() => toggleGroup(key)}
                 style={{
                   display: 'flex',

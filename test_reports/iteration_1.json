@@ -1,0 +1,24 @@
+{
+  "summary": "Completed renderer-UI testing of OpenCE Modding Tool against Vite dev server (http://localhost:5173) using the dev-mock IPC bridge. All 12 Playwright assertions passed: welcome screen renders with open-map-button, clicking it loads mock bloodgulch map, MapInfoPanel renders all expected fields with correct values (scenario=bloodgulch, build=01.00.01.0609, map type=Multiplayer, header version=609, status=Decompressed, file size 13.29 MB, tag count 2,455, CRC32 0x7B309554), toolbar shows open+recompress buttons (correct since mock map is not compressed), TagBrowser renders all 10 expected class groups collapsed by default, expand/collapse works, group-by-folder switch reorganizes correctly (vehicles/levels/etc.), search filtering with 'warthog' narrows to a single group and auto-expands it then clearing restores collapsed state, row selection updates the Extract Selected (n) count and toggles the disabled state, clicking Extract Selected logs the expected 'Extract Tags not implemented yet' warn message to LogPanel (expected M4 behavior), and LogPanel is always present. Zero browser console errors or page exceptions were captured during the full flow.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/test_reports/iteration_1.json"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "App.tsx:19-21 - the menu-action listener relies on action strings ending in '-stub' to decide what is unimplemented; this is a brittle contract between electron/main.ts menu wiring and the renderer. Consider replacing with a typed enum/union so renaming a menu id can't silently break the warning.",
+    "TagBrowser.tsx:50/56 - uses the comma-expression pattern `next.has(k) ? next.delete(k) : next.add(k)` which triggers no-unused-expressions warnings in strict ESLint configs; cleaner as an if/else. Functional behavior is correct.",
+    "TagBrowser.tsx:118 - `data-testid={`tag-group-${key}`}` works for the current fixed class names, but once real tag folders are grouped by `topFolder`, user-controlled strings with spaces/backslashes/special chars will produce invalid/duplicate testids. Consider slugifying the key for the testid while keeping the original for display.",
+    "App.tsx:53-61 - handleDecompress/handleRecompress pass an empty string as filePath to window.opence.decompressMap(''), relying on the main process to use the currently loaded map path implicitly. Explicit is better than implicit: pass mapState.filePath so the contract is self-documenting and testable."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (no backend)", "frontend": "100% (12/12 UI assertions)"},
+  "seed_data_creation": "None - used built-in dev-mock.ts canned bloodgulch data.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Milestone 3 renderer UI is fully green via dev-mock. For M4 (extract) and later, the real Electron shell path (electron/main.ts, preload.ts, map-worker.ts) still requires Xvfb-based smoke testing - browser automation can only cover renderer logic. Dev server is at http://localhost:5173; dev-mock auto-installs in Vite DEV mode only. Tag count (2455) in info panel intentionally does not match the ~10 rendered rows (sampleTags array) - do not flag as a bug.",
+  "rca of the issue": "N/A - no issues found."
+}

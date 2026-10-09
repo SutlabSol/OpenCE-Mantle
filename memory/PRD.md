@@ -193,3 +193,15 @@ Electron + React (Vite) app in `/app/desktop` (named "desktop", not the brief's 
 ## Next action for user
 M1+M2+M3 done. Review the GUI shell (screenshots shared in chat). Confirm before starting M4
 (dependency walker + extract tags with dependencies).
+
+## M3 testing (2026-07)
+testing_agent ran 12 Playwright assertions against the renderer (Vite dev server + dev-mock):
+welcome screen, map load, info panel field values, toolbar buttons, tag browser grouping
+(class + folder), search/auto-expand, multi-select + Extract button state, log panel, zero
+console errors. All 12 passed, zero bugs found. Applied 2 of 4 minor code-review suggestions
+(explicit filePath instead of empty string for decompress/recompress; slugified group
+data-testids to survive special characters in folder names). Did not change the '-stub'
+action-string convention (low risk, hobby-scope) or the ternary-as-expression style (already
+fixed to if/else alongside the testid fix). Electron shell itself (main/preload/menu/worker)
+was separately smoke-tested under Xvfb by the main agent (launches cleanly, no JS errors) -
+native dialogs/menus still need manual verification on the user's own Windows machine.

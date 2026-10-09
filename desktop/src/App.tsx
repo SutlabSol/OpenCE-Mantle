@@ -51,12 +51,14 @@ export default function App() {
   };
 
   const handleDecompress = async () => {
-    const result = await window.opence.decompressMap('');
+    if (!mapState || mapState.status === 'error') return;
+    const result = await window.opence.decompressMap(mapState.filePath);
     if (result) log('info', `Saved decompressed map to ${result.outputPath}`);
   };
 
   const handleRecompress = async () => {
-    const result = await window.opence.recompressMap('');
+    if (!mapState || mapState.status === 'error') return;
+    const result = await window.opence.recompressMap(mapState.filePath);
     if (result) log('info', `Saved recompressed map to ${result.outputPath}`);
   };
 
