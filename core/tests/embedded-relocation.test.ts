@@ -133,8 +133,13 @@ describe.skipIf(!haveColdsnap)(coldsnapTitle, () => {
     // is what matters, not absolute 4-byte alignment: real coldsnap.map's OWN tagDataOffset/
     // modelDataFileOffset are NOT actually 4-aligned (both ≡ 2 mod 4), so that is not a safe
     // invariant to assert here - see PRD.md "Relocation research" for the corrected finding.
+    // ALL 4 fields that change (not just the first 2) must keep coldsnap's own mod-4 remainder -
+    // coldsnap-as-TARGET is the only real sample map that actually exercises this (it's the one
+    // map in all 5 checked that is NOT 4-aligned to begin with - see PRD.md "Alignment" table).
     expect(reparsed.header.tagDataOffset % 4).toBe(oldTagDataOffset % 4);
     expect(reparsed.tagIndex.modelDataFileOffset % 4).toBe(oldModelDataFileOffset % 4);
+    expect(reparsed.header.decompressedFileSize % 4).toBe(oldDecompressedFileSize % 4);
+    expect(reparsed.header.tagDataSize % 4).toBe(oldTagDataSize % 4);
 
     const { errors } = validateWholeClosure(injected, reparsed.header, reparsed.tagIndex);
     expect(errors).toEqual([]);
