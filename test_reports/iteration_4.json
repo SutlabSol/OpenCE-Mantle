@@ -1,0 +1,26 @@
+{
+  "summary": "Targeted retest (iteration 4) of the single bug from iteration 3: Tools-menu disabled-state parity with Toolbar. FIX IS VERIFIED. All 4 Tools menu items (Decompress Map, Recompress Map, Extract Tags..., Inject Tags...) now render as native <button disabled={...}> and correctly reflect disabled state in both the welcome (no map) state and after loading the mock uncompressed bloodgulch map. Toolbar and MenuBar now share the same canDecompress/canRecompress/canExtract/canInject props from App.tsx and their disabled states match perfectly. Light regression also passed: welcome screen renders, Open Map flow loads mock map, menu closes on item click, click-outside closes dropdown, clicking enabled Recompress menu item successfully fires the recompress flow (log entry 'Saved recompressed map to C:/HaloCE/maps/bloodgulch_compressed.map' visible in Log Console), zero console errors.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/test_reports/iteration_4.json"],
+  "action_items": [
+    "Minor (optional): the testids for the Extract/Inject menu items end with a trailing dash ('menu-item-tools-extract-tags-' and 'menu-item-tools-inject-tags-') because the labels contain '...'. The review request/spec referred to them without the trailing dash. Consider either (a) stripping trailing dashes in the testid slug generator in MenuBar.tsx, or (b) updating the spec. Functionality is correct; this is only a selector-cosmetics nit."
+  ],
+  "critical_code_review_comments": [
+    "App.tsx now computes canDecompress/canRecompress/canExtract/canInject once and threads them to both MenuBar items and Toolbar - good single-source-of-truth refactor; eliminates the drift that caused the iteration-3 bug.",
+    "MenuBar items are now real <button disabled>, which is both accessible and testable (native disabled property). Good fix.",
+    "Slug generator for data-testid in MenuBar.tsx (line 61) does `.replace(/[^a-z0-9]+/g, '-')` without trimming trailing '-' - produces 'extract-tags-' from 'Extract Tags...'. Low priority but a `.replace(/-+$/, '')` would make testids cleaner."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100% on the targeted bug + regression checks (11/11 meaningful assertions passed; 2 false-negatives in automation unrelated to the fix)"},
+  "test_credentials": "N/A",
+  "seed_data_creation": "None (uses existing dev-mock.ts mocked window.opence)",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration-3 bug is fully fixed. Verified assertions: (1) welcome state: all 4 Tools items are native BUTTONs with disabled=true; (2) after loading mock bloodgulch (uncompressed): decompress disabled=true, recompress/extract/inject disabled=false; (3) toolbar buttons have identical disabled states (parity restored); (4) clicking Recompress menu item fires action and writes to Log Console; (5) menu auto-closes after click; (6) click-outside closes menu; (7) zero console errors. Note the Extract/Inject menu testids actually resolve to 'menu-item-tools-extract-tags-' and 'menu-item-tools-inject-tags-' (trailing dash because labels contain '...').",
+  "rca of the issue": "Original bug (iter 3): MenuBar rendered items as <div> with a visual-only disabled style and an onClick guard - no native `disabled` attribute - so DOM-level automation and assistive tech saw them as enabled. Additionally, Toolbar and MenuBar each independently derived their disabled flags from hasMap/isCompressed, risking drift. Fix: (a) items switched to <button disabled={item.disabled}>; (b) App.tsx now owns canDecompress/canRecompress/canExtract/canInject and passes them to both consumers. Mitigation verified by confirming native disabled property matches expectations in both welcome and loaded-map states, and that Toolbar's native disabled props match the menu's."
+}

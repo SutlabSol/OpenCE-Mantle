@@ -190,9 +190,56 @@ Electron + React (Vite) app in `/app/desktop` (named "desktop", not the brief's 
     to happen on the user's own machine (documented in `/app/README.md`), since this sandbox
     has no Windows and no real display.
 
+## UI redesign: Sapien/SparkEdit-style editor layout (2026-07)
+User: "can we change the UI of my app to look more like sapien and sparkedit" + feature
+wishlist for a future Phase-2 Sapien-style scenario editor (AI encounters, scripting,
+trigger volumes, lightmap painting, BSP editing, live simulation, player sim, cutscene
+cameras, detail painting, asset hierarchy mgmt). User explicitly scoped THIS session to
+UI/layout only: "at this point lets just do the UI update though, we will continue on with
+M-4 and such after the UI has been changed." No new functional milestones were built.
+
+Researched both reference tools (unfamiliar to main agent) via GitHub + web search:
+- Sapien (official Halo scenario editor): modular dockable panels - Game Window (center 3D
+  viewport + status bar), Hierarchy View (category tree + instance list), Properties Palette
+  (selected object attributes), Tool Window, Asset Type Palette.
+- SparkEdit (community Halo CE/Xbox editor): tab-based (Edit/Models), toolbar-driven,
+  classic early-2000s Windows utility chrome.
+
+Called design_agent with full original problem statement + verbatim user choices + these
+researched reference details + current/future key functionalities. Output:
+`/app/design_guidelines.json` - GitHub-dark-meets-Windows-XP-tool palette (bg #0D1117/panel
+#161B22/header #21262D, accents cyan/green/gold/danger), Segoe UI/Tahoma (native Windows
+look, no web-font override) + Consolas/JetBrains Mono, 5-region layout: menu bar + toolbar
+(top) / Hierarchy pane (left) / tabbed workspace (center: Map Overview + reserved 3D
+Viewport tab) / Properties Palette (right) / Log Console + Status Bar (bottom).
+
+Implemented: NEW components `MenuBar.tsx` (functional dropdowns), `StatusBar.tsx`,
+`PropertiesPalette.tsx` (shows focused tag's path/class/ID/size/resource-map flag + a
+"Dependencies - available in M4" placeholder), `CenterWorkspace.tsx` (Map Overview /
+3D Viewport tabs), `ViewportPlaceholder.tsx`. REWRITTEN: `Toolbar.tsx` (always-visible,
+contextually-disabled buttons incl. new Extract/Inject), `TagBrowser.tsx` (narrower left
+"Hierarchy" pane, new `onFocusTag` callback separate from multi-select checkboxes),
+`App.tsx` (full layout wiring, single source of truth for `canDecompress/canRecompress/
+canExtract/canInject`), `MapInfoPanel`/`CompressedBanner`/`UnsupportedBanner`/`LogPanel`/
+`WelcomeDropZone` (restyled only, logic unchanged). New IPC: `app:showAbout` (in-app Help
+menu now triggers the same native About dialog as the OS menu). Full new color palette in
+`src/styles/index.css`.
+
+Verified: tsc clean (renderer + electron), esbuild bundle clean, visually screenshotted
+(welcome/loaded/properties-focus/viewport-tab/menu-dropdown states) matching the Sapien-style
+multi-pane layout. testing_agent iteration 3: 28/29 checks passed, found 1 bug (Tools menu
+items were `<div>`s with only a visual disabled style, no native `disabled` attribute, so
+automation/assistive tech couldn't detect disabled state, and Toolbar/MenuBar each
+independently recomputed enable/disable logic risking drift). Fixed: menu items are now real
+`<button disabled={...}>`, and App.tsx now owns `canDecompress/canRecompress/canExtract/
+canInject` as the single source of truth passed to both. testing_agent iteration 4: fix
+verified, 11/11 targeted + regression checks passed, zero console errors. Also trimmed a
+cosmetic trailing-dash in generated menu-item testids per code review.
+
 ## Next action for user
-M1+M2+M3 done. Review the GUI shell (screenshots shared in chat). Confirm before starting M4
-(dependency walker + extract tags with dependencies).
+UI redesign done and tested. Review the new Sapien/SparkEdit-style layout (screenshots
+shared in chat) on your own machine (native Electron window + Windows build). Confirm before
+resuming M4 (dependency walker + extract tags with dependencies).
 
 ## M3 testing (2026-07)
 testing_agent ran 12 Playwright assertions against the renderer (Vite dev server + dev-mock):

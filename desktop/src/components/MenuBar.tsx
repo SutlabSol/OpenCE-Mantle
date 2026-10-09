@@ -58,7 +58,7 @@ export default function MenuBar({ menus }: { menus: Menu[] }) {
               {menu.items.map((item) => (
                 <button
                   key={item.label}
-                  data-testid={`menu-item-${menu.label.toLowerCase()}-${item.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}
+                  data-testid={`menu-item-${menu.label.toLowerCase()}-${item.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '')}`}
                   disabled={item.disabled}
                   onClick={() => {
                     setOpenMenu(null);
