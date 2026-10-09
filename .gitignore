@@ -83,3 +83,4 @@ android-sdk/
 
 # overlay black-box crash/user-report dumps — session data, never history
 **/.emergent/recordings/
+sample_maps/bitmaps.map

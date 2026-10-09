@@ -77,6 +77,22 @@ GUI shell (Open Map/info panel/Decompress button/tag browser), dependency walker
 inject (add/swap), export + CRC. Electron main/preload/renderer, worker threads for heavy
 parsing, typed IPC.
 
+## M1 validated against real sample maps (2026-07)
+User supplied bloodgulch.map, ui.map, bitmaps.map, loc.map, sounds.map.
+- `bloodgulch.map` and `ui.map` are real, UNCOMPRESSED Custom Edition maps (engine=0x261=609,
+  on-disk size == header `decompressedFileSize`). Ran `core/scripts/inspect-map.ts` against
+  both: header fields, tag count (2455 / 1412), scenario tag lookup, FourCC decoding, and
+  path-pointer resolution ALL correct against real data (e.g. tag #0 of bloodgulch.map is
+  `scenario levels\test\bloodgulch\bloodgulch`, matching the scenario name in the header;
+  885 tags correctly flagged `external=true` i.e. living in bitmaps.map/sounds.map).
+- `bitmaps.map`, `loc.map`, `sounds.map` are RESOURCE maps with a completely different,
+  non-"head"/"foot" header format (expected - out of scope for M1/M2, relevant later for the
+  M4 "point the app at resource maps" extraction feature).
+- None of the 5 supplied maps are compressed, so M2's decompress/recompress round-trip will
+  be validated as: compress(original) -> decompress -> must equal original byte-for-byte
+  (self-consistency), since no real Chimera-compressed sample or Windows Chimera tool is
+  available in this sandbox to cross-check against. Flagged to user.
+
 ## Next action for user
-Review M1 (code + README assumptions). Upload a real Custom Edition `.map` file so M2's
-decompress/recompress round-trip can be verified byte-for-byte. Confirm proceeding to M2.
+M1 fully validated against real maps. Proceeding to M2 (decompress/recompress) using the
+Chimera zstd scheme documented in Milestone 1. Will pause again for review once M2 tests pass.
