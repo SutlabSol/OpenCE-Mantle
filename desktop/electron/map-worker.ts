@@ -5,7 +5,7 @@ import {
   compressCustomEditionMap,
   decompressCustomEditionMap,
   estimateTagFootprints,
-} from '../../core/dist/index';
+} from '../../core/src/index';
 import type { LoadMapResult } from './shared-types';
 
 interface InspectTask {

@@ -6,15 +6,16 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev:renderer": "vite",
-    "dev:electron": "tsc -p electron/tsconfig.json && electron dist-electron/main.js",
-    "build:core": "cd ../core && yarn build",
+    "dev:electron": "node esbuild.electron.mjs && electron dist-electron/main.js",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p electron/tsconfig.json",
-    "build": "yarn build:core && yarn build:renderer && yarn build:electron",
+    "build:electron": "node esbuild.electron.mjs",
+    "typecheck:electron": "tsc --noEmit -p electron/tsconfig.json",
+    "build": "yarn build:renderer && yarn build:electron",
     "dist:win": "yarn build && electron-builder --win portable nsis",
     "dist:win:portable": "yarn build && electron-builder --win portable"
   },
   "dependencies": {
+    "@mongodb-js/zstd": "^7.0.0",
     "lucide-react": "^0.462.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -25,14 +26,15 @@
     "@vitejs/plugin-react": "^4.3.3",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.11"
   },
   "build": {
     "appId": "com.opence.moddingtool",
     "productName": "OpenCE Modding Tool",
-    "files": ["dist/**/*", "dist-electron/**/*", "package.json"],
-    "extraResources": [],
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "dist-electron/**/*", "package.json", "!electron/**/*", "!src/**/*"],
     "win": {
       "target": ["portable", "nsis"]
     },

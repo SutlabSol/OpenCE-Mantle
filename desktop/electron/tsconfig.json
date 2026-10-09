@@ -4,12 +4,11 @@
     "module": "CommonJS",
     "moduleResolution": "Node",
     "lib": ["ES2020"],
-    "outDir": "../dist-electron",
-    "rootDir": ".",
+    "noEmit": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["."]
+  "include": [".", "../core/src"]
 }
