@@ -1,9 +1,9 @@
 import { forwardRef, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
-import type { InjectPlanSummary, ApplyInjectResult } from '../../electron/shared-types';
+import type { InjectPlanSummary, ApplyInjectResult, InjectionMode } from '../../electron/shared-types';
 import { WarningGroup } from './WarningGroup';
 
-type Phase = 'picking' | 'planning' | 'plan-error' | 'review' | 'applying' | 'result' | 'apply-error';
+type Phase = 'choose-mode' | 'picking' | 'planning' | 'plan-error' | 'review' | 'applying' | 'result' | 'apply-error';
 
 interface Props {
   onClose: () => void;
@@ -11,14 +11,16 @@ interface Props {
 }
 
 /**
- * Milestone 5, Step A: ADD-mode tag injection. User picks a `.ocetags` container (never a path
- * typed in, always the native file dialog, in main.ts); this dialog shows the dry-run plan
- * (reused/added/blocked/external-reference warnings) and only writes anything once confirmed -
- * the actual write goes through the native Save As dialog too (main.ts, never overwrites the
- * open map). SWAP mode and the conflict dialog are Step B/C, not built yet.
+ * Milestone 5, Step A + B: ADD and SWAP mode tag injection. User first picks the mode for the
+ * whole operation (per-tag choice is Step C's conflict dialog, not built yet), then a `.ocetags`
+ * container (never a path typed in, always the native file dialog, in main.ts); this dialog shows
+ * the dry-run plan (reused/swapped/added/blocked/external-reference warnings) and only writes
+ * anything once confirmed - the actual write goes through the native Save As dialog too (main.ts,
+ * never overwrites the open map).
  */
 export default function InjectDialog({ onClose, log }: Props) {
-  const [phase, setPhase] = useState<Phase>('picking');
+  const [phase, setPhase] = useState<Phase>('choose-mode');
+  const [mode, setMode] = useState<InjectionMode>('add');
   const [plan, setPlan] = useState<InjectPlanSummary | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [understand, setUnderstand] = useState(false);
@@ -26,8 +28,13 @@ export default function InjectDialog({ onClose, log }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const startedRef = useRef(false);
 
+  const startPicking = (chosenMode: InjectionMode) => {
+    setMode(chosenMode);
+    setPhase('picking');
+  };
+
   useEffect(() => {
-    if (startedRef.current) return;
+    if (phase !== 'picking' || startedRef.current) return;
     startedRef.current = true;
     (async () => {
       const picked = await window.opence.pickInjectContainer();
@@ -36,7 +43,7 @@ export default function InjectDialog({ onClose, log }: Props) {
         return;
       }
       setPhase('planning');
-      const res = await window.opence.planInject(picked.path);
+      const res = await window.opence.planInject(picked.path, mode);
       if (res.ok) {
         setPlan(res.plan);
         setPhase('review');
@@ -46,7 +53,7 @@ export default function InjectDialog({ onClose, log }: Props) {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [phase]);
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -64,7 +71,7 @@ export default function InjectDialog({ onClose, log }: Props) {
     const res = await window.opence.applyInject();
     setApplyResult(res);
     if (res.ok) {
-      log('info', `Injected ${res.addedCount} tag(s) (${res.reusedCount} reused) into ${res.outputPath}`);
+      log('info', `Injected ${res.addedCount} tag(s), swapped ${res.swappedCount} (${res.reusedCount} reused) into ${res.outputPath}`);
       setPhase('result');
     } else if (res.code === 'CANCELLED') {
       setPhase('review');
@@ -73,6 +80,43 @@ export default function InjectDialog({ onClose, log }: Props) {
       setPhase('apply-error');
     }
   };
+
+  if (phase === 'choose-mode') {
+    return (
+      <Overlay>
+        <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
+          <div style={{ padding: 20 }}>
+            <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', marginBottom: 16 }}>
+              Choose how this whole operation should treat container tags that already exist (by path) in the target map.
+            </div>
+            <button
+              data-testid="inject-mode-add"
+              onClick={() => startPicking('add')}
+              style={{ ...buttonStyle(), display: 'block', width: '100%', textAlign: 'left', padding: '10px 14px', marginBottom: 10 }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: 3 }}>Add new tags</div>
+              <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>Only genuinely new tags are written. A tag that already exists in the target is left untouched (reused), never duplicated.</div>
+            </button>
+            <button
+              data-testid="inject-mode-swap"
+              onClick={() => startPicking('swap')}
+              style={{ ...buttonStyle(), display: 'block', width: '100%', textAlign: 'left', padding: '10px 14px' }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: 3 }}>Swap into existing tags</div>
+              <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                A tag that already exists in the target has its content REPLACED in place (same tagId, so existing placements/references pick it up immediately). New tags are still added.
+              </div>
+            </button>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+              <button data-testid="inject-mode-cancel" onClick={onClose} style={buttonStyle()}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </DialogShell>
+      </Overlay>
+    );
+  }
 
   if (phase === 'picking' || phase === 'planning') {
     return (
@@ -124,7 +168,7 @@ export default function InjectDialog({ onClose, log }: Props) {
         <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
           <div data-testid="inject-result" style={{ padding: 20 }}>
             <div style={{ color: 'var(--success-text)', marginBottom: 10, fontSize: 13 }}>
-              Injected {applyResult.addedCount} tag(s) ({applyResult.reusedCount} reused, not duplicated).
+              Injected {applyResult.addedCount} tag(s), swapped {applyResult.swappedCount} ({applyResult.reusedCount} reused, not duplicated).
             </div>
             <div style={{ fontSize: 12, fontFamily: 'var(--mono-font)', color: 'var(--text-secondary)', wordBreak: 'break-all', marginBottom: 14 }}>{applyResult.outputPath}</div>
             <div data-testid="inject-result-crc-warning" style={{ fontSize: 11.5, color: 'var(--warn-text)', marginBottom: 14 }}>
@@ -166,17 +210,18 @@ export default function InjectDialog({ onClose, log }: Props) {
   const hasBlocking = plan.refusedRoots.length > 0;
   const hasMismatch = plan.externalRefStatuses.some((r) => r.status === 'mismatch');
   const needsAck = hasBlocking || plan.blockedEmbedded.length > 0 || plan.blockedOther.length > 0 || hasMismatch;
-  const nothingToAdd = plan.counts.added === 0 && plan.counts.reused === 0;
+  const nothingToAdd = plan.counts.added === 0 && plan.counts.reused === 0 && plan.counts.swapped === 0;
 
   let confirmDisabledReason = '';
-  if (nothingToAdd) confirmDisabledReason = 'Nothing from this container can be added to the target map.';
+  if (nothingToAdd) confirmDisabledReason = 'Nothing from this container can be added or swapped into the target map.';
   else if (needsAck && !understand) confirmDisabledReason = 'Check "I understand" below to confirm you have read the warnings.';
 
   return (
     <Overlay>
       <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose} wide>
         <div data-testid="inject-dialog-summary" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12.5, color: 'var(--text-secondary)' }}>
-          From &quot;{plan.sourceMapName}&quot;: {plan.counts.added} to add, {plan.counts.reused} reused, {plan.counts.blockedEmbedded + plan.counts.blockedOther} blocked
+          From &quot;{plan.sourceMapName}&quot; ({plan.mode === 'swap' ? 'swap mode' : 'add mode'}): {plan.counts.added} to add, {plan.counts.swapped} to swap, {plan.counts.reused} reused,{' '}
+          {plan.counts.blockedEmbedded + plan.counts.blockedOther} blocked
         </div>
 
         <div style={{ padding: '10px 16px', maxHeight: 420, overflowY: 'auto' }}>
@@ -203,8 +248,9 @@ export default function InjectDialog({ onClose, log }: Props) {
               text: `"${r.path}" needs ${r.resourceMap} - ${describeRefStatus(r.status)}`,
             }))}
           />
+          <WarningGroup title="Will be swapped (keeps existing tagId)" severity="info" items={plan.toSwap.map((t, i) => ({ key: `swap-${i}`, text: `"${t.path}" (${t.group})` }))} />
           <WarningGroup title="Will be added" severity="info" items={plan.toAdd.map((t, i) => ({ key: `add-${i}`, text: `"${t.path}" (${t.group})` }))} />
-          <WarningGroup title="Reused (already present in target)" severity="info" items={plan.reused.map((t, i) => ({ key: `reuse-${i}`, text: `"${t.path}" (${t.group})` }))} />
+          <WarningGroup title="Reused (unchanged in target)" severity="info" items={plan.reused.map((t, i) => ({ key: `reuse-${i}`, text: `"${t.path}" (${t.group})` }))} />
         </div>
 
         <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)' }}>

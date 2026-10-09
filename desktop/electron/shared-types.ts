@@ -139,11 +139,15 @@ export interface InjectPlanRefusedRootSummary {
   reasons: string[];
 }
 
+export type InjectionMode = 'add' | 'swap';
+
 export interface InjectPlanSummary {
+  mode: InjectionMode;
   containerPath: string;
   sourceMapName: string;
-  counts: { totalInClosure: number; reused: number; added: number; blockedEmbedded: number; blockedOther: number; externalReferenced: number };
+  counts: { totalInClosure: number; reused: number; swapped: number; added: number; blockedEmbedded: number; blockedOther: number; externalReferenced: number };
   toAdd: InjectPlanTagSummary[];
+  toSwap: InjectPlanTagSummary[];
   reused: InjectPlanTagSummary[];
   blockedEmbedded: InjectPlanBlockedSummary[];
   blockedOther: InjectPlanBlockedSummary[];
@@ -154,7 +158,7 @@ export interface InjectPlanSummary {
 export type PlanInjectResult = { ok: true; plan: InjectPlanSummary } | { ok: false; code: string; message: string };
 
 export type ApplyInjectResult =
-  | { ok: true; outputPath: string; addedCount: number; reusedCount: number; staleChecksumWarning: string }
+  | { ok: true; outputPath: string; addedCount: number; reusedCount: number; swappedCount: number; staleChecksumWarning: string }
   | { ok: false; code: 'CANCELLED'; message: string }
   | { ok: false; code: string; message: string };
 
@@ -165,7 +169,7 @@ export type WorkerRequest =
   | { type: 'compress' | 'decompress'; requestId: string; filePath: string; outputPath: string }
   | { type: 'getDependencies'; requestId: string; originalIndices: number[] }
   | { type: 'extractTags'; requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }
-  | { type: 'planInject'; requestId: string; containerPath: string; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
+  | { type: 'planInject'; requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
   | { type: 'applyInject'; requestId: string; outputPath: string }
   | { type: 'cancel'; requestId: string };
 
@@ -188,7 +192,7 @@ export interface OpenceApi {
   pickResourceMap(kind: ResourceMapKind): Promise<ResourceMapPickResult>;
   getResourceMapStatuses(): Promise<Record<ResourceMapKind, ResourceMapStatus>>;
   pickInjectContainer(): Promise<{ path: string } | null>;
-  planInject(containerPath: string): Promise<PlanInjectResult>;
+  planInject(containerPath: string, mode: InjectionMode): Promise<PlanInjectResult>;
   applyInject(): Promise<ApplyInjectResult>;
   openContainingFolder(filePath: string): Promise<void>;
   getSettings(): Promise<AppSettings>;

@@ -4,7 +4,7 @@ import { inspectCustomEditionMap } from '../src/map/open-map';
 import { extractTagSet } from '../src/map/tag-extractor';
 import { serializeContainer, deserializeContainer, OCETAGS_FORMAT_VERSION, OCETAGS_MAGIC } from '../src/map/container';
 import type { OceContainer } from '../src/map/container';
-import { planAddInjection, applyAddInjection, normalizeTagPath, computeNewTagId } from '../src/map/tag-injector';
+import { planAddInjection, applyAddInjection, planSwapInjection, applySwapInjection, normalizeTagPath, computeNewTagId } from '../src/map/tag-injector';
 import { computeResourceMapIdentity } from '../src/map/resource-map';
 import { validateStructInstance } from '../src/map/definitions/validate-tag';
 import { getGroupDefinition } from '../src/map/definitions/engine';
@@ -14,8 +14,8 @@ import type { TagIndex } from '../src/map/tag-index';
 
 const haveSamples = hasSampleMap('bloodgulch.map') && hasSampleMap('ui.map');
 const suiteTitle = haveSamples
-  ? 'tag-injector M5 Step A (ADD mode)'
-  : `tag-injector M5 Step A (ADD mode) [${missingSampleMapsMessage(['bloodgulch.map', 'ui.map'])}]`;
+  ? 'tag-injector M5 Step A/B (ADD + SWAP modes)'
+  : `tag-injector M5 Step A/B (ADD + SWAP modes) [${missingSampleMapsMessage(['bloodgulch.map', 'ui.map'])}]`;
 
 describe.skipIf(!haveSamples)(suiteTitle, () => {
   let bgBuffer: Buffer;
@@ -191,5 +191,93 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     expect(errors).toEqual([]);
     expect(validated).toBeGreaterThan(1500);
     void knownGroups;
+  });
+
+  it('SWAP mode plan: a matched internal tag is swapped in place (keeps existing tagId); matched whole-tag-external dependencies fall back to untouched/reused with a blocked reason', () => {
+    const entry = uiTagIndex.entries.find((e) => e.path === 'weapons\\frag grenade\\shaders\\frag metal' && e.primaryClassName === 'shader_model')!;
+    expect(entry).toBeDefined();
+    const set = extractTagSet(uiBuffer, uiHeader, uiTagIndex, [entry.index]);
+    const container = deserializeContainer(serializeContainer(set, 'ui'));
+
+    const targetRoot = bgTagIndex.entries.find((e) => e.path === 'weapons\\frag grenade\\shaders\\frag metal' && e.primaryClassName === 'shader_model')!;
+    expect(targetRoot).toBeDefined();
+    expect(targetRoot.isExternal).toBe(false); // confirms this is a genuine in-place-swappable match, not a resource-map entry
+
+    const plan = planSwapInjection(bgTagIndex, container);
+    expect(plan.kind).toBe('ok');
+    if (plan.kind !== 'ok') return;
+
+    expect(plan.toSwap.some((s) => s.path === targetRoot.path && s.targetTagId === targetRoot.tagId)).toBe(true);
+    expect(plan.counts.swapped).toBeGreaterThanOrEqual(1);
+    expect(plan.resolvedTagIdByLocalIndex.get(container.tags.findIndex((t) => t.path === targetRoot.path))).toBe(targetRoot.tagId);
+
+    // The shader's bitmap dependencies already exist in bloodgulch as whole-tag-EXTERNAL entries
+    // (stock bitmaps.map) - nothing to swap into, so they fall back to reused + a blocked reason.
+    const blockedExternalTargets = [...plan.blockedOther].filter((b) => b.group === 'bitmap');
+    expect(blockedExternalTargets.length).toBeGreaterThan(0);
+    for (const b of blockedExternalTargets) {
+      expect(b.reasons.join(' ')).toMatch(/resource-map-indexed \(external\) entry/);
+      const li = container.tags.findIndex((t) => t.path === b.path && t.group === b.group);
+      expect(plan.reusedByLocalIndex.has(li)).toBe(true); // untouched fallback
+    }
+  });
+
+  it('SWAP mode apply: re-parses cleanly, swapped tag keeps its OLD tagId with NEW data, tag count is unchanged (pure swap, no adds), and every old+new tag still validates', () => {
+    const entry = uiTagIndex.entries.find((e) => e.path === 'weapons\\frag grenade\\shaders\\frag metal' && e.primaryClassName === 'shader_model')!;
+    const set = extractTagSet(uiBuffer, uiHeader, uiTagIndex, [entry.index]);
+    const container = deserializeContainer(serializeContainer(set, 'ui'));
+
+    const targetRoot = bgTagIndex.entries.find((e) => e.path === 'weapons\\frag grenade\\shaders\\frag metal' && e.primaryClassName === 'shader_model')!;
+    const plan = planSwapInjection(bgTagIndex, container);
+    expect(plan.kind).toBe('ok');
+    if (plan.kind !== 'ok') throw new Error('plan refused');
+    expect(plan.counts.added).toBe(0); // all 3 bitmap deps already matched (external) - this is a pure swap, no growth
+
+    const targetCopy = Buffer.from(bgBuffer);
+    const injected = applySwapInjection(targetCopy, bgHeader, bgTagIndex, container, plan);
+    expect(targetCopy.equals(bgBuffer)).toBe(true); // source buffer never mutated
+
+    const reparsed = inspectCustomEditionMap(injected);
+    expect(reparsed.status).toBe('ok');
+    if (reparsed.status !== 'ok') return;
+    expect(reparsed.tagIndex.entries.length).toBe(bgTagIndex.entries.length); // unchanged - swap doesn't grow the array
+
+    const swapped = reparsed.tagIndex.entries.find((e) => e.path === targetRoot.path && e.primaryClassName === 'shader_model')!;
+    expect(swapped.tagId).toBe(targetRoot.tagId); // tagId preserved
+    expect(swapped.tagDataPointerOrResourceIndex).not.toBe(targetRoot.tagDataPointerOrResourceIndex); // data pointer DID move (new content)
+
+    const errors: string[] = [];
+    const stats = { structsVisited: 0, dependenciesChecked: 0, reflexivesChecked: 0, elementsBoundsChecked: 0 };
+    let validated = 0;
+    for (const entry2 of reparsed.tagIndex.entries) {
+      if (entry2.isExternal) continue;
+      if (entry2.primaryClassName === 'scenario_structure_bsp') continue;
+      if (!entry2.primaryClassName) continue;
+      let def;
+      try {
+        def = getGroupDefinition(entry2.primaryClassName);
+      } catch {
+        continue;
+      }
+      if (def.extractable === false) continue;
+      const fileOffset = reparsed.header.tagDataOffset + (entry2.tagDataPointerOrResourceIndex - reparsed.tagIndex.baseMemoryAddress);
+      validateStructInstance(injected, reparsed.tagIndex, def.name, fileOffset, reparsed.header.tagDataOffset, reparsed.tagIndex.baseMemoryAddress, entry2.path, errors, stats);
+      validated++;
+    }
+    expect(errors).toEqual([]);
+    expect(validated).toBeGreaterThan(1500);
+  });
+
+  it('SWAP mode: blocks a matched tag with an embedded (external=0) raw-data warning, falling back to untouched/reused instead of writing it', () => {
+    const container = extractFromUi('ui\\small_ui', 'font'); // matches an EXISTING bloodgulch entry (loc.map external font) - see the whole-tag-external test above for that path; here we force an embedded warning on it to exercise the other SWAP block reason
+    const fakeOriginal = container.tags[0].originalIndex;
+    container.warnings = [...container.warnings, { originalIndex: fakeOriginal, path: 'synthetic', group: 'font', kind: 'embeddedRawData', message: 'synthetic embedded warning for test' }];
+    const plan = planSwapInjection(bgTagIndex, container);
+    expect(plan.kind).toBe('ok');
+    if (plan.kind !== 'ok') return;
+    expect(plan.counts.swapped).toBe(0);
+    expect(plan.toSwap.length).toBe(0);
+    expect(plan.reusedByLocalIndex.size).toBe(container.tags.length);
+    expect(plan.blockedEmbedded.length).toBe(1);
   });
 });

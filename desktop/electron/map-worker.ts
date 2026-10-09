@@ -11,7 +11,9 @@ import {
   serializeContainer,
   deserializeContainer,
   planAddInjection,
+  planSwapInjection,
   applyAddInjection,
+  applySwapInjection,
   computeResourceMapIdentity,
   getGroupDefinition,
   validateAllDefinitions,
@@ -19,7 +21,7 @@ import {
   OperationCancelledError,
   ContainerFormatError,
 } from '../../core/src/index';
-import type { CacheFileHeader, TagIndex, OceContainer, AddInjectionPlan, ResourceMapConfig } from '../../core/src/index';
+import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig } from '../../core/src/index';
 import type {
   LoadMapResult,
   WorkerRequest,
@@ -32,6 +34,7 @@ import type {
   PlanInjectResult,
   ApplyInjectResult,
   InjectPlanSummary,
+  InjectionMode,
   ResourceMapKind,
 } from './shared-types';
 
@@ -49,7 +52,7 @@ export interface LoadedMap {
 }
 
 let currentMap: LoadedMap | null = null;
-let currentInject: { container: OceContainer; plan: AddInjectionPlan } | null = null;
+let currentInject: { container: OceContainer; plan: InjectionPlan } | null = null;
 const cancelledRequests = new Set<string>();
 
 type Sink = (msg: { type: string; requestId?: string; [key: string]: unknown }) => void;
@@ -243,12 +246,14 @@ export function runExtractTags(task: { requestId: string; originalIndices: numbe
   }
 }
 
-function summarizePlan(containerPath: string, container: OceContainer, plan: AddInjectionPlan): InjectPlanSummary {
+function summarizePlan(containerPath: string, container: OceContainer, plan: InjectionPlan): InjectPlanSummary {
   return {
+    mode: plan.mode,
     containerPath,
     sourceMapName: container.sourceMapName,
     counts: plan.counts,
     toAdd: plan.toAdd.map((t) => ({ path: t.path, group: t.group })),
+    toSwap: plan.toSwap.map((s) => ({ path: s.path, group: s.group })),
     reused: Array.from(plan.reusedByLocalIndex.keys()).map((li) => ({ path: container.tags[li].path, group: container.tags[li].group })),
     blockedEmbedded: plan.blockedEmbedded.map((b) => ({ path: b.path, group: b.group, reasons: b.reasons })),
     blockedOther: plan.blockedOther.map((b) => ({ path: b.path, group: b.group, reasons: b.reasons })),
@@ -257,7 +262,7 @@ function summarizePlan(containerPath: string, container: OceContainer, plan: Add
   };
 }
 
-export function runPlanInject(task: { requestId: string; containerPath: string; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }) {
+export function runPlanInject(task: { requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open to inject into.');
   try {
     progress(task.requestId, 'Reading container file', 10);
@@ -277,7 +282,7 @@ export function runPlanInject(task: { requestId: string; containerPath: string; 
     }
 
     progress(task.requestId, 'Planning injection', 70);
-    const planResult = planAddInjection(currentMap.tagIndex, container, resourceMapConfig);
+    const planResult = task.mode === 'swap' ? planSwapInjection(currentMap.tagIndex, container, resourceMapConfig) : planAddInjection(currentMap.tagIndex, container, resourceMapConfig);
     if (planResult.kind === 'refused') {
       currentInject = null;
       return sendError(task.requestId, 'PLAN_REFUSED', planResult.reason);
@@ -298,7 +303,9 @@ export function runApplyInject(task: { requestId: string; outputPath: string }) 
   const tempPath = `${task.outputPath}.tmp-${randomUUID()}`;
   try {
     progress(task.requestId, 'Writing tag data', 30);
-    const injected = applyAddInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan);
+    const injected = currentInject.plan.mode === 'swap'
+      ? applySwapInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan)
+      : applyAddInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan);
     progress(task.requestId, 'Writing output file', 80);
     fs.writeFileSync(tempPath, injected);
     fs.renameSync(tempPath, task.outputPath);
@@ -308,6 +315,7 @@ export function runApplyInject(task: { requestId: string; outputPath: string }) 
       outputPath: task.outputPath,
       addedCount: currentInject.plan.counts.added,
       reusedCount: currentInject.plan.counts.reused,
+      swappedCount: currentInject.plan.counts.swapped,
       staleChecksumWarning: 'This map\'s CRC32 and tag checksum are now stale (recalculating them is Milestone 6) - some tools/servers that verify them may reject it until then.',
     } satisfies ApplyInjectResult);
   } catch (err) {

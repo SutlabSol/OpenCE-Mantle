@@ -12,6 +12,7 @@ import type {
   ResourceMapPickResult,
   PlanInjectResult,
   ApplyInjectResult,
+  InjectionMode,
 } from '../electron/shared-types';
 import { parseMockScenario, buildMockSummary, buildMockInjectPlan } from './test-fixtures/dependency-fixtures';
 
@@ -66,6 +67,7 @@ export function installDevMock() {
   const progressListeners = new Set<(e: ProgressEvent) => void>();
   const logListeners = new Set<(e: LogEvent) => void>();
   let extractCancelled = false;
+  let lastInjectMode: InjectionMode = 'add';
   const mockResourceMapStatuses: Record<ResourceMapKind, ResourceMapStatus> = {
     bitmaps: { state: 'not-configured' },
     sounds: { state: 'not-configured' },
@@ -139,18 +141,20 @@ export function installDevMock() {
     },
     getResourceMapStatuses: async () => ({ ...mockResourceMapStatuses }),
     pickInjectContainer: async () => ({ path: 'C:\\Users\\Dev\\Documents\\ui_ticker.ocetags' }),
-    planInject: async (containerPath) => {
+    planInject: async (containerPath, mode) => {
+      lastInjectMode = mode;
       await new Promise((r) => setTimeout(r, 200));
-      return { ok: true, plan: buildMockInjectPlan(scenario, containerPath) };
+      return { ok: true, plan: buildMockInjectPlan(scenario, containerPath, mode) };
     },
     applyInject: async (): Promise<ApplyInjectResult> => {
       await fakeProgress('applyInject');
-      const plan = buildMockInjectPlan(scenario, 'mock.ocetags');
+      const plan = buildMockInjectPlan(scenario, 'mock.ocetags', lastInjectMode);
       return {
         ok: true,
         outputPath: 'C:\\HaloCE\\maps\\bloodgulch_injected.map',
         addedCount: plan.counts.added,
         reusedCount: plan.counts.reused,
+        swappedCount: plan.counts.swapped,
         staleChecksumWarning: "This map's CRC32 and tag checksum are now stale (recalculating them is Milestone 6) - some tools/servers that verify them may reject it until then.",
       };
     },

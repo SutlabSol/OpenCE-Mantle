@@ -122,6 +122,15 @@ var TAG_CLASSES = [
   { name: "wind", groupId: "wind", parent: null, purpose: "Speed and variation of wind in a BSP cluster." }
 ];
 var CLASS_BY_FOURCC = new Map(TAG_CLASSES.map((c) => [fourCCFromString(c.groupId), c]));
+var CLASS_BY_NAME = new Map(TAG_CLASSES.map((c) => [c.name, c]));
+
+// ../core/src/map/errors.ts
+var CorruptMapError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CorruptMapError";
+  }
+};
 
 // ../core/src/map/tag-footprints.ts
 var SCENARIO_STRUCTURE_BSP_FOURCC = fourCCFromString("sbsp");
@@ -129,6 +138,57 @@ var SCENARIO_STRUCTURE_BSP_FOURCC = fourCCFromString("sbsp");
 // ../core/src/map/compression.ts
 var import_zstd = require("@mongodb-js/zstd");
 var CUSTOM_EDITION_COMPRESSED_ENGINE = (609 /* CUSTOM_EDITION */ | CHIMERA_COMPRESSED_ENGINE_MASK) >>> 0;
+
+// ../core/src/map/resource-map.ts
+var import_crypto = require("crypto");
+var RESOURCE_MAP_HEADER_SIZE = 16;
+var RESOURCE_MAP_ENTRY_SIZE = 12;
+function parseResourceMap(buffer) {
+  if (buffer.length < RESOURCE_MAP_HEADER_SIZE) {
+    throw new CorruptMapError("Resource map is smaller than its own header.");
+  }
+  const type = buffer.readUInt32LE(0);
+  const pathsOffset = buffer.readUInt32LE(4);
+  const resourcesOffset = buffer.readUInt32LE(8);
+  const resourceCount = buffer.readUInt32LE(12);
+  if (resourcesOffset + resourceCount * RESOURCE_MAP_ENTRY_SIZE > buffer.length) {
+    throw new CorruptMapError("Resource map index is out of bounds of the file.");
+  }
+  const entries = [];
+  for (let i = 0; i < resourceCount; i++) {
+    const entryOffset = resourcesOffset + i * RESOURCE_MAP_ENTRY_SIZE;
+    entries.push({
+      index: i,
+      pathOffset: pathsOffset + buffer.readUInt32LE(entryOffset + 0),
+      size: buffer.readUInt32LE(entryOffset + 4),
+      dataOffset: buffer.readUInt32LE(entryOffset + 8)
+    });
+  }
+  return { type, resourceCount, entries };
+}
+function computeResourceMapIdentity(buffer) {
+  const map = parseResourceMap(buffer);
+  const resourcesOffset = buffer.readUInt32LE(8);
+  const tableEnd = resourcesOffset + map.resourceCount * RESOURCE_MAP_ENTRY_SIZE;
+  const hash = (0, import_crypto.createHash)("sha256");
+  hash.update(buffer.subarray(0, Math.min(tableEnd, buffer.length)));
+  return { fileSize: buffer.length, entryCount: map.resourceCount, fingerprint: hash.digest("hex") };
+}
+var RESOURCE_MAP_TYPE_BY_KIND = { bitmaps: 1, sounds: 2, loc: 3 };
+function validateResourceMapFile(buffer, kind) {
+  let map;
+  try {
+    map = parseResourceMap(buffer);
+  } catch (err) {
+    return { ok: false, error: `This file doesn't look like a resource map (${err instanceof Error ? err.message : String(err)}).` };
+  }
+  const expectedType = RESOURCE_MAP_TYPE_BY_KIND[kind];
+  if (map.type !== expectedType) {
+    const kindName = Object.keys(RESOURCE_MAP_TYPE_BY_KIND).find((k) => RESOURCE_MAP_TYPE_BY_KIND[k] === map.type);
+    return { ok: false, error: `This file is a ${kindName ?? "unknown"}-type resource map, not a ${kind}.map - pick the correct file for this slot.` };
+  }
+  return { ok: true, identity: computeResourceMapIdentity(buffer) };
+}
 
 // ../core/src/map/definitions/groups/actor.json
 var actor_default = [
@@ -2287,7 +2347,9 @@ var bitmap_default = [
       {
         kind: "field",
         name: "flags",
-        type: "BitmapDataFlags"
+        type: "BitmapDataFlags",
+        externalDataSibling: { offsetField: "pixel data offset", sizeField: "pixel data size", resourceMap: "bitmaps.map" },
+        comment: "externalDataSibling: SOURCE (read 2026-08) invader/src/build/build_workload.cpp line ~1430 (embedded: pixel_data_offset = raw-data-region offset within THIS map) and invader/src/resource/resource.cpp line ~427 (external: pixel_data_offset = byte offset within bitmaps.map, flags |= BITMAP_DATA_FLAGS_FLAG_EXTERNAL). Confirmed against real bytes: every internal bitmap in ui.map has external=1 and pixel_data_offset exactly matches a bitmaps.map resource entry's dataOffset."
       },
       {
         kind: "field",
@@ -33645,27 +33707,41 @@ var import_electron2 = require("electron");
 function storePath2() {
   return path2.join(import_electron2.app.getPath("userData"), "settings.json");
 }
+var DEFAULT_SETTINGS = { lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } };
 function getSettings() {
   try {
     const raw = fs2.readFileSync(storePath2(), "utf-8");
     const parsed = JSON.parse(raw);
-    return { lastExtractDir: typeof parsed.lastExtractDir === "string" ? parsed.lastExtractDir : null };
+    return {
+      lastExtractDir: typeof parsed.lastExtractDir === "string" ? parsed.lastExtractDir : null,
+      resourceMaps: {
+        bitmaps: typeof parsed.resourceMaps?.bitmaps === "string" ? parsed.resourceMaps.bitmaps : null,
+        sounds: typeof parsed.resourceMaps?.sounds === "string" ? parsed.resourceMaps.sounds : null,
+        loc: typeof parsed.resourceMaps?.loc === "string" ? parsed.resourceMaps.loc : null
+      }
+    };
   } catch {
-    return { lastExtractDir: null };
+    return { ...DEFAULT_SETTINGS, resourceMaps: { ...DEFAULT_SETTINGS.resourceMaps } };
+  }
+}
+function writeSettings(next) {
+  try {
+    fs2.writeFileSync(storePath2(), JSON.stringify(next, null, 2));
+  } catch {
   }
 }
 function setLastExtractDir(dir) {
+  writeSettings({ ...getSettings(), lastExtractDir: dir });
+}
+function setResourceMapPath(kind, filePath) {
   const current = getSettings();
-  try {
-    fs2.writeFileSync(storePath2(), JSON.stringify({ ...current, lastExtractDir: dir }, null, 2));
-  } catch {
-  }
+  writeSettings({ ...current, resourceMaps: { ...current.resourceMaps, [kind]: filePath } });
 }
 
 // electron/worker-manager.ts
 var import_worker_threads = require("worker_threads");
 var path3 = __toESM(require("path"));
-var import_crypto = require("crypto");
+var import_crypto2 = require("crypto");
 var worker = null;
 var pending = /* @__PURE__ */ new Map();
 function ensureWorker(onLog) {
@@ -33708,7 +33784,7 @@ function startWorker(onLog) {
 }
 function sendWorkerRequest(request, onLog, onProgress = () => {
 }) {
-  const requestId = (0, import_crypto.randomUUID)();
+  const requestId = (0, import_crypto2.randomUUID)();
   const instance = ensureWorker(onLog);
   const promise = new Promise((resolve2, reject) => {
     pending.set(requestId, { resolve: resolve2, reject, onProgress });
@@ -33726,6 +33802,7 @@ var currentMapPath = null;
 var currentMapCompressed = false;
 var currentMapScenarioName = null;
 var currentExtractRequestId = null;
+var currentInjectContainerPath = null;
 var isDev = !import_electron3.app.isPackaged;
 function sendLog(level, message) {
   mainWindow?.webContents.send("app:log", { level, message, timestamp: Date.now() });
@@ -33921,6 +33998,120 @@ async function extractTagsFlow(request) {
     currentExtractRequestId = null;
   }
 }
+var RESOURCE_MAP_FILTER_NAMES = { bitmaps: "bitmaps.map", sounds: "sounds.map", loc: "loc.map" };
+function readResourceMapStatus(kind, filePath) {
+  if (!filePath) return { state: "not-configured" };
+  try {
+    const buffer = fs3.readFileSync(filePath);
+    const result = validateResourceMapFile(buffer, kind);
+    if (!result.ok) return { state: "missing-or-unreadable", path: filePath, error: result.error };
+    return { state: "ok", path: filePath, fileSizeBytes: buffer.length, entryCount: result.identity.entryCount };
+  } catch (err) {
+    return { state: "missing-or-unreadable", path: filePath, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+async function pickResourceMapFlow(kind) {
+  if (!mainWindow) return { ok: false, code: "NO_WINDOW", message: "Application window is not available." };
+  const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    title: `Pick ${RESOURCE_MAP_FILTER_NAMES[kind]}`,
+    filters: [{ name: "Halo CE Resource Map", extensions: ["map"] }],
+    properties: ["openFile"]
+  });
+  if (canceled || filePaths.length === 0) return { ok: false, code: "CANCELLED" };
+  const status = readResourceMapStatus(kind, filePaths[0]);
+  if (status.state !== "ok") {
+    sendLog("warn", `Rejected ${filePaths[0]} for the ${RESOURCE_MAP_FILTER_NAMES[kind]} slot: ${status.state === "missing-or-unreadable" ? status.error : "unknown error"}`);
+    return { ok: true, status };
+  }
+  setResourceMapPath(kind, filePaths[0]);
+  sendLog("info", `${RESOURCE_MAP_FILTER_NAMES[kind]} set to ${filePaths[0]} (${status.entryCount} entries).`);
+  return { ok: true, status };
+}
+function getResourceMapStatusesFlow() {
+  const settings = getSettings();
+  return {
+    bitmaps: readResourceMapStatus("bitmaps", settings.resourceMaps.bitmaps),
+    sounds: readResourceMapStatus("sounds", settings.resourceMaps.sounds),
+    loc: readResourceMapStatus("loc", settings.resourceMaps.loc)
+  };
+}
+async function pickInjectContainerFlow() {
+  if (!mainWindow) return null;
+  const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    title: "Inject tags from...",
+    filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }],
+    properties: ["openFile"]
+  });
+  if (canceled || filePaths.length === 0) return null;
+  return { path: filePaths[0] };
+}
+async function planInjectFlow(containerPath, mode) {
+  if (!currentMapPath || currentMapCompressed) return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress the target map before injecting tags into it." };
+  currentInjectContainerPath = containerPath;
+  const settings = getSettings();
+  const resourceMapPaths = {};
+  for (const kind of ["bitmaps", "sounds", "loc"]) {
+    const p = settings.resourceMaps[kind];
+    if (p) resourceMapPaths[kind] = p;
+  }
+  sendLog("info", `Planning ${mode === "swap" ? "swap" : "add"} injection from ${containerPath}`);
+  const { promise } = sendWorkerRequest(
+    { type: "planInject", containerPath, mode, resourceMapPaths },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "planInject", stage, percent })
+  );
+  try {
+    return await promise;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Injection plan failed: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
+async function applyInjectFlow() {
+  if (!mainWindow) return { ok: false, code: "NO_WINDOW", message: "Application window is not available." };
+  if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (!currentInjectContainerPath) return { ok: false, code: "NO_PLAN", message: 'Run "Inject Tags..." and review the plan before applying it.' };
+  const defaultPath = currentMapPath.replace(/\.map$/i, "_injected.map");
+  const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    title: "Save injected map as",
+    defaultPath,
+    filters: [{ name: "Halo CE Map", extensions: ["map"] }]
+  });
+  if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
+  const resolvedTarget = path4.resolve(filePath);
+  if (resolvedTarget === path4.resolve(currentMapPath)) {
+    return { ok: false, code: "REFUSED_SOURCE_PATH", message: "You cannot overwrite the map you are injecting into. Choose a different location." };
+  }
+  if (fs3.existsSync(resolvedTarget)) {
+    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: ["Overwrite", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      message: `"${path4.basename(resolvedTarget)}" already exists.`,
+      detail: "Do you want to overwrite it?"
+    });
+    if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
+  }
+  sendLog("info", `Writing injected map to ${resolvedTarget}`);
+  const { promise } = sendWorkerRequest(
+    { type: "applyInject", outputPath: resolvedTarget },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "applyInject", stage, percent })
+  );
+  try {
+    const result = await promise;
+    if (result.ok) sendLog("info", `Injected ${result.addedCount} tag(s), swapped ${result.swappedCount} (${result.reusedCount} reused) into ${result.outputPath}`);
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Injection failed: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  } finally {
+    currentInjectContainerPath = null;
+  }
+}
 function showAboutDialog() {
   if (!mainWindow) return;
   import_electron3.dialog.showMessageBox(mainWindow, {
@@ -33953,7 +34144,9 @@ function buildMenu() {
         { label: "Recompress Map", click: () => recompressFlow() },
         { type: "separator" },
         { label: "Extract Tags...", accelerator: "CmdOrCtrl+E", click: () => mainWindow?.webContents.send("menu:action", "extract-tags") },
-        { label: "Inject Tags...", click: () => mainWindow?.webContents.send("menu:action", "inject-stub") }
+        { label: "Inject Tags...", click: () => mainWindow?.webContents.send("menu:action", "inject-tags") },
+        { type: "separator" },
+        { label: "Settings...", click: () => mainWindow?.webContents.send("menu:action", "settings") }
       ]
     },
     {
@@ -33992,6 +34185,11 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.on("tags:cancelExtract", () => {
     if (currentExtractRequestId) cancelWorkerRequest(currentExtractRequestId, sendLog);
   });
+  import_electron3.ipcMain.handle("resourceMaps:pick", (_e, kind) => pickResourceMapFlow(kind));
+  import_electron3.ipcMain.handle("resourceMaps:getStatuses", () => getResourceMapStatusesFlow());
+  import_electron3.ipcMain.handle("tags:pickInjectContainer", () => pickInjectContainerFlow());
+  import_electron3.ipcMain.handle("tags:planInject", (_e, containerPath, mode) => planInjectFlow(containerPath, mode));
+  import_electron3.ipcMain.handle("tags:applyInject", () => applyInjectFlow());
   import_electron3.ipcMain.handle("app:openContainingFolder", (_e, filePath) => {
     if (typeof filePath === "string" && filePath) import_electron3.shell.showItemInFolder(filePath);
   });

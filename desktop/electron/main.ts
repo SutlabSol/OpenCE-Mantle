@@ -17,6 +17,7 @@ import type {
   ResourceMapPickResult,
   PlanInjectResult,
   ApplyInjectResult,
+  InjectionMode,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -299,7 +300,7 @@ async function pickInjectContainerFlow(): Promise<{ path: string } | null> {
   return { path: filePaths[0] };
 }
 
-async function planInjectFlow(containerPath: string): Promise<PlanInjectResult> {
+async function planInjectFlow(containerPath: string, mode: InjectionMode): Promise<PlanInjectResult> {
   if (!currentMapPath || currentMapCompressed) return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress the target map before injecting tags into it.' };
   currentInjectContainerPath = containerPath;
   const settings = getSettings();
@@ -308,8 +309,8 @@ async function planInjectFlow(containerPath: string): Promise<PlanInjectResult> 
     const p = settings.resourceMaps[kind];
     if (p) resourceMapPaths[kind] = p;
   }
-  sendLog('info', `Planning injection from ${containerPath}`);
-  const { promise } = sendWorkerRequest<PlanInjectResult>({ type: 'planInject', containerPath, resourceMapPaths }, sendLog, (stage, percent) =>
+  sendLog('info', `Planning ${mode === 'swap' ? 'swap' : 'add'} injection from ${containerPath}`);
+  const { promise } = sendWorkerRequest<PlanInjectResult>({ type: 'planInject', containerPath, mode, resourceMapPaths }, sendLog, (stage, percent) =>
     mainWindow?.webContents.send('map:progress', { taskId: 'planInject', stage, percent }),
   );
   try {
@@ -356,7 +357,7 @@ async function applyInjectFlow(): Promise<ApplyInjectResult> {
   );
   try {
     const result = await promise;
-    if (result.ok) sendLog('info', `Injected ${result.addedCount} tag(s) (${result.reusedCount} reused) into ${result.outputPath}`);
+    if (result.ok) sendLog('info', `Injected ${result.addedCount} tag(s), swapped ${result.swappedCount} (${result.reusedCount} reused) into ${result.outputPath}`);
     return result;
   } catch (err) {
     const e = err as Error & { code?: string };
@@ -455,7 +456,7 @@ app.whenReady().then(() => {
   ipcMain.handle('resourceMaps:pick', (_e, kind: ResourceMapKind) => pickResourceMapFlow(kind));
   ipcMain.handle('resourceMaps:getStatuses', () => getResourceMapStatusesFlow());
   ipcMain.handle('tags:pickInjectContainer', () => pickInjectContainerFlow());
-  ipcMain.handle('tags:planInject', (_e, containerPath: string) => planInjectFlow(containerPath));
+  ipcMain.handle('tags:planInject', (_e, containerPath: string, mode: InjectionMode) => planInjectFlow(containerPath, mode));
   ipcMain.handle('tags:applyInject', () => applyInjectFlow());
   ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);

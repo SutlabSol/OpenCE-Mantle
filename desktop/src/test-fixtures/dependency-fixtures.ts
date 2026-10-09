@@ -1,4 +1,4 @@
-import type { DependencyWalkSummary, DependencyTagInfo, DependencyNotExtractedInfo, DependencyWarningInfo, InjectPlanSummary } from '../../electron/shared-types';
+import type { DependencyWalkSummary, DependencyTagInfo, DependencyNotExtractedInfo, DependencyWarningInfo, InjectPlanSummary, InjectionMode } from '../../electron/shared-types';
 
 /**
  * Realistic dependency-walk fixtures shared between `dev-mock.ts` (Vite browser preview) and
@@ -174,14 +174,56 @@ export function buildMockSummary(scenario: MockScenario): DependencyWalkSummary 
   }
 }
 
-/** M5 Step A inject-plan fixtures (dev preview via `?mock=inject-clean` / `?mock=inject-blocked`). */
-export function buildMockInjectPlan(scenario: MockScenario, containerPath: string): InjectPlanSummary {
-  if (scenario === 'inject-blocked') {
+/** M5 Step A/B inject-plan fixtures (dev preview via `?mock=inject-clean` / `?mock=inject-blocked`, ADD or SWAP mode). */
+export function buildMockInjectPlan(scenario: MockScenario, containerPath: string, mode: InjectionMode = 'add'): InjectPlanSummary {
+  if (mode === 'swap') {
+    if (scenario === 'inject-blocked') {
+      return {
+        mode,
+        containerPath,
+        sourceMapName: 'ui',
+        counts: { totalInClosure: 2, reused: 1, swapped: 0, added: 0, blockedEmbedded: 1, blockedOther: 0, externalReferenced: 0 },
+        toAdd: [],
+        toSwap: [],
+        reused: [{ path: 'weapons\\frag grenade\\shaders\\frag metal', group: 'shader_model' }],
+        blockedEmbedded: [
+          { path: 'weapons\\frag grenade\\shaders\\frag metal', group: 'shader_model', reasons: ['Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone: synthetic embedded warning for test.'] },
+        ],
+        blockedOther: [],
+        externalRefStatuses: [],
+        refusedRoots: [],
+      };
+    }
     return {
+      mode,
       containerPath,
       sourceMapName: 'ui',
-      counts: { totalInClosure: 3, reused: 0, added: 1, blockedEmbedded: 1, blockedOther: 1, externalReferenced: 1 },
+      counts: { totalInClosure: 4, reused: 3, swapped: 1, added: 0, blockedEmbedded: 0, blockedOther: 3, externalReferenced: 0 },
+      toAdd: [],
+      toSwap: [{ path: 'weapons\\frag grenade\\shaders\\frag metal', group: 'shader_model' }],
+      reused: [
+        { path: 'weapons\\frag grenade\\bitmaps\\frag grenade', group: 'bitmap' },
+        { path: 'weapons\\frag grenade\\bitmaps\\frag grenade multipurpose', group: 'bitmap' },
+        { path: 'weapons\\assault rifle\\fp\\bitmaps\\diffuse gunmetal', group: 'bitmap' },
+      ],
+      blockedEmbedded: [],
+      blockedOther: [
+        { path: 'weapons\\frag grenade\\bitmaps\\frag grenade', group: 'bitmap', reasons: ['The existing tag in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.'] },
+        { path: 'weapons\\frag grenade\\bitmaps\\frag grenade multipurpose', group: 'bitmap', reasons: ['The existing tag in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.'] },
+        { path: 'weapons\\assault rifle\\fp\\bitmaps\\diffuse gunmetal', group: 'bitmap', reasons: ['The existing tag in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.'] },
+      ],
+      externalRefStatuses: [],
+      refusedRoots: [],
+    };
+  }
+  if (scenario === 'inject-blocked') {
+    return {
+      mode,
+      containerPath,
+      sourceMapName: 'ui',
+      counts: { totalInClosure: 3, reused: 0, swapped: 0, added: 1, blockedEmbedded: 1, blockedOther: 1, externalReferenced: 1 },
       toAdd: [{ path: 'ui\\ticker', group: 'font' }],
+      toSwap: [],
       reused: [],
       blockedEmbedded: [{ path: 'sky\\space\\bitmaps\\synthetic_embedded', group: 'bitmap', reasons: ['Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone.'] }],
       blockedOther: [{ path: 'ui\\gamespy', group: 'font', reasons: ['Depends on "fonts\\missing_in_target" (font), a resource-map tag not present in the target map.'] }],
@@ -190,10 +232,12 @@ export function buildMockInjectPlan(scenario: MockScenario, containerPath: strin
     };
   }
   return {
+    mode,
     containerPath,
     sourceMapName: 'ui',
-    counts: { totalInClosure: 2, reused: 1, added: 1, blockedEmbedded: 0, blockedOther: 0, externalReferenced: 1 },
+    counts: { totalInClosure: 2, reused: 1, swapped: 0, added: 1, blockedEmbedded: 0, blockedOther: 0, externalReferenced: 1 },
     toAdd: [{ path: 'ui\\ticker', group: 'font' }],
+    toSwap: [],
     reused: [{ path: 'ui\\small_ui', group: 'font' }],
     blockedEmbedded: [],
     blockedOther: [],

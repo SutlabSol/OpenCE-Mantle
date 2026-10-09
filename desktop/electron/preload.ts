@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind } from './shared-types';
+import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode } from './shared-types';
 
 const api: OpenceApi = {
   openMapDialog: () => ipcRenderer.invoke('dialog:openMap'),
@@ -12,7 +12,7 @@ const api: OpenceApi = {
   pickResourceMap: (kind: ResourceMapKind) => ipcRenderer.invoke('resourceMaps:pick', kind),
   getResourceMapStatuses: () => ipcRenderer.invoke('resourceMaps:getStatuses'),
   pickInjectContainer: () => ipcRenderer.invoke('tags:pickInjectContainer'),
-  planInject: (containerPath: string) => ipcRenderer.invoke('tags:planInject', containerPath),
+  planInject: (containerPath: string, mode: InjectionMode) => ipcRenderer.invoke('tags:planInject', containerPath, mode),
   applyInject: () => ipcRenderer.invoke('tags:applyInject'),
   openContainingFolder: (filePath: string) => ipcRenderer.invoke('app:openContainingFolder', filePath),
   getSettings: () => ipcRenderer.invoke('app:getSettings'),
