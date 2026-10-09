@@ -31,9 +31,12 @@ describe.skipIf(!haveBloodgulch)(suiteTitle, () => {
     expect(walk.tags.length).toBeGreaterThan(5);
     expect(walk.tags.some((t) => t.group === 'vehicle')).toBe(true);
     expect(walk.tags.some((t) => t.group === 'gbxmodel')).toBe(true);
-    // Every warning must reference a real kind and not crash the walk.
+    // Every warning must reference a real kind and not crash the walk. 'uncapturedData' added
+    // this session (gbxmodel model-geometry reflexives, and any plain TagDataOffset pointer
+    // that fails to resolve) - the warthog's gbxmodel genuinely triggers this for real, see
+    // tagdata-capture.test.ts for the dedicated coverage.
     for (const w of walk.warnings) {
-      expect(['uncertainGroup', 'noDefinition', 'externalTag', 'externalData', 'embeddedRawData', 'bspTag']).toContain(w.kind);
+      expect(['uncertainGroup', 'noDefinition', 'externalTag', 'externalData', 'embeddedRawData', 'bspTag', 'uncapturedData']).toContain(w.kind);
     }
     // eslint-disable-next-line no-console
     console.log(`warthog closure: ${walk.tags.length} internal tags, ${walk.externalTags.length} external, ${walk.warnings.length} warnings`);

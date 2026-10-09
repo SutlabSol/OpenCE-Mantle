@@ -319,7 +319,7 @@ export function runApplyInject(task: { requestId: string; outputPath: string }) 
       addedCount: currentInject.plan.counts.added,
       reusedCount: currentInject.plan.counts.reused,
       swappedCount: currentInject.plan.counts.swapped,
-      staleChecksumWarning: 'This map\'s CRC32 and tag checksum are now stale (recalculating them is Milestone 6) - some tools/servers that verify them may reject it until then.',
+      staleChecksumWarning: 'Checksums were not updated. This map may be rejected by some loaders until M6 (export + CRC) is done.',
     } satisfies ApplyInjectResult);
   } catch (err) {
     try {

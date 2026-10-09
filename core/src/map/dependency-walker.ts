@@ -3,7 +3,8 @@ import { resolveTagDataPointer } from './tag-index';
 import { OperationCancelledError } from './errors';
 import type { CacheFileHeader } from './header';
 import type { TagIndex } from './tag-index';
-import { resolveStruct, decodeStruct, getAllTagGroupNames, getGroupDefinition, getBitfieldDefinition, resolvePointer } from './definitions/engine';
+import { resolveStruct, decodeStruct, getAllTagGroupNames, getGroupDefinition, resolvePointer } from './definitions/engine';
+import { findEmbeddedDataFields } from './embedded-data-fields';
 
 /** NULL tag id sentinel (0xFFFFFFFF), see TagDependency / TagID. */
 const NULL_TAG_ID = 0xffffffff;
@@ -35,7 +36,7 @@ export interface WalkedTag {
   requiredBy: string[];
 }
 
-export type WarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'embeddedRawData' | 'bspTag' | 'invalidReflexive';
+export type WarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'embeddedRawData' | 'bspTag' | 'invalidReflexive' | 'uncapturedData';
 
 export interface WalkerWarning {
   originalIndex: number;
@@ -284,63 +285,75 @@ function collectFromStruct(
         });
         continue;
       }
+      if (childStructName === 'GBXModelGeometryPart') {
+        // Model geometry (vertex/index data) is NOT modeled in our schema at all and is NOT
+        // carried by the container format - see PRD.md "Model geometry relocation plan". Block
+        // the WHOLE tag from injection rather than silently producing a tag whose geometry
+        // pointers are meaningless in the target map.
+        warn({
+          originalIndex: rootOriginalIndex,
+          path: `${contextPath}.${field.name}`,
+          group: '',
+          kind: 'uncapturedData',
+          message: `"${contextPath}.${field.name}" has ${value.value.count} model geometry part(s) (vertex/index data in the separate model-data region) that this tool cannot yet capture or relocate - the WHOLE tag is blocked from injection, not silently dropped.`,
+        });
+      }
       const n = Math.min(value.value.count, MAX_ELEMENTS_WALKED_PER_REFLEXIVE);
       for (let i = 0; i < n; i++) {
         collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, rootOriginalIndex, enqueue, warn);
       }
-    } else if (value.kind === 'tagDataOffset' && value.value.size > 0) {
-      if (field.def.type === 'TagDataOffset' && field.def.externalFileOffset) {
-        const fieldContext = `${contextPath}.${field.name}`;
-        if (value.value.external !== 0) {
-          warn({
-            originalIndex: rootOriginalIndex,
-            path: fieldContext,
-            group: '',
-            kind: 'externalData',
-            message: `"${fieldContext}" (${value.value.size} bytes) lives in "${field.def.externalFileOffset}", not resolved this milestone (flagged only).`,
-            resourceMap: field.def.externalFileOffset,
-            fileOffset: value.value.fileOffset,
-            size: value.value.size,
-          });
-        } else {
-          warn({
-            originalIndex: rootOriginalIndex,
-            path: fieldContext,
-            group: '',
-            kind: 'embeddedRawData',
-            message: `"${fieldContext}" (${value.value.size} bytes) is embedded in this map's own raw-data region (file offset ${value.value.fileOffset}), outside this tag's own struct bytes - not carried by extraction/injection this milestone (flagged only).`,
-            resourceMap: field.def.externalFileOffset,
-            fileOffset: value.value.fileOffset,
-            size: value.value.size,
-          });
-        }
+    } else if (value.kind === 'tagDataOffset' && field.def.type === 'TagDataOffset' && !field.def.externalFileOffset && value.value.size > 0) {
+      // Pointer-based "in tag data" raw bytes (font pixels, string_list/unicode_string_list
+      // strings, meter stencil, hud_message_text, input_device_defaults, model_animations frame
+      // data, scenario script/comment data) - same virtual-address mechanism as TagReflexive,
+      // captured by the extractor (see `tag-extractor.ts`). Only warn here if it DOESN'T
+      // resolve - the normal (in-bounds) case needs no warning, it's captured fine.
+      const resolved2 = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      if (resolved2 < 0 || resolved2 + value.value.size > buffer.length) {
+        warn({
+          originalIndex: rootOriginalIndex,
+          path: `${contextPath}.${field.name}`,
+          group: '',
+          kind: 'uncapturedData',
+          message: `"${contextPath}.${field.name}" (${value.value.size} bytes) resolves outside this file (pointer base ${resolved2}) - cannot be captured, the WHOLE tag is blocked from injection, not silently dropped.`,
+        });
       }
-    } else if (value.kind === 'bitfield') {
-      const bitfieldDef = field.def.type ? getBitfieldDefinition(field.def.type) : undefined;
-      const externalBit = bitfieldDef?.fields.indexOf('external') ?? -1;
-      const sibling = field.def.externalDataSibling;
-      if (externalBit >= 0 && sibling) {
-        const offsetVal = decoded.get(sibling.offsetField);
-        const sizeVal = decoded.get(sibling.sizeField);
-        const size = offsetVal && sizeVal && offsetVal.kind === 'basic' && sizeVal.kind === 'basic' ? (sizeVal.value as number) : 0;
-        const fileOffsetValue = offsetVal && offsetVal.kind === 'basic' ? (offsetVal.value as number) : 0;
-        if (size > 0) {
-          const fieldContext = `${contextPath}.${field.name}`;
-          const bitSet = (value.value & (1 << externalBit)) !== 0;
-          warn({
-            originalIndex: rootOriginalIndex,
-            path: fieldContext,
-            group: '',
-            kind: bitSet ? 'externalData' : 'embeddedRawData',
-            message: bitSet
-              ? `"${fieldContext}" has its "external" flag set (${size} bytes in "${sibling.resourceMap}") - not resolved this milestone (flagged only).`
-              : `"${fieldContext}" (${size} bytes) is embedded in this map's own raw-data region (file offset ${fileOffsetValue}), outside this tag's own struct bytes - not carried by extraction/injection this milestone (flagged only).`,
-            resourceMap: sibling.resourceMap,
-            fileOffset: fileOffsetValue,
-            size,
-          });
-        }
-      }
+    }
+  }
+
+  for (const match of findEmbeddedDataFields(resolved, decoded)) {
+    const fieldContext = `${contextPath}.${match.fieldName}`;
+    if (match.kind === 'unknown') {
+      warn({
+        originalIndex: rootOriginalIndex,
+        path: fieldContext,
+        group: '',
+        kind: 'embeddedRawData',
+        message: `"${fieldContext}" is annotated as carrying embedded/external raw data but its layout could not be read - unrecognized, blocked, not guessed.`,
+        resourceMap: match.resourceMap,
+      });
+    } else if (match.external) {
+      warn({
+        originalIndex: rootOriginalIndex,
+        path: fieldContext,
+        group: '',
+        kind: 'externalData',
+        message: `"${fieldContext}" (${match.size} bytes) lives in "${match.resourceMap}", not resolved this milestone (flagged only).`,
+        resourceMap: match.resourceMap,
+        fileOffset: match.fileOffset,
+        size: match.size,
+      });
+    } else {
+      warn({
+        originalIndex: rootOriginalIndex,
+        path: fieldContext,
+        group: '',
+        kind: 'embeddedRawData',
+        message: `"${fieldContext}" (${match.size} bytes) is embedded in this map's own raw-data region (file offset ${match.fileOffset}), outside this tag's own struct bytes - captured into the container for relocation if the extracting build supports it (see Verify Embedded Data for status); injection is blocked unless the container has the captured bytes.`,
+        resourceMap: match.resourceMap,
+        fileOffset: match.fileOffset,
+        size: match.size,
+      });
     }
   }
 }

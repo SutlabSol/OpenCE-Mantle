@@ -39,14 +39,11 @@
  * (`toAdd`) participate in the block-cascade.
  *
  * NOT part of Step A/B (left for later/flagged, never done silently):
- * - Embedded (external=0) bitmap/sound raw data relocation: see `relocateEmbeddedRawData` below
- *   - disabled, blocks ADD/SWAP for any such tag instead. Re-verified this session with a
- *   reusable scanner (`core/scripts/scan-embedded-data.ts`, built on the same `walkDependencies`
- *   detection the injector itself uses): 251 non-external bitmap/sound tags in ui.map (575
- *   external data fields) and 0 non-external bitmap/sound tags at all in bloodgulch.map - 0
- *   embedded (external=0) fields found in either. STILL UNVERIFIED against real bytes - see
- *   SOURCES.md "Milestone 5 Step B" entry. Tracked as an open item in PRD.md pending a user-
- *   supplied sample map with one real embedded bitmap/sound.
+ * - Embedded (external=0) bitmap/sound raw data relocation: implemented (see `applyInjection`'s
+ *   doc for the mechanism) but stays behind `InjectionOptions.allowEmbeddedRelocation`, which
+ *   defaults to false and is never set by `map-worker.ts` - test-only until the user approves
+ *   turning it on for real. `planInjection` blocks these tags exactly as before while the option
+ *   is off.
  * - Adding brand-new whole-tag-external (resource-map-indexed) entries: an 'external' dependency
  *   that doesn't already exist in the target map blocks the dependent tag (missing dependency),
  *   it is not auto-created. Swapping INTO an existing whole-tag-external entry is also refused
@@ -172,16 +169,36 @@ export type AddInjectionRefusal = InjectionRefusal;
 /** @deprecated kept as an alias - use `InjectionCounts`. */
 export type AddInjectionCounts = InjectionCounts;
 
-const OCETAGS_SUPPORTED_MAX_VERSION = 2;
+const OCETAGS_SUPPORTED_MAX_VERSION = 3;
 
-function embeddedWarningMessages(container: OceContainer): Map<number, string[]> {
+function warningMessagesOfKind(container: OceContainer, kind: string): Map<number, string[]> {
   const byOriginal = new Map<number, string[]>();
   for (const w of container.warnings) {
-    if (w.kind !== 'embeddedRawData') continue;
+    if (w.kind !== kind) continue;
     if (!byOriginal.has(w.originalIndex)) byOriginal.set(w.originalIndex, []);
     byOriginal.get(w.originalIndex)!.push(w.message);
   }
   return byOriginal;
+}
+
+function embeddedWarningMessages(container: OceContainer): Map<number, string[]> {
+  return warningMessagesOfKind(container, 'embeddedRawData');
+}
+
+/** local container index -> how many embedded bitmap/sound patches this container actually captured for that tag (0 for v1/v2 containers, or a v3 capture that failed validation - see `tag-extractor.ts`). */
+function embeddedCapturedCounts(container: OceContainer): Map<number, number> {
+  const byOriginal = new Map<number, number>();
+  for (const t of container.tags) byOriginal.set(t.originalIndex, t.embeddedRawDataPatches?.length ?? 0);
+  return byOriginal;
+}
+
+export interface InjectionOptions {
+  /**
+   * Relocation of embedded (external=0) bitmap/sound raw data stays DISABLED (the default,
+   * matching production) until explicitly approved - see PRD.md "Relocation research". Tests
+   * may opt in explicitly; `map-worker.ts` (the real app) never passes this.
+   */
+  allowEmbeddedRelocation?: boolean;
 }
 
 /**
@@ -189,7 +206,7 @@ function embeddedWarningMessages(container: OceContainer): Map<number, string[]>
  * any bytes. Never mutates its inputs. `mode` applies to the whole operation (per-tag choice is
  * Step C, not built yet).
  */
-export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}): InjectionPlanResult {
+export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
   if (container.formatVersion > OCETAGS_SUPPORTED_MAX_VERSION) {
     return { kind: 'refused', reason: `This .ocetags container is format version ${container.formatVersion}, newer than this build supports (${OCETAGS_SUPPORTED_MAX_VERSION}). Update OpenCE.` };
   }
@@ -210,22 +227,53 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
   }
 
   const embeddedWarningsByOriginal = embeddedWarningMessages(container);
+  const embeddedCapturedByOriginal = embeddedCapturedCounts(container);
+  const uncapturedDataByOriginal = warningMessagesOfKind(container, 'uncapturedData');
+
+  /** Unconditional - unlike embedded relocation, there is no opt-in for data the extractor structurally cannot carry at all (model geometry, an out-of-bounds pointer). Always blocks ADD and SWAP alike. */
+  function uncapturedDataBlockReason(t: OceContainerTag): string | null {
+    const msgs = uncapturedDataByOriginal.get(t.originalIndex);
+    if (!msgs || msgs.length === 0) return null;
+    return `This tag has data that cannot be captured or relocated: ${msgs.join('; ')}`;
+  }
+
+  /** null = not blocked by embedded data. Otherwise the reason to surface. */
+  function embeddedBlockReason(t: OceContainerTag): string | null {
+    const msgs = embeddedWarningsByOriginal.get(t.originalIndex);
+    if (!msgs || msgs.length === 0) return null;
+    if (!options.allowEmbeddedRelocation) {
+      return `Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone: ${msgs.join('; ')}`;
+    }
+    const captured = embeddedCapturedByOriginal.get(t.originalIndex) ?? 0;
+    if (captured < msgs.length) {
+      return `This container doesn't have the embedded bitmap/sound bytes captured for relocation (extracted by a build without this feature, or a capture mismatch at extraction time) - re-extract to enable relocation: ${msgs.join('; ')}`;
+    }
+    return null;
+  }
 
   const blockedReasons = new Map<number, string[]>();
   const blockedEmbeddedSet = new Set<number>();
+  const blockedUncapturedSet = new Set<number>();
   for (const li of candidateAdd) {
     const t = container.tags[li];
-    const msgs = embeddedWarningsByOriginal.get(t.originalIndex);
-    if (msgs && msgs.length > 0) {
-      blockedEmbeddedSet.add(li);
-      blockedReasons.set(li, [`Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone: ${msgs.join('; ')}`]);
+    const reasons: string[] = [];
+    const uncaptured = uncapturedDataBlockReason(t);
+    if (uncaptured) {
+      blockedUncapturedSet.add(li);
+      reasons.push(uncaptured);
     }
+    const embedded = embeddedBlockReason(t);
+    if (embedded) {
+      blockedEmbeddedSet.add(li);
+      reasons.push(embedded);
+    }
+    if (reasons.length > 0) blockedReasons.set(li, reasons);
   }
 
   // Fixed-point cascade over `toAdd` candidates only: a matched tag's tagId never changes
   // (whether swapped or left untouched - see module doc), so nothing depending on a matched tag
   // by internal reference can ever be blocked by it. Only true appends participate here.
-  const blocked = new Set<number>(blockedEmbeddedSet);
+  const blocked = new Set<number>([...blockedEmbeddedSet, ...blockedUncapturedSet]);
   let changed = true;
   while (changed) {
     changed = false;
@@ -273,9 +321,9 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
     if (existing.isExternal) {
       reasons.push(`The existing "${t.path}" (${t.group}) in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.`);
     }
-    const embeddedMsgs = embeddedWarningsByOriginal.get(t.originalIndex);
-    if (embeddedMsgs && embeddedMsgs.length > 0) {
-      reasons.push(`Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone: ${embeddedMsgs.join('; ')}`);
+    const embeddedBlockMsg = embeddedBlockReason(t);
+    if (embeddedBlockMsg) {
+      reasons.push(embeddedBlockMsg);
     }
     for (const dep of t.dependencies as ExtractedDependencyRef[]) {
       if (dep.kind === 'null') continue;
@@ -293,7 +341,7 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
     if (reasons.length > 0) {
       blockedReasons.set(li, reasons);
       blocked.add(li);
-      if (embeddedMsgs && embeddedMsgs.length > 0) blockedEmbeddedSet.add(li);
+      if (embeddedBlockMsg) blockedEmbeddedSet.add(li);
       reusedByLocalIndex.set(li, existing.tagId); // swap requested but not possible - falls back to untouched
     } else {
       toSwap.push({ localIndex: li, path: t.path, group: t.group, targetTagId: existing.tagId, targetOriginalIndex: existing.index });
@@ -362,12 +410,12 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
   };
 }
 
-export function planAddInjection(targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}): InjectionPlanResult {
-  return planInjection('add', targetTagIndex, container, resourceMapConfig);
+export function planAddInjection(targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
+  return planInjection('add', targetTagIndex, container, resourceMapConfig, options);
 }
 
-export function planSwapInjection(targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}): InjectionPlanResult {
-  return planInjection('swap', targetTagIndex, container, resourceMapConfig);
+export function planSwapInjection(targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
+  return planInjection('swap', targetTagIndex, container, resourceMapConfig, options);
 }
 
 /** Recursively rewrites one newly-added tag's own buffer in place: TagDependency.tagId fields are remapped to the target map's resolved tagIds, and TagReflexive pointers (currently LOCAL byte offsets from extraction) become real virtual addresses for their final position in the target file. `tagBaseAbsolute` is the tag's own fixed absolute position in `data` (constant across the whole recursive call tree); `localOffset` is this struct instance's absolute position in `data`. */
@@ -434,28 +482,69 @@ function makeResolveDepTagId(t: OceContainerTag, plan: InjectionPlan, targetTagI
  * entries keep their existing path pointer), and returns a brand-new Buffer. Never mutates
  * `targetBuffer`. Caller is responsible for writing the result via temp-file-then-rename and for
  * treating `crc32`/`tagFileChecksums` as stale (Milestone 6).
+ *
+ * When `options.allowEmbeddedRelocation` is true (test-only until approved - see
+ * `InjectionOptions`), also relocates every captured embedded (external=0) bitmap/sound asset
+ * across `toAdd`/`toSwap`: the unique asset bytes are inserted once, zero-padded to a 4-byte
+ * boundary, immediately before the target's own `modelDataFileOffset` (verified via real bytes
+ * to always sit exactly at the end of the raw-data region, before model data - see PRD.md
+ * "Relocation research"). That shifts model data + tag data forward by the inserted size;
+ * exactly 4 stored header/sub-header fields need recomputing as a result - `modelDataFileOffset`,
+ * `tagDataOffset`, `tagDataSize`, `decompressedFileSize` - everything else (every existing
+ * TagReflexive/TagDependency pointer, `bsp_start`, model vertex/index pointers) resolves
+ * correctly automatically via the SAME `tag_array_address`-anchored translation already used for
+ * tag-array growth, because none of those are raw/absolute file offsets (confirmed against
+ * invader/src/build/build_workload.cpp's generic pointer-fixup pass - every one of them is
+ * written as a translated virtual address, not a literal file offset). The two true absolute
+ * file offsets in the format - `bsp_start` and the embedded bitmap/sound offsets themselves -
+ * are handled explicitly: `bsp_start` always resolves to BEFORE the insertion point (BSP data
+ * precedes raw-data in every real map checked) so it never shifts; the embedded offsets are
+ * patched directly via each tag's `embeddedRawDataPatches`.
  */
-export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan): Buffer {
+export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan, options: InjectionOptions = {}): Buffer {
   const addedCount = plan.toAdd.length;
   const swappedCount = plan.toSwap.length;
   if (addedCount === 0 && swappedCount === 0) return Buffer.from(targetBuffer);
 
-  const subHeaderOffset = targetHeader.tagDataOffset;
+  // Combined append list: brand-new entries first, then swapped-in-place entries - order is
+  // arbitrary, both just append struct data past the (shifted) existing data region.
+  const writeTags: OceContainerTag[] = [...plan.toAdd, ...plan.toSwap.map((s) => container.tags[s.localIndex])];
+
+  if (!options.allowEmbeddedRelocation) {
+    for (const t of writeTags) {
+      if (t.embeddedRawDataPatches && t.embeddedRawDataPatches.length > 0) {
+        throw new Error(`Internal error: "${t.path}" reached applyInjection() with embedded raw data to relocate, but allowEmbeddedRelocation is false - planInjection() should have blocked it.`);
+      }
+    }
+  }
+
+  const subHeaderOffset = targetHeader.tagDataOffset; // OLD position - read-anchor for everything below
   const arrayOffset = subHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
   const oldTagCount = targetTagIndex.entries.length;
   const oldStructDataOffset = arrayOffset + oldTagCount * TAG_ENTRY_SIZE;
   const oldFileLength = targetBuffer.length;
   const delta = addedCount * TAG_ENTRY_SIZE; // only brand-new entries grow the tag array
 
+  // Embedded relocation: every unique asset across toAdd/toSwap, inserted once right before
+  // modelDataFileOffset, zero-padded to a 4-byte boundary - a harmless, defensive convention
+  // (matches invader's REQUIRED_PADDING_32_BIT), NOT a confirmed hard requirement: real
+  // coldsnap.map's own tagDataOffset/modelDataFileOffset are themselves NOT 4-aligned (both ≡ 2
+  // mod 4). Padding preserves whatever alignment the source already had either way.
+  const insertPos = targetTagIndex.modelDataFileOffset;
+  const embeddedAssetBuffers: Buffer[] = options.allowEmbeddedRelocation
+    ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).map((a) => Buffer.from(a.data, 'base64')))
+    : [];
+  const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
+  const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + ((4 - (embeddedBlobSize % 4)) % 4);
+
   const oldTagArrayAddress = targetBuffer.readUInt32LE(subHeaderOffset + 0x00);
   const newTagArrayAddress = (oldTagArrayAddress - delta) >>> 0;
   const newBaseMemoryAddress = (newTagArrayAddress - TAG_DATA_HEADER_PC_SIZE) >>> 0;
+  const newTagDataOffset = subHeaderOffset + insertSize;
+  const newArrayOffset = arrayOffset + insertSize;
 
-  // Combined append list: brand-new entries first, then swapped-in-place entries - order is
-  // arbitrary, both just append struct data past the (shifted) existing data region.
-  const writeTags: OceContainerTag[] = [...plan.toAdd, ...plan.toSwap.map((s) => container.tags[s.localIndex])];
   const dataBuffers = writeTags.map((t) => Buffer.from(t.data, 'base64'));
-  const structDataStart = oldFileLength + delta;
+  const structDataStart = oldFileLength + insertSize + delta;
   const structOffsets: number[] = [];
   let running = structDataStart;
   for (const b of dataBuffers) {
@@ -472,16 +561,33 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   const newFileLength = running;
 
   const out = Buffer.alloc(newFileLength);
-  targetBuffer.copy(out, 0, 0, arrayOffset); // header + BSP + raw-data + model-data + sub-header, byte-for-byte
-  out.writeUInt32LE(newTagArrayAddress, subHeaderOffset + 0x00);
-  out.writeUInt32LE(oldTagCount + addedCount, subHeaderOffset + 0x0c);
+  targetBuffer.copy(out, 0, 0, insertPos); // header + BSP + rest of raw-data region, byte-for-byte, unmoved
 
-  targetBuffer.copy(out, arrayOffset, arrayOffset, oldStructDataOffset); // existing array entries, UNTOUCHED (re-anchored, not rewritten)
-  targetBuffer.copy(out, oldStructDataOffset + delta, oldStructDataOffset, oldFileLength); // existing struct/path-string data, shifted but UNTOUCHED
+  // Per-writeTags-index, per-asset -> the asset's final absolute file offset in `out`.
+  const assetAbsoluteOffsets: number[][] = writeTags.map(() => []);
+  if (insertSize > 0) {
+    let cursor = insertPos;
+    for (let i = 0; i < writeTags.length; i++) {
+      for (const asset of writeTags[i].embeddedRawDataAssets ?? []) {
+        const bytes = Buffer.from(asset.data, 'base64');
+        bytes.copy(out, cursor);
+        assetAbsoluteOffsets[i].push(cursor);
+        cursor += bytes.length;
+      }
+    }
+    // [cursor, insertPos + insertSize) is the alignment pad - left zero by Buffer.alloc.
+  }
+
+  targetBuffer.copy(out, insertPos + insertSize, insertPos, oldStructDataOffset); // rest of model data + sub-header + existing tag array, shifted by +insertSize ONLY (the tag-array growth insertion point is further along, handled next)
+  targetBuffer.copy(out, oldStructDataOffset + insertSize + delta, oldStructDataOffset, oldFileLength); // existing struct/path-string data, shifted by +insertSize AND +delta
+
+  out.writeUInt32LE(newTagArrayAddress, newTagDataOffset + 0x00);
+  out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 0x0c);
+  if (insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 0x14); // modelDataFileOffset
 
   for (let i = 0; i < addedCount; i++) {
     const t = plan.toAdd[i];
-    const entryOffset = oldStructDataOffset + i * TAG_ENTRY_SIZE;
+    const entryOffset = oldStructDataOffset + insertSize + i * TAG_ENTRY_SIZE;
     const classInfo = lookupTagClassByName(t.group);
     if (!classInfo) throw new Error(`Unknown tag group "${t.group}" - cannot write a tag index entry for it.`);
     const primaryFourCC = fourCCFromString(classInfo.groupId);
@@ -492,16 +598,16 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
     out.writeUInt32LE(tertiary === null ? 0xffffffff : tertiary, entryOffset + 0x08);
     const tagId = plan.resolvedTagIdByLocalIndex.get(plan.toAddLocalIndices[i])!;
     out.writeUInt32LE(tagId, entryOffset + 0x0c);
-    const pathPointer = newBaseMemoryAddress + (pathOffsets[i] - subHeaderOffset);
+    const pathPointer = newBaseMemoryAddress + (pathOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(pathPointer >>> 0, entryOffset + 0x10);
-    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - subHeaderOffset);
+    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
     out.writeUInt32LE(0, entryOffset + 0x18); // isExternal = false, this module never adds resource-map-indexed entries
 
     dataBuffers[i].copy(out, structOffsets[i]);
     pathBuffers[i].copy(out, pathOffsets[i]);
 
-    const translation = (newBaseMemoryAddress - subHeaderOffset + structOffsets[i]) >>> 0;
+    const translation = (newBaseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
     const depCursor = { value: 0 };
     rewriteAddedTagData(out, t.structName, structOffsets[i], t.dependencies as ExtractedDependencyRef[], depCursor, translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
@@ -510,52 +616,45 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
     const s = plan.toSwap[j];
     const t = container.tags[s.localIndex];
     const i = addedCount + j; // index into writeTags/dataBuffers/structOffsets
-    const entryOffset = arrayOffset + s.targetOriginalIndex * TAG_ENTRY_SIZE; // EXISTING array slot, same position
+    const entryOffset = newArrayOffset + s.targetOriginalIndex * TAG_ENTRY_SIZE; // EXISTING array slot, same relative position
     const secondary = t.secondaryClassFourCC ?? 0xffffffff;
     const tertiary = t.tertiaryClassFourCC ?? 0xffffffff;
     // tagId (0x0c), path pointer (0x10), primary class (0x00) and isExternal (0x18) are
     // INTENTIONALLY left unchanged - that's what makes this a swap, not a new tag.
     out.writeUInt32LE(secondary === null ? 0xffffffff : secondary, entryOffset + 0x04);
     out.writeUInt32LE(tertiary === null ? 0xffffffff : tertiary, entryOffset + 0x08);
-    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - subHeaderOffset);
+    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
 
     dataBuffers[i].copy(out, structOffsets[i]);
 
-    const translation = (newBaseMemoryAddress - subHeaderOffset + structOffsets[i]) >>> 0;
+    const translation = (newBaseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
     const depCursor = { value: 0 };
     rewriteAddedTagData(out, t.structName, structOffsets[i], t.dependencies as ExtractedDependencyRef[], depCursor, translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
 
+  // Patch every relocated embedded asset's new absolute file offset into its tag's own struct
+  // bytes - the one place each mechanism's raw file-offset field lives (see
+  // `embedded-data-fields.ts`). Must run AFTER the struct-data copies above.
+  for (let i = 0; i < writeTags.length; i++) {
+    for (const patch of writeTags[i].embeddedRawDataPatches ?? []) {
+      out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + patch.patchOffset);
+    }
+  }
+
   out.writeUInt32LE(newFileLength, 0x8); // decompressedFileSize
-  out.writeUInt32LE(newFileLength - subHeaderOffset, 0x14); // tagDataSize
+  if (insertSize > 0) out.writeUInt32LE(newTagDataOffset, 0x10); // tagDataOffset
+  out.writeUInt32LE(newFileLength - newTagDataOffset, 0x14); // tagDataSize
   // crc32 (0x64) and the sub-header's tagFileChecksums (subHeaderOffset+0x08) are left byte-for-byte
   // as in the target map - both are stale after this write; recalculating them is Milestone 6.
 
   return out;
 }
 
-export function applyAddInjection(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan): Buffer {
-  return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan);
+export function applyAddInjection(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan, options: InjectionOptions = {}): Buffer {
+  return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan, options);
 }
 
-export function applySwapInjection(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan): Buffer {
-  return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan);
-}
-
-/**
- * DISABLED. Relocating embedded (external=0) bitmap/sound raw data requires re-deriving where
- * a map's raw-data region starts, which is NOT stored anywhere in a compiled map (confirmed:
- * it's the implicit gap between `end_of_bsps` and `model_offset` in
- * invader/src/build/build_workload.cpp's `generate_final_data` lambda, lines ~278-300 - neither
- * boundary is an explicit header field, unlike `model_data_file_offset` which IS stored).
- * Reconstructing it from a compiled file alone is under-determined without more research. Never
- * called by `planAddInjection`/`applyAddInjection`; covered only by its own synthetic-fixture
- * test (`relocation-synthetic.test.ts`), which must stay separate from "verified against real
- * bytes" per project rules - neither sample map contains a single real embedded bitmap/sound to
- * verify against (confirmed: scanned all 222 internal ui.map bitmaps + 125 ui.map sound
- * permutations, 100% external=1; bloodgulch.map has zero internal bitmap/sound tags at all).
- */
-export function relocateEmbeddedRawData(): never {
-  throw new Error('relocateEmbeddedRawData is disabled this milestone - see tag-injector.ts module doc.');
+export function applySwapInjection(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan, options: InjectionOptions = {}): Buffer {
+  return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan, options);
 }

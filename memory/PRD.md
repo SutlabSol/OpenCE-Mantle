@@ -11,7 +11,69 @@ Milestones: M1 header/index parse, M2 decompress/recompress, M3 GUI shell, M4 de
 extraction, M5 tag injection/swap, M6 export + CRC32 recalc. Future: M7 field-level tag editor,
 Phase 2 3D scenario editor.
 
+## Status table (2026-08, updated this session — labels: verified by tests / same-reader /
+needs re-verification / unverified / blocked)
+| Feature | Status | How |
+|---|---|---|
+| M4 extraction (general) | **needs re-verification** | Was "done" before the font/string_list/meter/etc data-dropping bug was found; the bug is now fixed and same-reader-verified (101/101 core Vitest), but no fix this session has been run by the user on Windows/OpenCE yet. See "Windows check" below to move this to verified without a full OpenCE session. |
+| M5 ADD / SWAP (tags with NO gbxmodel in their closure) | **needs re-verification** | Same reason as extraction - the data-dropping bug could have affected any injected tag with a font/string_list/meter/hud_message_text/input_device_defaults/model_animations/scenario field. Fixed + same-reader-verified this session; not yet confirmed in OpenCE. |
+| M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked** | `uncapturedData` warning unconditionally blocks these (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. |
+| Embedded (external=0) bitmap/sound relocation | **same-reader-verified, NOT approved for the real app** | `embedded-relocation.test.ts`, real coldsnap.map bytes. `allowEmbeddedRelocation` stays off in `map-worker.ts`. |
+| `gbxmodel` model geometry capture/relocation | **unverified / not built** | Plan not yet written (next step, pending). |
+| Sound relocation | **same-reader-verified, bounds-only** | No deterministic size formula for compressed audio exists (stated, not guessed) - a corrupt/truncated embedded sound could still pass the bounds check. |
+| `crc32`/`tagFileChecksums` after injection | **unverified, known-stale** | M6 work, tracked P0, not started. |
+
+### Windows check to move "M4 extraction" to verified (no OpenCE needed)
+1. Build, open `ui.map`, extract `ui\ticker` (Tools > Extract Tags, search "ticker", pick the
+   **font** result, not the ui_widget_definition ones) alone (no dependencies needed).
+2. Expect: extraction succeeds with 0 warnings for that tag, "Open containing folder" shows a
+   `.ocetags` file. Expect the file to be noticeably larger than a few KB (it embeds the font's
+   ~31 KB of glyph pixel data) - if you want an exact number, the pixels field alone is 31,066
+   bytes plus the JSON/base64 + struct overhead.
+3. Extract any weapon (e.g. `weapons\assault rifle\assault rifle`) with dependencies - expect it
+   to succeed with only "External data"/"BSP" style warnings, never a crash.
+4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
+
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-08 (this session): Fixed Issue 1 (P0, silently dropped data fields). Root cause: the
+  `uncapturedData` guard logic and the plain-`TagDataOffset` pointer-capture branch in
+  `tag-extractor.ts`'s `flattenStruct` were already present in this session's uncommitted work
+  (font/string_list/unicode_string_list/meter/hud_message_text/input_device_defaults/
+  model_animations/scenario script+comment data - all captured the same way as TagReflexive:
+  append pointed-to bytes, rewrite the pointer to a local offset; unresolvable pointers leave the
+  tag's data untouched and `dependency-walker.ts` emits a blocking `uncapturedData` warning, same
+  mechanism used for the `gbxmodel`-geometry block). What was missing: (a) a real-byte proof (not
+  just bounds-checking) and (b) a second, genuinely new bug found while building that proof -
+  `flattenStruct`'s plain-`TagDataOffset` branch did NOT skip `nonCached` fields the way
+  `dependency-walker.ts`'s `collectFromStruct` and `embedded-data-fields.ts`'s
+  `findEmbeddedDataFields` already did. Confirmed via real bytes: bitmap's `compressed color
+  plate data` field (nonCached, "confirmed garbage" per this file's own earlier note) has a
+  **non-zero stored size in 222/222 ui.map bitmaps and 132/132 coldsnap.map bitmaps** - its
+  garbage pointer happened to resolve out-of-bounds in every sample checked (so no map in this
+  repo was actually corrupted), but a future map where that garbage pointer coincidentally landed
+  in-bounds would have had random bytes captured as "data" and the field's pointer rewritten to
+  point at them - never read by the game (nonCached), but wasted space and a real latent gap.
+  Fixed: `flattenStruct` now skips `field.def.nonCached` fields exactly like the walker does.
+  Also found: `dependency-walker.test.ts`'s warning-kind allowlist (a typo-guard sanity check, not
+  a behavioral assertion) didn't list `uncapturedData` yet - a real, deliberate new kind added
+  this session (2 legitimate emitters: unresolvable plain-pointer fields, `gbxmodel` geometry
+  reflexives) - extended the allowlist, did not change any production logic to satisfy the test.
+- 2026-08 (this session): Real-byte proof for Issue 1 added (`tagdata-capture.test.ts`):
+  `ui\ticker` (font)'s 31,066-byte `pixels` field captured byte-identical to the source map,
+  survives v3 container round-trip; a negative test corrupts that same pointer to resolve
+  out-of-bounds and confirms `walkDependencies` flags it + `planAddInjection` blocks the tag with
+  a "cannot be captured or relocated" reason (into a target that doesn't already have the tag, so
+  the block path is actually exercised, not matched/reused). A same-reader property sweep
+  (independent expected-length calculator, not calling `tag-extractor.ts`'s own code) ran over
+  **every non-external tag in all 4 available sample maps** (bloodgulch 1569, ui 1411, sidewinder
+  1542, coldsnap 1957 - 6,479 tags total): **0 length mismatches (0 silently dropped) in all
+  four**. `uncapturedData` warnings found: bloodgulch 169 (70 unique tags), ui 14 (5), sidewinder
+  160 (64), coldsnap 186 (78) - **100% of these are the known, already-blocked `gbxmodel`
+  geometry case; 0 were a plain-pointer field failing to resolve** in any real sample map. Core:
+  **101/101 Vitest pass** (95 + 6 new). Desktop: 33/33 unchanged (no desktop files touched).
+  Labelled "same-reader" per this session's new rule: this proves internal consistency with our
+  own reader's assumptions, not that the real Halo CE/OpenCE engine accepts the result - that
+  still needs the user's own Windows/OpenCE test (see "Windows check" above).
 - 2026-08: SparkEdit is **out of scope** - continue the current tool. Investigated and rejected
   (wrong stack, unverified structs, no tests, no injector logic to borrow, unclear license);
   reference its 3D/BSP rendering techniques only when Phase 2 is built, never its code.
@@ -44,6 +106,43 @@ Phase 2 3D scenario editor.
   bitmap/sound tags). Main agent additionally decided NOT to write a synthetic
   relocation-algorithm fixture (would mean building, and risking false confidence in, the real
   feature under a "synthetic" label) — flagged to user, **no explicit ruling recorded yet**.
+- 2026-08: User supplied `coldsnap.map` (396 real embedded assets). Agent proved via real bytes
+  that relocation is possible (region layout, "exactly 4 fields" claim) and the user approved
+  **building** it ("Yes, build it"), with conditions — see "Relocation research" below for the
+  full report, what's built, and what's still unapproved. Container bumped to **v3**: per-tag
+  `embeddedRawDataAssets`/`embeddedRawDataPatches` (captured bytes + patch offsets), deduped
+  per-tag by (fileOffset, size). Bitmap captures are validated against width/height/format/
+  mipmaps (formula verified 100% exact against all 800 real BitmapData instances across
+  coldsnap.map + ui.map) — a mismatch blocks the WHOLE tag, never a partial relocation. Sound
+  captures are bounds-checked only (no reliable deterministic size formula for compressed audio
+  without decoding it) — stated explicitly, not silently assumed safe. The actual relocation
+  write path (`applyInjection`'s embedded-insertion branch) is **implemented and tested against
+  real bytes** but stays behind `InjectionOptions.allowEmbeddedRelocation` (default `false`,
+  `map-worker.ts` never sets it) — **the user has not yet approved enabling it in the real app**;
+  it is only ever exercised by `embedded-relocation.test.ts`. `planInjection`'s default
+  (production) behavior — blocking any tag with embedded data — is completely unchanged.
+- 2026-08: Two NEW, pre-existing bugs found while researching the above:
+  1. **FIXED this session** (see "Decisions" entries above dated this session for the full
+     root-cause + real-byte proof) - `tag-extractor.ts` now flattens the pointer-based data for
+     every plain `TagDataOffset` field (font/string_list/unicode_string_list/meter/
+     hud_message_text/input_device_defaults/model_animations/scenario), same mechanism as
+     TagReflexive; unresolvable ones block the whole tag via `uncapturedData` rather than
+     dropping silently. Same-reader-verified against real bytes in all 4 sample maps, 0
+     mismatches. Still "needs re-verification" (not "verified") until the user confirms on
+     Windows/OpenCE - see "Status table" above.
+  2. **NOT fixed, blocked at the warning level** (Issue 2, plan not yet written): `gbxmodel`
+     model geometry (vertex/index data, stored in the separate "model data" region) is never
+     captured by the container format at all. Since this session, any tag whose dependency
+     closure includes a `gbxmodel` is unconditionally **blocked** from ADD/SWAP via a new
+     `uncapturedData` warning (`dependency-walker.ts`, `childStructName === 'GBXModelGeometryPart'`)
+     - this prevents producing a corrupt map, but means vehicles/weapons/bipeds can't be
+     injected at all today. Capture/relocation plan is the next step, pending user approval
+     before any geometry code is written.
+- 2026-08: `crc32` (main header) and the sub-header's `tagFileChecksums` go stale after ANY
+  injection (tag-array growth OR embedded insertion) — tracked P0, not fixed this session (M6
+  work). The Inject result dialog and worker already surface this (`staleChecksumWarning`,
+  updated wording 2026-08: "Checksums were not updated. This map may be rejected by some loaders
+  until M6 (export + CRC) is done.").
 - 2026-08: M5 build order approved: Step A (ADD mode only) → stop for review → Step B (SWAP,
   keeps target's tag ID) → stop → Step C (conflict dialog: skip/replace/rename + "apply to all",
   using the existing `ConfirmDialog.tsx`). Never overwrite source map (temp+rename to a new file
@@ -178,13 +277,10 @@ by a full M4 **frontend/UI integration** pass (see below), which is now done and
   (even Reclaimer's own author calls it a guess), and it doesn't appear in either sample map.
 - **OPEN ITEM (P0, blocks embedded-data relocation)**: embedded (external=0) bitmap/sound raw-data
   relocation is unimplemented and the ADD/SWAP injector actively blocks any tag with one (plain-
-  language warning). Re-confirmed 2026-08 with a reusable scanner
-  (`core/scripts/scan-embedded-data.ts`): 0 embedded bitmap/sound fields in ui.map (251 non-
-  external bitmap/sound tags checked) or bloodgulch.map (0 non-external bitmap/sound tags at all).
-  User has custom maps with embedded custom-art bitmaps/sounds and will supply a small one to
-  `/app/sample_maps/` (filename TBD) once ready — do NOT implement/enable relocation against a
-  synthetic-only fixture; wait for that real file, scan it the same way, propose enabling, and
-  get explicit user approval before turning it on.
+  language warning). 2026-08: **verified feasible** on a real custom map (coldsnap.map, 396
+  embedded assets) - see "Relocation verification attempt #3" below for the design and exact
+  citations. NOT implemented - proposed to the user, waiting for explicit approval before writing
+  any code. Still true: do NOT implement/enable against a synthetic-only fixture.
 
 ## Upcoming (pending user go-ahead — M4 UI is done, waiting for user's own Electron/Windows test)
 - Sounds.map resolution (parse external sound pointers before M5) — explicitly deferred by user.
@@ -219,9 +315,30 @@ layout, pure `rangesOverlap`/`formatEmbeddedDataReport` tests). Desktop: 33/33 V
 tests for the dialog), both electron+renderer `tsc --noEmit` clean, esbuild bundle clean.
 Per the user's new standing rule, **no testing_agent/screenshot used** - targeted Vitest only.
 
-## Staged for next turn: Yoyorast_Island.map (2026-08)
-Uploaded by user for Task 3 (relocation-via-copy-without-region-start research). Saved to
-`sample_maps/Yoyorast_Island.map` but **NOT YET analyzed** - user said stop after Task 2.
+## Relocation verification attempt #3 (Task 3): coldsnap.map - VERIFIES, pending approval (2026-08)
+User uploaded `sample_maps/coldsnap.map` (real CE 609 custom map, 2791 tags, 79.9MB) - first real
+embedded-data sample. `verifyEmbeddedData` found **396 embedded assets (350 bitmap + 46 sound),
+0 blocked, 0 out-of-bounds, 0 overlapping, 0 unreadable** - a genuinely clean, heavily-modded map.
+Real example: `levels\one\devices\bitmaps\panel_scuff` (bitmap), embedded, offset=26,396,672,
+size=43,704 bytes, first bytes `1084cb5a55552323718ccb5a5555c842`.
+**Finding**: relocation does NOT need the region's start - confirmed by exact arithmetic on real
+bytes (see SOURCES.md "UPDATE 2026-08" for the full citation): `max(embedded offset+size) ==
+tagIndex.modelDataFileOffset` (54552850, exact), `modelDataFileOffset + modelDataSize ==
+tagDataOffset` (70610858, exact), `tagDataOffset + tagDataSize == decompressedFileSize`
+(79925558, exact) - zero slack, whole file accounted for. Embedded offsets are confirmed plain
+absolute file offsets (not memory-address-translated: `baseMemoryAddress` ~1.08B vs offsets
+~26-54M, different domains).
+**Proposed design** (NOT implemented - awaiting approval): insert new embedded bytes immediately
+before `modelDataFileOffset`, shift model+tag data forward by the inserted size, increment
+exactly 3 stored fields by that delta (`modelDataFileOffset`, `tagDataOffset`,
+`decompressedFileSize`) - every existing struct pointer auto-shifts via the same
+`tagDataOffset`-relative anchor already used for M5's tag-array growth, zero per-pointer
+rewriting needed. Preserves the observed invariant exactly (safer than appending at true EOF,
+which breaks it and is unverified).
+**Residual risk**: structural/arithmetic analysis of ONE real map, not yet validated by an actual
+in-game round-trip. Recommend implementing behind clear logging and having the user verify
+in-game before trusting it for real mods.
+Yoyorast_Island.map (`sample_maps/`) is staged but unused - optional secondary cross-check later.
 
 
 ## Relocation verification attempt #2: sidewinder.map (2026-08, read-only)
@@ -318,6 +435,34 @@ embedded bitmap later for actual verification - filename/tag TBD from user when 
   container can't run it) - same caveat as Step A, user will test themselves.
 - **Per explicit user instruction this session: STOPPING here for review before Step C** (the
   conflict dialog - skip/replace/rename + "apply to all", using the existing `ConfirmDialog.tsx`).
+
+### 2026-08 session: embedded (external=0) bitmap/sound relocation - built, disabled by default
+See "Relocation research" section above for the full report. Summary of what changed:
+- New `core/src/map/embedded-data-fields.ts` — shared detector + bitmap pixel-size validator,
+  also adopted by `dependency-walker.ts` (pure refactor, same warnings/behavior, same 73/73
+  pre-refactor test results, coldsnap.map Verify Embedded Data still reports 396 embedded / 9
+  external / 0 blocked before and after).
+- `container.ts` bumped to **v3**: per-tag `embeddedRawDataAssets`/`embeddedRawDataPatches`. v1/v2
+  containers still read fine (fields simply undefined, relocation stays blocked for them).
+- `tag-extractor.ts`: captures embedded bytes at extraction time (always on, no flag - pure data
+  gathering), deduped per-tag, bitmap-size-validated, bounds-checked.
+- `tag-injector.ts`: `applyInjection` can relocate the captured bytes, but ONLY when the caller
+  passes `{ allowEmbeddedRelocation: true }` — default `false`, `map-worker.ts` never sets it, so
+  the shipped app's behavior is byte-for-byte unchanged from before this session.
+- 2 new pre-existing bugs found (NOT fixed, logged above as tracked P0s): the font/string_list/
+  model_animations/etc `TagDataOffset`-pointer extraction gap, and `gbxmodel` model-data not
+  being carried by the container format at all.
+- Tests: `embedded-data-fields.test.ts` (12 unit tests), `embedded-relocation.test.ts` (4 tests,
+  real coldsnap.map/bloodgulch.map bytes, independent-of-the-injector's-own-math verification),
+  plus extended `tag-extractor.test.ts` (+5) and `embedded-data-verifier.test.ts` (+1). Removed
+  `relocation-synthetic.test.ts` (superseded - it only tested that the old disabled stub threw).
+  **Core: 95/95 Vitest pass. Desktop: 33/33 Vitest pass.** Did NOT call `testing_agent` (backend-
+  only, byte-level change, no UI touched this session - self-tested per RULES.md).
+- **NOT done** (explicitly out of scope / awaiting approval): enabling `allowEmbeddedRelocation`
+  in `InjectDialog.tsx`/`map-worker.ts`; fixing either of the 2 newly-found pre-existing bugs;
+  Step C (conflict dialog, still blocked on explicit user go-ahead); CRC32/checksum recalculation
+  (M6).
+
   Not built yet.
 
 ### What to test in OpenCE on Windows (Step B, in addition to Step A's steps)
@@ -425,11 +570,112 @@ against real bytes in the sample maps.
 - Step C: conflict dialog (skip/replace/rename, "apply to all") using the existing
   `ConfirmDialog.tsx`, plus pre-write validation surfaced in the UI.
 
-## Key files
+## Relocation research (2026-08) — full report, what's built, what's still unapproved
+
+Real bytes only, cross-checked against `invader/src/build/build_workload.cpp` +
+`invader/src/tag/code_generator/compile.py` (the actual compiler, not guesswork).
+
+**Region order (coldsnap.map)**: `[header 0-2048] → [BSP data 2048-26,396,672] → [embedded
+bitmap/sound raw data, ending exactly at modelDataFileOffset=54,552,850] → [model data, to
+70,610,858] → [tag data, to 79,925,558]`. Identical shape (0 embedded) on bloodgulch/ui/
+sidewinder. Matches `build_workload.cpp` byte-for-byte.
+
+**Every absolute/stored-offset mechanism found**:
+- `bsp_start` (`scenario` tag's `ScenarioBSP` entries): absolute file offset, always ends well
+  before the insertion point in every map checked — never shifts, never patched.
+- bitmap per-mipmap pixel offset / sound `samples.file_offset` when `external=0`: exactly what's
+  relocated.
+- bitmap's `compressed color plate data`/`processed pixel data`: `nonCached` (confirmed garbage
+  in real bytes) — already ignored.
+- Every OTHER `TagDataOffset` field (scenario script/comment data, font pixels, string_list/
+  unicode_string_list strings, meter stencil, hud_message_text, input_device_defaults,
+  model_animations frame data): a pointer-based mechanism (same virtual-address translation as
+  `TagReflexive`) per Invader's own codegen — confirmed safe, `external`/`file_offset` sub-fields
+  are written as garbage for these groups and never read at the resolved location.
+- `gbxmodel` vertex/index references: real virtual-address pointers at compile time (confirmed
+  via `build_workload.cpp`'s generic pointer-fixup registration), not raw file offsets — safe,
+  though our schema doesn't model these specific fields yet (model data is never touched by
+  relocation anyway, just shifted as one opaque blob).
+
+**Header/sub-header fields that change** (4, not 3 — `tagDataSize` is separately stored, not
+auto-derived): `modelDataFileOffset`, `tagDataOffset`, `decompressedFileSize`, `tagDataSize`.
+Each changes for the SAME reason here (the embedded-byte insertion) — tag-ARRAY growth (a
+pre-existing, separately-tested M5 mechanism) additionally shifts the struct/path-data append
+position, but doesn't touch these 4 fields differently than it already did before this session.
+
+**Alignment**: inserted blob is zero-padded to a 4-byte boundary (matches Invader's
+`REQUIRED_PADDING_32_BIT` convention) — but this is NOT a confirmed hard requirement: real
+coldsnap.map's own `tagDataOffset`/`modelDataFileOffset` are themselves not 4-aligned (both ≡ 2
+mod 4). The padding is harmless and preserves whatever alignment the source already had.
+
+**CRC/checksums**: stale after this write, same as the pre-existing tag-array-growth code already
+flags — tracked P0 above, M6 work, not done here.
+
+**What's built** (`embedded-data-fields.ts` new shared helper + `tag-extractor.ts` capture +
+`tag-injector.ts` write path), all behind `InjectionOptions.allowEmbeddedRelocation` (default
+`false`):
+1. `findEmbeddedDataFields()` — ONE definition-driven detector for both the bitmap (bitfield
+   sibling) and sound (`TagDataOffset`+`externalFileOffset`) mechanisms, returning `'unknown'`
+   (never guessed) for any unrecognized shape. Used directly by the walker and the extractor.
+2. Capture (extraction time, always on — this part has NO disabled flag, it's pure data
+   gathering, never written back anywhere): slices embedded bytes, dedupes per-tag by
+   `(fileOffset, size)`, validates bitmap sizes against width/height/format/mipmaps (100% exact
+   formula match against all 800 real BitmapData instances checked), bounds-checks sound
+   (no deterministic size formula available for compressed audio — stated, not guessed). A
+   mismatch blocks the WHOLE tag's relocation (container still has the tag, just without
+   `embeddedRawDataAssets`), never a partial one.
+3. Write path (`applyInjection`): inserts the unique asset bytes once, right before the target's
+   `modelDataFileOffset`, patches the 4 header fields, patches each relocated tag's own raw
+   file-offset field via its recorded `patchOffset`. `planInjection`'s default (production)
+   blocking behavior is UNCHANGED — this only ever runs when a caller explicitly opts in.
+
+**Tested** (`embedded-relocation.test.ts`, real bytes, no synthetic fixtures): production default
+still blocks; an isolated SWAP-into-self case verifies the exact 4-field math with zero tag-array
+growth; a combined ADD into a copy of bloodgulch.map (0 pre-existing embedded data) verifies
+byte-identical relocated content + a full 1500+ tag closure re-parse + Verify Embedded Data 0
+problems; a harder SWAP into a copy of coldsnap.map ITSELF (396 pre-existing embedded assets)
+verifies every one of those 396 keeps its exact byte content and file offset, only the 2 swapped
+tags' content legitimately moved. All verification is **independent of `tag-injector.ts`'s own
+arithmetic** — expected sizes/offsets are re-derived from scratch in the test file.
+
+**What these tests CANNOT prove** (told to the user explicitly, not hidden):
+- They confirm the bytes are internally consistent with OUR OWN reader's assumptions. A shared
+  blind spot between the writer and reader would pass here undetected.
+- They do not prove the real Halo CE/OpenCE engine accepts the file — crc32/checksums are
+  deliberately stale (M6), and nothing here has been loaded in the actual game.
+- Cross-tag/cross-map dedup is NOT done — relocating a tag whose embedded bytes happen to already
+  exist elsewhere in the target map's raw-data region still inserts a fresh copy (acceptable,
+  approved scope: dedupe is per-tag only, per the user's own phrasing).
+
+**NOT YET approved**: enabling `allowEmbeddedRelocation` in the real app
+(`InjectDialog.tsx`/`map-worker.ts`). Awaiting the user's decision after reviewing this report —
+if approved, the only change needed is passing `{ allowEmbeddedRelocation: true }` through
+`map-worker.ts`'s `planInject`/`applyInject` IPC handlers.
+
+### What to test in OpenCE on Windows (embedded relocation, once/if enabled)
+1. `yarn core test` locally first — confirms the bytes are internally consistent before touching OpenCE.
+2. Extract a tag with embedded bitmap/sound data (one of your custom maps with real custom art,
+   e.g. a vehicle skin not in stock bitmaps.map) into a `.ocetags` file.
+3. Inject it into a DIFFERENT target map, Save As a new file (never overwrites the original).
+4. Load the new file in the actual game. **What you should see**: the map loads, the injected
+   tag is present, and its texture/sound plays correctly in-game.
+5. What each failure would mean: **fails to load at all** → likely the stale CRC32/checksum (M6,
+   already known-stale, not a relocation bug specifically) OR a real relocation math error we
+   didn't catch — report the exact error text. **Loads but the map/level doesn't start** →
+   possible corrupted tag-data region (reflexive/pointer issue), report which tag. **Starts but
+   the new object spawns with blank/missing/garbled textures or no sound** → the relocation
+   itself likely has a bug (wrong offset patched, or the asset bytes themselves got mangled) —
+   this is the single most informative failure mode, please report it with the exact tag path.
+
+
 - `/app/core/src/map/definitions/engine.ts` — schema engine (load/validate/resolve/decode/encode)
 - `/app/core/src/map/definitions/validate-tag.ts` — real-map validation (round-trip, deps, bounds)
 - `/app/core/src/map/dependency-walker.ts`, `tag-extractor.ts`, `container.ts` — M4 core logic
-- `/app/core/src/map/tag-injector.ts` — M5 Step A+B injection engine (plan/apply ADD + SWAP modes)
+- `/app/core/src/map/embedded-data-fields.ts` — shared bitmap/sound embedded-field detector +
+  bitmap pixel-data-size validator, used by the walker and the extractor (2026-08)
+- `/app/core/src/map/tag-injector.ts` — M5 Step A+B injection engine (plan/apply ADD + SWAP
+  modes) + embedded relocation write path (built 2026-08, behind `allowEmbeddedRelocation`,
+  default off, NOT yet approved for the real app)
 - `/app/desktop/electron/worker-manager.ts`, `map-worker.ts`, `main.ts` — M4/M5 persistent worker + IPC
 - `/app/desktop/src/components/DependencyDialog.tsx`, `TagBrowser.tsx` — M4 UI
 - `/app/desktop/src/components/InjectDialog.tsx`, `SettingsDialog.tsx` — M5 Step A+B UI (mode choice + review)
@@ -439,7 +685,9 @@ against real bytes in the sample maps.
   bitmap/sound data in any .map file (`yarn tsx scripts/scan-embedded-data.ts /path/to/map`); run
   this FIRST against any user-supplied custom map before touching relocation work
 - `/app/core/tests/definitions.test.ts`, `tag-extractor.test.ts`, `tag-injector.test.ts`,
-  `container-v2.test.ts` — validation suites (**62/62 passing**)
+  `container-v2.test.ts`, `embedded-data-fields.test.ts`, `embedded-relocation.test.ts`,
+  `tagdata-capture.test.ts` (new 2026-08: real-byte font capture, negative test, 4-map property
+  sweep for Issue 1) — validation suites (**101/101 passing** as of 2026-08; desktop Vitest 33/33)
 - `/app/core/scripts/generate-definitions.mjs` — regenerate `groups/*.json` from a fresh Invader
   clone if definitions ever need updating (`INVADER_DIR=/path/to/invader/.../definition node
   scripts/generate-definitions.mjs`)

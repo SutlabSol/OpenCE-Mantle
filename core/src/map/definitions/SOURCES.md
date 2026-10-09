@@ -204,11 +204,69 @@ against real bytes in the sample maps, not inferred.
   ~278-300); unlike `model_data_file_offset` (which IS a stored header field and is unrelated -
   it's 3D vertex data, not bitmap/sound bytes), there is no discrete field recording where the
   raw-data region begins. Reconstructing it from a compiled file alone is under-determined.
+  **UPDATE 2026-08 (coldsnap.map, a real custom map, 396 embedded assets - 350 bitmap + 46
+  sound - the first real embedded-data sample obtained)**: the region's START is still not
+  stored, but its END is, and relocation doesn't need the start at all. Verified by exact
+  arithmetic on real bytes: `max(embedded fileOffset + size) == tagIndex.modelDataFileOffset`
+  (54552850 == 54552850, to the byte), and `modelDataFileOffset + modelDataSize == header.
+  tagDataOffset` (70610858 == 70610858) and `tagDataOffset + tagDataSize == decompressedFileSize`
+  (79925558 == 79925558) - the whole file is accounted for with zero slack: `[prefix incl.
+  BSP][embedded bitmap/sound data, ending exactly at modelDataFileOffset][model data][tag data]`.
+  Also reconfirmed the embedded offset is a plain absolute file offset, not a memory-address
+  translation: `baseMemoryAddress` is ~1.08 billion (a virtual address) vs embedded offsets of
+  ~26-54 million (file-sized magnitude) - different domains entirely. **Consequence**: reading an
+  embedded asset never needed the region start (just its own stored offset+size, already
+  bounds/overlap/readability-verified by `embedded-data-verifier.ts`). Writing a relocated copy
+  doesn't either, IF inserted immediately before `modelDataFileOffset` (shifting model+tag data
+  forward by the inserted size and incrementing exactly 3 stored fields -
+  `modelDataFileOffset`/`tagDataOffset`/`decompressedFileSize` - by that same delta; every
+  existing struct pointer auto-shifts via the same `tagDataOffset`-relative anchor already used
+  for M5's tag-array growth, needs zero per-pointer rewriting). This is a structural/arithmetic
+  finding from ONE real map, not yet validated by an actual in-game round-trip - proposed to the
+  user 2026-08, awaiting approval before implementing (see PRD.md Decisions).
   **Consequence for M5**: embedded (`external=0`) bitmap/sound relocation is DISABLED - tags
   needing it are blocked with a plain-language warning, never silently written. Neither sample
   map contains a single real embedded asset to verify a relocation implementation against anyway
   (scanned: 222 internal ui.map bitmaps + 125 ui.map sound permutations, 100% external=1;
   bloodgulch.map has zero internal bitmap/sound tags at all - every one is whole-tag-indexed).
+  **UPDATE 2026-08 (relocation BUILT, still disabled by default - see PRD.md "Relocation
+  research" for the full research report, remaining risk list, and exact Windows test steps)**:
+  implemented in `embedded-data-fields.ts`/`tag-extractor.ts`/`tag-injector.ts`, verified against
+  real coldsnap.map bytes in `embedded-relocation.test.ts` (extract+inject into bloodgulch.map
+  AND back into coldsnap.map itself, full 1500+ tag closure re-parse, Verify Embedded Data
+  before/after). Gated behind `InjectionOptions.allowEmbeddedRelocation` (default false,
+  `map-worker.ts` never sets it) - the user has NOT yet approved flipping this on for the real
+  app; it is exercised only by tests until they do.
+  - **Correction found while re-verifying this**: `invader/src/build/build_workload.cpp`'s
+    `REQUIRED_PADDING_32_BIT` macro does NOT mean every real compiled map's `tagDataOffset`/
+    `modelDataFileOffset` is 4-byte aligned - coldsnap.map's own values are both ≡ 2 mod 4. The
+    implementation still zero-pads the inserted blob to 4 bytes (harmless, preserves whatever
+    alignment the source had), but this is NOT asserted as a hard invariant anywhere.
+  - **Every other `TagDataOffset`-typed field in the schema** (scenario script/comment data,
+    font pixels, string_list/unicode_string_list strings, meter stencil, hud_message_text,
+    input_device_defaults, model_animations frame data) is a DIFFERENT, already-safe mechanism:
+    confirmed via `invader/src/tag/code_generator/compile.py` line 140 - the generic codegen path
+    registers the field's `.pointer` member for the SAME struct/pointer-fixup pass used for
+    `TagReflexive`/`TagDependency`, and never writes `.file_offset`/`.external` for these groups
+    at all. Real-byte spot checks confirm this: e.g. a `string_list` tag's `external` sub-field
+    reads back as `3787653199` (garbage) while its `.pointer` is a normal-looking virtual
+    address. `gbxmodel` vertex/index data is likewise a real virtual-address pointer at compile
+    time (`build_workload.cpp` ~line 2388, `vertex_ptr.offset = &part_data.vertex_offset`), not a
+    raw file offset - safe under the same translation, confirmed by source even though our own
+    schema doesn't model those specific fields yet.
+  - **A separate, pre-existing bug found during this research (NOT fixed, logged as a tracked
+    P0 in PRD.md)**: `tag-extractor.ts`'s `flattenStruct` never flattened the `.pointer`-based
+    data for plain `TagDataOffset` fields (the mechanism above) - only `TagReflexive`/
+    `TagDependency`. Extracting+injecting a font/string_list/meter/hud_message_text/
+    input_device_defaults/model_animations/scenario tag silently drops that real data. Confirmed
+    concretely: `ui\ticker` (the font tag used as the "clean baseline" case in
+    `tag-injector.test.ts`) has 31,066 real bytes of glyph pixel data via this mechanism that
+    gets dropped today. Unrelated to bitmap/sound embedding (orthogonal tag groups).
+  - **Also newly confirmed, not previously stated**: `bsp_start` (`ScenarioBSP`, inside the
+    `scenario` tag) is a genuine absolute file offset, but it always resolves to BEFORE the
+    embedded-data insertion point in every real map checked (coldsnap: BSP data ends at
+    26,396,672, insertion point is 54,552,850) - it never needs patching.
+
 - **Whole-tag indexing (mechanism A, already implemented pre-M5 via `resource-map.ts`
   `resourceIndexResolves`) and per-asset data externality (mechanism B, above) are two unrelated
   mechanisms.** Mechanism A: the tag index entry's own `isExternal` bit + `tagDataPointerOrResourceIndex`

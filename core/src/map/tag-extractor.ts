@@ -3,6 +3,7 @@ import { resolveTagDataPointer } from './tag-index';
 import { resolveStruct, decodeStruct, getGroupDefinition, resolvePointer } from './definitions/engine';
 import { walkDependencies } from './dependency-walker';
 import type { WalkerWarning, WalkOptions } from './dependency-walker';
+import { findEmbeddedDataFields, validateBitmapAssetSize } from './embedded-data-fields';
 import { OperationCancelledError } from './errors';
 import type { CacheFileHeader } from './header';
 import type { TagIndex } from './tag-index';
@@ -18,6 +19,19 @@ export interface ExtractedDependencyRef {
   kind: DependencyRefKind;
   /** Only set when kind === 'internal': index into `ExtractedTagSet.tags`. */
   localTagIndex?: number;
+}
+
+/** One unique embedded (external=0) bitmap/sound raw-data range captured from the source map. */
+export interface ExtractedEmbeddedAsset {
+  kind: 'bitmap' | 'sound';
+  data: Buffer;
+}
+
+/** One place, within this tag's own flattened `data`, whose raw file-offset value points at `assetIndex`. */
+export interface ExtractedEmbeddedPatch {
+  assetIndex: number;
+  patchOffset: number;
+  patchWidth: number;
 }
 
 export interface ExtractedTag {
@@ -36,6 +50,9 @@ export interface ExtractedTag {
    */
   data: Buffer;
   dependencies: ExtractedDependencyRef[];
+  /** Embedded (external=0) bitmap/sound raw bytes captured from the source map, deduped by (fileOffset, size). Empty if this tag has none, or if any one of them failed validation (see `embeddedCaptureBlockedReasons` on the returned set's warnings - a mismatch blocks the WHOLE tag, never a partial relocation). */
+  embeddedRawDataAssets: ExtractedEmbeddedAsset[];
+  embeddedRawDataPatches: ExtractedEmbeddedPatch[];
 }
 
 /** A tag that was walked but whose group is not yet extractable (e.g. `scenario_structure_bsp`). */
@@ -85,10 +102,58 @@ function classifyDependency(
   return { fieldPath, group, path, kind: 'unresolved' };
 }
 
+/** Accumulates embedded (external=0) bitmap/sound captures for ONE tag across every struct level reached by `flattenStruct`. Bytes deduped by (fileOffset, size); every patch offset is recorded even when it shares an asset. */
+interface EmbeddedCaptureState {
+  dedupeKeyToAssetIndex: Map<string, number>;
+  assets: ExtractedEmbeddedAsset[];
+  patches: ExtractedEmbeddedPatch[];
+  /** Human-readable reasons a candidate asset was NOT captured (out of bounds, size mismatch, unrecognized layout) - a non-empty list blocks relocation for the whole tag. */
+  blockedReasons: string[];
+}
+
+function captureEmbeddedFields(
+  buffer: Buffer,
+  resolved: ReturnType<typeof resolveStruct>,
+  decoded: ReturnType<typeof decodeStruct>,
+  myAbsoluteOffset: number,
+  fieldPath: string,
+  capture: EmbeddedCaptureState,
+): void {
+  for (const match of findEmbeddedDataFields(resolved, decoded)) {
+    const context = `${fieldPath}.${match.fieldName}`;
+    if (match.external) continue; // lives in bitmaps.map/sounds.map - out of scope here (see externalResourceRefs)
+    if (match.kind === 'unknown') {
+      capture.blockedReasons.push(`${context}: unrecognized embedded-data layout, not captured.`);
+      continue;
+    }
+    if (match.fileOffset < 0 || match.size <= 0 || match.fileOffset + match.size > buffer.length) {
+      capture.blockedReasons.push(`${context}: file offset ${match.fileOffset} + size ${match.size} is out of bounds of the source map.`);
+      continue;
+    }
+    if (match.kind === 'bitmap') {
+      const validation = validateBitmapAssetSize(decoded, match.size);
+      if (!validation.ok) {
+        capture.blockedReasons.push(`${context}: ${validation.reason}.`);
+        continue;
+      }
+    }
+    const dedupeKey = `${match.fileOffset}:${match.size}`;
+    let assetIndex = capture.dedupeKeyToAssetIndex.get(dedupeKey);
+    if (assetIndex === undefined) {
+      assetIndex = capture.assets.length;
+      capture.assets.push({ kind: match.kind, data: Buffer.from(buffer.subarray(match.fileOffset, match.fileOffset + match.size)) });
+      capture.dedupeKeyToAssetIndex.set(dedupeKey, assetIndex);
+    }
+    capture.patches.push({ assetIndex, patchOffset: myAbsoluteOffset + match.patchOffset, patchWidth: match.patchWidth });
+  }
+}
+
 /**
  * Flattens one struct instance (and everything reachable from it via TagReflexive) into
  * `outChunks`, appending to the shared `runningOffset`. TagDependency fields are recorded into
- * `dependencies` but left byte-for-byte unchanged.
+ * `dependencies` but left byte-for-byte unchanged. Embedded (external=0) bitmap/sound fields
+ * found on this struct are captured into `embeddedCapture`, keyed by their position
+ * (`myAbsoluteOffset`) within the tag's own final flattened buffer.
  *
  * Two-phase per struct, NOT a naive single-pass DFS: for each reflexive field, every sibling
  * element's own top-level bytes are written CONTIGUOUSLY first (phase 1), and only after that
@@ -103,11 +168,13 @@ function flattenStruct(
   structName: string,
   fileOffset: number,
   myBytes: Buffer,
+  myAbsoluteOffset: number,
   fileOffsetAnchor: number,
   baseMemoryAddress: number,
   outChunks: Buffer[],
   runningOffset: { value: number },
   dependencies: ExtractedDependencyRef[],
+  embeddedCapture: EmbeddedCaptureState,
   fieldPath: string,
   tagIndex: TagIndex,
   localIndexByOriginal: Map<number, number>,
@@ -115,12 +182,14 @@ function flattenStruct(
 ): void {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(buffer, fileOffset, structName);
+  captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fieldPath, embeddedCapture);
 
   interface ReflexiveWork {
     fieldName: string;
     childStructName: string;
     childSize: number;
     srcChildBase: number;
+    localArrayStart: number;
     count: number;
     childBytesList: Buffer[];
   }
@@ -131,6 +200,7 @@ function flattenStruct(
   for (const field of resolved.fields) {
     const value = decoded.get(field.name);
     if (!value) continue;
+    if (field.def.nonCached) continue; // garbage in cache format (e.g. bitmap's color-plate/processed-pixel TagDataOffset fields) - same exclusion as dependency-walker.ts's collectFromStruct and embedded-data-fields.ts's findEmbeddedDataFields, never treated as real pointer data.
     const path = `${fieldPath}.${field.name}`;
 
     if (value.kind === 'dependency') {
@@ -152,7 +222,24 @@ function flattenStruct(
         childBytesList.push(childBytes);
         runningOffset.value += childSize;
       }
-      reflexiveWork.push({ fieldName: field.name, childStructName, childSize, srcChildBase, count: value.value.count, childBytesList });
+      reflexiveWork.push({ fieldName: field.name, childStructName, childSize, srcChildBase, localArrayStart, count: value.value.count, childBytesList });
+    } else if (value.kind === 'tagDataOffset' && field.def.type === 'TagDataOffset' && !field.def.externalFileOffset && value.value.size > 0) {
+      // Pointer-based "in tag data" raw bytes (font pixels, string_list/unicode_string_list
+      // strings, meter stencil, hud_message_text, input_device_defaults, model_animations frame
+      // data, scenario script/comment data) - same virtual-address mechanism as TagReflexive, so
+      // captured the same way: append the pointed-to bytes, rewrite the pointer to the new local
+      // offset. If the pointer doesn't resolve, leave it byte-for-byte as in the source (the
+      // walker already flagged this with an 'uncapturedData' warning that blocks the WHOLE tag
+      // from injection - see `dependency-walker.ts`).
+      const srcBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      if (srcBase >= 0 && srcBase + value.value.size <= buffer.length) {
+        const localOffset = runningOffset.value;
+        const bytes = Buffer.from(buffer.subarray(srcBase, srcBase + value.value.size));
+        outChunks.push(bytes);
+        runningOffset.value += bytes.length;
+        myBytes.writeUInt32LE(localOffset, field.offset + 12); // DecodedTagDataOffset.pointerLow
+        myBytes.writeUInt32LE(0, field.offset + 16); // pointerHigh
+      }
     }
   }
 
@@ -165,11 +252,13 @@ function flattenStruct(
         work.childStructName,
         work.srcChildBase + i * work.childSize,
         work.childBytesList[i],
+        work.localArrayStart + i * work.childSize,
         fileOffsetAnchor,
         baseMemoryAddress,
         outChunks,
         runningOffset,
         dependencies,
+        embeddedCapture,
         `${fieldPath}.${work.fieldName}[${i}]`,
         tagIndex,
         localIndexByOriginal,
@@ -221,6 +310,7 @@ export function extractTagSet(
   const localIndexByOriginal = new Map<number, number>();
   extractableWalked.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
 
+  const extraWarnings: WalkerWarning[] = [];
   const tags: ExtractedTag[] = extractableWalked.map((t, i) => {
     if (options.signal?.aborted) throw new OperationCancelledError();
     options.onProgress?.(i, extractableWalked.length);
@@ -235,6 +325,7 @@ export function extractTagSet(
     const dependencies: ExtractedDependencyRef[] = [];
     const outChunks: Buffer[] = [];
     const runningOffset = { value: 0 };
+    const embeddedCapture: EmbeddedCaptureState = { dedupeKeyToAssetIndex: new Map(), assets: [], patches: [], blockedReasons: [] };
     const rootResolved = resolveStruct(structName);
     const rootBytes = Buffer.from(buffer.subarray(fileOffset, fileOffset + rootResolved.totalSize));
     outChunks.push(rootBytes);
@@ -244,24 +335,38 @@ export function extractTagSet(
       structName,
       fileOffset,
       rootBytes,
+      0,
       fileOffsetAnchor,
       baseMemoryAddress,
       outChunks,
       runningOffset,
       dependencies,
+      embeddedCapture,
       t.path,
       tagIndex,
       localIndexByOriginal,
       notExtractedByOriginal,
     );
 
+    if (embeddedCapture.blockedReasons.length > 0) {
+      extraWarnings.push({
+        originalIndex: t.originalIndex,
+        path: t.path,
+        group: t.group,
+        kind: 'embeddedRawData',
+        message: `"${t.path}" has embedded raw data that could not be safely captured, so NONE of it was captured (never a partial relocation): ${embeddedCapture.blockedReasons.join(' ')}`,
+      });
+    }
+
     return { originalIndex: t.originalIndex, group: t.group, path: t.path, structName, data: Buffer.concat(outChunks), dependencies,
       secondaryClassFourCC: tagIndex.entries[t.originalIndex].secondaryClassFourCC,
-      tertiaryClassFourCC: tagIndex.entries[t.originalIndex].tertiaryClassFourCC };
+      tertiaryClassFourCC: tagIndex.entries[t.originalIndex].tertiaryClassFourCC,
+      embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
+      embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches };
   });
 
   options.onProgress?.(extractableWalked.length, extractableWalked.length);
-  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: walk.warnings };
+  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...walk.warnings, ...extraWarnings] };
 }
 
 /**

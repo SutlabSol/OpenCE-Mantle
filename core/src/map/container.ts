@@ -4,23 +4,44 @@
  * re-deriving any of M4's logic. JSON text (not a packed binary) - this is OpenCE's own new
  * format, not a Halo format, so there is no byte-layout constraint to match.
  *
- * v2 (this session) adds: `secondaryClassFourCC`/`tertiaryClassFourCC` per tag (preserves the
+ * v2 adds: `secondaryClassFourCC`/`tertiaryClassFourCC` per tag (preserves the
  * abstract-class dual-classification seen on ~11% of real tags, e.g. every concrete shader_*
  * subtype also carries secondary class "shdr" - confirmed against bloodgulch.map, 280/2455
  * entries), `resourceMapIdentities` (fingerprint of the SOURCE map's configured resource maps
  * at extraction time, for M5's mismatch warning), `externalResourceRefs` (per-tag list of
  * bitmaps.map/sounds.map-referenced fields, derived from the walker's 'externalData' warnings),
- * and `externalData: 'referenced'` (reserved; 'embedded' is NOT implemented - see
- * `embeddedRawDataWarnings` and SOURCES.md "Raw bitmap/sound data placement").
+ * and `externalData: 'referenced'`.
+ *
+ * v3 (this session) adds: per-tag `embeddedRawDataAssets`/`embeddedRawDataPatches` - the actual
+ * embedded (external=0) bitmap/sound bytes captured at extraction time (base64, deduped by
+ * source range), plus every byte offset within the tag's own `data` that must be patched to
+ * point at them once relocated. Injection of a tag with embedded data from a v1/v2 container
+ * (or a v3 container that couldn't fully capture it - see `tag-extractor.ts`) stays blocked
+ * with a "re-extract to enable relocation" message - see `tag-injector.ts`. Relocation itself
+ * stays behind an explicit, test-only opt-in until approved (see PRD.md "Relocation research").
  */
-import type { ExtractedTagSet, ExtractedDependencyRef } from './tag-extractor';
+import type { ExtractedTagSet, ExtractedDependencyRef, ExtractedEmbeddedAsset, ExtractedEmbeddedPatch } from './tag-extractor';
 import type { WalkerWarning } from './dependency-walker';
 import type { ResourceMapIdentity } from './resource-map';
 
 export const OCETAGS_MAGIC = 'OCETAGS';
-export const OCETAGS_FORMAT_VERSION = 2;
+export const OCETAGS_FORMAT_VERSION = 3;
 export const OCETAGS_MIN_SUPPORTED_VERSION = 1;
 export const OCETAGS_EXTENSION = '.ocetags';
+
+/** One embedded (external=0) bitmap/sound asset's bytes, stored once even if multiple fields point at it. */
+export interface OceContainerEmbeddedRawDataAsset {
+  kind: 'bitmap' | 'sound';
+  /** Base64-encoded raw bytes, exactly as sliced from the source map. */
+  data: string;
+}
+
+/** One byte offset within a tag's own `data` that must be rewritten to the relocated asset's new absolute file offset. */
+export interface OceContainerEmbeddedRawDataPatch {
+  assetIndex: number;
+  patchOffset: number;
+  patchWidth: number;
+}
 
 export interface OceContainerTag {
   originalIndex: number;
@@ -33,6 +54,9 @@ export interface OceContainerTag {
   /** Added in v2; undefined when read from a v1 container (no dual-classification info available). */
   secondaryClassFourCC?: number | null;
   tertiaryClassFourCC?: number | null;
+  /** Added in v3; undefined when read from a v1/v2 container - relocation stays blocked for those. */
+  embeddedRawDataAssets?: OceContainerEmbeddedRawDataAsset[];
+  embeddedRawDataPatches?: OceContainerEmbeddedRawDataPatch[];
 }
 
 export interface OceContainerNotExtracted {
@@ -137,6 +161,8 @@ export function serializeContainer(
       dependencies: t.dependencies,
       secondaryClassFourCC: t.secondaryClassFourCC,
       tertiaryClassFourCC: t.tertiaryClassFourCC,
+      embeddedRawDataAssets: t.embeddedRawDataAssets.map((a: ExtractedEmbeddedAsset) => ({ kind: a.kind, data: a.data.toString('base64') })),
+      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p: ExtractedEmbeddedPatch) => ({ ...p })),
     })),
     notExtracted: set.notExtracted,
     warnings: set.warnings,

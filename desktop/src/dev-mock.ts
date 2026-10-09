@@ -155,7 +155,7 @@ export function installDevMock() {
         addedCount: plan.counts.added,
         reusedCount: plan.counts.reused,
         swappedCount: plan.counts.swapped,
-        staleChecksumWarning: "This map's CRC32 and tag checksum are now stale (recalculating them is Milestone 6) - some tools/servers that verify them may reject it until then.",
+        staleChecksumWarning: 'Checksums were not updated. This map may be rejected by some loaders until M6 (export + CRC) is done.',
       };
     },
     verifyEmbeddedData: async () => {

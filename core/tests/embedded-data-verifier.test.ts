@@ -84,6 +84,27 @@ describe('verifyEmbeddedData - real maps (map-agnostic: same code path for every
   });
 });
 
+describe('verifyEmbeddedData - coldsnap.map (a real custom map WITH embedded bitmap/sound data, unlike the stock maps above)', () => {
+  const haveColdsnap = hasSampleMaps(['coldsnap.map']);
+  const suiteTitle = haveColdsnap ? 'checked against coldsnap.map' : `checked against coldsnap.map [${missingSampleMapsMessage(['coldsnap.map'])}]`;
+
+  (haveColdsnap ? describe : describe.skip)(suiteTitle, () => {
+    it('reports 396 embedded, 9 external, 0 blocked, 0 bounds/overlap/readability problems - same numbers before and after the embedded-data-fields.ts shared-helper refactor', () => {
+      const buffer = readSampleMap('coldsnap.map');
+      const inspected = inspectCustomEditionMap(buffer);
+      expect(inspected.status).toBe('ok');
+      if (inspected.status !== 'ok') return;
+      const report = verifyEmbeddedData(buffer, inspected.header, inspected.tagIndex);
+      expect(report.blockedTags).toEqual([]);
+      expect(report.counts.embeddedOutOfBounds).toBe(0);
+      expect(report.counts.overlapping).toBe(0);
+      expect(report.counts.unreadable).toBe(0);
+      expect(report.counts.embedded).toBe(396);
+      expect(report.counts.external).toBe(9);
+    });
+  });
+});
+
 describe('formatEmbeddedDataReport', () => {
   function baseReport(overrides: Partial<EmbeddedDataReport> = {}): EmbeddedDataReport {
     return {
