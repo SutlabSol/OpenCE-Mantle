@@ -96,3 +96,32 @@ User supplied bloodgulch.map, ui.map, bitmaps.map, loc.map, sounds.map.
 ## Next action for user
 M1 fully validated against real maps. Proceeding to M2 (decompress/recompress) using the
 Chimera zstd scheme documented in Milestone 1. Will pause again for review once M2 tests pass.
+
+### M2 — Decompress/recompress: DONE (2026-07, this session)
+- `core/src/map/compression.ts` — `compressCustomEditionMap(buffer, level=19)` and
+  `decompressCustomEditionMap(buffer)`, using `@mongodb-js/zstd` (napi binding, no WASM heap
+  limits - tried `zstd-codec` first but it OOM'd on real 13MB+ map data due to Emscripten's
+  16MiB heap cap, so switched to a native binding).
+- Confirmed the Chimera compression marker as FACT (not inference) by reading the literal
+  enum from Chimera's own source: `CACHE_FILE_CUSTOM_EDITION_COMPRESSED = 0x861A0261` in
+  `src/chimera/halo_data/map.hpp`, exactly `0x861A0000 | 0x261`.
+- Implementation copies the full 2048-byte header through verbatim in both directions and
+  only ever patches the 4-byte `engine` field - a deliberate, documented deviation from
+  Chimera's own reference code (which zeroes `file_size` on decompress) in favor of a
+  guaranteed byte-identical round trip.
+- Tests: 10 new Vitest tests (6 synthetic + 4 against the REAL bloodgulch.map/ui.map):
+  - `compress -> decompress` reproduces the real bloodgulch.map byte-for-byte (13,936,092
+    bytes, compressed to ~4.1MB at level 19 in ~2.7s).
+  - `decompress -> recompress -> decompress` byte-identical, satisfying the brief's stated
+    round-trip requirement, for both bloodgulch.map and ui.map.
+  - Rejects compressing an already-compressed map, rejects decompressing a non-compressed
+    map, rejects corrupt input - all with friendly typed errors.
+  - All 27 tests pass (`cd core && yarn test`), `yarn build` type-checks clean.
+- No genuinely Chimera-compressed sample map was available to diff our output against
+  directly; round-trip self-consistency against real game data is the validation we have.
+  Flagged to user as an open item if they can obtain one later.
+
+## Next action for user
+M1 + M2 complete and validated against real maps. Proceeding to M3 (GUI shell: Electron +
+React, Open Map, info panel, Decompress button, tag browser) - the first visible, clickable
+version of the app. Will pause again for review once M3 is testable end-to-end.

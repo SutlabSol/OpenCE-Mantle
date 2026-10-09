@@ -16,5 +16,8 @@
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",
     "vitest": "^2.1.4"
+  },
+  "dependencies": {
+    "@mongodb-js/zstd": "^7.0.0"
   }
 }

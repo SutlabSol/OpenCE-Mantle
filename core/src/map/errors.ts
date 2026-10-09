@@ -35,3 +35,11 @@ export class CompressedMapError extends Error {
     this.name = 'CompressedMapError';
   }
 }
+
+/** Thrown when decompressCustomEditionMap() is called on a map that is not actually compressed. */
+export class NotCompressedMapError extends Error {
+  constructor() {
+    super('This map is not compressed; there is nothing to decompress.');
+    this.name = 'NotCompressedMapError';
+  }
+}
