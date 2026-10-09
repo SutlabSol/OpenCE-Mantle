@@ -12,34 +12,31 @@ export default function WelcomeDropZone({ onOpen }: Props) {
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 18,
-        border: '2px dashed var(--border)',
-        margin: 24,
-        borderRadius: 10,
+        gap: 16,
+        border: '1px dashed var(--border)',
+        margin: 20,
         color: 'var(--text-secondary)',
+        background: 'var(--bg-panel)',
       }}
     >
-      <div style={{ fontFamily: 'var(--ui-font)', fontSize: 30, fontWeight: 600, letterSpacing: 1, color: 'var(--text-primary)' }}>
-        No map open
-      </div>
-      <div style={{ fontSize: 15 }}>Drag a Halo: Custom Edition .map file here, or</div>
+      <div style={{ fontFamily: 'var(--ui-font)', fontSize: 22, fontWeight: 600, color: 'var(--text-primary)' }}>No map open</div>
+      <div style={{ fontSize: 13 }}>Drag a Halo: Custom Edition .map file here, or</div>
       <button
         data-testid="open-map-button"
         onClick={onOpen}
         style={{
-          background: 'var(--accent)',
-          color: '#1a1406',
+          background: 'var(--accent-cyan)',
+          color: '#06202c',
           border: 'none',
-          padding: '10px 28px',
-          borderRadius: 6,
-          fontSize: 17,
+          padding: '8px 24px',
+          borderRadius: 2,
+          fontSize: 14,
           fontWeight: 600,
-          letterSpacing: 0.5,
         }}
       >
         Open Map
       </button>
-      <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 10 }}>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
         Only Halo: Custom Edition PC maps (version 609) are supported.
       </div>
     </div>

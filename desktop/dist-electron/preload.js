@@ -8,6 +8,7 @@ var api = {
   decompressMap: (filePath) => import_electron.ipcRenderer.invoke("map:decompress", filePath),
   recompressMap: (filePath) => import_electron.ipcRenderer.invoke("map:recompress", filePath),
   notImplemented: (feature) => import_electron.ipcRenderer.send("app:notImplemented", feature),
+  showAbout: () => import_electron.ipcRenderer.invoke("app:showAbout"),
   getAppVersion: () => import_electron.ipcRenderer.invoke("app:version"),
   getRecentMaps: () => import_electron.ipcRenderer.invoke("app:recentMaps"),
   onProgress: (cb) => {

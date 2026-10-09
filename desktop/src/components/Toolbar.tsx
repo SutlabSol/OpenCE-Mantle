@@ -1,68 +1,69 @@
 import type { CSSProperties } from 'react';
 
 interface Props {
-  title: string;
-  version: string;
   onOpen: () => void;
   hasMap: boolean;
   isCompressed: boolean;
   onDecompress: () => void;
   onRecompress: () => void;
+  onExtract: () => void;
+  onInject: () => void;
   progress: { stage: string; percent: number } | null;
 }
 
-export default function Toolbar({ title, version, onOpen, hasMap, isCompressed, onDecompress, onRecompress, progress }: Props) {
+export default function Toolbar({ onOpen, hasMap, isCompressed, onDecompress, onRecompress, onExtract, onInject, progress }: Props) {
   return (
     <div
+      data-testid="sparkedit-toolbar"
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 14,
-        padding: '10px 18px',
+        gap: 6,
+        padding: '6px 10px',
         background: 'var(--bg-panel)',
-        borderBottom: '1px solid var(--border-soft)',
+        borderBottom: '1px solid var(--border)',
       }}
     >
-      <div style={{ fontWeight: 700, fontSize: 20, color: 'var(--accent-strong)', letterSpacing: 0.5 }}>OpenCE Modding Tool</div>
-      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>v{version}</div>
+      <ToolbarButton testid="open-map-toolbar-button" label="Open Map" onClick={onOpen} />
+      <Divider />
+      <ToolbarButton testid="decompress-button-toolbar" label="Decompress" onClick={onDecompress} disabled={!hasMap || !isCompressed} />
+      <ToolbarButton testid="recompress-button" label="Recompress" onClick={onRecompress} disabled={!hasMap || isCompressed} />
+      <Divider />
+      <ToolbarButton testid="toolbar-extract-button" label="Extract Tags" onClick={onExtract} disabled={!hasMap} />
+      <ToolbarButton testid="toolbar-inject-button" label="Inject Tags" onClick={onInject} disabled={!hasMap} />
       <div style={{ flex: 1 }} />
-      {hasMap && !isCompressed && (
-        <button data-testid="recompress-button" onClick={onRecompress} style={buttonStyle()}>
-          Recompress
-        </button>
-      )}
-      {hasMap && isCompressed && (
-        <button data-testid="decompress-button-toolbar" onClick={onDecompress} style={buttonStyle(true)}>
-          Decompress
-        </button>
-      )}
-      <button data-testid="open-map-toolbar-button" onClick={onOpen} style={buttonStyle()}>
-        Open Map
-      </button>
       {progress && (
-        <div style={{ width: 180, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ flex: 1, height: 6, background: 'var(--bg-elevated)', borderRadius: 3, overflow: 'hidden' }}>
+        <div style={{ width: 200, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--mono-font)', whiteSpace: 'nowrap' }}>{progress.stage}</span>
+          <div style={{ flex: 1, height: 6, background: 'var(--bg-main)', border: '1px solid var(--border)', borderRadius: 1, overflow: 'hidden' }}>
             <div
               data-testid="progress-bar-fill"
-              style={{ height: '100%', width: `${progress.percent}%`, background: 'var(--accent)', transition: 'width 0.2s' }}
+              style={{ height: '100%', width: `${progress.percent}%`, background: 'var(--accent-cyan)', transition: 'width 0.2s' }}
             />
           </div>
-          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--mono-font)' }}>{progress.percent}%</span>
         </div>
       )}
-      {title && <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--mono-font)' }}>{title}</div>}
     </div>
   );
 }
 
-function buttonStyle(accentBorder = false): CSSProperties {
-  return {
-    background: 'var(--bg-elevated)',
-    color: 'var(--text-primary)',
-    border: `1px solid ${accentBorder ? 'var(--accent)' : 'var(--border)'}`,
-    borderRadius: 5,
-    padding: '7px 16px',
-    fontSize: 13,
-    fontWeight: 500,
+function Divider() {
+  return <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />;
+}
+
+function ToolbarButton({ testid, label, onClick, disabled }: { testid: string; label: string; onClick: () => void; disabled?: boolean }) {
+  const style: CSSProperties = {
+    background: 'var(--bg-panel-header)',
+    color: disabled ? 'var(--text-dim)' : 'var(--text-primary)',
+    border: '1px solid var(--border)',
+    borderRadius: 2,
+    padding: '5px 12px',
+    fontSize: 12,
+    opacity: disabled ? 0.5 : 1,
   };
+  return (
+    <button data-testid={testid} onClick={onClick} disabled={disabled} style={style}>
+      {label}
+    </button>
+  );
 }

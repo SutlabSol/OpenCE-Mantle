@@ -10,10 +10,11 @@ export default function CompressedBanner({ onDecompress }: Props) {
         display: 'flex',
         alignItems: 'center',
         gap: 14,
-        padding: '12px 18px',
+        padding: '8px 14px',
         background: 'var(--warn-bg)',
         borderBottom: '1px solid var(--warn-border)',
         color: 'var(--warn-text)',
+        fontSize: 12.5,
       }}
     >
       <strong>This map is compressed.</strong>
@@ -23,12 +24,13 @@ export default function CompressedBanner({ onDecompress }: Props) {
         data-testid="decompress-button"
         onClick={onDecompress}
         style={{
-          background: 'var(--accent)',
+          background: 'var(--accent-gold)',
           color: '#1a1406',
           border: 'none',
-          borderRadius: 5,
-          padding: '7px 18px',
+          borderRadius: 2,
+          padding: '5px 14px',
           fontWeight: 600,
+          fontSize: 12,
         }}
       >
         Decompress...

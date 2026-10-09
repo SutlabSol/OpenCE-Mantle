@@ -3,6 +3,7 @@ import type { TagEntrySummary } from '../../electron/shared-types';
 
 interface Props {
   tags: TagEntrySummary[];
+  onFocusTag: (tag: TagEntrySummary) => void;
   onNotImplemented: (feature: string) => void;
 }
 
@@ -23,11 +24,12 @@ function slugify(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group';
 }
 
-export default function TagBrowser({ tags, onNotImplemented }: Props) {
+export default function TagBrowser({ tags, onFocusTag, onNotImplemented }: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -69,56 +71,51 @@ export default function TagBrowser({ tags, onNotImplemented }: Props) {
     setSelected(next);
   };
 
+  const focusRow = (t: TagEntrySummary) => {
+    setFocusedIndex(t.index);
+    onFocusTag(t);
+  };
+
   return (
-    <div data-testid="tag-browser" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-      <div style={{ display: 'flex', gap: 10, padding: '10px 14px', borderBottom: '1px solid var(--border-soft)' }}>
+    <div data-testid="hierarchy-tag-browser" style={{ width: 360, flexShrink: 0, borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--bg-panel)' }}>
+      <div style={{ padding: '7px 10px', background: 'var(--bg-panel-header)', borderBottom: '1px solid var(--border)', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+        Hierarchy
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>
         <input
           data-testid="tag-search-input"
           placeholder="Search path, class, or tag ID..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{
-            flex: 1,
-            background: 'var(--bg-elevated)',
-            border: '1px solid var(--border)',
-            borderRadius: 5,
-            padding: '6px 10px',
-            color: 'var(--text-primary)',
-            fontSize: 13,
-          }}
+          style={{ background: 'var(--bg-main)', border: '1px solid var(--border)', borderRadius: 2, padding: '5px 8px', color: 'var(--text-primary)', fontSize: 12 }}
         />
-        <select
-          data-testid="group-mode-select"
-          value={groupMode}
-          onChange={(e) => setGroupMode(e.target.value as GroupMode)}
-          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text-primary)', fontSize: 13 }}
-        >
-          <option value="class">Group by class</option>
-          <option value="folder">Group by folder</option>
-        </select>
-        <button
-          data-testid="extract-selected-button"
-          disabled={selected.size === 0}
-          onClick={() => onNotImplemented('Extract Tags')}
-          style={{
-            background: selected.size ? 'var(--accent)' : 'var(--bg-elevated)',
-            color: selected.size ? '#1a1406' : 'var(--text-dim)',
-            border: '1px solid var(--border)',
-            borderRadius: 5,
-            padding: '6px 14px',
-            fontSize: 13,
-          }}
-        >
-          Extract Selected ({selected.size})
-        </button>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: '28px 1fr 160px 90px 90px', padding: '6px 14px', fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', borderBottom: '1px solid var(--border-soft)' }}>
-        <div />
-        <div>Path</div>
-        <div>Class</div>
-        <div>Tag ID</div>
-        <div>Size</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <select
+            data-testid="group-mode-select"
+            value={groupMode}
+            onChange={(e) => setGroupMode(e.target.value as GroupMode)}
+            style={{ flex: 1, background: 'var(--bg-main)', border: '1px solid var(--border)', borderRadius: 2, color: 'var(--text-primary)', fontSize: 12 }}
+          >
+            <option value="class">By class</option>
+            <option value="folder">By folder</option>
+          </select>
+          <button
+            data-testid="extract-selected-button"
+            disabled={selected.size === 0}
+            onClick={() => onNotImplemented('Extract Tags')}
+            style={{
+              background: selected.size ? 'var(--accent-cyan)' : 'var(--bg-panel-header)',
+              color: selected.size ? '#06202c' : 'var(--text-dim)',
+              border: '1px solid var(--border)',
+              borderRadius: 2,
+              padding: '5px 10px',
+              fontSize: 11.5,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Extract ({selected.size})
+          </button>
+        </div>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }} data-testid="tag-browser-list">
@@ -132,16 +129,17 @@ export default function TagBrowser({ tags, onNotImplemented }: Props) {
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 8,
-                  padding: '7px 14px',
-                  background: 'var(--bg-elevated)',
+                  gap: 6,
+                  padding: '5px 10px',
+                  background: 'var(--bg-panel-header)',
                   cursor: 'pointer',
-                  fontSize: 13,
+                  fontSize: 12,
                   fontWeight: 600,
-                  color: 'var(--accent-strong)',
+                  color: 'var(--accent-cyan)',
+                  borderBottom: '1px solid var(--border)',
                 }}
               >
-                <span>{isOpen ? '▾' : '▸'}</span>
+                <span style={{ fontSize: 10 }}>{isOpen ? '▾' : '▸'}</span>
                 <span>{key}</span>
                 <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>({items.length})</span>
               </div>
@@ -150,26 +148,25 @@ export default function TagBrowser({ tags, onNotImplemented }: Props) {
                   <div
                     key={t.index}
                     data-testid={`tag-row-${t.index}`}
-                    onClick={() => toggleSelect(t.index)}
+                    onClick={() => focusRow(t)}
                     style={{
-                      display: 'grid',
-                      gridTemplateColumns: '28px 1fr 160px 90px 90px',
-                      padding: '5px 14px',
-                      fontSize: 12.5,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '4px 10px 4px 22px',
+                      fontSize: 12,
                       fontFamily: 'var(--mono-font)',
-                      background: selected.has(t.index) ? 'var(--accent-dim)' : 'transparent',
-                      borderBottom: '1px solid var(--border-soft)',
+                      background: focusedIndex === t.index ? 'var(--selection-bg)' : selected.has(t.index) ? 'rgba(56,189,248,0.08)' : 'transparent',
+                      borderLeft: focusedIndex === t.index ? '2px solid var(--selection-border)' : '2px solid transparent',
                       cursor: 'pointer',
                     }}
                   >
                     <input type="checkbox" checked={selected.has(t.index)} onChange={() => toggleSelect(t.index)} onClick={(e) => e.stopPropagation()} />
-                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.path}>
-                      {t.path}
-                      {t.isExternal && <span style={{ color: 'var(--text-dim)' }}> (external)</span>}
-                    </div>
-                    <div>{t.primaryClassName}</div>
-                    <div>0x{t.tagId.toString(16).padStart(8, '0')}</div>
-                    <div>{formatSize(t.estimatedSize)}</div>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={t.path}>
+                      {t.path.split('\\').pop()}
+                      {t.isExternal && <span style={{ color: 'var(--text-dim)' }}> *</span>}
+                    </span>
+                    <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>{formatSize(t.estimatedSize)}</span>
                   </div>
                 ))}
             </div>

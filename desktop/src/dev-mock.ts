@@ -63,6 +63,7 @@ export function installDevMock() {
       return { outputPath: filePath.replace('.map', '_compressed.map'), originalSize: 13_936_092, newSize: 4_100_000 };
     },
     notImplemented: (feature) => logListeners.forEach((cb) => cb({ level: 'warn', message: `${feature} not implemented yet`, timestamp: Date.now() })),
+    showAbout: async () => logListeners.forEach((cb) => cb({ level: 'info', message: 'About OpenCE Modding Tool v0.1.0-dev', timestamp: Date.now() })),
     getAppVersion: async () => '0.1.0-dev',
     getRecentMaps: async () => ['C:/HaloCE/maps/bloodgulch.map'],
     onProgress: (cb) => {

@@ -51,6 +51,7 @@ export interface OpenceApi {
   decompressMap(filePath: string): Promise<CompressionResult | null>;
   recompressMap(filePath: string): Promise<CompressionResult | null>;
   notImplemented(feature: string): void;
+  showAbout(): Promise<void>;
   getAppVersion(): Promise<string>;
   getRecentMaps(): Promise<string[]>;
   onProgress(cb: (e: ProgressEvent) => void): () => void;

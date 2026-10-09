@@ -7,6 +7,7 @@ const api: OpenceApi = {
   decompressMap: (filePath: string) => ipcRenderer.invoke('map:decompress', filePath),
   recompressMap: (filePath: string) => ipcRenderer.invoke('map:recompress', filePath),
   notImplemented: (feature: string) => ipcRenderer.send('app:notImplemented', feature),
+  showAbout: () => ipcRenderer.invoke('app:showAbout'),
   getAppVersion: () => ipcRenderer.invoke('app:version'),
   getRecentMaps: () => ipcRenderer.invoke('app:recentMaps'),
   onProgress: (cb: (e: ProgressEvent) => void) => {

@@ -185,6 +185,15 @@ async function recompressFlow() {
   sendLog("info", `Compressed: ${result.originalSize} -> ${result.newSize} bytes`);
   return result;
 }
+function showAboutDialog() {
+  if (!mainWindow) return;
+  import_electron2.dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "About",
+    message: `OpenCE Modding Tool v${import_electron2.app.getVersion()}`,
+    detail: "A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\nFormat references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\nCompression reference: Chimera.\nTarget runtime: OpenCE (OpenCommunityEdition/OpenCE).\n\nNo Bungie/Microsoft assets are bundled; this tool only operates on files you supply."
+  });
+}
 function buildMenu() {
   const recents = getRecentMaps();
   const template = [
@@ -216,12 +225,7 @@ function buildMenu() {
       submenu: [
         {
           label: "About OpenCE Modding Tool",
-          click: () => import_electron2.dialog.showMessageBox(mainWindow, {
-            type: "info",
-            title: "About",
-            message: `OpenCE Modding Tool v${import_electron2.app.getVersion()}`,
-            detail: "A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\nFormat references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\nCompression reference: Chimera.\nTarget runtime: OpenCE (OpenCommunityEdition/OpenCE).\n\nNo Bungie/Microsoft assets are bundled; this tool only operates on files you supply."
-          })
+          click: () => showAboutDialog()
         },
         {
           label: "View format references",
@@ -249,6 +253,7 @@ import_electron2.app.whenReady().then(() => {
   import_electron2.ipcMain.handle("app:version", () => import_electron2.app.getVersion());
   import_electron2.ipcMain.handle("app:recentMaps", () => getRecentMaps());
   import_electron2.ipcMain.on("app:notImplemented", (_e, feature) => sendLog("warn", `${feature} is not implemented yet (coming in a later milestone).`));
+  import_electron2.ipcMain.handle("app:showAbout", () => showAboutDialog());
   createWindow();
   import_electron2.app.on("activate", () => {
     if (import_electron2.BrowserWindow.getAllWindows().length === 0) createWindow();

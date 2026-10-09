@@ -25,16 +25,20 @@ export default function MapInfoPanel({ header }: { header: MapHeaderSummary }) {
       style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(3, 1fr)',
-        gap: '10px 24px',
-        padding: '14px 18px',
-        background: 'var(--bg-panel)',
-        borderBottom: '1px solid var(--border-soft)',
+        gap: '14px 28px',
+        padding: '20px 24px',
+        background: 'var(--bg-main)',
+        flex: 1,
+        alignContent: 'start',
       }}
     >
       {fields.map(([label, value]) => (
-        <div key={label}>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 0.6 }}>{label}</div>
-          <div style={{ fontSize: 14, fontFamily: 'var(--mono-font)', color: 'var(--text-primary)' }} data-testid={`map-info-${label.toLowerCase().replace(/\s+/g, '-')}`}>
+        <div key={label} style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)', padding: '10px 12px' }}>
+          <div style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 0.6 }}>{label}</div>
+          <div
+            style={{ fontSize: 14, fontFamily: 'var(--mono-font)', color: 'var(--text-primary)', marginTop: 3 }}
+            data-testid={`map-info-${label.toLowerCase().replace(/\s+/g, '-')}`}
+          >
             {value}
           </div>
         </div>

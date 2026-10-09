@@ -1,27 +1,31 @@
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root {
-  --bg-base: #14161b;
-  --bg-panel: #1b1e25;
-  --bg-elevated: #242833;
-  --bg-elevated-hover: #2c313f;
-  --border: #333948;
-  --border-soft: #262b37;
-  --text-primary: #e9e7df;
-  --text-secondary: #9aa0ae;
-  --text-dim: #666c7a;
-  --accent: #caa045;
-  --accent-strong: #e8c05f;
-  --accent-dim: rgba(202, 160, 69, 0.14);
-  --warn-bg: #352b13;
+  --bg-main: #0d1117;
+  --bg-panel: #161b22;
+  --bg-panel-header: #21262d;
+  --bg-control: #0d1117;
+  --bg-hover: #1c2129;
+  --border: #30363d;
+  --border-active: #58a6ff;
+  --text-primary: #f0f6fc;
+  --text-secondary: #8b949e;
+  --text-dim: #5b6472;
+  --accent-cyan: #38bdf8;
+  --accent-green: #22c55e;
+  --accent-gold: #eab308;
+  --accent-danger: #ef4444;
+  --selection-bg: rgba(31, 111, 235, 0.2);
+  --selection-border: #1f6feb;
+  --warn-bg: #2b2305;
   --warn-border: #8a6d1f;
-  --warn-text: #e3c66b;
-  --error-bg: #351515;
+  --warn-text: #eab308;
+  --error-bg: #2b0f0f;
   --error-border: #8a3030;
-  --error-text: #e68686;
-  --success-text: #7cc99a;
-  --ui-font: 'Barlow Condensed', sans-serif;
-  --mono-font: 'JetBrains Mono', monospace;
+  --error-text: #f87171;
+  --success-text: #22c55e;
+  --ui-font: 'Segoe UI', Tahoma, -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono-font: Consolas, 'JetBrains Mono', 'IBM Plex Mono', monospace;
 }
 
 * {
@@ -36,10 +40,10 @@ body,
 }
 
 body {
-  background: var(--bg-base);
+  background: var(--bg-main);
   color: var(--text-primary);
   font-family: var(--ui-font);
-  font-size: 14px;
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
@@ -58,8 +62,8 @@ button {
 }
 ::-webkit-scrollbar-thumb {
   background: var(--border);
-  border-radius: 4px;
+  border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--accent-dim);
+  background: var(--border-active);
 }

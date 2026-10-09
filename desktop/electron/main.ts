@@ -120,6 +120,20 @@ async function recompressFlow() {
   return result;
 }
 
+function showAboutDialog() {
+  if (!mainWindow) return;
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: 'About',
+    message: `OpenCE Modding Tool v${app.getVersion()}`,
+    detail:
+      'A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\n' +
+      'Format references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\n' +
+      'Compression reference: Chimera.\nTarget runtime: OpenCE (OpenCommunityEdition/OpenCE).\n\n' +
+      'No Bungie/Microsoft assets are bundled; this tool only operates on files you supply.',
+  });
+}
+
 function buildMenu() {
   const recents = getRecentMaps();
   const template: Electron.MenuItemConstructorOptions[] = [
@@ -154,17 +168,7 @@ function buildMenu() {
       submenu: [
         {
           label: 'About OpenCE Modding Tool',
-          click: () =>
-            dialog.showMessageBox(mainWindow!, {
-              type: 'info',
-              title: 'About',
-              message: `OpenCE Modding Tool v${app.getVersion()}`,
-              detail:
-                'A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\n' +
-                'Format references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\n' +
-                'Compression reference: Chimera.\nTarget runtime: OpenCE (OpenCommunityEdition/OpenCE).\n\n' +
-                'No Bungie/Microsoft assets are bundled; this tool only operates on files you supply.',
-            }),
+          click: () => showAboutDialog(),
         },
         {
           label: 'View format references',
@@ -194,6 +198,7 @@ app.whenReady().then(() => {
   ipcMain.handle('app:version', () => app.getVersion());
   ipcMain.handle('app:recentMaps', () => getRecentMaps());
   ipcMain.on('app:notImplemented', (_e, feature: string) => sendLog('warn', `${feature} is not implemented yet (coming in a later milestone).`));
+  ipcMain.handle('app:showAbout', () => showAboutDialog());
 
   createWindow();
 

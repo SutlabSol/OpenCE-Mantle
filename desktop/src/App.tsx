@@ -1,25 +1,30 @@
 import { useEffect, useState } from 'react';
-import type { LoadMapResult } from '../electron/shared-types';
+import type { LoadMapResult, TagEntrySummary } from '../electron/shared-types';
 import { useOpenceEvents } from './hooks/useOpenceEvents';
+import MenuBar from './components/MenuBar';
 import Toolbar from './components/Toolbar';
 import WelcomeDropZone from './components/WelcomeDropZone';
-import MapInfoPanel from './components/MapInfoPanel';
 import CompressedBanner from './components/CompressedBanner';
 import UnsupportedBanner from './components/UnsupportedBanner';
 import TagBrowser from './components/TagBrowser';
+import CenterWorkspace from './components/CenterWorkspace';
+import PropertiesPalette from './components/PropertiesPalette';
 import LogPanel from './components/LogPanel';
+import StatusBar from './components/StatusBar';
 
 export default function App() {
   const [mapState, setMapState] = useState<LoadMapResult | null>(null);
-  const [version, setVersion] = useState('0.1.0');
+  const [focusedTag, setFocusedTag] = useState<TagEntrySummary | null>(null);
   const { logs, progress, log } = useOpenceEvents();
 
   useEffect(() => {
-    window.opence.getAppVersion().then(setVersion);
     const offMenu = window.opence.onMenuAction((action) => {
       if (action.endsWith('-stub')) log('warn', `${action.replace('-stub', '')} is coming in a later milestone.`);
     });
-    const offLoaded = window.opence.onMapLoaded((result) => setMapState(result));
+    const offLoaded = window.opence.onMapLoaded((result) => {
+      setMapState(result);
+      setFocusedTag(null);
+    });
     return () => {
       offMenu();
       offLoaded();
@@ -36,6 +41,7 @@ export default function App() {
       log('info', `Dropped: ${path}`);
       const result = await window.opence.loadMap(path);
       setMapState(result);
+      setFocusedTag(null);
     };
     window.addEventListener('dragover', onDragOver);
     window.addEventListener('drop', onDrop);
@@ -47,7 +53,10 @@ export default function App() {
 
   const handleOpen = async () => {
     const result = await window.opence.openMapDialog();
-    if (result) setMapState(result);
+    if (result) {
+      setMapState(result);
+      setFocusedTag(null);
+    }
   };
 
   const handleDecompress = async () => {
@@ -62,34 +71,67 @@ export default function App() {
     if (result) log('info', `Saved recompressed map to ${result.outputPath}`);
   };
 
+  const notImplemented = (feature: string) => {
+    window.opence.notImplemented(feature);
+    log('warn', `${feature} is coming in a later milestone.`);
+  };
+
   const hasMap = mapState?.status === 'ok' || mapState?.status === 'compressed';
   const isCompressed = mapState?.status === 'compressed';
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <MenuBar
+        menus={[
+          {
+            label: 'File',
+            items: [
+              { label: 'Open Map...', onClick: handleOpen },
+              { label: 'Save As...', onClick: () => notImplemented('Save As / Export') },
+              { label: 'Exit', onClick: () => window.close() },
+            ],
+          },
+          {
+            label: 'Tools',
+            items: [
+              { label: 'Decompress Map', onClick: handleDecompress, disabled: !hasMap || !isCompressed },
+              { label: 'Recompress Map', onClick: handleRecompress, disabled: !hasMap || isCompressed },
+              { label: 'Extract Tags...', onClick: () => notImplemented('Extract Tags'), disabled: !hasMap },
+              { label: 'Inject Tags...', onClick: () => notImplemented('Inject Tags'), disabled: !hasMap },
+            ],
+          },
+          { label: 'Help', items: [{ label: 'About', onClick: () => window.opence.showAbout() }] },
+        ]}
+      />
       <Toolbar
-        title={mapState && mapState.status !== 'error' ? mapState.filePath : ''}
-        version={version}
         onOpen={handleOpen}
         hasMap={hasMap}
         isCompressed={isCompressed}
         onDecompress={handleDecompress}
         onRecompress={handleRecompress}
+        onExtract={() => notImplemented('Extract Tags')}
+        onInject={() => notImplemented('Inject Tags')}
         progress={progress}
       />
 
       {mapState?.status === 'compressed' && <CompressedBanner onDecompress={handleDecompress} />}
       {mapState?.status === 'unsupported' && <UnsupportedBanner message={mapState.message} />}
       {mapState?.status === 'error' && <UnsupportedBanner message={mapState.message} />}
-      {mapState?.status === 'ok' && <MapInfoPanel header={mapState.header} />}
 
-      {mapState?.status === 'ok' ? (
-        <TagBrowser tags={mapState.tags} onNotImplemented={(f) => window.opence.notImplemented(f)} />
-      ) : (
-        <WelcomeDropZone onOpen={handleOpen} />
-      )}
+      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+        {mapState?.status === 'ok' ? (
+          <>
+            <TagBrowser tags={mapState.tags} onFocusTag={setFocusedTag} onNotImplemented={notImplemented} />
+            <CenterWorkspace header={mapState.header} />
+            <PropertiesPalette focusedTag={focusedTag} />
+          </>
+        ) : (
+          <WelcomeDropZone onOpen={handleOpen} />
+        )}
+      </div>
 
       <LogPanel logs={logs} />
+      <StatusBar mapState={mapState} />
     </div>
   );
 }

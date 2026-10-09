@@ -9,13 +9,13 @@ const COLOR: Record<string, string> = { info: 'var(--text-secondary)', warn: 'va
 export default function LogPanel({ logs }: { logs: LogLine[] }) {
   return (
     <div
-      data-testid="log-panel"
+      data-testid="log-console-panel"
       style={{
-        height: 150,
+        height: 130,
         overflowY: 'auto',
-        background: '#0f1115',
-        borderTop: '1px solid var(--border-soft)',
-        padding: '8px 14px',
+        background: '#090b0e',
+        borderTop: '1px solid var(--border)',
+        padding: '6px 14px',
         fontFamily: 'var(--mono-font)',
         fontSize: 12,
       }}
