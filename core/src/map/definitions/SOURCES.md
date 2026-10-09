@@ -183,3 +183,61 @@ as a deviation from the plan for visibility, not hiding extra scope delivered.
 - Per-mipmap `BitmapDataFlags.external` bit (a second, rarer externality mechanism inside an
   internal bitmap tag, per Invader's comment "for Gearbox versions and CEA") was not checked - no
   bitmap data in either sample map was found to use it, so this gap is moot for the current data.
+
+## Milestone 5, Step A findings (2026-08) - verified, not asserted
+
+Investigated before writing any injection code, per explicit user requirement. All claims below
+are cited against the real Invader source (`/tmp/invader`, commit 696830f) and cross-checked
+against real bytes in the sample maps, not inferred.
+
+- **Per-mipmap/per-sound-permutation externality (`external=0` vs `external=1`) is a raw file
+  offset either way, never a resource-map index.** `external=1`: `pixel_data_offset`/
+  `samples.file_offset` is a byte offset INTO bitmaps.map/sounds.map (`invader/src/resource/
+  resource.cpp` ~line 427/525, `bitmap_data.pixel_data_offset = ab.data_offset`). Verified against
+  real bytes: every one of ui.map's 222 internal bitmaps' `pixel data offset` exactly matches a
+  `dataOffset` entry in the sample `bitmaps.map`'s own resource table (e.g. "star mask":
+  offset=16, size=2744, matches entry 0 exactly). `external=0`: the SAME field is instead an
+  ABSOLUTE FILE OFFSET into THIS map's own raw-data region (`invader/src/build/
+  build_workload.cpp` line ~1430, `bitmap_data.pixel_data_offset = all_assets[idx].first +
+  file_offset`). **This raw-data region's start is NOT stored anywhere in a compiled map** - it's
+  the implicit gap between `end_of_bsps` and `model_offset` in `generate_final_data` (lines
+  ~278-300); unlike `model_data_file_offset` (which IS a stored header field and is unrelated -
+  it's 3D vertex data, not bitmap/sound bytes), there is no discrete field recording where the
+  raw-data region begins. Reconstructing it from a compiled file alone is under-determined.
+  **Consequence for M5**: embedded (`external=0`) bitmap/sound relocation is DISABLED - tags
+  needing it are blocked with a plain-language warning, never silently written. Neither sample
+  map contains a single real embedded asset to verify a relocation implementation against anyway
+  (scanned: 222 internal ui.map bitmaps + 125 ui.map sound permutations, 100% external=1;
+  bloodgulch.map has zero internal bitmap/sound tags at all - every one is whole-tag-indexed).
+- **Whole-tag indexing (mechanism A, already implemented pre-M5 via `resource-map.ts`
+  `resourceIndexResolves`) and per-asset data externality (mechanism B, above) are two unrelated
+  mechanisms.** Mechanism A: the tag index entry's own `isExternal` bit + `tagDataPointerOrResourceIndex`
+  (an actual resource-map ENTRY INDEX) means the WHOLE tag definition lives in bitmaps.map/
+  sounds.map/loc.map. Mechanism B (this session) is per-field, inside an otherwise-internal tag.
+  A tag can be internal under mechanism A yet still reference bitmaps.map/sounds.map under
+  mechanism B (e.g. every internal bitmap in ui.map).
+- **Secondary/tertiary tag classes are real, non-trivial data** (280/2455 bloodgulch.map entries
+  have a non-null secondary class, e.g. every concrete `shader_transparent_*` tag also carries
+  secondary class `shdr`) but were NOT captured by M4's `ExtractedTag`/`OceContainerTag` - fixed
+  this session (`secondaryClassFourCC`/`tertiaryClassFourCC` added, container bumped to v2).
+  Preserved defensively on injection (copied byte-for-byte from the source tag index entry) since
+  our own `validate-tag.ts` doesn't consume them for dependency validation and their exact runtime
+  significance to the game engine wasn't independently confirmed either way - preserving them is
+  harmless and byte-faithful regardless.
+- **Every pointer in the tag-data region resolves via ONE global anchor.** Confirmed against
+  Invader's actual MAP READER (not just the builder) - `invader/src/map/map.cpp` line 244:
+  `base_memory_address = tag_data_header->tag_array_address - sizeof(CacheFileTagDataHeaderPC)`
+  (0x28), algebraically identical to this project's pre-existing `tag-index.ts` derivation. This
+  means growing the tag array (M5 ADD mode) does NOT require rewriting any existing tag's internal
+  pointers: decrementing the single stored `tag_array_address` field by the array's growth in
+  bytes re-anchors every existing reflexive/path/tag-data pointer to the physically-shifted
+  positions automatically. Verified empirically, not just by citation: `tag-injector.test.ts`
+  re-parses an injected copy of bloodgulch.map with this project's own reader and runs
+  `validateStructInstance` over every old AND new tag (1500+ tags), zero errors.
+- **New tag IDs use the same salt formula as tool.exe**: `invader/src/build/build_workload.cpp`
+  line 1230, `full_id = ((tag_index + 0x6174) | 0x8000) << 16 | (uint16)tag_index`.
+- **Decision (not silently made - this is the record of it)**: `TagDependency.pathPointer`/
+  `pathSize` fields are tool-only convenience fields (not dereferenced by the game at runtime,
+  per Invader's struct comments) and are already stale the moment a tag is extracted from its
+  source map. M5's injector zeroes them (rather than leaving source-map garbage) on every
+  dependency it rewrites, since there is one clearly-correct answer here, not a judgment call.

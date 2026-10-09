@@ -144,15 +144,113 @@ by a full M4 **frontend/UI integration** pass (see below), which is now done and
   "array of numbers" to named sub-fields as needed).
 - Phase 2: 3D scenario editor (three.js viewport, BSP/model rendering, Forge-like placement).
 
+## M5 Step A: ADD-mode tag injection (done 2026-08)
+User required a cited, verified design (not asserted) before any code — see
+`core/src/map/definitions/SOURCES.md` "Milestone 5, Step A findings" for the full citations
+(Invader map.cpp/build_workload.cpp/resource.cpp line numbers) and the empirical checks run
+against real bytes in the sample maps.
+
+- **Core** (`/core/src/map/tag-injector.ts`, new):
+  - `planAddInjection(targetTagIndex, container, resourceMapConfig?)`: dry-run only, never
+    mutates/allocates. Reuses existing target tags by normalized path+class instead of
+    duplicating; blocks (with a fixed-point cascade to dependents) any tag with an
+    `embeddedRawData` warning (relocation disabled) or a missing `external`/`unresolved`/
+    `notExtracted` dependency; reports per-root refusal reasons; computes external-resource-map
+    fingerprint status (`match`/`mismatch`/`unconfigured-on-target`/`unverified-at-extraction`).
+  - `applyAddInjection(...)`: the structural write. Grows the tag array and decrements the single
+    stored `tag_array_address` field by the growth delta — this re-anchors EVERY existing tag's
+    reflexive/path/tag-data pointers automatically (cited + empirically verified, see SOURCES.md),
+    zero per-pointer rewriting needed for pre-existing tags. New tags' own local (extraction-time)
+    reflexive offsets are translated to real virtual addresses; `TagDependency.tagId` fields are
+    remapped to the resolved target tagId (new tagId via the real tool.exe salt formula); `pathPointer`/
+    `pathSize` are zeroed (stale tool-only fields, decided not left as source-map garbage).
+    `crc32`/sub-header `tagFileChecksums` are deliberately left untouched and reported as stale
+    (M6's job, never silently done here).
+  - `relocateEmbeddedRawData()`: explicit disabled stub (throws). Embedded (`external=0`)
+    bitmap/sound relocation needs the raw-data region's start, which isn't stored anywhere in a
+    compiled map — under-determined from a compiled file alone, and neither sample map has a real
+    embedded asset to verify an implementation against anyway. Never called by
+    plan/applyAddInjection. A synthetic (non-real-byte) fixture was deliberately NOT built either —
+    writing a fake relocation algorithm just to exercise a "disabled" stub would mean building (and
+    risk giving false confidence in) the real feature under a "synthetic" label; flagged to user
+    instead of decided silently.
+  - Container bumped to **v2** (`container.ts`): `secondaryClassFourCC`/`tertiaryClassFourCC` per
+    tag (280/2455 bloodgulch.map tags have a non-null secondary class — was silently dropped by
+    M4, fixed this session), `resourceMapIdentities` (sha256 of header+entry table, NOT the whole
+    file), `externalResourceRefs` (per-tag bitmaps.map/sounds.map references with
+    verified/unverified status), `externalData: 'referenced'` (reserved for a future 'embedded').
+    v1 containers still read fine (defaults for new fields); version > 2 rejected with a
+    plain-language message; a real v1 fixture (`tests/fixtures/v1-warthog.ocetags`) is kept and
+    tested.
+  - `dependency-walker.ts`: now ALSO flags the embedded (`external=0`) case (previously only
+    `external=1`/mechanism-B-referenced was flagged — the embedded case was a latent,
+    unflagged gap from M4: extracting a tag with embedded pixel/sample data would have produced
+    a container with a silently-dangling offset). Generalized via a new `externalDataSibling`
+    JSON schema annotation on `BitmapData.flags` (data-driven, no hardcoded field names in TS).
+  - Tests: `tag-injector.test.ts` (9 tests incl. full inject-into-copy-of-bloodgulch.map
+    round-trip that re-parses with this project's own reader and validates every old+new tag,
+    1500+ tags, zero errors), `container-v2.test.ts` (5 tests: v1 fixture read, version rejection,
+    v2 round-trip, verified/unverified refs), `relocation-synthetic.test.ts` (1 test: confirms the
+    stub is unconditionally disabled). **Core: 59/59 Vitest pass.**
+- **Electron** (`/app/desktop/electron/`):
+  - `settings.ts`: `AppSettings.resourceMaps: {bitmaps,sounds,loc}`, corrupt/missing
+    `settings.json` falls back to defaults. Main process is the only thing that ever writes a
+    resource-map path — renderer only ever receives a typed `ResourceMapStatus` back.
+  - `main.ts`: `resourceMaps:pick`/`resourceMaps:getStatuses` (validates file type for the slot
+    via `validateResourceMapFile`, rejects+doesn't save an invalid pick with a plain-language
+    error), `tags:pickInjectContainer`/`tags:planInject`/`tags:applyInject` (Save As dialog,
+    refuses the source map path, confirms before overwrite, never overwrites the map being
+    injected into).
+  - `map-worker.ts`: `planInject`/`applyInject` worker requests, reusing the already-open
+    `currentMap` as the injection target; writes via temp-file-then-rename.
+- **Frontend**: `InjectDialog.tsx` (new) — phases picking→planning→review→applying→result, with
+  `WarningGroup` sections for refused roots/blocked-embedded/blocked-other/external-refs/
+  will-be-added/reused, an "I understand" checkbox gating confirm when there's anything blocking,
+  stale-CRC32 warning shown in the result. `SettingsDialog.tsx` (new) — 3 resource-map picker rows
+  with not-configured/missing-or-unreadable/ok status (a 4th state, "configured but not matching
+  THIS map", is contextual per-injection and shown in InjectDialog instead, not here).
+- **Testing**: core 59/59 ✅, desktop electron/renderer `tsc --noEmit` clean ✅, desktop Vitest
+  25/25 ✅, `testing_agent` E2E on InjectDialog/SettingsDialog via browser mock: 100%, 0 console
+  errors, 0 bugs found (`/app/test_reports/iteration_6.json`). **NOT YET verified**: real Electron
+  shell / real map injection in OpenCE (headless container can't run it) — user will test
+  themselves on Windows; exact steps below.
+
+### What to test in OpenCE on Windows (Step A)
+1. Open a target map (e.g. a copy of `bloodgulch.map`) in OpenCE, decompress if needed.
+2. Tools > Settings... — point at your own `bitmaps.map`/`sounds.map`/`loc.map` (optional for
+   this test, but needed to see "match"/"mismatch" instead of "unconfigured-on-target").
+3. Extract a tag with NO external data (e.g. a vehicle) into a `.ocetags` file from a DIFFERENT
+   source map copy, or re-use one from your earlier M4 test.
+4. Tools > Inject Tags... on the target map, pick that `.ocetags` file, review the plan (should
+   show "to add"/"reused" with zero blocked), confirm, Save As a NEW file (never overwrites your
+   original).
+5. Load the NEW file in OpenCE/the actual game. **This is the real test** — our own re-parser
+   validates pointers internally, but only the real engine can confirm it actually loads &
+   displays correctly. Report back: does it load? Does the injected tag/its dependencies show up
+   correctly in-game?
+6. Optional: repeat with a tag that DOES have external bitmap/sound data (e.g. extract an internal
+   ui.map bitmap) to see the "External resource map references" warning and fingerprint status.
+7. Optional stress test: try extracting a tag with embedded (non-shared) custom art if you have
+   one (a modded map with brand-new textures not in stock bitmaps.map) — this SHOULD be blocked
+   with a plain-language warning, confirming the disabled-relocation guard works as intended.
+
+### M5 remaining (Step B/C, not started — build order from user, one step at a time)
+- Step B: SWAP mode (keeps the target tag's existing tag ID so references TO it stay valid).
+- Step C: conflict dialog (skip/replace/rename, "apply to all") using the existing
+  `ConfirmDialog.tsx`, plus pre-write validation surfaced in the UI.
+
 ## Key files
 - `/app/core/src/map/definitions/engine.ts` — schema engine (load/validate/resolve/decode/encode)
 - `/app/core/src/map/definitions/validate-tag.ts` — real-map validation (round-trip, deps, bounds)
 - `/app/core/src/map/dependency-walker.ts`, `tag-extractor.ts`, `container.ts` — M4 core logic
-- `/app/desktop/electron/worker-manager.ts`, `map-worker.ts`, `main.ts` — M4 persistent worker + IPC
+- `/app/core/src/map/tag-injector.ts` — M5 Step A injection engine (plan/apply ADD mode)
+- `/app/desktop/electron/worker-manager.ts`, `map-worker.ts`, `main.ts` — M4/M5 persistent worker + IPC
 - `/app/desktop/src/components/DependencyDialog.tsx`, `TagBrowser.tsx` — M4 UI
+- `/app/desktop/src/components/InjectDialog.tsx`, `SettingsDialog.tsx` — M5 Step A UI
 - `/app/core/src/map/definitions/SOURCES.md` — provenance table, must stay updated
-- `/app/core/src/map/resource-map.ts` — bitmaps.map/sounds.map/loc.map parser
-- `/app/core/tests/definitions.test.ts`, `tag-extractor.test.ts` — validation suites (45/45 passing)
+- `/app/core/src/map/resource-map.ts` — bitmaps.map/sounds.map/loc.map parser + fingerprinting
+- `/app/core/tests/definitions.test.ts`, `tag-extractor.test.ts`, `tag-injector.test.ts`,
+  `container-v2.test.ts` — validation suites (**59/59 passing**)
 - `/app/core/scripts/generate-definitions.mjs` — regenerate `groups/*.json` from a fresh Invader
   clone if definitions ever need updating (`INVADER_DIR=/path/to/invader/.../definition node
   scripts/generate-definitions.mjs`)

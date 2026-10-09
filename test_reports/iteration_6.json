@@ -1,0 +1,37 @@
+{
+  "summary": "E2E frontend testing of M5 Step A InjectDialog + SettingsDialog via Vite dev server with mocked window.opence (?mock=inject-clean / ?mock=inject-blocked). All 7 feature requirements from the review request pass with 0 console errors. Regression spot-check of M1-M4 (open map, hierarchy render, toolbar enablement, menu structure) also passes.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/test_reports/iteration_6.json"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "InjectDialog correctly guards every state: nothingToAdd permanently disables confirm, needsAck requires explicit 'I understand' acknowledgement, disabled-reason text is user-friendly and visible via data-testid.",
+    "SettingsDialog uses main-process-owned status (never raw user path input), matching spec intent - component only receives the typed ResourceMapStatus back.",
+    "dev-mock pickResourceMap updates per-kind map and getResourceMapStatuses returns a shallow copy - correct behavior preventing shared-reference bugs.",
+    "Minor: 'needsAck' in InjectDialog treats hasMismatch as blocking but the dev-mock inject-blocked fixture uses status='unconfigured-on-target' not 'mismatch', so hasMismatch=false there - needsAck still true via blockedEmbedded/blockedOther/refusedRoots. If main agent wants to exercise the mismatch-only path in UI preview, a 3rd mock scenario could help, but current coverage is adequate for M5 Step A.",
+    "No file-size concerns (InjectDialog ~305 lines, SettingsDialog ~123 lines).",
+    "All interactive elements expose the data-testids promised in the review request."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (desktop app, no HTTP backend)", "frontend": "100% (7/7 feature requirements, 0 console errors)"},
+  "verified_flows": [
+    "Toolbar: inject/extract buttons disabled before map open, enabled after status='ok'.",
+    "Settings dialog: opens via Tools > Settings... (menu-item-tools-settings), 3 rows (bitmaps/sounds/loc) each show 'Not configured' initially, Pick... updates to 'C:\\HaloCE\\{kind}.map (1706 entries)', Done closes.",
+    "Settings dialog: Escape key and × button both close.",
+    "Inject-clean: summary 'From \"ui\": 1 to add, 1 reused, 0 blocked'; WarningGroup sections for External resource map references, Will be added, Reused present; no understand-checkbox; Confirm button enabled; Cancel closes.",
+    "Inject-blocked: summary 'From \"ui\": 1 to add, 0 reused, 2 blocked'; all 4 WarningGroup sections present (Refused, Blocked-embedded, Blocked-other, External refs); 'no resource map configured' status shown; confirm disabled with inject-confirm-disabled-reason='Check \"I understand\" below to confirm you have read the warnings.'; checking inject-understand-checkbox enables confirm and removes disabled-reason.",
+    "Result phase: Confirm -> brief inject-progress -> inject-result with 'Injected 1 tag(s) (1 reused, not duplicated).', outputPath 'C:\\HaloCE\\maps\\bloodgulch_injected.map', inject-result-crc-warning containing CRC32/stale message, inject-result-open-folder and inject-result-close buttons both work.",
+    "Inject dialog: Escape and × button both close from review phase.",
+    "Menu: menu-item-tools-inject-tags present and launches the inject flow (parity with toolbar-inject-button).",
+    "Regression: map loads with 10 group checkboxes, 2455-tag header stats render, menu structure intact (File/Tools/Help), 0 console/page errors across all flows."
+  ],
+  "test_credentials": "N/A",
+  "seed_data_creation": "None (uses existing dev-mock.ts + buildMockInjectPlan fixtures).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "M5 Step A frontend (InjectDialog + SettingsDialog) is fully working in browser-mock mode. The Electron main-process IPC handlers (pickResourceMapFlow/getResourceMapStatusesFlow/pickInjectContainerFlow/planInjectFlow/applyInjectFlow in main.ts) cannot be exercised headlessly - rely on the 59/59 core + 25/25 desktop unit tests already green. Known missed-but-not-blocking: a dedicated 'external-ref-mismatch' mock scenario would exercise the hasMismatch=true branch (currently inject-blocked uses unconfigured-on-target). Toolbar testids used: toolbar-inject-button, toolbar-extract-button, open-map-button. Menu-item testids follow pattern menu-item-tools-{action-kebab-case}."
+}
