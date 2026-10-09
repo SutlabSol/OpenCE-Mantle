@@ -41,10 +41,90 @@ Phase 2 3D scenario editor.
   - Full provenance table, abstract-class notes, and known simplifications documented in
     `core/src/map/definitions/SOURCES.md` — read that before touching M4/M7.
 
-### Stopped here deliberately
-Per explicit user instruction: "Post a short report... then STOP and wait for my go-ahead before
-starting M4. Do not combine the two steps." M4 (dependency walker + extraction) has **not**
-been started. Waiting for user confirmation before proceeding.
+### Stopped here deliberately (superseded — see M4 section below)
+Earlier in this session M4 core logic was built and validated via Vitest only; this was followed
+by a full M4 **frontend/UI integration** pass (see below), which is now done and tested.
+
+## M4: Dependency walker + tag extraction + UI (done 2026-08)
+- **Core** (`/core/src/map/dependency-walker.ts`, `tag-extractor.ts`, `container.ts`):
+  - `walkDependencies()`: generic BFS over TagDependency/TagReflexive fields (reuses the
+    definitions engine, no per-group hardcoding), tracks `requiredBy` (reverse edges, for the
+    dialog's "required by" column), classifies each tag as `ok`/`bsp`/`external`/`uncertain`/
+    `noDefinition`, takes optional `{ onProgress, signal }` (`WalkOptions`) so callers get
+    progress + cancellation without `/core` importing anything Electron/Node-specific.
+  - `extractable`/`notExtractableReason` added to `DefinitionStruct`/`ResolvedStruct` (generic
+    flag, checked by the extractor — no hardcoded group names). Set to `false` on
+    `scenario_structure_bsp` (separate memory region, see SOURCES.md). The walker still visits a
+    non-extractable BSP's **own direct dependencies** as informational-only warnings ("needed by
+    BSP, not extracted") without walking/extracting them further.
+  - `extractTagSet()`: flattens the walked closure into self-contained, relocatable buffers
+    (two-phase per-struct flatten: siblings first, then recurse, to preserve reflexive array
+    stride — same technique as before). Tags with `extractable: false` are excluded and reported
+    in `notExtracted`, never silently included. Throws `AllTagsExcludedError` if that leaves
+    nothing to extract (BSP-only selection) — no file written.
+  - `container.ts`: new `.ocetags` file format (JSON, versioned: magic, `formatVersion`,
+    `sourceMapName`, `createdAt`, `hasUnresolvedBspReferences`, tags + base64 data + deps,
+    `notExtracted`, `warnings`). `deserializeContainer()` rejects wrong magic/version and any
+    container containing an `scenario_structure_bsp` tag (defense in depth for M5's reader).
+  - Tests: `core/tests/tag-extractor.test.ts` — scenario extraction excludes BSP + flags
+    container, BSP-only selection throws, mixed selection extracts rest + reports BSP, clean
+    round-trip through serialize/deserialize, reject-sbsp-container. **45/45 core Vitest pass.**
+- **Electron backend** (`/app/desktop/electron/`):
+  - `worker-manager.ts` (new, replaces `worker-task.ts`): exactly **one** persistent
+    `map-worker.js` Worker thread per app session, started eagerly in `main.ts`'s
+    `app.whenReady()`. Typed request/response protocol in `shared-types.ts`
+    (`WorkerRequest`/`WorkerResponse`), every request has a `requestId`.
+  - `map-worker.ts` (rewritten, stateful): parses the open map **once** on `inspect` and keeps
+    `{buffer, header, tagIndex}` in worker memory — `getDependencies`/`extractTags` reuse it, no
+    re-send/re-clone of the map buffer per call. All `fs` I/O lives here; `/core` stays pure.
+    `extractTags` writes to a temp file then renames into place (cancel/crash/failure leaves no
+    partial file). Cancellation via a polled `AbortController` per requestId. Logs "Worker loaded,
+    definitions loaded (N tag groups, N structs)" on startup (self-check).
+  - `main.ts`: `deps:get` (read-only) and `tags:extract` IPC handlers. `tags:extract` shows the
+    native Save As dialog itself (renderer never supplies a path), refuses the source map path and
+    paths inside the app install dir, confirms before overwriting an existing file, remembers last
+    used directory (`settings.ts`, `userData/settings.json`). All inputs validated; every result is
+    `{ ok, code, message }` shaped.
+  - `preload.ts`: named methods only (`getDependencies`, `extractTags`, `cancelExtraction`,
+    `openContainingFolder`, `getSettings`), no `ipcRenderer` exposed; `contextIsolation: true`,
+    `nodeIntegration: false` (unchanged from M3).
+- **Frontend** (`/app/desktop/src/`):
+  - `components/DependencyDialog.tsx` (new): phases loading → list → extracting → result/error.
+    Summary line, grouped collapsible warnings (`WarningGroup.tsx`: "Not extracted" [blocking],
+    "External data", "Undefined/uncertain groups", "Unresolved references"), searchable
+    virtualized tag list (`VirtualTagList.tsx`, manual windowing, no new dep — verified smooth at
+    2,200+ rows). Confirm button disabled with a stated reason when nothing is extractable
+    (BSP-only, no checkbox) or gated by an "I understand" checkbox when there are warnings.
+    Progress + Cancel during extraction; result view with "Open containing folder"; Escape to
+    close/cancel; focus trap; "Copy warnings" button.
+  - `components/TagBrowser.tsx` (rewritten): controlled `selected: Set<number>` prop, group-header
+    checkbox selects every tag in that group, right-click context menu ("Extract (with
+    dependencies)...", selects the row first if unselected), toolbar Extract button shows count.
+  - `App.tsx`: owns `selectedTagIndices`/`extractSelection` state; one shared `requestExtract()`
+    handler used by the toolbar button, the TagBrowser context menu, the Tools menu
+    ("Extract Tags...", forwarded from Electron's menu via `menu:action`), and a global Ctrl+E
+    listener. Large selections (>200 tags) get a confirm before walking. Dialog auto-closes when
+    the open map changes.
+  - `dev-mock.ts` + `test-fixtures/dependency-fixtures.ts` (new): 9 scenarios via `?mock=<name>`
+    (clean, scenario-bsp, external-data, spheroid, bsp-only, large-list, deps-error, extract-error,
+    slow-progress), shared between the dev preview and the RTL component tests. Only activates via
+    dynamic `import()` gated on `import.meta.env.DEV` + absent `window.opence` — confirmed absent
+    from production `dist`/`dist-electron` bundles (grepped for `installDevMock`,
+    `buildMockSummary`, `parseMockScenario`, `MOCK_SCENARIOS` — none found; only a harmless, always
+    unreachable "MOCK DATA" string literal remains in `App.tsx`, gated by a runtime flag that's
+    never true outside the mock).
+  - Desktop renderer test infra added: `vitest` + `jsdom` + `@testing-library/react` (pinned to
+    versions compatible with Node 20 — see `package.json`/`engines`). 14 RTL tests across
+    `DependencyDialog.test.tsx` and `TagBrowser.test.tsx`, all passing.
+- **Packaging**: `engines.node` set to `>=20 <23` in both `core` and `desktop` `package.json`
+  (Node 22 LTS recommended, Node 26 known to break Electron's binary download per user report).
+  `asarUnpack` added for `@mongodb-js/zstd` native module in `electron-builder` config.
+- **Testing status**: core Vitest 45/45 ✅. Electron + renderer `tsc --noEmit` clean ✅. Desktop
+  Vitest (RTL) 14/14 ✅. `testing_agent` E2E pass over all 9 mock scenarios in the browser preview:
+  100%, 0 console errors, 0 code changes requested (see `/app/test_reports/iteration_5.json`).
+  **NOT YET verified**: real Electron shell with a real map (main process/native dialogs/worker
+  can't run in this headless container) — user said they'll test `extract a vehicle and weapon
+  from bloodgulch.map` themselves on Windows once this is handed off.
 
 ## Known simplifications / backlog (see SOURCES.md for full detail)
 - Composite geometry types (Point3D, Matrix, etc.) decode as plain number arrays, not named
@@ -56,11 +136,9 @@ been started. Waiting for user confirmation before proceeding.
 - `spheroid` tag group is genuinely **uncertain** — no reliable source exists for it anywhere
   (even Reclaimer's own author calls it a guess), and it doesn't appear in either sample map.
 
-## Upcoming (pending user go-ahead)
-- M4: dependency walker + tag extraction, built on top of the definitions layer's
-  `resolveStruct`/`decodeStruct`/TagDependency metadata (already has everything needed: classes
-  list, reflexive child struct names, abstract-class expansions).
-- M5: tag injection/swap (ADD/SWAP modes).
+## Upcoming (pending user go-ahead — M4 UI is done, waiting for user's own Electron/Windows test)
+- Sounds.map resolution (parse external sound pointers before M5) — explicitly deferred by user.
+- M5: tag injection/swap (ADD/SWAP modes), reading the `.ocetags` container from M4.
 - M6: export map + recalc CRC32.
 - M7: field-level tag editor reusing this definition layer (promote any group's field naming from
   "array of numbers" to named sub-fields as needed).
@@ -69,9 +147,12 @@ been started. Waiting for user confirmation before proceeding.
 ## Key files
 - `/app/core/src/map/definitions/engine.ts` — schema engine (load/validate/resolve/decode/encode)
 - `/app/core/src/map/definitions/validate-tag.ts` — real-map validation (round-trip, deps, bounds)
+- `/app/core/src/map/dependency-walker.ts`, `tag-extractor.ts`, `container.ts` — M4 core logic
+- `/app/desktop/electron/worker-manager.ts`, `map-worker.ts`, `main.ts` — M4 persistent worker + IPC
+- `/app/desktop/src/components/DependencyDialog.tsx`, `TagBrowser.tsx` — M4 UI
 - `/app/core/src/map/definitions/SOURCES.md` — provenance table, must stay updated
 - `/app/core/src/map/resource-map.ts` — bitmaps.map/sounds.map/loc.map parser
-- `/app/core/tests/definitions.test.ts` — the validation test suite (34/34 passing)
+- `/app/core/tests/definitions.test.ts`, `tag-extractor.test.ts` — validation suites (45/45 passing)
 - `/app/core/scripts/generate-definitions.mjs` — regenerate `groups/*.json` from a fresh Invader
   clone if definitions ever need updating (`INVADER_DIR=/path/to/invader/.../definition node
   scripts/generate-definitions.mjs`)
