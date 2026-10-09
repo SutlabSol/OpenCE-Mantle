@@ -12,6 +12,13 @@ extraction, M5 tag injection/swap, M6 export + CRC32 recalc. Future: M7 field-le
 Phase 2 3D scenario editor.
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-08: SparkEdit is **out of scope** - continue the current tool. Investigated and rejected
+  (wrong stack, unverified structs, no tests, no injector logic to borrow, unclear license);
+  reference its 3D/BSP rendering techniques only when Phase 2 is built, never its code.
+- 2026-08: Relocation must be map-agnostic - no logic keyed to a specific map name, tag path, or
+  file size (format-level struct-layout constants are fine, see RULES.md). Verified by audit:
+  `tag-injector.ts`/`dependency-walker.ts`/`resource-map.ts` contain zero map-name/path-literal
+  branches outside comments/tests.
 - 2026-08: Standing rules captured in `/app/memory/RULES.md` (work on copies, temp+rename writes,
   SAMPLE_MAPS_DIR helper, Node 22/Yarn 1 only, verified-by-tests/mock-preview/unverified reporting,
   stop-and-ask on ambiguous offset/size/flag, stay inside the named milestone, embedded-data
@@ -186,6 +193,25 @@ by a full M4 **frontend/UI integration** pass (see below), which is now done and
 - M7: field-level tag editor reusing this definition layer (promote any group's field naming from
   "array of numbers" to named sub-fields as needed).
 - Phase 2: 3D scenario editor (three.js viewport, BSP/model rendering, Forge-like placement).
+
+## Relocation verification attempt #2: sidewinder.map (2026-08, read-only)
+User uploaded `sample_maps/sidewinder.map` (real CE 609, 2420 tags, 14.8MB) as a candidate real
+embedded-bitmap example. Ran the SAME generic scanner used on ui.map/bloodgulch.map (no map-name
+or path-specific code - see Decisions above) plus a full scenario-closure dependency walk (1079
+tags walked, 555 external, 2 bspTag, **0 embeddedRawData/uncertainGroup/noDefinition/notExtracted
+warnings**). **Result: 0 embedded bitmap/sound data, same as ui.map and bloodgulch.map.**
+sidewinder is an unmodified stock CE multiplayer map - like bloodgulch, every bitmap/sound it uses
+routes through bitmaps.map/sounds.map. It does not demonstrate embedded data either; still need a
+genuinely custom/modded map (the user's own fighterbomber/banshee/mp_tree_pine_snow maps,
+mentioned in an earlier session, were never supplied). Relocation stays **disabled**, not
+enabled - per explicit instruction, a verification failure/non-finding must not flip it on.
+Additional structural finding re-surfaced from existing SOURCES.md research (not new, but
+material to "must work for ANY map"): the embedded raw-data region's START OFFSET is not stored
+anywhere in a compiled map (confirmed against `invader/src/build/build_workload.cpp` - it's an
+implicit gap computed only at build time) - reconstructing it from a compiled file alone for an
+arbitrary map is a second, independent blocker beyond "no sample found yet" and needs its own
+research before relocation can be enabled even once a real embedded asset is available.
+
 
 ## Investigation: SparkEdit CE (v609) support feasibility (2026-08, read-only, no code changed)
 See chat for full 7-point report. Verdict: **reference only, do not fork/extend SparkEdit.**

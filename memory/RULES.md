@@ -35,3 +35,7 @@
   build commands, exact click-through steps, and what they should see.
 - For map-writing changes, include a self-check the user can run: open a map, save it
   unchanged, and compare bytes against the original, listing every expected difference.
+- No logic keyed to a specific map name, tag path, or file size. Format-level constants
+  (fixed struct-layout byte offsets, sentinel values like 0xFFFFFFFF) are fine - they
+  apply to every v609 map. A check or branch that only fires for one named map/tag or
+  one observed size is not.
