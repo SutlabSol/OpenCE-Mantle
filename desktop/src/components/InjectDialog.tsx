@@ -2,6 +2,7 @@ import { forwardRef, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
 import type { InjectPlanSummary, ApplyInjectResult, InjectionMode } from '../../electron/shared-types';
 import { WarningGroup } from './WarningGroup';
+import { buildInjectWarningReport } from './injectWarningReport';
 
 type Phase = 'choose-mode' | 'picking' | 'planning' | 'plan-error' | 'review' | 'applying' | 'result' | 'apply-error';
 
@@ -206,6 +207,11 @@ export default function InjectDialog({ onClose, log }: Props) {
     );
   }
 
+  const copyWarningReport = () => {
+    if (!plan) return;
+    navigator.clipboard?.writeText(buildInjectWarningReport(plan)).catch(() => {});
+  };
+
   // phase === 'review'
   const hasBlocking = plan.refusedRoots.length > 0;
   const hasMismatch = plan.externalRefStatuses.some((r) => r.status === 'mismatch');
@@ -219,9 +225,14 @@ export default function InjectDialog({ onClose, log }: Props) {
   return (
     <Overlay>
       <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose} wide>
-        <div data-testid="inject-dialog-summary" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12.5, color: 'var(--text-secondary)' }}>
-          From &quot;{plan.sourceMapName}&quot; ({plan.mode === 'swap' ? 'swap mode' : 'add mode'}): {plan.counts.added} to add, {plan.counts.swapped} to swap, {plan.counts.reused} reused,{' '}
-          {plan.counts.blockedEmbedded + plan.counts.blockedOther} blocked
+        <div data-testid="inject-dialog-summary" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12.5, color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+          <span>
+            From &quot;{plan.sourceMapName}&quot; ({plan.mode === 'swap' ? 'swap mode' : 'add mode'}): {plan.counts.added} to add, {plan.counts.swapped} to swap, {plan.counts.reused} reused,{' '}
+            {plan.counts.blockedEmbedded + plan.counts.blockedOther} blocked
+          </span>
+          <button data-testid="inject-copy-warning-report-button" onClick={copyWarningReport} style={{ ...buttonStyle(), flexShrink: 0 }}>
+            Copy warning report
+          </button>
         </div>
 
         <div style={{ padding: '10px 16px', maxHeight: 420, overflowY: 'auto' }}>

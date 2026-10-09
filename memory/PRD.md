@@ -187,6 +187,28 @@ by a full M4 **frontend/UI integration** pass (see below), which is now done and
   "array of numbers" to named sub-fields as needed).
 - Phase 2: 3D scenario editor (three.js viewport, BSP/model rendering, Forge-like placement).
 
+## Investigation: SparkEdit CE (v609) support feasibility (2026-08, read-only, no code changed)
+See chat for full 7-point report. Verdict: **reference only, do not fork/extend SparkEdit.**
+Reasons: C++/MFC/legacy-OpenGL stack (wrong language for this Electron+TS project), struct
+knowledge is hand-reversed/unverified (vs our Invader-cited SOURCES.md), zero automated tests,
+legacy VC6/VC7 toolchain, no cross-map tag-injection code to borrow at all (its "import" feature
+only registers tags already embedded in the loaded map into the scenario palette - not a byte-
+level injector like our M5), and unclear license (no LICENSE file in the HaloMods repo itself).
+Its one genuine strength - a complete 3D BSP/model viewport + Forge-style scenario editor (frustum
+culling, lightmap-as-second-texture-unit, per-model LOD distance cutoffs, OBJ export) - should be
+mined as a **design reference only** when Phase 2 (three.js scenario editor) is built on our own
+core, not reused as code.
+
+## Small: "Copy warning report" button in InjectDialog (done 2026-08)
+New pure function `buildInjectWarningReport(plan)` (`src/components/injectWarningReport.ts`)
+formats refusedRoots/blockedEmbedded/blockedOther/externalRefStatuses as path+category+reason
+text lines; wired to a button next to the review-phase summary line
+(`inject-copy-warning-report-button`), copies via `navigator.clipboard` (same pattern as
+`DependencyDialog`'s existing "Copy warnings" button). Targeted Vitest only, per user instruction
+(3/3 pass, `src/components/__tests__/injectWarningReport.test.ts`) - no testing_agent/screenshot
+used this session (new standing rule in RULES.md).
+
+
 ## M5 Step B: SWAP-mode tag injection (done 2026-08, this session)
 
 Before any code, user required an exhaustive real-byte search of ui.map/bloodgulch.map for

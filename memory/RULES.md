@@ -30,3 +30,8 @@
   unverified, and exact Windows and OpenCE test steps. No file-by-file narration.
 - Run targeted tests for the area changed. Run the full suite and screenshots only at
   the end of a milestone step.
+- Do not run the testing agent, screenshot tool, or full-stack tests unless the user asks.
+- The user builds and tests on Windows each iteration. Every handoff must give: exact
+  build commands, exact click-through steps, and what they should see.
+- For map-writing changes, include a self-check the user can run: open a map, save it
+  unchanged, and compare bytes against the original, listing every expected difference.
