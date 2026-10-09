@@ -603,10 +603,16 @@ Each changes for the SAME reason here (the embedded-byte insertion) — tag-ARRA
 pre-existing, separately-tested M5 mechanism) additionally shifts the struct/path-data append
 position, but doesn't touch these 4 fields differently than it already did before this session.
 
-**Alignment**: inserted blob is zero-padded to a 4-byte boundary (matches Invader's
-`REQUIRED_PADDING_32_BIT` convention) — but this is NOT a confirmed hard requirement: real
-coldsnap.map's own `tagDataOffset`/`modelDataFileOffset` are themselves not 4-aligned (both ≡ 2
-mod 4). The padding is harmless and preserves whatever alignment the source already had.
+**Alignment — SETTLED this session** (`scripts/check-alignment.ts`, read-only, run against all 5
+sample maps, see handoff for the full table): only `coldsnap.map` breaks 4-byte alignment on
+`modelDataFileOffset`/`tagDataOffset` (both ≡ 2 mod 4); the other 4 maps (bloodgulch, ui,
+sidewinder, Yoyorast_Island) are both 4-aligned. **No map is 16-byte aligned on both fields** (at
+least one of the two breaks it in every single map). Decision: **preserve the target's own
+alignment, never force 4-byte or 16-byte** - confirmed as the only safe rule across real maps, not
+just the one coldsnap sample. This matches what `applyInjection` already does (it pads the
+INSERTED blob to a 4-byte boundary relative to itself, which shifts both fields by a multiple of
+4 and therefore preserves whatever mod-4/mod-16 remainder the target already had) - no code change
+needed, the existing implementation was already correct, now confirmed by 5 maps instead of 1.
 
 **CRC/checksums**: stale after this write, same as the pre-existing tag-array-growth code already
 flags — tracked P0 above, M6 work, not done here.
