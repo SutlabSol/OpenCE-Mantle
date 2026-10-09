@@ -4,12 +4,18 @@
   "private": true,
   "description": "OpenCE Modding Tool - GUI desktop app for modding Halo: Custom Edition (PC) maps.",
   "main": "dist-electron/main.js",
+  "engines": {
+    "node": ">=20 <23"
+  },
   "scripts": {
     "dev:renderer": "vite",
     "dev:electron": "node esbuild.electron.mjs && electron dist-electron/main.js",
     "build:renderer": "vite build",
     "build:electron": "node esbuild.electron.mjs",
     "typecheck:electron": "tsc --noEmit -p electron/tsconfig.json",
+    "typecheck:renderer": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "yarn typecheck:electron && yarn typecheck:renderer",
+    "test": "vitest run",
     "build": "yarn build:renderer && yarn build:electron",
     "dist:win": "yarn build && electron-builder --win portable nsis",
     "dist:win:portable": "yarn build && electron-builder --win portable"
@@ -21,25 +27,47 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@testing-library/dom": "10",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16",
+    "@testing-library/user-event": "14",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.24.0",
+    "jsdom": "24",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vitest": "2.1.9"
   },
   "build": {
     "appId": "com.opence.moddingtool",
     "productName": "OpenCE Modding Tool",
-    "directories": { "output": "release" },
-    "files": ["dist/**/*", "dist-electron/**/*", "package.json", "!electron/**/*", "!src/**/*"],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "!electron/**/*",
+      "!src/**/*"
+    ],
+    "asarUnpack": [
+      "**/node_modules/@mongodb-js/zstd/**"
+    ],
     "win": {
-      "target": ["portable", "nsis"]
+      "target": [
+        "portable",
+        "nsis"
+      ]
     },
     "linux": {
-      "target": ["AppImage"]
+      "target": [
+        "AppImage"
+      ]
     }
   }
 }

@@ -11,3 +11,6 @@ export * from './map/definitions/types';
 export * from './map/definitions/basic-types';
 export * from './map/definitions/engine';
 export * from './map/definitions/validate-tag';
+export * from './map/dependency-walker';
+export * from './map/tag-extractor';
+export * from './map/container';

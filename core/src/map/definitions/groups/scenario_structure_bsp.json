@@ -1731,6 +1731,8 @@
       }
     ],
     "tagClass": "scenario_structure_bsp",
+    "extractable": false,
+    "notExtractableReason": "scenario_structure_bsp tags live in a separate memory region addressed via the owning Scenario's BSP location info (bsp_start/bsp_address, see SOURCES.md \"Key finding\"), not yet carried into the extractor's relocatable container format.",
     "sizeBytes": 648
   },
   {

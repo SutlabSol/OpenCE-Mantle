@@ -1,10 +1,16 @@
-import type { LoadMapResult, OpenceApi, ProgressEvent, LogEvent } from '../electron/shared-types';
+import type { LoadMapResult, OpenceApi, ProgressEvent, LogEvent, GetDependenciesResult, ExtractTagsRequest, ExtractTagsResult, AppSettings } from '../electron/shared-types';
+import { parseMockScenario, buildMockSummary } from './test-fixtures/dependency-fixtures';
 
 /**
  * Dev-only mock of window.opence, used when previewing the renderer in a plain browser
- * (no Electron main/preload present). Mirrors real inspectCustomEditionMap() output shape
- * for bloodgulch.map so the UI can be visually verified without the full desktop shell.
- * Never used in the packaged app (main.ts/preload.ts always provide the real API there).
+ * (no Electron main/preload present). Mirrors real inspectCustomEditionMap()/getDependencies()/
+ * extractTags() output shapes so the UI - including the M4 DependencyDialog - can be visually
+ * verified without the full desktop shell. Never used in the packaged app (main.ts/preload.ts
+ * always provide the real API there); only loaded via a dynamic import gated on DEV in main.tsx,
+ * so production bundles never include this file or its fixtures.
+ *
+ * Scenario selectable via `?mock=<name>` (see MOCK_SCENARIOS in test-fixtures/dependency-fixtures.ts):
+ * clean, scenario-bsp, external-data, spheroid, bsp-only, large-list, deps-error, extract-error, slow-progress.
  */
 const sampleTags = [
   { index: 0, tagId: 0xe1740000, primaryClassName: 'scenario', path: 'levels\\test\\bloodgulch\\bloodgulch', isExternal: false, estimatedSize: 215040 },
@@ -40,9 +46,12 @@ function mockLoadResult(filePath: string): LoadMapResult {
 
 export function installDevMock() {
   if (window.opence) return;
+  (window as unknown as { __OPENCE_MOCK__: boolean }).__OPENCE_MOCK__ = true;
 
+  const scenario = parseMockScenario(window.location.search);
   const progressListeners = new Set<(e: ProgressEvent) => void>();
   const logListeners = new Set<(e: LogEvent) => void>();
+  let extractCancelled = false;
 
   const fakeProgress = async (taskId: string) => {
     for (const [stage, percent] of [['Reading file', 10], ['Processing', 50], ['Writing file', 85], ['Done', 100]] as const) {
@@ -62,6 +71,43 @@ export function installDevMock() {
       await fakeProgress('compress');
       return { outputPath: filePath.replace('.map', '_compressed.map'), originalSize: 13_936_092, newSize: 4_100_000 };
     },
+    getDependencies: async (originalIndices): Promise<GetDependenciesResult> => {
+      logListeners.forEach((cb) => cb({ level: 'info', message: `Extract requested: ${originalIndices.length} tag(s) selected.`, timestamp: Date.now() }));
+      for (const [stage, percent] of [['Walking dependencies', 40], ['Done', 100]] as const) {
+        await new Promise((r) => setTimeout(r, 150));
+        progressListeners.forEach((cb) => cb({ taskId: 'getDependencies', stage, percent }));
+      }
+      if (scenario === 'deps-error') return { ok: false, code: 'UNEXPECTED_ERROR', message: 'Simulated dependency walk failure for testing (?mock=deps-error).' };
+      return { ok: true, summary: buildMockSummary(scenario) };
+    },
+    extractTags: async (request: ExtractTagsRequest): Promise<ExtractTagsResult> => {
+      extractCancelled = false;
+      const summary = buildMockSummary(scenario);
+      if (summary.allExcluded) return { ok: false, code: 'BSP_ONLY_SELECTION', message: 'Nothing in this selection can be extracted yet (only scenario_structure_bsp tags).' };
+
+      const ticks = scenario === 'slow-progress' ? 10 : 3;
+      for (let i = 0; i < ticks; i++) {
+        if (extractCancelled) {
+          progressListeners.forEach((cb) => cb({ taskId: 'extract', stage: 'Cancelled', percent: 0 }));
+          return { ok: false, code: 'CANCELLED', message: 'Extraction was cancelled.' };
+        }
+        await new Promise((r) => setTimeout(r, scenario === 'slow-progress' ? 250 : 120));
+        const percent = Math.round(((i + 1) / ticks) * 100);
+        progressListeners.forEach((cb) => cb({ taskId: 'extract', stage: `Extracting tag ${i + 1} of ${ticks}`, percent }));
+      }
+      if (scenario === 'extract-error') return { ok: false, code: 'UNEXPECTED_ERROR', message: 'Simulated extraction failure for testing (?mock=extract-error).' };
+
+      const outputPath = `C:\\Users\\Dev\\Documents\\${request.suggestedFileName}.ocetags`;
+      logListeners.forEach((cb) => cb({ level: 'info', message: `Extracted ${summary.extractableTags.length} tag(s) to ${outputPath}`, timestamp: Date.now() }));
+      return { ok: true, outputPath, tagCount: summary.extractableTags.length, fileSizeBytes: 182_300, carriedOverWarnings: summary.warnings };
+    },
+    cancelExtraction: () => {
+      extractCancelled = true;
+    },
+    openContainingFolder: async (filePath: string) => {
+      logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) Would open containing folder for ${filePath}`, timestamp: Date.now() }));
+    },
+    getSettings: async (): Promise<AppSettings> => ({ lastExtractDir: null }),
     notImplemented: (feature) => logListeners.forEach((cb) => cb({ level: 'warn', message: `${feature} not implemented yet`, timestamp: Date.now() })),
     showAbout: async () => logListeners.forEach((cb) => cb({ level: 'info', message: 'About OpenCE Modding Tool v0.1.0-dev', timestamp: Date.now() })),
     getAppVersion: async () => '0.1.0-dev',
@@ -76,7 +122,7 @@ export function installDevMock() {
     },
     onMenuAction: () => () => {},
     onMapLoaded: () => () => {},
-    getPathForFile: (file) => (file as any).path ?? file.name,
+    getPathForFile: (file) => (file as unknown as { path?: string }).path ?? file.name,
   };
 
   window.opence = mock;

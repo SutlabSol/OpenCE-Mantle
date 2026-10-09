@@ -1,5 +1,5 @@
 import { fourCCToString } from '../../constants/tag-classes';
-import { resolveStruct, decodeStruct, encodeStruct } from './engine';
+import { resolveStruct, decodeStruct, encodeStruct, resolvePointer } from './engine';
 import type { DecodedFieldValue } from './engine';
 import type { TagIndex } from '../tag-index';
 
@@ -182,7 +182,7 @@ export function validateStructInstance(
       const childStructName = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
-      const childBaseOffset = fileOffsetAnchor + (pointerLow - baseMemoryAddress);
+      const childBaseOffset = resolvePointer(pointerLow, fileOffsetAnchor, baseMemoryAddress);
 
       if (childBaseOffset < 0 || childBaseOffset + count * childSize > buffer.length) {
         errors.push(

@@ -54,6 +54,10 @@ export interface DefinitionValueField {
   nonCached?: boolean;
   /** Cache-only: only meaningful in a compiled cache map, not in a HEK .tag file. Space is still reserved. */
   cacheOnly?: boolean;
+  /** Only present when type === "TagDataOffset": the offset is a direct absolute file offset within this map. */
+  fileOffset?: boolean;
+  /** Only present when type === "TagDataOffset": this data lives in an external resource map (e.g. "sounds.map") when this instance is marked external, not inline in this file. */
+  externalFileOffset?: string;
   comment?: string;
 }
 
@@ -68,6 +72,14 @@ export interface DefinitionStruct {
   tagClass?: string;
   /** Declared total size in bytes, used as a ground-truth check against the computed layout. */
   sizeBytes?: number;
+  /**
+   * False if this tag group's data cannot be safely extracted yet (e.g. `scenario_structure_bsp`
+   * lives in a separate memory region not yet carried by the extractor). Defaults to extractable
+   * (true) when omitted. Checked generically by `tag-extractor.ts` - no hardcoded group names.
+   */
+  extractable?: boolean;
+  /** Required when `extractable === false`: user-facing reason shown in logs/dependency dialog. */
+  notExtractableReason?: string;
   fields: DefinitionField[];
 }
 

@@ -1,10 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TagEntrySummary } from '../../electron/shared-types';
 
 interface Props {
   tags: TagEntrySummary[];
   onFocusTag: (tag: TagEntrySummary) => void;
-  onNotImplemented: (feature: string) => void;
+  selected: Set<number>;
+  onSelectedChange: (next: Set<number>) => void;
+  onExtractRequested: (indices: number[]) => void;
+  /** null = enabled; otherwise the tooltip/disabled reason shown on the Extract button/menu item. */
+  extractDisabledReason: string | null;
 }
 
 type GroupMode = 'class' | 'folder';
@@ -24,12 +28,23 @@ function slugify(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group';
 }
 
-export default function TagBrowser({ tags, onFocusTag, onNotImplemented }: Props) {
+export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChange, onExtractRequested, extractDisabledReason }: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
-  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [closedGroups, setClosedGroups] = useState<Set<string>>(() => new Set());
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; index: number } | null>(null);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener('click', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [contextMenu]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -49,31 +64,47 @@ export default function TagBrowser({ tags, onFocusTag, onNotImplemented }: Props
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [filtered, groupMode]);
 
-  const effectiveOpen = search.trim() ? new Set(groups.map(([key]) => key)) : openGroups;
+  // Groups start expanded (matches the earlier "always browsable" behaviour); users collapse ones they don't need.
+  const effectiveOpen = (key: string) => (search.trim() ? true : !closedGroups.has(key));
 
   const toggleGroup = (key: string) => {
-    const next = new Set(openGroups);
-    if (next.has(key)) {
-      next.delete(key);
-    } else {
-      next.add(key);
-    }
-    setOpenGroups(next);
+    const next = new Set(closedGroups);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setClosedGroups(next);
   };
 
   const toggleSelect = (index: number) => {
     const next = new Set(selected);
-    if (next.has(index)) {
-      next.delete(index);
-    } else {
-      next.add(index);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    onSelectedChange(next);
+  };
+
+  const toggleGroupSelect = (items: TagEntrySummary[]) => {
+    const allSelected = items.every((t) => selected.has(t.index));
+    const next = new Set(selected);
+    for (const t of items) {
+      if (allSelected) next.delete(t.index);
+      else next.add(t.index);
     }
-    setSelected(next);
+    onSelectedChange(next);
   };
 
   const focusRow = (t: TagEntrySummary) => {
     setFocusedIndex(t.index);
     onFocusTag(t);
+  };
+
+  const handleRowContextMenu = (e: React.MouseEvent, t: TagEntrySummary) => {
+    e.preventDefault();
+    if (!selected.has(t.index)) onSelectedChange(new Set([t.index]));
+    setContextMenu({ x: e.clientX, y: e.clientY, index: t.index });
+  };
+
+  const requestExtract = () => {
+    if (selected.size === 0) return;
+    onExtractRequested(Array.from(selected));
   };
 
   return (
@@ -101,11 +132,12 @@ export default function TagBrowser({ tags, onFocusTag, onNotImplemented }: Props
           </select>
           <button
             data-testid="extract-selected-button"
-            disabled={selected.size === 0}
-            onClick={() => onNotImplemented('Extract Tags')}
+            disabled={selected.size === 0 || !!extractDisabledReason}
+            title={extractDisabledReason ?? undefined}
+            onClick={requestExtract}
             style={{
-              background: selected.size ? 'var(--accent-cyan)' : 'var(--bg-panel-header)',
-              color: selected.size ? '#06202c' : 'var(--text-dim)',
+              background: selected.size && !extractDisabledReason ? 'var(--accent-cyan)' : 'var(--bg-panel-header)',
+              color: selected.size && !extractDisabledReason ? '#06202c' : 'var(--text-dim)',
               border: '1px solid var(--border)',
               borderRadius: 2,
               padding: '5px 10px',
@@ -120,7 +152,8 @@ export default function TagBrowser({ tags, onFocusTag, onNotImplemented }: Props
 
       <div style={{ flex: 1, overflowY: 'auto' }} data-testid="tag-browser-list">
         {groups.map(([key, items]) => {
-          const isOpen = effectiveOpen.has(key);
+          const isOpen = effectiveOpen(key);
+          const allSelected = items.length > 0 && items.every((t) => selected.has(t.index));
           return (
             <div key={key}>
               <div
@@ -139,6 +172,14 @@ export default function TagBrowser({ tags, onFocusTag, onNotImplemented }: Props
                   borderBottom: '1px solid var(--border)',
                 }}
               >
+                <input
+                  data-testid={`tag-group-select-${slugify(key)}`}
+                  type="checkbox"
+                  title={`Select all tags under "${key}"`}
+                  checked={allSelected}
+                  onChange={() => toggleGroupSelect(items)}
+                  onClick={(e) => e.stopPropagation()}
+                />
                 <span style={{ fontSize: 10 }}>{isOpen ? '▾' : '▸'}</span>
                 <span>{key}</span>
                 <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>({items.length})</span>
@@ -149,6 +190,7 @@ export default function TagBrowser({ tags, onFocusTag, onNotImplemented }: Props
                     key={t.index}
                     data-testid={`tag-row-${t.index}`}
                     onClick={() => focusRow(t)}
+                    onContextMenu={(e) => handleRowContextMenu(e, t)}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
@@ -173,6 +215,45 @@ export default function TagBrowser({ tags, onFocusTag, onNotImplemented }: Props
           );
         })}
       </div>
+
+      {contextMenu && (
+        <div
+          data-testid="tag-row-context-menu"
+          style={{
+            position: 'fixed',
+            top: contextMenu.y,
+            left: contextMenu.x,
+            background: 'var(--bg-panel)',
+            border: '1px solid var(--border)',
+            boxShadow: '2px 4px 10px rgba(0,0,0,0.5)',
+            zIndex: 200,
+            minWidth: 220,
+          }}
+        >
+          <button
+            data-testid="tag-row-context-extract"
+            disabled={!!extractDisabledReason}
+            title={extractDisabledReason ?? undefined}
+            onClick={() => {
+              setContextMenu(null);
+              requestExtract();
+            }}
+            style={{
+              display: 'block',
+              width: '100%',
+              textAlign: 'left',
+              background: 'transparent',
+              border: 'none',
+              padding: '7px 14px',
+              color: extractDisabledReason ? 'var(--text-dim)' : 'var(--text-primary)',
+              fontSize: 12.5,
+              cursor: extractDisabledReason ? 'default' : 'pointer',
+            }}
+          >
+            Extract (with dependencies)...
+          </button>
+        </div>
+      )}
     </div>
   );
 }

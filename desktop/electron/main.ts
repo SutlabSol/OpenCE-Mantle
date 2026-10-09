@@ -1,13 +1,17 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import { OCETAGS_EXTENSION } from '../../core/src/index';
 import { getRecentMaps, addRecentMap } from './recent-maps';
-import { runMapWorkerTask } from './worker-task';
-import type { LoadMapResult, CompressionResult, LogEvent } from './shared-types';
+import { getSettings, setLastExtractDir } from './settings';
+import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
+import type { LoadMapResult, CompressionResult, LogEvent, GetDependenciesResult, ExtractTagsRequest, ExtractTagsResult } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
 let currentMapPath: string | null = null;
 let currentMapCompressed = false;
+let currentMapScenarioName: string | null = null;
+let currentExtractRequestId: string | null = null;
 
 const isDev = !app.isPackaged;
 
@@ -42,24 +46,28 @@ function createWindow() {
 async function loadMapAtPath(filePath: string): Promise<LoadMapResult> {
   sendLog('info', `Opening ${filePath}`);
   try {
-    const result = await runMapWorkerTask<LoadMapResult>({ type: 'inspect', filePath }, (stage, percent) => {
+    const { promise } = sendWorkerRequest<LoadMapResult>({ type: 'inspect', filePath }, sendLog, (stage, percent) => {
       mainWindow?.webContents.send('map:progress', { taskId: 'load', stage, percent });
     });
+    const result = await promise;
 
     if (result.status === 'ok') {
       currentMapPath = filePath;
       currentMapCompressed = false;
+      currentMapScenarioName = result.header.scenarioName;
       addRecentMap(filePath);
       buildMenu();
       sendLog('info', `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
     } else if (result.status === 'compressed') {
       currentMapPath = filePath;
       currentMapCompressed = true;
+      currentMapScenarioName = null;
       addRecentMap(filePath);
       buildMenu();
       sendLog('warn', 'This map is compressed - decompress it to browse tags.');
     } else if (result.status === 'unsupported') {
       currentMapPath = null;
+      currentMapScenarioName = null;
       sendLog('error', result.message);
     }
     return result;
@@ -93,10 +101,12 @@ async function decompressFlow() {
   if (canceled || !filePath) return null;
 
   sendLog('info', `Decompressing ${currentMapPath} -> ${filePath}`);
-  const result = await runMapWorkerTask<CompressionResult>(
+  const { promise } = sendWorkerRequest<CompressionResult>(
     { type: 'decompress', filePath: currentMapPath, outputPath: filePath },
+    sendLog,
     (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'decompress', stage, percent }),
   );
+  const result = await promise;
   sendLog('info', `Decompressed: ${result.originalSize} -> ${result.newSize} bytes`);
   return result;
 }
@@ -112,12 +122,114 @@ async function recompressFlow() {
   if (canceled || !filePath) return null;
 
   sendLog('info', `Compressing ${currentMapPath} -> ${filePath}`);
-  const result = await runMapWorkerTask<CompressionResult>(
+  const { promise } = sendWorkerRequest<CompressionResult>(
     { type: 'compress', filePath: currentMapPath, outputPath: filePath },
+    sendLog,
     (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'compress', stage, percent }),
   );
+  const result = await promise;
   sendLog('info', `Compressed: ${result.originalSize} -> ${result.newSize} bytes`);
   return result;
+}
+
+/** Read-only: walks dependencies for the dependency dialog. Never touches disk beyond the already-open map. */
+async function getDependenciesFlow(originalIndices: unknown): Promise<GetDependenciesResult> {
+  if (!Array.isArray(originalIndices) || originalIndices.length === 0 || !originalIndices.every((n) => Number.isInteger(n) && n >= 0)) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'No valid tags were selected.' };
+  }
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress a map before extracting tags.' };
+  }
+  sendLog('info', `Extract requested: ${originalIndices.length} tag(s) selected.`);
+  const { promise } = sendWorkerRequest<GetDependenciesResult>({ type: 'getDependencies', originalIndices }, sendLog, (stage, percent) =>
+    mainWindow?.webContents.send('map:progress', { taskId: 'getDependencies', stage, percent }),
+  );
+  try {
+    return await promise;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Dependency walk failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+/**
+ * Shows the native Save As dialog (never takes a path from the renderer), validates it, confirms
+ * overwrite, then has the worker extract + write a single `.ocetags` container (temp-file-then-
+ * rename, so a cancel/crash/failure never leaves a partial file at the destination).
+ */
+async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTagsResult> {
+  if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
+  if (!request || !Array.isArray(request.originalIndices) || request.originalIndices.length === 0 || !request.originalIndices.every((n) => Number.isInteger(n) && n >= 0)) {
+    return { ok: false, code: 'INVALID_INPUT', message: 'No valid tags were selected.' };
+  }
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress a map before extracting tags.' };
+  }
+
+  const settings = getSettings();
+  const defaultDir = settings.lastExtractDir && fs.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : app.getPath('documents');
+  const safeName = String(request.suggestedFileName || 'extracted_tags').replace(/[<>:"/\\|?*]/g, '_') || 'extracted_tags';
+  const defaultPath = path.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
+
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Extract tags to...',
+    defaultPath,
+    filters: [{ name: 'OpenCE Tag Set', extensions: ['ocetags'] }],
+  });
+  if (canceled || !filePath) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+
+  const resolvedTarget = path.resolve(filePath);
+  const resolvedSourceMap = path.resolve(currentMapPath);
+  const resolvedAppDir = path.resolve(app.getAppPath());
+  if (resolvedTarget === resolvedSourceMap) {
+    return { ok: false, code: 'REFUSED_SOURCE_PATH', message: 'You cannot overwrite the source map file. Choose a different location.' };
+  }
+  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path.sep)) {
+    return { ok: false, code: 'REFUSED_APP_PATH', message: 'You cannot save inside the application install directory. Choose a different location.' };
+  }
+
+  if (fs.existsSync(resolvedTarget)) {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Overwrite', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      message: `"${path.basename(resolvedTarget)}" already exists.`,
+      detail: 'Do you want to overwrite it?',
+    });
+    if (response !== 0) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+  }
+
+  setLastExtractDir(path.dirname(resolvedTarget));
+  sendLog('info', `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
+
+  const { requestId, promise } = sendWorkerRequest<ExtractTagsResult>(
+    {
+      type: 'extractTags',
+      originalIndices: request.originalIndices,
+      outputPath: resolvedTarget,
+      sourceMapName: currentMapScenarioName ?? path.basename(currentMapPath, '.map'),
+    },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'extract', stage, percent }),
+  );
+  currentExtractRequestId = requestId;
+  try {
+    const payload = await promise;
+    if (payload.ok) sendLog('info', `Extracted ${payload.tagCount} tag(s) to ${payload.outputPath}`);
+    return payload;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    if (e.code === 'CANCELLED') {
+      sendLog('warn', 'Extraction cancelled - no file was written.');
+      return { ok: false, code: 'CANCELLED', message: 'Extraction was cancelled.' };
+    }
+    sendLog('error', `Extraction failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  } finally {
+    currentExtractRequestId = null;
+  }
 }
 
 function showAboutDialog() {
@@ -159,7 +271,7 @@ function buildMenu() {
         { label: 'Decompress Map', click: () => decompressFlow() },
         { label: 'Recompress Map', click: () => recompressFlow() },
         { type: 'separator' },
-        { label: 'Extract Tags...', click: () => mainWindow?.webContents.send('menu:action', 'extract-stub') },
+        { label: 'Extract Tags...', accelerator: 'CmdOrCtrl+E', click: () => mainWindow?.webContents.send('menu:action', 'extract-tags') },
         { label: 'Inject Tags...', click: () => mainWindow?.webContents.send('menu:action', 'inject-stub') },
       ],
     },
@@ -181,6 +293,9 @@ function buildMenu() {
 }
 
 app.whenReady().then(() => {
+  // Started eagerly so the "worker loaded, definitions loaded" self-check is visible at launch.
+  startWorker(sendLog);
+
   ipcMain.handle('dialog:openMap', async () => {
     if (!mainWindow) return null;
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -195,6 +310,15 @@ app.whenReady().then(() => {
   ipcMain.handle('map:load', (_e, filePath: string) => loadMapAtPath(filePath));
   ipcMain.handle('map:decompress', () => decompressFlow());
   ipcMain.handle('map:recompress', () => recompressFlow());
+  ipcMain.handle('deps:get', (_e, originalIndices: unknown) => getDependenciesFlow(originalIndices));
+  ipcMain.handle('tags:extract', (_e, request: ExtractTagsRequest) => extractTagsFlow(request));
+  ipcMain.on('tags:cancelExtract', () => {
+    if (currentExtractRequestId) cancelWorkerRequest(currentExtractRequestId, sendLog);
+  });
+  ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
+    if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
+  });
+  ipcMain.handle('app:getSettings', () => getSettings());
   ipcMain.handle('app:version', () => app.getVersion());
   ipcMain.handle('app:recentMaps', () => getRecentMaps());
   ipcMain.on('app:notImplemented', (_e, feature: string) => sendLog('warn', `${feature} is not implemented yet (coming in a later milestone).`));

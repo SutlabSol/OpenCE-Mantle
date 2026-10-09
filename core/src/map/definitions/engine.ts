@@ -48,6 +48,9 @@ export interface ResolvedStruct {
   totalSize: number;
   /** Non-pad fields only, in physical order, with absolute offsets from the struct's base. */
   fields: ResolvedField[];
+  /** False if this tag group is not extractable yet (see `DefinitionStruct.extractable`). Undefined/true = extractable. */
+  extractable?: boolean;
+  notExtractableReason?: string;
 }
 
 export type DecodedFieldValue =
@@ -168,14 +171,36 @@ export function resolveStruct(name: string, _visiting: Set<string> = new Set()):
     );
   }
 
-  const resolved: ResolvedStruct = { name, tagClass: def.tagClass, totalSize, fields };
+  const resolved: ResolvedStruct = {
+    name,
+    tagClass: def.tagClass,
+    totalSize,
+    fields,
+    extractable: def.extractable,
+    notExtractableReason: def.notExtractableReason,
+  };
   structResolutionCache.set(name, resolved);
   _visiting.delete(name);
   return resolved;
 }
 
+/**
+ * Converts a virtual-address pointer found inside a tag struct to an absolute file offset:
+ * `fileOffsetAnchor + (pointer - baseMemoryAddress)`. For a normal tag `fileOffsetAnchor` is
+ * `header.tagDataOffset`; for a `scenario_structure_bsp` tag it is that BSP's own `bsp_start`
+ * (see `dependency-walker.ts` / `validate-tag.ts` `locateStructureBsp`). Invader's tag.cpp uses
+ * this exact two-anchor formula (`base_struct_offset`/`base_struct_pointer`).
+ */
+export function resolvePointer(pointer: number, fileOffsetAnchor: number, baseMemoryAddress: number): number {
+  return fileOffsetAnchor + (pointer - baseMemoryAddress);
+}
+
 export function getAllTagGroupNames(): string[] {
   return Array.from(tagGroupNameToStructName.keys());
+}
+
+export function getBitfieldDefinition(name: string): DefinitionBitfield | undefined {
+  return bitfields.get(name);
 }
 
 export function getGroupStructName(tagGroupName: string): string | null {

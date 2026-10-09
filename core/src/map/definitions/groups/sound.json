@@ -158,7 +158,9 @@
         "kind": "field",
         "name": "samples",
         "type": "TagDataOffset",
-        "maximum": 4194304
+        "maximum": 4194304,
+        "fileOffset": true,
+        "externalFileOffset": "sounds.map"
       },
       {
         "kind": "field",

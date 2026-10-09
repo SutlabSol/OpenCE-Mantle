@@ -25,6 +25,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 // electron/map-worker.ts
 var import_worker_threads = require("worker_threads");
 var fs = __toESM(require("fs"));
+var import_crypto = require("crypto");
 
 // ../core/src/constants/cache-file.ts
 var CHIMERA_COMPRESSED_ENGINE_MASK = 2249850880;
@@ -166,6 +167,12 @@ var NotCompressedMapError = class extends Error {
   constructor() {
     super("This map is not compressed; there is nothing to decompress.");
     this.name = "NotCompressedMapError";
+  }
+};
+var OperationCancelledError = class extends Error {
+  constructor() {
+    super("Operation was cancelled.");
+    this.name = "OperationCancelledError";
   }
 };
 
@@ -353,6 +360,47 @@ async function decompressCustomEditionMap(buffer) {
   decompressedBody.copy(output, CACHE_FILE_HEADER_SIZE);
   return output;
 }
+
+// ../core/src/map/definitions/basic-types.ts
+var BASIC_TYPE_SIZES = {
+  int8: 1,
+  uint8: 1,
+  int16: 2,
+  uint16: 2,
+  Index: 2,
+  int32: 4,
+  uint32: 4,
+  float: 4,
+  Angle: 4,
+  Fraction: 4,
+  Pointer: 4,
+  TagFourCC: 4,
+  TagID: 4,
+  TagString: 32,
+  Point2D: 8,
+  Point2DInt: 4,
+  Point3D: 12,
+  Vector2D: 8,
+  Vector3D: 12,
+  Plane2D: 12,
+  Plane3D: 16,
+  Euler2D: 8,
+  Euler3D: 12,
+  Quaternion: 16,
+  Matrix: 36,
+  ColorRGB: 12,
+  ColorARGB: 16,
+  ColorARGBInt: 4,
+  Rectangle2D: 8,
+  /** `TagDependency<EndianType>`: fourcc(4) + path_pointer(4) + path_size(4) + tag_id(4). */
+  TagDependency: 16,
+  /** `TagReflexive<...>` block header: count(4) + pointer(8, zero/unused on disk). */
+  TagReflexive: 12,
+  /** `TagDataOffset<EndianType>`: size(4) + external/flags(4) + file_offset(4) + pointer(8). */
+  TagDataOffset: 20,
+  /** `ScenarioScriptNodeValue` union (bool/short/long/float/TagID share one 4-byte slot). */
+  ScenarioScriptNodeValue: 4
+};
 
 // ../core/src/map/definitions/groups/actor.json
 var actor_default = [
@@ -24038,6 +24086,8 @@ var scenario_structure_bsp_default = [
       }
     ],
     tagClass: "scenario_structure_bsp",
+    extractable: false,
+    notExtractableReason: `scenario_structure_bsp tags live in a separate memory region addressed via the owning Scenario's BSP location info (bsp_start/bsp_address, see SOURCES.md "Key finding"), not yet carried into the extractor's relocatable container format.`,
     sizeBytes: 648
   },
   {
@@ -27085,7 +27135,9 @@ var sound_default = [
         kind: "field",
         name: "samples",
         type: "TagDataOffset",
-        maximum: 4194304
+        maximum: 4194304,
+        fileOffset: true,
+        externalFileOffset: "sounds.map"
       },
       {
         kind: "field",
@@ -33796,6 +33848,96 @@ var ALL_DEFINITION_FILES = [
   wind_default
 ];
 
+// ../core/src/map/definitions/codec.ts
+var FLOAT_COMPOSITE_COMPONENT_COUNT = {
+  Point2D: 2,
+  Point3D: 3,
+  Vector2D: 2,
+  Vector3D: 3,
+  Plane2D: 3,
+  Plane3D: 4,
+  Euler2D: 2,
+  Euler3D: 3,
+  Quaternion: 4,
+  Matrix: 9,
+  ColorRGB: 3,
+  ColorARGB: 4
+};
+var INT16_COMPOSITE_COMPONENT_COUNT = {
+  Point2DInt: 2,
+  Rectangle2D: 4
+};
+function decodeDependency(buffer, offset) {
+  return {
+    fourcc: buffer.readUInt32LE(offset + 0),
+    pathPointer: buffer.readUInt32LE(offset + 4),
+    pathSize: buffer.readUInt32LE(offset + 8),
+    tagId: buffer.readUInt32LE(offset + 12)
+  };
+}
+function decodeReflexive(buffer, offset) {
+  return {
+    count: buffer.readUInt32LE(offset + 0),
+    pointerLow: buffer.readUInt32LE(offset + 4),
+    pointerHigh: buffer.readUInt32LE(offset + 8)
+  };
+}
+function decodeTagDataOffset(buffer, offset) {
+  return {
+    size: buffer.readUInt32LE(offset + 0),
+    external: buffer.readUInt32LE(offset + 4),
+    fileOffset: buffer.readUInt32LE(offset + 8),
+    pointerLow: buffer.readUInt32LE(offset + 12),
+    pointerHigh: buffer.readUInt32LE(offset + 16)
+  };
+}
+function decodeBasicUnit(buffer, offset, type) {
+  switch (type) {
+    case "int8":
+      return buffer.readInt8(offset);
+    case "uint8":
+      return buffer.readUInt8(offset);
+    case "int16":
+      return buffer.readInt16LE(offset);
+    case "uint16":
+    case "Index":
+      return buffer.readUInt16LE(offset);
+    case "int32":
+      return buffer.readInt32LE(offset);
+    case "uint32":
+    case "Pointer":
+    case "TagFourCC":
+    case "TagID":
+    case "ColorARGBInt":
+      return buffer.readUInt32LE(offset);
+    case "float":
+    case "Angle":
+    case "Fraction":
+      return buffer.readFloatLE(offset);
+    case "ScenarioScriptNodeValue":
+      return buffer.readUInt32LE(offset);
+    case "TagString": {
+      const raw = Buffer.from(buffer.subarray(offset, offset + 32));
+      const nullIndex = raw.indexOf(0);
+      const text = (nullIndex === -1 ? raw : raw.subarray(0, nullIndex)).toString("ascii");
+      return { text, raw };
+    }
+  }
+  if (type in FLOAT_COMPOSITE_COMPONENT_COUNT) {
+    const n = FLOAT_COMPOSITE_COMPONENT_COUNT[type];
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(buffer.readFloatLE(offset + i * 4));
+    return out;
+  }
+  if (type in INT16_COMPOSITE_COMPONENT_COUNT) {
+    const n = INT16_COMPOSITE_COMPONENT_COUNT[type];
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(buffer.readInt16LE(offset + i * 2));
+    return out;
+  }
+  throw new Error(`decodeBasicUnit: unknown basic type "${type}"`);
+}
+
 // ../core/src/map/definitions/engine.ts
 var DefinitionLoadError = class extends Error {
   constructor(message) {
@@ -33827,78 +33969,671 @@ for (const file of ALL_DEFINITION_FILES) {
     }
   }
 }
+function basicUnitSize(type) {
+  const size = BASIC_TYPE_SIZES[type];
+  if (size === void 0) {
+    throw new DefinitionLoadError(`Unknown basic field type "${type}".`);
+  }
+  return size;
+}
+function fieldSize(structName, field) {
+  if (field.type === "TagDependency") {
+    if (!field.classes || field.classes.length === 0) {
+      throw new DefinitionLoadError(`Struct "${structName}" field "${field.name}" is a TagDependency with no "classes".`);
+    }
+    return BASIC_TYPE_SIZES.TagDependency;
+  }
+  if (field.type === "TagReflexive") {
+    if (!field.struct) {
+      throw new DefinitionLoadError(`Struct "${structName}" field "${field.name}" is a TagReflexive with no "struct".`);
+    }
+    if (!structs.has(field.struct)) {
+      throw new DefinitionLoadError(
+        `Struct "${structName}" field "${field.name}" is a TagReflexive pointing to undefined struct "${field.struct}".`
+      );
+    }
+    return BASIC_TYPE_SIZES.TagReflexive;
+  }
+  if (field.type === "TagDataOffset") {
+    return BASIC_TYPE_SIZES.TagDataOffset;
+  }
+  const enumDef = enums.get(field.type);
+  if (enumDef) return 2;
+  const bitfieldDef = bitfields.get(field.type);
+  if (bitfieldDef) return bitfieldDef.width / 8;
+  let base = basicUnitSize(field.type);
+  if (field.bounds) base *= 2;
+  if (field.count && field.count > 1) base *= field.count;
+  return base;
+}
+var structResolutionCache = /* @__PURE__ */ new Map();
+function resolveStruct(name, _visiting = /* @__PURE__ */ new Set()) {
+  const cached = structResolutionCache.get(name);
+  if (cached) return cached;
+  if (_visiting.has(name)) {
+    throw new DefinitionLoadError(`Cyclic "inherits" chain detected involving struct "${name}".`);
+  }
+  const def = structs.get(name);
+  if (!def) {
+    throw new DefinitionLoadError(`Unknown struct "${name}".`);
+  }
+  _visiting.add(name);
+  const fields = [];
+  let offset = 0;
+  if (def.inherits) {
+    const parent = resolveStruct(def.inherits, _visiting);
+    fields.push(...parent.fields);
+    offset = parent.totalSize;
+  }
+  for (const f of def.fields) {
+    if (f.kind === "pad") {
+      offset += f.size;
+      continue;
+    }
+    const size = fieldSize(name, f);
+    fields.push({ name: f.name, offset, size, def: f });
+    offset += size;
+  }
+  const totalSize = offset;
+  if (def.sizeBytes !== void 0 && def.sizeBytes !== totalSize) {
+    throw new DefinitionLoadError(
+      `Struct "${name}" computed layout size ${totalSize} bytes does not match declared size ${def.sizeBytes} bytes. This means the field list/basic type sizes used to derive this struct are wrong.`
+    );
+  }
+  const resolved = {
+    name,
+    tagClass: def.tagClass,
+    totalSize,
+    fields,
+    extractable: def.extractable,
+    notExtractableReason: def.notExtractableReason
+  };
+  structResolutionCache.set(name, resolved);
+  _visiting.delete(name);
+  return resolved;
+}
+function resolvePointer(pointer, fileOffsetAnchor, baseMemoryAddress) {
+  return fileOffsetAnchor + (pointer - baseMemoryAddress);
+}
+function getAllTagGroupNames() {
+  return Array.from(tagGroupNameToStructName.keys());
+}
+function getBitfieldDefinition(name) {
+  return bitfields.get(name);
+}
+function getGroupDefinition(tagGroupName) {
+  const structName = tagGroupNameToStructName.get(tagGroupName);
+  if (!structName) {
+    throw new DefinitionLoadError(`No tag group definition registered for "${tagGroupName}".`);
+  }
+  return resolveStruct(structName);
+}
+function validateAllDefinitions() {
+  for (const name of structs.keys()) {
+    resolveStruct(name);
+  }
+  return {
+    structCount: structs.size,
+    enumCount: enums.size,
+    bitfieldCount: bitfields.size,
+    tagGroupCount: tagGroupNameToStructName.size
+  };
+}
+function decodeValueField(buffer, absOffset, field) {
+  if (field.type === "TagDependency") return { kind: "dependency", value: decodeDependency(buffer, absOffset) };
+  if (field.type === "TagReflexive") return { kind: "reflexive", value: decodeReflexive(buffer, absOffset) };
+  if (field.type === "TagDataOffset") return { kind: "tagDataOffset", value: decodeTagDataOffset(buffer, absOffset) };
+  if (enums.has(field.type)) return { kind: "enum", value: buffer.readUInt16LE(absOffset) };
+  const bitfieldDef = bitfields.get(field.type);
+  if (bitfieldDef) {
+    const value = bitfieldDef.width === 8 ? buffer.readUInt8(absOffset) : bitfieldDef.width === 16 ? buffer.readUInt16LE(absOffset) : buffer.readUInt32LE(absOffset);
+    return { kind: "bitfield", value, width: bitfieldDef.width };
+  }
+  if (field.bounds) {
+    const unitSize = basicUnitSize(field.type);
+    return {
+      kind: "bounds",
+      type: field.type,
+      value: [decodeBasicUnit(buffer, absOffset, field.type), decodeBasicUnit(buffer, absOffset + unitSize, field.type)]
+    };
+  }
+  if (field.count && field.count > 1) {
+    const unitSize = basicUnitSize(field.type);
+    const out = [];
+    for (let i = 0; i < field.count; i++) out.push(decodeBasicUnit(buffer, absOffset + i * unitSize, field.type));
+    return { kind: "array", type: field.type, value: out };
+  }
+  return { kind: "basic", type: field.type, value: decodeBasicUnit(buffer, absOffset, field.type) };
+}
+function decodeStruct(buffer, baseOffset, structName) {
+  const resolved = resolveStruct(structName);
+  const out = /* @__PURE__ */ new Map();
+  for (const field of resolved.fields) {
+    out.set(field.name, decodeValueField(buffer, baseOffset + field.offset, field.def));
+  }
+  return out;
+}
+
+// ../core/src/map/dependency-walker.ts
+var NULL_TAG_ID = 4294967295;
+var UNCERTAIN_GROUPS = ["spheroid"];
+var MAX_ELEMENTS_WALKED_PER_REFLEXIVE = 2e3;
+function walkDependencies(buffer, header, tagIndex, rootIndices, options = {}) {
+  const knownGroups = new Set(getAllTagGroupNames());
+  const visited = /* @__PURE__ */ new Map();
+  const requiredByMap = /* @__PURE__ */ new Map();
+  const warnings = [];
+  const queue = rootIndices.map((index) => ({ index }));
+  let processed = 0;
+  const addRequiredBy = (index, fromPath) => {
+    if (!fromPath) return;
+    if (!requiredByMap.has(index)) requiredByMap.set(index, /* @__PURE__ */ new Set());
+    requiredByMap.get(index).add(fromPath);
+  };
+  while (queue.length > 0) {
+    if (options.signal?.aborted) throw new OperationCancelledError();
+    processed++;
+    if (processed % 25 === 0) options.onProgress?.(visited.size, queue.length);
+    const { index, bspLocation, fromPath } = queue.shift();
+    addRequiredBy(index, fromPath);
+    if (visited.has(index)) continue;
+    if (index < 0 || index >= tagIndex.entries.length) continue;
+    const entry = tagIndex.entries[index];
+    const group = entry.primaryClassName ?? fourCCToString(entry.primaryClassFourCC);
+    const base = { originalIndex: index, tagId: entry.tagId, path: entry.path, group };
+    if (entry.isExternal) {
+      visited.set(index, { ...base, status: "external", requiredBy: [] });
+      warnings.push({
+        originalIndex: index,
+        path: entry.path,
+        group,
+        kind: "externalTag",
+        message: `"${entry.path}" (${group}) lives in a resource map (bitmaps.map/sounds.map/loc.map), not this map. Not walked further; sounds.map/loc.map resolution is a follow-up milestone.`
+      });
+      continue;
+    }
+    if (UNCERTAIN_GROUPS.includes(group)) {
+      visited.set(index, { ...base, status: "uncertain", requiredBy: [] });
+      warnings.push({
+        originalIndex: index,
+        path: entry.path,
+        group,
+        kind: "uncertainGroup",
+        message: `"${entry.path}" is a "${group}" tag - no reliable field layout exists for this group (see SOURCES.md). Treated as an opaque blob; not walked further.`
+      });
+      continue;
+    }
+    if (!knownGroups.has(group)) {
+      visited.set(index, { ...base, status: "noDefinition", requiredBy: [] });
+      warnings.push({
+        originalIndex: index,
+        path: entry.path,
+        group,
+        kind: "noDefinition",
+        message: `"${entry.path}" has unrecognized tag class "${group}" - no definition registered. Treated as an opaque blob; not walked further.`
+      });
+      continue;
+    }
+    const status = group === "scenario_structure_bsp" ? "bsp" : "ok";
+    if (status === "bsp") {
+      if (!bspLocation) {
+        warnings.push({
+          originalIndex: index,
+          path: entry.path,
+          group,
+          kind: "bspTag",
+          message: `"${entry.path}" (scenario_structure_bsp) was reached without its owning Scenario's BSP location info - cannot locate its data. Treated as an opaque blob.`
+        });
+        visited.set(index, { ...base, status: "noDefinition", requiredBy: [] });
+        continue;
+      }
+      warnings.push({
+        originalIndex: index,
+        path: entry.path,
+        group,
+        kind: "bspTag",
+        message: `"${entry.path}" (scenario_structure_bsp) lives in a separate region with its own pointer base (bsp_start/bsp_address via a cache-header indirection, not the main tag data section). See SOURCES.md "Key finding".`
+      });
+    }
+    visited.set(index, { ...base, status, bspLocation, requiredBy: [] });
+    const structName = getGroupDefinition(group).name;
+    const fileOffset = bspLocation ? bspLocation.fileOffset : resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const fileOffsetAnchor = bspLocation ? bspLocation.fileOffsetAnchor : header.tagDataOffset;
+    const baseMemoryAddress = bspLocation ? bspLocation.baseMemoryAddress : tagIndex.baseMemoryAddress;
+    if (status === "bsp" && getGroupDefinition(group).extractable === false) {
+      for (const dep of collectDirectDependencyRefs(buffer, structName, fileOffset, tagIndex)) {
+        warnings.push({
+          originalIndex: dep.originalIndex,
+          path: dep.path,
+          group: dep.group,
+          kind: "bspTag",
+          message: `"${dep.path}" (${dep.group}) is needed by BSP "${entry.path}" but not extracted (BSP data isn't carried into the extracted set this milestone).`
+        });
+      }
+      continue;
+    }
+    collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, baseMemoryAddress, entry.path, entry.path, (dep) => queue.push(dep), (w) => warnings.push(w));
+  }
+  options.onProgress?.(visited.size, 0);
+  const tags = [];
+  const externalTags = [];
+  for (const tag of visited.values()) {
+    tag.requiredBy = Array.from(requiredByMap.get(tag.originalIndex) ?? []).sort();
+    if (tag.status === "external") externalTags.push(tag);
+    else tags.push(tag);
+  }
+  return { tags, externalTags, warnings };
+}
+function collectDirectDependencyRefs(buffer, structName, fileOffset, tagIndex) {
+  const resolved = resolveStruct(structName);
+  if (fileOffset < 0 || fileOffset + resolved.totalSize > buffer.length) return [];
+  const decoded = decodeStruct(buffer, fileOffset, structName);
+  const out = [];
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value || value.kind !== "dependency" || value.value.tagId === NULL_TAG_ID) continue;
+    const idx = value.value.tagId & 65535;
+    const referenced = idx < tagIndex.entries.length ? tagIndex.entries[idx] : void 0;
+    out.push({ originalIndex: idx, group: referenced?.primaryClassName ?? fourCCToString(value.value.fourcc), path: referenced?.path ?? "(unknown)" });
+  }
+  return out;
+}
+function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, baseMemoryAddress, contextPath, rootPath, enqueue, warn) {
+  const resolved = resolveStruct(structName);
+  if (fileOffset < 0 || fileOffset + resolved.totalSize > buffer.length) return;
+  const decoded = decodeStruct(buffer, fileOffset, structName);
+  let bspLocationForStructureBsp;
+  if (structName === "ScenarioBSP") {
+    const bspStart = decoded.get("bsp start")?.value;
+    const bspAddress = decoded.get("bsp address")?.value;
+    if (typeof bspStart === "number" && typeof bspAddress === "number" && bspStart + 24 <= buffer.length) {
+      const metaPointer = buffer.readUInt32LE(bspStart + 0);
+      bspLocationForStructureBsp = { fileOffset: resolvePointer(metaPointer, bspStart, bspAddress), fileOffsetAnchor: bspStart, baseMemoryAddress: bspAddress };
+    }
+  }
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value) continue;
+    if (field.def.nonCached) continue;
+    if (value.kind === "dependency") {
+      if (value.value.tagId !== NULL_TAG_ID) {
+        enqueue({
+          index: value.value.tagId & 65535,
+          bspLocation: field.name === "structure bsp" ? bspLocationForStructureBsp : void 0,
+          fromPath: rootPath
+        });
+      }
+    } else if (value.kind === "reflexive" && value.value.count > 0) {
+      const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+      if (!childStructName) continue;
+      const childSize = resolveStruct(childStructName).totalSize;
+      const childBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      if (childBase < 0 || childBase + value.value.count * childSize > buffer.length) continue;
+      const n = Math.min(value.value.count, MAX_ELEMENTS_WALKED_PER_REFLEXIVE);
+      for (let i = 0; i < n; i++) {
+        collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, enqueue, warn);
+      }
+    } else if (value.kind === "tagDataOffset" && value.value.size > 0) {
+      if (field.def.type === "TagDataOffset" && field.def.externalFileOffset && value.value.external !== 0) {
+        warn({
+          originalIndex: -1,
+          path: contextPath,
+          group: "",
+          kind: "externalData",
+          message: `"${contextPath}.${field.name}" (${value.value.size} bytes) lives in "${field.def.externalFileOffset}", not resolved this milestone (flagged only).`
+        });
+      }
+    } else if (value.kind === "bitfield") {
+      const bitfieldDef = field.def.type ? getBitfieldDefinition(field.def.type) : void 0;
+      const externalBit = bitfieldDef?.fields.indexOf("external") ?? -1;
+      if (externalBit >= 0 && (value.value & 1 << externalBit) !== 0) {
+        warn({
+          originalIndex: -1,
+          path: contextPath,
+          group: "",
+          kind: "externalData",
+          message: `"${contextPath}.${field.name}" has its "external" flag set (per-mipmap bitmap data in bitmaps.map) - not resolved this milestone (flagged only).`
+        });
+      }
+    }
+  }
+}
+
+// ../core/src/map/tag-extractor.ts
+var NULL_TAG_ID2 = 4294967295;
+var AllTagsExcludedError = class extends Error {
+  constructor(notExtracted) {
+    super(`Nothing in this selection can be extracted yet: ${notExtracted.map((t) => `"${t.path}" (${t.group})`).join(", ")}.`);
+    this.notExtracted = notExtracted;
+    this.name = "AllTagsExcludedError";
+  }
+};
+function classifyDependency(dep, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
+  if (dep.tagId === NULL_TAG_ID2) return { fieldPath, group: "", path: "", kind: "null" };
+  const idx = dep.tagId & 65535;
+  const referenced = idx < tagIndex.entries.length ? tagIndex.entries[idx] : void 0;
+  const group = referenced?.primaryClassName ?? fourCCToString(dep.fourcc);
+  const path = referenced?.path ?? "(unknown)";
+  if (referenced?.isExternal) return { fieldPath, group, path, kind: "external" };
+  const notExtracted = notExtractedByOriginal.get(idx);
+  if (notExtracted) return { fieldPath, group: notExtracted.group, path: notExtracted.path, kind: "notExtracted" };
+  const localTagIndex = localIndexByOriginal.get(idx);
+  if (localTagIndex !== void 0) return { fieldPath, group, path, kind: "internal", localTagIndex };
+  return { fieldPath, group, path, kind: "unresolved" };
+}
+function flattenStruct(buffer, structName, fileOffset, myBytes, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
+  const resolved = resolveStruct(structName);
+  const decoded = decodeStruct(buffer, fileOffset, structName);
+  const reflexiveWork = [];
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value) continue;
+    const path = `${fieldPath}.${field.name}`;
+    if (value.kind === "dependency") {
+      dependencies.push(classifyDependency(value.value, path, tagIndex, localIndexByOriginal, notExtractedByOriginal));
+    } else if (value.kind === "reflexive" && value.value.count > 0) {
+      const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+      if (!childStructName) continue;
+      const childSize = resolveStruct(childStructName).totalSize;
+      const srcChildBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      const localArrayStart = runningOffset.value;
+      myBytes.writeUInt32LE(localArrayStart, field.offset + 4);
+      myBytes.writeUInt32LE(0, field.offset + 8);
+      const childBytesList = [];
+      for (let i = 0; i < value.value.count; i++) {
+        const childOffset = srcChildBase + i * childSize;
+        const childBytes = Buffer.from(buffer.subarray(childOffset, childOffset + childSize));
+        outChunks.push(childBytes);
+        childBytesList.push(childBytes);
+        runningOffset.value += childSize;
+      }
+      reflexiveWork.push({ fieldName: field.name, childStructName, childSize, srcChildBase, count: value.value.count, childBytesList });
+    }
+  }
+  for (const work of reflexiveWork) {
+    for (let i = 0; i < work.count; i++) {
+      flattenStruct(
+        buffer,
+        work.childStructName,
+        work.srcChildBase + i * work.childSize,
+        work.childBytesList[i],
+        fileOffsetAnchor,
+        baseMemoryAddress,
+        outChunks,
+        runningOffset,
+        dependencies,
+        `${fieldPath}.${work.fieldName}[${i}]`,
+        tagIndex,
+        localIndexByOriginal,
+        notExtractedByOriginal
+      );
+    }
+  }
+}
+function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
+  const walk = walkDependencies(buffer, header, tagIndex, rootIndices, options);
+  const extractableWalked = [];
+  const notExtracted = [];
+  const notExtractedByOriginal = /* @__PURE__ */ new Map();
+  for (const t of walk.tags) {
+    const def = getGroupDefinition(t.group);
+    if (def.extractable === false) {
+      const entry = {
+        originalIndex: t.originalIndex,
+        group: t.group,
+        path: t.path,
+        reason: def.notExtractableReason ?? `"${t.group}" tags are not extractable yet.`
+      };
+      notExtracted.push(entry);
+      notExtractedByOriginal.set(t.originalIndex, entry);
+    } else {
+      extractableWalked.push(t);
+    }
+  }
+  if (extractableWalked.length === 0) {
+    throw new AllTagsExcludedError(notExtracted);
+  }
+  const localIndexByOriginal = /* @__PURE__ */ new Map();
+  extractableWalked.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
+  const tags = extractableWalked.map((t, i) => {
+    if (options.signal?.aborted) throw new OperationCancelledError();
+    options.onProgress?.(i, extractableWalked.length);
+    const structName = getGroupDefinition(t.group).name;
+    const fileOffsetAnchor = t.bspLocation ? t.bspLocation.fileOffsetAnchor : header.tagDataOffset;
+    const baseMemoryAddress = t.bspLocation ? t.bspLocation.baseMemoryAddress : tagIndex.baseMemoryAddress;
+    const fileOffset = t.bspLocation ? t.bspLocation.fileOffset : resolveTagDataPointer(tagIndex.entries[t.originalIndex].tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const dependencies = [];
+    const outChunks = [];
+    const runningOffset = { value: 0 };
+    const rootResolved = resolveStruct(structName);
+    const rootBytes = Buffer.from(buffer.subarray(fileOffset, fileOffset + rootResolved.totalSize));
+    outChunks.push(rootBytes);
+    runningOffset.value += rootResolved.totalSize;
+    flattenStruct(
+      buffer,
+      structName,
+      fileOffset,
+      rootBytes,
+      fileOffsetAnchor,
+      baseMemoryAddress,
+      outChunks,
+      runningOffset,
+      dependencies,
+      t.path,
+      tagIndex,
+      localIndexByOriginal,
+      notExtractedByOriginal
+    );
+    return { originalIndex: t.originalIndex, group: t.group, path: t.path, structName, data: Buffer.concat(outChunks), dependencies };
+  });
+  options.onProgress?.(extractableWalked.length, extractableWalked.length);
+  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: walk.warnings };
+}
+
+// ../core/src/map/container.ts
+var OCETAGS_MAGIC = "OCETAGS";
+var OCETAGS_FORMAT_VERSION = 1;
+function serializeContainer(set, sourceMapName) {
+  const container = {
+    magic: OCETAGS_MAGIC,
+    formatVersion: OCETAGS_FORMAT_VERSION,
+    sourceMapName,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    hasUnresolvedBspReferences: set.notExtracted.length > 0,
+    rootOriginalIndices: set.rootOriginalIndices,
+    tags: set.tags.map((t) => ({
+      originalIndex: t.originalIndex,
+      group: t.group,
+      path: t.path,
+      structName: t.structName,
+      data: t.data.toString("base64"),
+      dependencies: t.dependencies
+    })),
+    notExtracted: set.notExtracted,
+    warnings: set.warnings
+  };
+  return Buffer.from(JSON.stringify(container, null, 2), "utf-8");
+}
 
 // electron/map-worker.ts
-function progress(taskId, stage, percent) {
-  import_worker_threads.parentPort?.postMessage({ type: "progress", taskId, stage, percent });
+var currentMap = null;
+var cancelledRequests = /* @__PURE__ */ new Set();
+function progress(requestId, stage, percent) {
+  import_worker_threads.parentPort?.postMessage({ type: "progress", requestId, stage, percent });
+}
+function sendResult(requestId, payload) {
+  import_worker_threads.parentPort?.postMessage({ type: "result", requestId, payload });
+}
+function sendError(requestId, code, message) {
+  import_worker_threads.parentPort?.postMessage({ type: "error", requestId, code, message });
+}
+function handleTaskError(requestId, err) {
+  if (err instanceof OperationCancelledError) return sendError(requestId, "CANCELLED", "Cancelled by user.");
+  if (err instanceof AllTagsExcludedError) return sendError(requestId, "BSP_ONLY_SELECTION", err.message);
+  sendError(requestId, "UNEXPECTED_ERROR", err instanceof Error ? err.message : String(err));
+}
+function makeCancelController(requestId) {
+  const controller = new AbortController();
+  const interval = setInterval(() => {
+    if (cancelledRequests.has(requestId)) controller.abort();
+  }, 150);
+  return { signal: controller.signal, stop: () => clearInterval(interval) };
+}
+function sizeByIndex(header, tagIndex) {
+  return new Map(estimateTagFootprints(header, tagIndex).map((f) => [f.tagIndex, f.estimatedSize]));
+}
+function toWarningInfo(w) {
+  return { originalIndex: w.originalIndex, path: w.path, group: w.group, kind: w.kind, message: w.message };
 }
 async function runInspect(task) {
-  progress(task.taskId, "Reading file", 10);
+  progress(task.requestId, "Reading file", 10);
   const buffer = fs.readFileSync(task.filePath);
-  progress(task.taskId, "Parsing header and tag index", 50);
-  const result = inspectCustomEditionMap(buffer);
+  progress(task.requestId, "Parsing header and tag index", 50);
+  const inspected = inspectCustomEditionMap(buffer);
   let payload;
-  if (result.status === "ok") {
-    const footprints = estimateTagFootprints(result.header, result.tagIndex);
-    const sizeByIndex = new Map(footprints.map((f) => [f.tagIndex, f.estimatedSize]));
+  if (inspected.status === "ok") {
+    currentMap = { filePath: task.filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex };
+    const sizes = sizeByIndex(inspected.header, inspected.tagIndex);
     payload = {
       status: "ok",
       filePath: task.filePath,
       header: {
-        scenarioName: result.header.scenarioName,
-        buildString: result.header.buildString,
-        mapType: result.header.mapType,
-        crc32: result.header.crc32,
-        tagDataOffset: result.header.tagDataOffset,
-        tagDataSize: result.header.tagDataSize,
-        decompressedFileSize: result.header.decompressedFileSize,
+        scenarioName: inspected.header.scenarioName,
+        buildString: inspected.header.buildString,
+        mapType: inspected.header.mapType,
+        crc32: inspected.header.crc32,
+        tagDataOffset: inspected.header.tagDataOffset,
+        tagDataSize: inspected.header.tagDataSize,
+        decompressedFileSize: inspected.header.decompressedFileSize,
         fileSizeOnDisk: buffer.length,
-        tagCount: result.tagIndex.tagCount
+        tagCount: inspected.tagIndex.tagCount
       },
-      tags: result.tagIndex.entries.map((e) => ({
+      tags: inspected.tagIndex.entries.map((e) => ({
         index: e.index,
         tagId: e.tagId,
         primaryClassName: e.primaryClassName ?? "?",
         path: e.path,
         isExternal: e.isExternal,
-        estimatedSize: sizeByIndex.get(e.index) ?? null
+        estimatedSize: sizes.get(e.index) ?? null
       }))
     };
-  } else if (result.status === "compressed") {
+  } else if (inspected.status === "compressed") {
+    currentMap = null;
     payload = { status: "compressed", filePath: task.filePath };
   } else {
-    payload = { status: "unsupported", filePath: task.filePath, message: result.message };
+    currentMap = null;
+    payload = { status: "unsupported", filePath: task.filePath, message: inspected.message };
   }
-  progress(task.taskId, "Done", 100);
-  import_worker_threads.parentPort?.postMessage({ type: "result", taskId: task.taskId, payload });
+  progress(task.requestId, "Done", 100);
+  sendResult(task.requestId, payload);
 }
 async function runCompression(task) {
-  progress(task.taskId, "Reading file", 10);
+  progress(task.requestId, "Reading file", 10);
   const buffer = fs.readFileSync(task.filePath);
-  progress(task.taskId, task.type === "decompress" ? "Decompressing (zstd)" : "Compressing (zstd level 19)", 35);
+  progress(task.requestId, task.type === "decompress" ? "Decompressing (zstd)" : "Compressing (zstd level 19)", 35);
   const output = task.type === "decompress" ? await decompressCustomEditionMap(buffer) : await compressCustomEditionMap(buffer, 19);
-  progress(task.taskId, "Writing output file", 85);
+  progress(task.requestId, "Writing output file", 85);
   fs.writeFileSync(task.outputPath, output);
-  progress(task.taskId, "Done", 100);
-  import_worker_threads.parentPort?.postMessage({
-    type: "result",
-    taskId: task.taskId,
-    payload: { outputPath: task.outputPath, originalSize: buffer.length, newSize: output.length }
-  });
+  progress(task.requestId, "Done", 100);
+  sendResult(task.requestId, { outputPath: task.outputPath, originalSize: buffer.length, newSize: output.length });
+}
+function runGetDependencies(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  const cancelCtl = makeCancelController(task.requestId);
+  try {
+    const walk = walkDependencies(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
+      signal: cancelCtl.signal,
+      onProgress: (visited, queued) => progress(task.requestId, `Walking dependencies (${visited} visited, ${queued} queued)`, Math.min(95, 10 + visited))
+    });
+    const sizes = sizeByIndex(currentMap.header, currentMap.tagIndex);
+    const extractableTags = [];
+    const notExtractedTags = [];
+    for (const t of walk.tags) {
+      const def = getGroupDefinition(t.group);
+      if (def.extractable === false) {
+        notExtractedTags.push({
+          originalIndex: t.originalIndex,
+          path: t.path,
+          group: t.group,
+          reason: def.notExtractableReason ?? `"${t.group}" tags are not extractable yet.`,
+          requiredBy: t.requiredBy
+        });
+      } else {
+        extractableTags.push({ originalIndex: t.originalIndex, path: t.path, group: t.group, status: t.status, estimatedSize: sizes.get(t.originalIndex) ?? null, requiredBy: t.requiredBy });
+      }
+    }
+    const externalTags = walk.externalTags.map((t) => ({ originalIndex: t.originalIndex, path: t.path, group: t.group, status: t.status, estimatedSize: null, requiredBy: t.requiredBy }));
+    const totalEstimatedSize = extractableTags.reduce((sum, t) => sum + (t.estimatedSize ?? 0), 0);
+    const summary = {
+      requestedOriginalIndices: task.originalIndices,
+      extractableTags,
+      notExtractedTags,
+      externalTags,
+      warnings: walk.warnings.map(toWarningInfo),
+      totalEstimatedSize,
+      allExcluded: extractableTags.length === 0 && notExtractedTags.length > 0
+    };
+    progress(task.requestId, "Done", 100);
+    sendResult(task.requestId, { ok: true, summary });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  } finally {
+    cancelCtl.stop();
+    cancelledRequests.delete(task.requestId);
+  }
+}
+function runExtractTags(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  const cancelCtl = makeCancelController(task.requestId);
+  const tempPath = `${task.outputPath}.tmp-${(0, import_crypto.randomUUID)()}`;
+  try {
+    progress(task.requestId, "Walking dependencies", 5);
+    const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
+      signal: cancelCtl.signal,
+      onProgress: (i, total) => progress(task.requestId, `Extracting tag ${i + 1} of ${total}`, 10 + Math.round(i / Math.max(1, total) * 70))
+    });
+    if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
+    progress(task.requestId, "Writing container file", 90);
+    const containerBuffer = serializeContainer(set, task.sourceMapName);
+    fs.writeFileSync(tempPath, containerBuffer);
+    fs.renameSync(tempPath, task.outputPath);
+    progress(task.requestId, "Done", 100);
+    sendResult(task.requestId, {
+      ok: true,
+      outputPath: task.outputPath,
+      tagCount: set.tags.length,
+      fileSizeBytes: containerBuffer.length,
+      carriedOverWarnings: set.warnings.map(toWarningInfo)
+    });
+  } catch (err) {
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch {
+    }
+    handleTaskError(task.requestId, err);
+  } finally {
+    cancelCtl.stop();
+    cancelledRequests.delete(task.requestId);
+  }
 }
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
-    if (task.type === "inspect") {
-      await runInspect(task);
-    } else {
-      await runCompression(task);
+    if (task.type === "cancel") {
+      cancelledRequests.add(task.requestId);
+      return;
     }
+    if (task.type === "inspect") await runInspect(task);
+    else if (task.type === "compress" || task.type === "decompress") await runCompression(task);
+    else if (task.type === "getDependencies") runGetDependencies(task);
+    else if (task.type === "extractTags") runExtractTags(task);
   } catch (err) {
-    import_worker_threads.parentPort?.postMessage({
-      type: "error",
-      taskId: task.taskId,
-      message: err instanceof Error ? err.message : String(err)
-    });
+    handleTaskError(task.requestId, err);
   }
 });
+try {
+  const stats = validateAllDefinitions();
+  import_worker_threads.parentPort?.postMessage({ type: "ready", info: `Worker loaded, definitions loaded (${stats.tagGroupCount} tag groups, ${stats.structCount} structs).` });
+} catch (err) {
+  import_worker_threads.parentPort?.postMessage({ type: "ready", info: `Worker loaded, but definition validation FAILED: ${err instanceof Error ? err.message : String(err)}` });
+}
 //# sourceMappingURL=map-worker.js.map

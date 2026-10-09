@@ -43,3 +43,11 @@ export class NotCompressedMapError extends Error {
     this.name = 'NotCompressedMapError';
   }
 }
+
+/** Thrown by long-running core operations (walk/extract) when the caller's AbortSignal fires. */
+export class OperationCancelledError extends Error {
+  constructor() {
+    super('Operation was cancelled.');
+    this.name = 'OperationCancelledError';
+  }
+}

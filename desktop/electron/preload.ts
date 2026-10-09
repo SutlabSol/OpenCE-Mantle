@@ -1,11 +1,16 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult } from './shared-types';
+import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest } from './shared-types';
 
 const api: OpenceApi = {
   openMapDialog: () => ipcRenderer.invoke('dialog:openMap'),
   loadMap: (filePath: string) => ipcRenderer.invoke('map:load', filePath),
   decompressMap: (filePath: string) => ipcRenderer.invoke('map:decompress', filePath),
   recompressMap: (filePath: string) => ipcRenderer.invoke('map:recompress', filePath),
+  getDependencies: (originalIndices: number[]) => ipcRenderer.invoke('deps:get', originalIndices),
+  extractTags: (request: ExtractTagsRequest) => ipcRenderer.invoke('tags:extract', request),
+  cancelExtraction: () => ipcRenderer.send('tags:cancelExtract'),
+  openContainingFolder: (filePath: string) => ipcRenderer.invoke('app:openContainingFolder', filePath),
+  getSettings: () => ipcRenderer.invoke('app:getSettings'),
   notImplemented: (feature: string) => ipcRenderer.send('app:notImplemented', feature),
   showAbout: () => ipcRenderer.invoke('app:showAbout'),
   getAppVersion: () => ipcRenderer.invoke('app:version'),

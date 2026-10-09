@@ -38,6 +38,8 @@ function convertField(f) {
   if (f.flagged) out.flagged = true;
   if (f.non_cached) out.nonCached = true;
   if (f.cache_only === true) out.cacheOnly = true;
+  if (f.file_offset) out.fileOffset = true;
+  if (f.external_file_offset) out.externalFileOffset = f.external_file_offset;
   if (f.comment) out.comment = f.comment;
   return out;
 }

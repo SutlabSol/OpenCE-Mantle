@@ -48,6 +48,97 @@ in both sample maps' BSPs decodes to plausible values (sane world-bounds boundin
 sane reflexive counts) and the full round-trip/dependency/bounds validation passes with zero
 failures. See `validate-tag.ts` → `locateStructureBsp`.
 
+## Per-group coverage: tags actually tested
+
+`scripts/report-coverage.ts` counts how many internal (non-external) tags of each group exist
+across `bloodgulch.map` + `ui.map`'s tag indices - this is "tested" in the sense that
+`tests/definitions.test.ts` and `tests/dependency-walker.test.ts` exercised every one of them
+(round-trip, dependency resolution, reflexive bounds). 61 of 83 groups have at least one tag
+tested this way; the other 22 simply never occur as a root tag in either sample map (several are
+abstract base classes - `object`, `item`, `unit`, `device`, `shader`, `model` - that are never a
+concrete tag's own class, only referenced via the abstract-class expansion table).
+
+### Tested (group → tag count across both sample maps)
+
+| group | tags tested |
+|---|---|
+| actor_variant | 4 |
+| antenna | 3 |
+| biped | 2 |
+| bitmap | 222 |
+| camera_track | 9 |
+| color_table | 8 |
+| contrail | 12 |
+| damage_effect | 86 |
+| decal | 43 |
+| dialogue | 1 |
+| effect | 379 |
+| equipment | 16 |
+| flag | 1 |
+| font | 4 |
+| gbxmodel | 75 |
+| globals | 2 |
+| grenade_hud_interface | 4 |
+| hud_globals | 2 |
+| hud_message_text | 1 |
+| hud_number | 2 |
+| input_device_defaults | 46 |
+| item_collection | 14 |
+| lens_flare | 33 |
+| light | 46 |
+| light_volume | 10 |
+| material_effects | 5 |
+| meter | 4 |
+| model_animations | 22 |
+| model_collision_geometry | 38 |
+| multiplayer_scenario_description | 1 |
+| particle | 138 |
+| particle_system | 14 |
+| physics | 5 |
+| point_physics | 43 |
+| projectile | 23 |
+| scenario | 2 |
+| scenario_structure_bsp | 2 |
+| scenery | 20 |
+| shader_environment | 15 |
+| shader_model | 127 |
+| shader_transparent_chicago | 50 |
+| shader_transparent_chicago_extended | 11 |
+| shader_transparent_glass | 6 |
+| shader_transparent_meter | 4 |
+| shader_transparent_plasma | 1 |
+| sky | 2 |
+| sound | 29 |
+| sound_environment | 1 |
+| sound_looping | 19 |
+| sound_scenery | 1 |
+| string_list | 2 |
+| tag_collection | 8 |
+| ui_widget_collection | 2 |
+| ui_widget_definition | 1138 |
+| unicode_string_list | 168 |
+| unit_hud_interface | 5 |
+| vehicle | 6 |
+| virtual_keyboard | 1 |
+| weapon | 20 |
+| weapon_hud_interface | 23 |
+| wind | 1 |
+
+**Zero failures across all 61 tested groups** (round-trip + dependency + reflexive bounds).
+
+### Untested — "read from source, untested" (0 tags in either sample map)
+
+`actor`, `continuous_damage_effect`, `detail_object_collection`, `device`, `device_control`,
+`device_light_fixture`, `device_machine`, `fog`, `garbage`, `glow`, `item`, `lightning`, `model`,
+`object`, `placeholder`, `preferences_network_game`, `shader`, `shader_transparent_generic`,
+`shader_transparent_water`, `spheroid`, `unit`, `weather_particle_system`.
+
+These are **read from source, untested** — field layout was read from Invader (or Reclaimer for
+`spheroid`) the same as every other group, but never exercised against a real tag because none
+exist as a root entry in either sample map. `object`/`item`/`unit`/`device`/`shader`/`model` are
+the abstract base classes (see "Abstract tag base classes" above) — they're never a concrete
+tag's own class. `spheroid` additionally remains **uncertain** per its own entry above.
+
 ## Per-group table
 
 Legend - **status**: `full` (every field defined) · `uncertain` (no reliable source exists).
