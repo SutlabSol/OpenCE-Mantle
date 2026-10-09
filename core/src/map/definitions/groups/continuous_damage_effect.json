@@ -1,0 +1,325 @@
+[
+  {
+    "kind": "struct",
+    "name": "ContinuousDamageEffect",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "cutoff scale",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "low frequency vibrate frequency",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "high frequency vibrate frequency",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking random translation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking random rotation",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking wobble function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking wobble period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking wobble weight",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 160
+      },
+      {
+        "kind": "field",
+        "name": "damage side effect",
+        "type": "DamageEffectSideEffect"
+      },
+      {
+        "kind": "field",
+        "name": "damage category",
+        "type": "DamageEffectCategory"
+      },
+      {
+        "kind": "field",
+        "name": "damage flags",
+        "type": "DamageEffectDamageFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "damage lower bound",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "damage upper bound",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "damage vehicle passthrough penalty",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "damage stun",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "damage maximum stun",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "damage stun time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "damage instantaneous acceleration",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "dirt",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sand",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "stone",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "snow",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "wood",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "metal hollow",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "metal thin",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "metal thick",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rubber",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "glass",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "force field",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "grunt",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hunter armor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hunter skin",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "elite",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "jackal",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "jackal energy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "engineer skin",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "engineer force field",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flood combat form",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flood carrier form",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "cyborg armor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "cyborg energy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "human armor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "human skin",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sentinel",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "monitor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "plastic",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "water",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "leaves",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "elite energy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ice",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hunter shield",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      }
+    ],
+    "tagClass": "continuous_damage_effect",
+    "sizeBytes": 512
+  }
+]

@@ -1,0 +1,56 @@
+[
+  {
+    "kind": "struct",
+    "name": "HUDNumber",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "digits bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "bitmap digit width",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "screen digit width",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "x offset",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "y offset",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "decimal point width",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "colon width",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 76
+      }
+    ],
+    "tagClass": "hud_number",
+    "sizeBytes": 100
+  }
+]

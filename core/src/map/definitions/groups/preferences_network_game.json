@@ -1,0 +1,63 @@
+[
+  {
+    "kind": "struct",
+    "name": "PreferencesNetworkGame",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "primary color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "secondary color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "pattern",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "pattern bitmap index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "decal",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "decal bitmap index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 800
+      }
+    ],
+    "tagClass": "preferences_network_game",
+    "sizeBytes": 896
+  }
+]

@@ -1,0 +1,89 @@
+[
+  {
+    "kind": "struct",
+    "name": "SoundEnvironment",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "unknown",
+        "type": "int32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "priority",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "room intensity",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "room intensity hf",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "room rolloff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "decay time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "decay hf ratio",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "reflections intensity",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "reflections delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "reverb intensity",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "reverb delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "diffusion",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "density",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hf reference",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "tagClass": "sound_environment",
+    "sizeBytes": 72
+  }
+]

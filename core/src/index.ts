@@ -6,3 +6,8 @@ export * from './map/tag-index';
 export * from './map/tag-footprints';
 export * from './map/open-map';
 export * from './map/compression';
+export * from './map/resource-map';
+export * from './map/definitions/types';
+export * from './map/definitions/basic-types';
+export * from './map/definitions/engine';
+export * from './map/definitions/validate-tag';

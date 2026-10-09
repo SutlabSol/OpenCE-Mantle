@@ -1,0 +1,79 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "PointPhysicsFlags",
+    "width": 32,
+    "fields": [
+      "flamethrower particle collision",
+      "collides with structures",
+      "collides with water surface",
+      "uses simple wind",
+      "uses damped wind",
+      "no gravity"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "PointPhysics",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "PointPhysicsFlags"
+      },
+      {
+        "kind": "field",
+        "name": "mass scale",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "water gravity scale",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "air gravity scale",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "density",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "air friction",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "water friction",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "surface friction",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "elasticity",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "tagClass": "point_physics",
+    "sizeBytes": 64
+  }
+]

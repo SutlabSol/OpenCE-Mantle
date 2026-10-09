@@ -1,0 +1,49 @@
+[
+  {
+    "kind": "struct",
+    "name": "MultiplayerScenarioDescriptionScenarioDescription",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "descriptive bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "displayed map name",
+        "type": "TagDependency",
+        "classes": [
+          "unicode_string_list"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "scenario tag directory path",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      }
+    ],
+    "sizeBytes": 68
+  },
+  {
+    "kind": "struct",
+    "name": "MultiplayerScenarioDescription",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "multiplayer scenarios",
+        "type": "TagReflexive",
+        "struct": "MultiplayerScenarioDescriptionScenarioDescription",
+        "maximum": 32
+      }
+    ],
+    "tagClass": "multiplayer_scenario_description",
+    "sizeBytes": 12
+  }
+]

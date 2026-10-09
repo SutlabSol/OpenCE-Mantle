@@ -1,0 +1,296 @@
+[
+  {
+    "kind": "enum",
+    "name": "GlowBoundaryEffect",
+    "options": [
+      "bounce",
+      "wrap"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "GlowNormalParticleDistribution",
+    "options": [
+      "distributed randomly",
+      "distributed uniformly"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "GlowTrailingParticleDistribution",
+    "options": [
+      "emit vertically",
+      "emit normal up",
+      "emit randomly"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "GlowFlags",
+    "width": 32,
+    "fields": [
+      "modify particle color in range",
+      "particles move backwards",
+      "partices move in both directions",
+      "trailing particles fade over time",
+      "trailing particles shrink over time",
+      "trailing particles slow over time"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "Glow",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "attachment marker",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "number of particles",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "boundary effect",
+        "type": "GlowBoundaryEffect"
+      },
+      {
+        "kind": "field",
+        "name": "normal particle distribution",
+        "type": "GlowNormalParticleDistribution"
+      },
+      {
+        "kind": "field",
+        "name": "trailing particle distribution",
+        "type": "GlowTrailingParticleDistribution"
+      },
+      {
+        "kind": "field",
+        "name": "glow flags",
+        "type": "GlowFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "attachment 0",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "particle rotational velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "particle rot vel mul low",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "particle rot vel mul high",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "attachment 1",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "effect rotational velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "effect rot vel mul low",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "effect rot vel mul high",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "attachment 2",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "effect translational velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "effect trans vel mul low",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "effect trans vel mul high",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "attachment 3",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "min distance particle to object",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "max distance particle to object",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "distance to object mul low",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "distance to object mul high",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "attachment 4",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "particle size bounds",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "size attachment multiplier",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "attachment 5",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "color bound 0",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "color bound 1",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "scale color 0",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "scale color 1",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "color rate of change",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fading percentage of glow",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "particle generation freq",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "lifetime of trailing particles",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "velocity of trailing particles",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "trailing particle minimum t",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "trailing particle maximum t",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 52
+      },
+      {
+        "kind": "field",
+        "name": "texture",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      }
+    ],
+    "tagClass": "glow",
+    "sizeBytes": 340
+  }
+]

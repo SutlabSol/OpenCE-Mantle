@@ -1,0 +1,32 @@
+[
+  {
+    "kind": "struct",
+    "name": "TagCollectionTag",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "reference",
+        "type": "TagDependency",
+        "classes": [
+          "*"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "TagCollection",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "tags",
+        "type": "TagReflexive",
+        "struct": "TagCollectionTag",
+        "maximum": 200
+      }
+    ],
+    "tagClass": "tag_collection",
+    "sizeBytes": 12
+  }
+]

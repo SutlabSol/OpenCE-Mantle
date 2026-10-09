@@ -1,0 +1,551 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "GrenadeHUDInterfaceOverlayType",
+    "width": 16,
+    "fields": [
+      "show on flashing",
+      "show on empty",
+      "show on default",
+      "show always"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "GrenadeHUDInterfaceSoundLatchedTo",
+    "width": 32,
+    "fields": [
+      "low grenade count",
+      "no grenades left",
+      "throw on no grenades"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "GrenadeHUDInterfaceOverlay",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "frame rate",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "GrenadeHUDInterfaceOverlayType"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "HUDInterfaceOverlayFlashFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      }
+    ],
+    "sizeBytes": 136
+  },
+  {
+    "kind": "struct",
+    "name": "GrenadeHUDInterfaceSound",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "sound_looping"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "latched to",
+        "type": "GrenadeHUDInterfaceSoundLatchedTo"
+      },
+      {
+        "kind": "field",
+        "name": "scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 56
+  },
+  {
+    "kind": "struct",
+    "name": "GrenadeHUDInterface",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "HUDInterfaceAnchor"
+      },
+      {
+        "kind": "field",
+        "name": "canvas size",
+        "type": "HUDInterfaceCanvasSize"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "background anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "background width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "background interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "background default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "background flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "background flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "background flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "background flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "background sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "background multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "total grenades background multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers maximum number of digits",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers flags",
+        "type": "HUDInterfaceNumberFlags"
+      },
+      {
+        "kind": "field",
+        "name": "total grenades numbers number of fractional digits",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "flash cutoff",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "total grenades overlay bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "total grenades overlays",
+        "type": "TagReflexive",
+        "struct": "GrenadeHUDInterfaceOverlay",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "total grenades warning sounds",
+        "type": "TagReflexive",
+        "struct": "GrenadeHUDInterfaceSound",
+        "maximum": 12
+      },
+      {
+        "kind": "pad",
+        "size": 68
+      },
+      {
+        "kind": "field",
+        "name": "messaging information sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information width offset",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information offset from reference corner",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information override icon color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information frame rate",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information flags",
+        "type": "HUDInterfaceMessagingFlags"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information text index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      }
+    ],
+    "tagClass": "grenade_hud_interface",
+    "sizeBytes": 504
+  }
+]

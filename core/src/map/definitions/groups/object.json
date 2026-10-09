@@ -1,0 +1,586 @@
+[
+  {
+    "kind": "enum",
+    "name": "PredictedResourceType",
+    "options": [
+      "bitmap",
+      "sound"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "PredictedResource",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "PredictedResourceType"
+      },
+      {
+        "kind": "field",
+        "name": "resource index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "tag",
+        "type": "TagID"
+      }
+    ],
+    "sizeBytes": 8
+  },
+  {
+    "kind": "enum",
+    "name": "ObjectNoise",
+    "options": [
+      "silent",
+      "medium",
+      "loud",
+      "shout",
+      "quiet"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ObjectFunctionIn",
+    "options": [
+      "none",
+      "body vitality",
+      "shield vitality",
+      "recent body damage",
+      "recent shield damage",
+      "random constant",
+      "umbrella shield vitality",
+      "shield stun",
+      "recent umbrella shield vitality",
+      "umbrella shield stun",
+      "region",
+      "region 1",
+      "region 2",
+      "region 3",
+      "region 4",
+      "region 5",
+      "region 6",
+      "region 7",
+      "alive",
+      "compass"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ObjectType",
+    "options": [
+      "biped",
+      "vehicle",
+      "weapon",
+      "equipment",
+      "garbage",
+      "projectile",
+      "scenery",
+      "device machine",
+      "device control",
+      "device light fixture",
+      "placeholder",
+      "sound scenery"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ObjectFunctionFlags",
+    "width": 32,
+    "fields": [
+      "invert",
+      "additive",
+      "always active"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ObjectFlags",
+    "width": 16,
+    "fields": [
+      "does not cast shadow",
+      "transparent self occlusion",
+      "brighter than it should be",
+      "not a pathfinding obstacle",
+      "extension of parent",
+      "cast shadow by default",
+      "does not have anniversary geometry"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ObjectAttachment",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "TagDependency",
+        "classes": [
+          "light",
+          "light_volume",
+          "contrail",
+          "particle_system",
+          "effect",
+          "sound_looping"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "marker",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "primary scale",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "secondary scale",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "change color",
+        "type": "FunctionNameNullable"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "sizeBytes": 72
+  },
+  {
+    "kind": "struct",
+    "name": "ObjectWidget",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "reference",
+        "type": "TagDependency",
+        "classes": [
+          "antenna",
+          "glow",
+          "light_volume",
+          "lightning",
+          "flag"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ObjectFunction",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ObjectFunctionFlags"
+      },
+      {
+        "kind": "field",
+        "name": "period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scale period by",
+        "type": "FunctionScaleBy"
+      },
+      {
+        "kind": "field",
+        "name": "function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "scale function by",
+        "type": "FunctionScaleBy"
+      },
+      {
+        "kind": "field",
+        "name": "wobble function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "wobble period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "wobble magnitude",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "square wave threshold",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "step count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "map to",
+        "type": "FunctionType"
+      },
+      {
+        "kind": "field",
+        "name": "sawtooth count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "add",
+        "type": "FunctionScaleBy"
+      },
+      {
+        "kind": "field",
+        "name": "scale result by",
+        "type": "FunctionScaleBy"
+      },
+      {
+        "kind": "field",
+        "name": "bounds mode",
+        "type": "FunctionBoundsMode"
+      },
+      {
+        "kind": "field",
+        "name": "bounds",
+        "type": "Fraction",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "turn off with",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "scale by",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 252
+      },
+      {
+        "kind": "field",
+        "name": "inverse bounds",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "inverse sawtooth",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "inverse step",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "inverse period",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "usage",
+        "type": "TagString"
+      }
+    ],
+    "sizeBytes": 360
+  },
+  {
+    "kind": "struct",
+    "name": "ObjectChangeColorsPermutation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "weight",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "color lower bound",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "color upper bound",
+        "type": "ColorRGB"
+      }
+    ],
+    "sizeBytes": 28
+  },
+  {
+    "kind": "struct",
+    "name": "ObjectChangeColors",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "darken by",
+        "type": "FunctionScaleBy"
+      },
+      {
+        "kind": "field",
+        "name": "scale by",
+        "type": "FunctionScaleBy"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ColorInterpolationFlags"
+      },
+      {
+        "kind": "field",
+        "name": "color lower bound",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "color upper bound",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "permutations",
+        "type": "TagReflexive",
+        "struct": "ObjectChangeColorsPermutation",
+        "maximum": 8
+      }
+    ],
+    "sizeBytes": 44
+  },
+  {
+    "kind": "struct",
+    "name": "Object",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "object type",
+        "type": "ObjectType"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ObjectFlags"
+      },
+      {
+        "kind": "field",
+        "name": "bounding radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "bounding offset",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "origin offset",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "acceleration scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scales change colors",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "model",
+        "type": "TagDependency",
+        "classes": [
+          "model"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "animation graph",
+        "type": "TagDependency",
+        "classes": [
+          "model_animations"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      },
+      {
+        "kind": "field",
+        "name": "collision model",
+        "type": "TagDependency",
+        "classes": [
+          "model_collision_geometry"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "physics",
+        "type": "TagDependency",
+        "classes": [
+          "physics"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "modifier shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "creation effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 84
+      },
+      {
+        "kind": "field",
+        "name": "render bounding radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "a in",
+        "type": "ObjectFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "b in",
+        "type": "ObjectFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "c in",
+        "type": "ObjectFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "d in",
+        "type": "ObjectFunctionIn"
+      },
+      {
+        "kind": "pad",
+        "size": 44
+      },
+      {
+        "kind": "field",
+        "name": "hud text message index",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "forced shader permutation index",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "attachments",
+        "type": "TagReflexive",
+        "struct": "ObjectAttachment",
+        "maximum": 8
+      },
+      {
+        "kind": "field",
+        "name": "widgets",
+        "type": "TagReflexive",
+        "struct": "ObjectWidget",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "functions",
+        "type": "TagReflexive",
+        "struct": "ObjectFunction",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "change colors",
+        "type": "TagReflexive",
+        "struct": "ObjectChangeColors",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "predicted resources",
+        "type": "TagReflexive",
+        "struct": "PredictedResource",
+        "maximum": 1024,
+        "cacheOnly": true
+      }
+    ],
+    "tagClass": "object",
+    "sizeBytes": 380
+  },
+  {
+    "kind": "bitfield",
+    "name": "BaseObjectFlags",
+    "width": 16,
+    "fields": [
+      "off in pegasus"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "BasicObject",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "more flags",
+        "type": "BaseObjectFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 124
+      }
+    ],
+    "inherits": "Object",
+    "sizeBytes": 508
+  }
+]

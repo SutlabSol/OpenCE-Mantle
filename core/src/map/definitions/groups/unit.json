@@ -1,0 +1,709 @@
+[
+  {
+    "kind": "enum",
+    "name": "UnitFunctionIn",
+    "options": [
+      "none",
+      "driver seat power",
+      "gunner seat power",
+      "aiming change",
+      "mouth aperture",
+      "integrated light power",
+      "can blink",
+      "shield sapping"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "UnitDefaultTeam",
+    "options": [
+      "none",
+      "player",
+      "human",
+      "covenant",
+      "flood",
+      "sentinel",
+      "unused6",
+      "unused7",
+      "unused8",
+      "unused9"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "UnitMotionSensorBlipSize",
+    "options": [
+      "medium",
+      "small",
+      "large"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "UnitFlags",
+    "width": 32,
+    "fields": [
+      "circular aiming",
+      "destroyed after dying",
+      "half speed interpolation",
+      "fires from camera",
+      "entrance inside bounding sphere",
+      "unused",
+      "causes passenger dialogue",
+      "resists pings",
+      "melee attack is fatal",
+      "don't reface during pings",
+      "has no aiming",
+      "simple creature",
+      "impact melee attaches to unit",
+      "impact melee dies on shields",
+      "cannot open doors automatically",
+      "melee attackers cannot attach",
+      "not instantly killed by melee",
+      "shield sapping",
+      "runs around flaming",
+      "inconsequential",
+      "special cinematic unit",
+      "ignored by autoaiming",
+      "shields fry infection forms",
+      "integrated light cntrls weapon",
+      "integrated light lasts forever"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "UnitSeatFlags",
+    "width": 32,
+    "fields": [
+      "invisible",
+      "locked",
+      "driver",
+      "gunner",
+      "third person camera",
+      "allows weapons",
+      "third person on enter",
+      "first person camera slaved to gun",
+      "allow vehicle communication animations",
+      "not valid without driver",
+      "allow ai noncombatants"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "UnitPoweredSeat",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "driver powerup time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "driver powerdown time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 56
+      }
+    ],
+    "sizeBytes": 68
+  },
+  {
+    "kind": "struct",
+    "name": "UnitCameraTrack",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "track",
+        "type": "TagDependency",
+        "classes": [
+          "camera_track"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 28
+  },
+  {
+    "kind": "struct",
+    "name": "UnitUnitHudInterface",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "hud",
+        "type": "TagDependency",
+        "classes": [
+          "unit_hud_interface"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "enum",
+    "name": "MetagameType",
+    "options": [
+      "brute",
+      "grunt",
+      "jackal",
+      "skirmisher",
+      "marine",
+      "spartan",
+      "bugger",
+      "hunter",
+      "flood infection",
+      "flood carrier",
+      "flood combat",
+      "flood pure",
+      "sentinel",
+      "elite",
+      "engineer",
+      "mule",
+      "turret",
+      "mongoose",
+      "warthog",
+      "scorpion",
+      "hornet",
+      "pelican",
+      "revenant",
+      "seraph",
+      "shade",
+      "watchtower",
+      "ghost",
+      "chopper",
+      "mauler",
+      "wraith",
+      "banshee",
+      "phantom",
+      "scarab",
+      "guntower",
+      "tuning fork",
+      "broadsword",
+      "mammoth",
+      "lich",
+      "mantis",
+      "wasp",
+      "phaeton",
+      "bishop",
+      "knight",
+      "pawn"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "MetagameClass",
+    "options": [
+      "infantry",
+      "leader",
+      "hero",
+      "specialist",
+      "light vehicle",
+      "heavy vehicle",
+      "giant vehicle",
+      "standard vehicle"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "UnitSeat",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "UnitSeatFlags"
+      },
+      {
+        "kind": "field",
+        "name": "label",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "marker name",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "acceleration scale",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "yaw rate",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "pitch rate",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "camera marker name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "camera submerged marker name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "pitch auto level",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "pitch range",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "camera tracks",
+        "type": "TagReflexive",
+        "struct": "UnitCameraTrack",
+        "maximum": 2
+      },
+      {
+        "kind": "field",
+        "name": "unit hud interface",
+        "type": "TagReflexive",
+        "struct": "UnitUnitHudInterface",
+        "maximum": 2
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "hud text message index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "yaw minimum",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "yaw maximum",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "built in gunner",
+        "type": "TagDependency",
+        "classes": [
+          "actor_variant"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      }
+    ],
+    "sizeBytes": 284
+  },
+  {
+    "kind": "struct",
+    "name": "UnitWeapon",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "weapon",
+        "type": "TagDependency",
+        "classes": [
+          "weapon"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      }
+    ],
+    "sizeBytes": 36
+  },
+  {
+    "kind": "struct",
+    "name": "UnitDialogueVariant",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "variant number",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "dialogue",
+        "type": "TagDependency",
+        "classes": [
+          "dialogue"
+        ]
+      }
+    ],
+    "sizeBytes": 24
+  },
+  {
+    "kind": "struct",
+    "name": "Unit",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "unit flags",
+        "type": "UnitFlags"
+      },
+      {
+        "kind": "field",
+        "name": "default team",
+        "type": "UnitDefaultTeam"
+      },
+      {
+        "kind": "field",
+        "name": "constant sound volume",
+        "type": "ObjectNoise"
+      },
+      {
+        "kind": "field",
+        "name": "rider damage fraction",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "integrated light toggle",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "unit a in",
+        "type": "UnitFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "unit b in",
+        "type": "UnitFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "unit c in",
+        "type": "UnitFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "unit d in",
+        "type": "UnitFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "camera field of view",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "camera stiffness",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "camera marker name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "camera submerged marker name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "pitch auto level",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "pitch range",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "camera tracks",
+        "type": "TagReflexive",
+        "struct": "UnitCameraTrack",
+        "maximum": 2
+      },
+      {
+        "kind": "field",
+        "name": "seat acceleration scale",
+        "type": "Point3D"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "soft ping threshold",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "soft ping interrupt time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard ping threshold",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "hard ping interrupt time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard death threshold",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "feign death threshold",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "feign death time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "distance of evade anim",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "distance of dive anim",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "stunned movement threshold",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "feign death chance",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "feign repeat chance",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "spawned actor",
+        "type": "TagDependency",
+        "classes": [
+          "actor_variant"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "spawned actor count",
+        "type": "int16",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "spawned velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "aiming velocity maximum",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "aiming acceleration maximum",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "casual aiming modifier",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "looking velocity maximum",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "looking acceleration maximum",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "ai vehicle radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ai danger radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "melee damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor blip size",
+        "type": "UnitMotionSensorBlipSize"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "metagame type",
+        "type": "MetagameType",
+        "comment": "used for scoring in Halo: CE Anniversary (MCC only)"
+      },
+      {
+        "kind": "field",
+        "name": "metagame class",
+        "type": "MetagameClass",
+        "comment": "used for scoring in Halo: CE Anniversary (MCC only)"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "new hud interfaces",
+        "type": "TagReflexive",
+        "struct": "UnitUnitHudInterface",
+        "maximum": 2
+      },
+      {
+        "kind": "field",
+        "name": "dialogue variants",
+        "type": "TagReflexive",
+        "struct": "UnitDialogueVariant",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "grenade velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "grenade type",
+        "type": "GrenadeType"
+      },
+      {
+        "kind": "field",
+        "name": "grenade count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "soft ping interrupt ticks",
+        "type": "int16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "hard ping interrupt ticks",
+        "type": "int16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "powered seats",
+        "type": "TagReflexive",
+        "struct": "UnitPoweredSeat",
+        "maximum": 2
+      },
+      {
+        "kind": "field",
+        "name": "weapons",
+        "type": "TagReflexive",
+        "struct": "UnitWeapon",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "seats",
+        "type": "TagReflexive",
+        "struct": "UnitSeat",
+        "maximum": 16
+      }
+    ],
+    "inherits": "Object",
+    "tagClass": "unit",
+    "sizeBytes": 752
+  }
+]

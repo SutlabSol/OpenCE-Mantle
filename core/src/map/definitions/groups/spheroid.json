@@ -1,0 +1,16 @@
+[
+  {
+    "kind": "struct",
+    "name": "Spheroid",
+    "tagClass": "spheroid",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float",
+        "comment": "UNCERTAIN: Reclaimer's own comment on this field says 'this is just a guess. This could just as easily be 4 bytes of padding.' No other source (including Invader, which has no definition for this tag group at all) could be opened to confirm. Flagged uncertain in SOURCES.md; treated as a single opaque 4-byte field so offsets/size stay correct even if the semantic meaning here is wrong."
+      }
+    ],
+    "sizeBytes": 4
+  }
+]

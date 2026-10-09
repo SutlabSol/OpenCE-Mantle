@@ -1,0 +1,593 @@
+[
+  {
+    "kind": "enum",
+    "name": "ActorVariantMovementType",
+    "options": [
+      "always run",
+      "always crouch",
+      "switch types"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ActorVariantSpecialFireMode",
+    "options": [
+      "none",
+      "overcharge",
+      "secondary trigger"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ActorVariantSpecialFireSituation",
+    "options": [
+      "never",
+      "enemy visible",
+      "enemy out of sight",
+      "strafing"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ActorVariantTrajectoryType",
+    "options": [
+      "toss",
+      "lob",
+      "bounce"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ActorVariantGrenadeStimulus",
+    "options": [
+      "never",
+      "visible target",
+      "seek cover"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ActorVariantFlags",
+    "width": 32,
+    "fields": [
+      "can shoot while flying",
+      "interpolate color in hsv",
+      "has unlimited grenades",
+      "movement switching try to stay with friends",
+      "active camouflage",
+      "super active camouflage",
+      "cannot use ranged weapons",
+      "prefer passenger seat"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ActorVariantChangeColors",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "color lower bound",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "color upper bound",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ActorVariant",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ActorVariantFlags"
+      },
+      {
+        "kind": "field",
+        "name": "actor definition",
+        "type": "TagDependency",
+        "classes": [
+          "actor"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "unit",
+        "type": "TagDependency",
+        "classes": [
+          "unit"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "major variant",
+        "type": "TagDependency",
+        "classes": [
+          "actor_variant"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "metagame type",
+        "type": "MetagameType",
+        "comment": "used for scoring in Halo: CE Anniversary (MCC only)"
+      },
+      {
+        "kind": "field",
+        "name": "metagame class",
+        "type": "MetagameClass",
+        "comment": "used for scoring in Halo: CE Anniversary (MCC only)"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "movement type",
+        "type": "ActorVariantMovementType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "initial crouch chance",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "crouch time",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "run time",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "weapon",
+        "type": "TagDependency",
+        "classes": [
+          "weapon"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "maximum firing distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rate of fire",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "projectile error",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "first burst delay time",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "new target firing pattern time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "surprise delay time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "surprise fire wildly time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "death fire wildly chance",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "death fire wildly time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "desired combat range",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "custom stand gun offset",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "custom crouch gun offset",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "target tracking",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "target leading",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "weapon damage modifier",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "damage per second",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "burst origin radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "burst origin angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "burst return length",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "burst return angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "burst duration",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "burst separation",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "burst angular velocity",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "special damage modifier",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "special projectile error",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "new target burst duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "new target burst separation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "new target rate of fire",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "new target projectile error",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "moving burst duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "moving burst separation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "moving rate of fire",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "moving projectile error",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "berserk burst duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "berserk burst separation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "berserk rate of fire",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "berserk projectile error",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "super ballistic range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "bombardment range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "modified vision range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "special fire mode",
+        "type": "ActorVariantSpecialFireMode"
+      },
+      {
+        "kind": "field",
+        "name": "special fire situation",
+        "type": "ActorVariantSpecialFireSituation"
+      },
+      {
+        "kind": "field",
+        "name": "special fire chance",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "special fire delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "melee range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "melee abort range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "berserk firing ranges",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "berserk melee range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "berserk melee abort range",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "grenade type",
+        "type": "GrenadeType"
+      },
+      {
+        "kind": "field",
+        "name": "trajectory type",
+        "type": "ActorVariantTrajectoryType"
+      },
+      {
+        "kind": "field",
+        "name": "grenade stimulus",
+        "type": "ActorVariantGrenadeStimulus"
+      },
+      {
+        "kind": "field",
+        "name": "minimum enemy count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "enemy radius",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "grenade velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "grenade ranges",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "collateral damage radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "grenade chance",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "grenade check time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "encounter grenade timeout",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "equipment",
+        "type": "TagDependency",
+        "classes": [
+          "equipment"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "grenade count",
+        "type": "int16",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "don't drop grenades chance",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "drop weapon loaded",
+        "type": "float",
+        "maximum": 1,
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "drop weapon ammo",
+        "type": "int16",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "body vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield sapping radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "forced shader permutation",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "change colors",
+        "type": "TagReflexive",
+        "struct": "ActorVariantChangeColors",
+        "maximum": 4
+      }
+    ],
+    "tagClass": "actor_variant",
+    "sizeBytes": 568
+  }
+]

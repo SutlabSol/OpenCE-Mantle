@@ -1,0 +1,536 @@
+[
+  {
+    "kind": "enum",
+    "name": "ShaderTransparentGenericStageInputColor",
+    "options": [
+      "zero",
+      "one",
+      "one half",
+      "negative one",
+      "negative one half",
+      "map color 0",
+      "map color 1",
+      "map color 2",
+      "map color 3",
+      "vertex color 0 diffuse light",
+      "vertex color 1 fade perpendicular",
+      "scratch color 0",
+      "scratch color 1",
+      "constant color 0",
+      "constant color 1",
+      "map alpha 0",
+      "map alpha 1",
+      "map alpha 2",
+      "map alpha 3",
+      "vertex alpha 0 fade none",
+      "vertex alpha 1 fade perpendicular",
+      "scratch alpha 0",
+      "scratch alpha 1",
+      "constant alpha 0",
+      "constant alpha 1"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderTransparentGenericStageInputAlpha",
+    "options": [
+      "zero",
+      "one",
+      "one half",
+      "negative one",
+      "negative one half",
+      "map alpha 0",
+      "map alpha 1",
+      "map alpha 2",
+      "map alpha 3",
+      "vertex alpha 0 fade none",
+      "vertex alpha 1 fade perpendicular",
+      "scratch alpha 0",
+      "scratch alpha 1",
+      "constant alpha 0",
+      "constant alpha 1",
+      "map blue 0",
+      "map blue 1",
+      "map blue 2",
+      "map blue 3",
+      "vertex blue 0 blue light",
+      "vertex blue 1 fade parallel",
+      "scratch blue 0",
+      "scratch blue 1",
+      "constant blue 0",
+      "constant blue 1"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderTransparentGenericStageInputMappingColor",
+    "options": [
+      "clamp x",
+      "1 clamp x",
+      "2",
+      "1 2",
+      "clamp x 1 2",
+      "1 2 clamp x",
+      "x",
+      "x 1"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderTransparentGenericStageOutputFunction",
+    "options": [
+      "multiply",
+      "dot product"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderTransparentGenericStageOutputMapping",
+    "options": [
+      "color identity",
+      "color scale by 1 2",
+      "color scale by 2",
+      "color scale by 4",
+      "color bias by 1 2",
+      "color expand normal"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderTransparentGenericStageOutput",
+    "options": [
+      "alpha discard",
+      "alpha scratch alpha 0 final alpha",
+      "alpha scratch alpha 1",
+      "alpha vertex alpha 0 fog",
+      "alpha vertex alpha 1",
+      "alpha map alpha 0",
+      "alpha map alpha 1",
+      "alpha map alpha 2",
+      "alpha map alpha 3"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderTransparentGenericMapFlag",
+    "width": 16,
+    "fields": [
+      "unfiltered",
+      "u clamped",
+      "v clamped"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderTransparentGenericStageFlags",
+    "width": 16,
+    "fields": [
+      "color mux",
+      "alpha mux",
+      "a out controls color0 animation"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderTransparentGenericFlags",
+    "width": 8,
+    "fields": [
+      "alpha tested",
+      "decal",
+      "two sided",
+      "first map is in screenspace",
+      "draw before water",
+      "ignore effect",
+      "scale first map with distance",
+      "numeric"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentGenericMap",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ShaderTransparentGenericMapFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "map u scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "map v scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "map u offset",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "map v offset",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "map rotation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "mipmap bias",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "u animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "u animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "u animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "v animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "v animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation center",
+        "type": "Point2D"
+      }
+    ],
+    "sizeBytes": 100
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentGenericStage",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ShaderTransparentGenericStageFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "color0 source",
+        "type": "FunctionNameNullable"
+      },
+      {
+        "kind": "field",
+        "name": "color0 animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "color0 animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "color0 animation lower bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "color0 animation upper bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "color1",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "input a",
+        "type": "ShaderTransparentGenericStageInputColor"
+      },
+      {
+        "kind": "field",
+        "name": "input a mapping",
+        "type": "ShaderTransparentGenericStageInputMappingColor"
+      },
+      {
+        "kind": "field",
+        "name": "input b",
+        "type": "ShaderTransparentGenericStageInputColor"
+      },
+      {
+        "kind": "field",
+        "name": "input b mapping",
+        "type": "ShaderTransparentGenericStageInputMappingColor"
+      },
+      {
+        "kind": "field",
+        "name": "input c",
+        "type": "ShaderTransparentGenericStageInputColor"
+      },
+      {
+        "kind": "field",
+        "name": "input c mapping",
+        "type": "ShaderTransparentGenericStageInputMappingColor"
+      },
+      {
+        "kind": "field",
+        "name": "input d",
+        "type": "ShaderTransparentGenericStageInputColor"
+      },
+      {
+        "kind": "field",
+        "name": "input d mapping",
+        "type": "ShaderTransparentGenericStageInputMappingColor"
+      },
+      {
+        "kind": "field",
+        "name": "output ab",
+        "type": "ShaderTransparentGenericStageOutput"
+      },
+      {
+        "kind": "field",
+        "name": "output ab function",
+        "type": "ShaderTransparentGenericStageOutputFunction"
+      },
+      {
+        "kind": "field",
+        "name": "output bc",
+        "type": "ShaderTransparentGenericStageOutput"
+      },
+      {
+        "kind": "field",
+        "name": "output cd function",
+        "type": "ShaderTransparentGenericStageOutputFunction"
+      },
+      {
+        "kind": "field",
+        "name": "output ab cd mux sum",
+        "type": "ShaderTransparentGenericStageOutput"
+      },
+      {
+        "kind": "field",
+        "name": "output mapping color",
+        "type": "ShaderTransparentGenericStageOutputMapping"
+      },
+      {
+        "kind": "field",
+        "name": "input a alpha",
+        "type": "ShaderTransparentGenericStageInputAlpha"
+      },
+      {
+        "kind": "field",
+        "name": "input a mapping alpha",
+        "type": "ShaderTransparentGenericStageInputMappingColor"
+      },
+      {
+        "kind": "field",
+        "name": "input b alpha",
+        "type": "ShaderTransparentGenericStageInputAlpha"
+      },
+      {
+        "kind": "field",
+        "name": "input b mapping alpha",
+        "type": "ShaderTransparentGenericStageInputMappingColor"
+      },
+      {
+        "kind": "field",
+        "name": "input c alpha",
+        "type": "ShaderTransparentGenericStageInputAlpha"
+      },
+      {
+        "kind": "field",
+        "name": "input c mapping alpha",
+        "type": "ShaderTransparentGenericStageInputMappingColor"
+      },
+      {
+        "kind": "field",
+        "name": "input d alpha",
+        "type": "ShaderTransparentGenericStageInputAlpha"
+      },
+      {
+        "kind": "field",
+        "name": "input d mapping alpha",
+        "type": "ShaderTransparentGenericStageInputMappingColor"
+      },
+      {
+        "kind": "field",
+        "name": "output ab alpha",
+        "type": "ShaderTransparentGenericStageOutput"
+      },
+      {
+        "kind": "field",
+        "name": "output cd alpha",
+        "type": "ShaderTransparentGenericStageOutput"
+      },
+      {
+        "kind": "field",
+        "name": "output ab cd mux sum alpha",
+        "type": "ShaderTransparentGenericStageOutput"
+      },
+      {
+        "kind": "field",
+        "name": "output mapping alpha",
+        "type": "ShaderTransparentGenericStageOutputMapping"
+      }
+    ],
+    "sizeBytes": 112
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentGeneric",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "numeric counter limit",
+        "type": "uint8"
+      },
+      {
+        "kind": "field",
+        "name": "shader transparent generic flags",
+        "type": "ShaderTransparentGenericFlags"
+      },
+      {
+        "kind": "field",
+        "name": "first map type",
+        "type": "ShaderFirstMapType"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer blend function",
+        "type": "FramebufferBlendFunction"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer fade mode",
+        "type": "FramebufferFadeMode"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer fade source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "lens flare spacing",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "lens flare",
+        "type": "TagDependency",
+        "classes": [
+          "lens_flare"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "extra layers",
+        "type": "TagReflexive",
+        "struct": "ShaderTransparentExtraLayer",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "maps",
+        "type": "TagReflexive",
+        "struct": "ShaderTransparentGenericMap",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "stages",
+        "type": "TagReflexive",
+        "struct": "ShaderTransparentGenericStage",
+        "maximum": 7
+      }
+    ],
+    "inherits": "Shader",
+    "tagClass": "shader_transparent_generic",
+    "sizeBytes": 108
+  }
+]

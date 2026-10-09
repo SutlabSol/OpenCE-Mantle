@@ -1,0 +1,122 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "ShaderTransparentMeterFlags",
+    "width": 16,
+    "fields": [
+      "decal",
+      "two sided",
+      "flash color is negative",
+      "tint mode 2",
+      "unfiltered"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentMeter",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "meter flags",
+        "type": "ShaderTransparentMeterFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "gradient min color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "gradient max color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "background color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "flash color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "meter tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "meter transparency",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "background transparency",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "meter brightness source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "flash brightness source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "value source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "gradient source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "flash extension source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "inherits": "Shader",
+    "tagClass": "shader_transparent_meter",
+    "sizeBytes": 260
+  }
+]

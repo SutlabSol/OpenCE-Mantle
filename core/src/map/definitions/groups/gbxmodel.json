@@ -1,0 +1,197 @@
+[
+  {
+    "kind": "struct",
+    "name": "GBXModelGeometryPart",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "field",
+        "name": "local node count",
+        "type": "uint8",
+        "maximum": 22
+      },
+      {
+        "kind": "field",
+        "name": "local node indices",
+        "type": "uint8",
+        "count": 22,
+        "comment": "Local nodes are used to indirectly refer to a real node. So, if local nodes are used, a vertex says node #4, and local node #4 refers to node #5, then the vertex is node #5. There really doesn't seem to be any benefit to using local nodes, considering compressed vertices (which can only address 42 nodes) don't even use them. They just make the models unnecessarily more convoluted while taking up more space."
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      }
+    ],
+    "inherits": "ModelGeometryPart",
+    "sizeBytes": 132
+  },
+  {
+    "kind": "struct",
+    "name": "GBXModelGeometry",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "IsUnusedFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "parts",
+        "type": "TagReflexive",
+        "struct": "GBXModelGeometryPart",
+        "maximum": 32,
+        "extendedMaximum": 32767
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "GBXModel",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ModelFlags"
+      },
+      {
+        "kind": "field",
+        "name": "node list checksum",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "super high detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "high detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "medium detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "low detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "super low detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "super low detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "low detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "medium detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "high detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "super high detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "base map u scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "base map v scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 116
+      },
+      {
+        "kind": "field",
+        "name": "markers",
+        "type": "TagReflexive",
+        "struct": "ModelMarker",
+        "maximum": 0
+      },
+      {
+        "kind": "field",
+        "name": "nodes",
+        "type": "TagReflexive",
+        "struct": "ModelNode",
+        "maximum": 64,
+        "extendedMaximum": 255
+      },
+      {
+        "kind": "field",
+        "name": "regions",
+        "type": "TagReflexive",
+        "struct": "ModelRegion",
+        "maximum": 32,
+        "extendedMaximum": 255
+      },
+      {
+        "kind": "field",
+        "name": "geometries",
+        "type": "TagReflexive",
+        "struct": "GBXModelGeometry",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "shaders",
+        "type": "TagReflexive",
+        "struct": "ModelShaderReference",
+        "maximum": 32,
+        "extendedMaximum": 32767
+      }
+    ],
+    "tagClass": "gbxmodel",
+    "sizeBytes": 232
+  }
+]

@@ -1,0 +1,298 @@
+[
+  {
+    "kind": "enum",
+    "name": "LensFlareRadiusScaledBy",
+    "options": [
+      "none",
+      "rotation",
+      "rotation and strafing",
+      "distance from center"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "LensFlareOcclusionOffsetDirection",
+    "options": [
+      "toward viewer",
+      "marker forward",
+      "none"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "LensFlareRotationFunction",
+    "options": [
+      "none",
+      "rotation a",
+      "rotation b",
+      "rotation translation",
+      "translation"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "LensFlareReflectionFlags",
+    "width": 16,
+    "fields": [
+      "align rotation with screen center",
+      "radius not scaled by distance",
+      "radius scaled by occlusion factor",
+      "occluded by solid objects"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "LensFlareReflectionMoreFlags",
+    "width": 16,
+    "fields": [
+      "interpolate colors in hsv",
+      "more colors"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "LensFlareFlags",
+    "width": 16,
+    "fields": [
+      "sun",
+      "no occlusion test",
+      "only render in first person",
+      "only render in third person",
+      "fade in more quickly",
+      "fade out more quickly",
+      "scale by marker"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "LensFlareReflection",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "LensFlareReflectionFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "bitmap index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation offset",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "radius scaled by",
+        "type": "LensFlareRadiusScaledBy"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "brightness",
+        "type": "Fraction",
+        "maximum": 1,
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "brightness scaled by",
+        "type": "LensFlareRadiusScaledBy"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "tint color",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "color lower bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "color upper bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "more flags",
+        "type": "LensFlareReflectionMoreFlags"
+      },
+      {
+        "kind": "field",
+        "name": "animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      }
+    ],
+    "sizeBytes": 128
+  },
+  {
+    "kind": "struct",
+    "name": "LensFlare",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "falloff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "cutoff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "cos falloff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "cos cutoff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "occlusion radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "occlusion offset direction",
+        "type": "LensFlareOcclusionOffsetDirection"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "near fade distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "far fade distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "LensFlareFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 76
+      },
+      {
+        "kind": "field",
+        "name": "rotation function",
+        "type": "LensFlareRotationFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "rotation function scale",
+        "type": "Angle",
+        "comment": "Prior to CEA's newer MCC Halo CE: Mod Tools, this was defaulted to 360 radians (as a bug), thus all Bungie, Gearbox, and early CEA releases had this scaled to 360 radians. As of MCC CEA, it's defaulted to 2*pi instead"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "horizontal scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "vertical scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "reflections",
+        "type": "TagReflexive",
+        "struct": "LensFlareReflection",
+        "maximum": 32
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "tagClass": "lens_flare",
+    "sizeBytes": 240
+  }
+]

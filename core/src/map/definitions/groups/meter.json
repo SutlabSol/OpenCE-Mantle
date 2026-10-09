@@ -1,0 +1,121 @@
+[
+  {
+    "kind": "enum",
+    "name": "MeterInterpolateColors",
+    "options": [
+      "linearly",
+      "faster near empty",
+      "faster near full",
+      "through random noise"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "MeterAnchorColors",
+    "options": [
+      "at both ends",
+      "at empty",
+      "at full"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "Meter",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "IsUnusedFlag"
+      },
+      {
+        "kind": "field",
+        "name": "stencil bitmaps",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ],
+        "nonCached": true,
+        "comment": "Don't use this! This gets dereferenced on map build."
+      },
+      {
+        "kind": "field",
+        "name": "source bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ],
+        "nonCached": true,
+        "comment": "Don't use this! This gets dereferenced on map build."
+      },
+      {
+        "kind": "field",
+        "name": "stencil sequence index",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "source sequence index",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "interpolate colors",
+        "type": "MeterInterpolateColors"
+      },
+      {
+        "kind": "field",
+        "name": "anchor colors",
+        "type": "MeterAnchorColors"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "empty color",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "full color",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "unmask distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "mask distance",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "encoded stencil",
+        "type": "TagDataOffset",
+        "maximum": 65536,
+        "cacheOnly": true
+      }
+    ],
+    "tagClass": "meter",
+    "sizeBytes": 172
+  }
+]

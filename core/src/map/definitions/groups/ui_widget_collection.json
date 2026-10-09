@@ -1,0 +1,30 @@
+[
+  {
+    "kind": "struct",
+    "name": "UIWidgetCollectionEntry",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "ui widget definition",
+        "type": "TagDependency",
+        "classes": ["ui_widget_definition"]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "UIWidgetCollection",
+    "tagClass": "ui_widget_collection",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "ui widget definitions",
+        "type": "TagReflexive",
+        "struct": "UIWidgetCollectionEntry",
+        "maximum": 32
+      }
+    ],
+    "sizeBytes": 12
+  }
+]

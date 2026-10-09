@@ -1,0 +1,195 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "LightVolumeFlags",
+    "width": 16,
+    "fields": [
+      "interpolate color in hsv",
+      "more colors"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "LightVolumeFrame",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "offset from marker",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "offset exponent",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "length",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "radius hither",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "radius yon",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "radius exponent",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "tint color hither",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "tint color yon",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "tint color exponent",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "brightness exponent",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 176
+  },
+  {
+    "kind": "struct",
+    "name": "LightVolume",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "attachment marker",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "LightVolumeFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "near fade distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "far fade distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular brightness scale",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "parallel brightness scale",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "brightness scale source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "count",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 72
+      },
+      {
+        "kind": "field",
+        "name": "frame animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      },
+      {
+        "kind": "pad",
+        "size": 64
+      },
+      {
+        "kind": "field",
+        "name": "frames",
+        "type": "TagReflexive",
+        "struct": "LightVolumeFrame",
+        "maximum": 2
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "tagClass": "light_volume",
+    "sizeBytes": 332
+  }
+]

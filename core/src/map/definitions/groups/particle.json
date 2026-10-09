@@ -1,0 +1,358 @@
+[
+  {
+    "kind": "enum",
+    "name": "ParticleOrientation",
+    "options": [
+      "screen facing",
+      "parallel to direction",
+      "perpendicular to direction"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ParticleAnchor",
+    "options": [
+      "with primary",
+      "with screen space",
+      "zsprite"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ParticleFlags",
+    "width": 32,
+    "fields": [
+      "can animate backwards",
+      "animation stops at rest",
+      "animation starts on random frame",
+      "animate once per frame",
+      "dies at rest",
+      "dies on contact with structure",
+      "tint from diffuse texture",
+      "dies on contact with water",
+      "dies on contact with air",
+      "self illuminated",
+      "random horizontal mirroring",
+      "random vertical mirroring"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ParticleShaderFlags",
+    "width": 16,
+    "fields": [
+      "sort bias",
+      "nonlinear tint",
+      "don't overdraw fp weapon"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "Particle",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ParticleFlags"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "physics",
+        "type": "TagDependency",
+        "classes": [
+          "point_physics"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "sir marty exchanged his children for thine",
+        "type": "TagDependency",
+        "classes": [
+          "material_effects"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "lifespan",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "fade in time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade out time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "collision effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "death effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "minimum size",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "radius animation",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "animation rate",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "contact deterioration",
+        "type": "float",
+        "nonCached": true,
+        "comment": "this value is totally broken and locks the game up if it's non-zero; even tool.exe sets it to zero"
+      },
+      {
+        "kind": "field",
+        "name": "fade start size",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade end size",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "first sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "initial sequence count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "looping sequence count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "final sequence count",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "sprite size",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "orientation",
+        "type": "ParticleOrientation"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      },
+      {
+        "kind": "field",
+        "name": "shader type",
+        "type": "ShaderType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "shader flags",
+        "type": "ParticleShaderFlags"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer blend function",
+        "type": "FramebufferBlendFunction"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer fade mode",
+        "type": "FramebufferFadeMode"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap flags",
+        "type": "IsUnfilteredFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "secondary bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "ParticleAnchor"
+      },
+      {
+        "kind": "field",
+        "name": "secondary bitmap flags",
+        "type": "IsUnfilteredFlag"
+      },
+      {
+        "kind": "field",
+        "name": "u animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "u animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "u animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "v animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "v animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation center",
+        "type": "Point2D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "zsprite radius scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      }
+    ],
+    "tagClass": "particle",
+    "sizeBytes": 356
+  }
+]

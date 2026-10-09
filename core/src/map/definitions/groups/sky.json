@@ -1,0 +1,241 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "SkyLightFlags",
+    "width": 32,
+    "fields": [
+      "affects exteriors",
+      "affects interiors"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "SkyFunction",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "function name",
+        "type": "TagString"
+      }
+    ],
+    "sizeBytes": 36
+  },
+  {
+    "kind": "struct",
+    "name": "SkyAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation index",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "period",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      }
+    ],
+    "sizeBytes": 36
+  },
+  {
+    "kind": "struct",
+    "name": "SkyLight",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "lens flare",
+        "type": "TagDependency",
+        "classes": [
+          "lens_flare"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "lens flare marker name",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "SkyLightFlags"
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "power",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "test distance",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "direction",
+        "type": "Euler2D"
+      },
+      {
+        "kind": "field",
+        "name": "diameter",
+        "type": "float"
+      }
+    ],
+    "sizeBytes": 116
+  },
+  {
+    "kind": "struct",
+    "name": "Sky",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "model",
+        "type": "TagDependency",
+        "classes": [
+          "model"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "animation graph",
+        "type": "TagDependency",
+        "classes": [
+          "model_animations"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "indoor ambient radiosity color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "indoor ambient radiosity power",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "outdoor ambient radiosity color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "outdoor ambient radiosity power",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "outdoor fog color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "outdoor fog maximum density",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "outdoor fog start distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "outdoor fog opaque distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "indoor fog color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "indoor fog maximum density",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "indoor fog start distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "indoor fog opaque distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "indoor fog screen",
+        "type": "TagDependency",
+        "classes": [
+          "fog"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "shader functions",
+        "type": "TagReflexive",
+        "struct": "SkyFunction",
+        "maximum": 8
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "SkyAnimation",
+        "maximum": 8
+      },
+      {
+        "kind": "field",
+        "name": "lights",
+        "type": "TagReflexive",
+        "struct": "SkyLight",
+        "maximum": 8
+      }
+    ],
+    "tagClass": "sky",
+    "sizeBytes": 208
+  }
+]

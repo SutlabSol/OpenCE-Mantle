@@ -1,0 +1,122 @@
+[
+  {
+    "kind": "struct",
+    "name": "AntennaVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "spring strength coefficient",
+        "type": "Fraction"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "angles",
+        "type": "Euler2D"
+      },
+      {
+        "kind": "field",
+        "name": "length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "lod color",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      },
+      {
+        "kind": "field",
+        "name": "offset",
+        "type": "Point3D",
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 128
+  },
+  {
+    "kind": "struct",
+    "name": "Antenna",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "attachment marker name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "bitmaps",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "physics",
+        "type": "TagDependency",
+        "classes": [
+          "point_physics"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 80
+      },
+      {
+        "kind": "field",
+        "name": "spring strength coefficient",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "falloff pixels",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "cutoff pixels",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "length",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      },
+      {
+        "kind": "field",
+        "name": "vertices",
+        "type": "TagReflexive",
+        "struct": "AntennaVertex",
+        "maximum": 20
+      }
+    ],
+    "tagClass": "antenna",
+    "sizeBytes": 208
+  }
+]

@@ -1,0 +1,477 @@
+[
+  {
+    "kind": "enum",
+    "name": "ShaderEnvironmentType",
+    "options": [
+      "normal",
+      "blended",
+      "blended base specular"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderEnvironmentReflectionType",
+    "options": [
+      "bumped cube map",
+      "flat cube map",
+      "bumped radiosity"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderEnvironmentFlags",
+    "width": 16,
+    "fields": [
+      "alpha tested",
+      "bump map is specular mask",
+      "true atmospheric fog",
+      "use alternate bump attenuation",
+      "use alternate normal type blending"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderEnvironmentDiffuseFlags",
+    "width": 16,
+    "fields": [
+      "rescale detail maps",
+      "rescale bump map"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderEnvironmentSpecularFlags",
+    "width": 16,
+    "fields": [
+      "overbright",
+      "extra shiny",
+      "lightmap is specular"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderEnvironmentReflectionFlags",
+    "width": 16,
+    "fields": [
+      "dynamic mirror"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderEnvironment",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shader environment flags",
+        "type": "ShaderEnvironmentFlags"
+      },
+      {
+        "kind": "field",
+        "name": "shader environment type",
+        "type": "ShaderEnvironmentType"
+      },
+      {
+        "kind": "field",
+        "name": "lens flare spacing",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "lens flare",
+        "type": "TagDependency",
+        "classes": [
+          "lens_flare"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 44
+      },
+      {
+        "kind": "field",
+        "name": "diffuse flags",
+        "type": "ShaderEnvironmentDiffuseFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "base map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "detail map function",
+        "type": "ShaderDetailFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "primary detail map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "primary detail map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "secondary detail map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "secondary detail map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "micro detail map function",
+        "type": "ShaderDetailFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "micro detail map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "micro detail map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "material color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "bump map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "bump map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "bump map scale xy",
+        "type": "Point2D",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "u animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "u animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "v animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "self illumination flags",
+        "type": "IsUnfilteredFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "primary on color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "primary off color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "primary animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "primary animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "primary animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "secondary on color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "secondary off color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "secondary animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "secondary animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "secondary animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "plasma on color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "plasma off color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "plasma animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "plasma animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "plasma animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "specular flags",
+        "type": "ShaderEnvironmentSpecularFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "parallel color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "reflection flags",
+        "type": "ShaderEnvironmentReflectionFlags"
+      },
+      {
+        "kind": "field",
+        "name": "reflection type",
+        "type": "ShaderEnvironmentReflectionType"
+      },
+      {
+        "kind": "field",
+        "name": "lightmap brightness scale",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "parallel brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "reflection cube map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "inherits": "Shader",
+    "tagClass": "shader_environment",
+    "sizeBytes": 836
+  }
+]

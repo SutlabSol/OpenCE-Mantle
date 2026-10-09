@@ -1,0 +1,15 @@
+[
+  {
+    "kind": "struct",
+    "name": "Garbage",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 168
+      }
+    ],
+    "inherits": "Item",
+    "tagClass": "garbage",
+    "sizeBytes": 944
+  }
+]

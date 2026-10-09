@@ -1,0 +1,226 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "LightFlags",
+    "width": 32,
+    "fields": [
+      "dynamic",
+      "no specular",
+      "don't light own object",
+      "supersize in first person",
+      "first person flashlight",
+      "don't fade active camouflage"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "Light",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "LightFlags"
+      },
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "radius modifer",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "falloff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "cutoff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "lens flare only radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "cos falloff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "cos cutoff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "specular radius multiplier",
+        "type": "float",
+        "cacheOnly": true,
+        "comment": "Not setting this to 2 breaks the first person flashlight."
+      },
+      {
+        "kind": "field",
+        "name": "sin cutoff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "interpolation flags",
+        "type": "ColorInterpolationFlags"
+      },
+      {
+        "kind": "field",
+        "name": "color lower bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "color upper bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "primary cube map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "texture animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "texture animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "secondary cube map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "yaw function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "yaw period",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "roll function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "roll period",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "pitch function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "pitch period",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "lens flare",
+        "type": "TagDependency",
+        "classes": [
+          "lens_flare"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "intensity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "duration",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "falloff function",
+        "type": "FunctionType"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 92
+      }
+    ],
+    "tagClass": "light",
+    "sizeBytes": 352
+  }
+]

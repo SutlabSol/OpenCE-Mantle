@@ -1,0 +1,1144 @@
+[
+  {
+    "kind": "enum",
+    "name": "WeaponHUDInterfaceStateAttachedTo",
+    "options": [
+      "total ammo",
+      "loaded ammo",
+      "heat",
+      "age",
+      "secondary weapon total ammo",
+      "secondary weapon loaded ammo",
+      "distance to target",
+      "elevation to target"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WeaponHUDInterfaceViewType",
+    "options": [
+      "any",
+      "fullscreen",
+      "splitscreen"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WeaponHUDInterfaceCrosshairType",
+    "options": [
+      "aim",
+      "zoom overlay",
+      "charge",
+      "should reload",
+      "flash heat",
+      "flash total ammo",
+      "flash battery",
+      "reload overheat",
+      "flash when firing and no ammo",
+      "flash when throwing and no grenade",
+      "low ammo and none left to reload",
+      "should reload secondary trigger",
+      "flash secondary total ammo",
+      "flash secondary reload",
+      "flash when firing secondary trigger with no ammo",
+      "low secondary ammo and none left to reload",
+      "primary trigger ready",
+      "secondary trigger ready",
+      "flash when firing with depleted battery"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponHUDInterfaceCrosshairTypeFlags",
+    "width": 32,
+    "fields": [
+      "aim",
+      "zoom overlay",
+      "charge",
+      "should reload",
+      "flash heat",
+      "flash total ammo",
+      "flash battery",
+      "reload overheat",
+      "flash when firing and no ammo",
+      "flash when throwing and no grenade",
+      "low ammo and none left to reload",
+      "should reload secondary trigger",
+      "flash secondary total ammo",
+      "flash secondary reload",
+      "flash when firing secondary trigger with no ammo",
+      "low secondary ammo and none left to reload",
+      "primary trigger ready",
+      "secondary trigger ready",
+      "flash when firing with depleted battery"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponHUDInterfaceNumberWeaponSpecificFlags",
+    "width": 16,
+    "fields": [
+      "divide number by clip size"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponHUDInterfaceCrosshairOverlayFlags",
+    "width": 32,
+    "fields": [
+      "flashes when active",
+      "not a sprite",
+      "show only when zoomed",
+      "show sniper data",
+      "hide area outside reticle",
+      "one zoom level",
+      "don't show when zoomed"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponHUDInterfaceOverlayType",
+    "width": 16,
+    "fields": [
+      "show on flashing",
+      "show on empty",
+      "show on reload overheating",
+      "show on default",
+      "show always"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponHUDInterfaceScreenEffectDefinitionMaskFlags",
+    "width": 16,
+    "fields": [
+      "only when zoomed"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponHUDInterfaceScreenEffectDefinitionNightVisionFlags",
+    "width": 16,
+    "fields": [
+      "only when zoomed",
+      "connect to flashlight",
+      "masked"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponHUDInterfaceScreenEffectDefinitionDesaturationFlags",
+    "width": 16,
+    "fields": [
+      "only when zoomed",
+      "connect to flashlight",
+      "additive",
+      "masked"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponHUDInterfaceFlags",
+    "width": 16,
+    "fields": [
+      "use parent hud flashing parameters"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterfaceStaticElement",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "state attached to",
+        "type": "WeaponHUDInterfaceStateAttachedTo"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "allowed view type",
+        "type": "WeaponHUDInterfaceViewType"
+      },
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "HUDInterfaceChildAnchor"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      }
+    ],
+    "sizeBytes": 180
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterfaceMeter",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "state attached to",
+        "type": "WeaponHUDInterfaceStateAttachedTo"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "allowed view type",
+        "type": "WeaponHUDInterfaceViewType"
+      },
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "HUDInterfaceChildAnchor"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "meter bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "color at meter minimum",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "color at meter maximum",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flash color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "empty color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "HUDInterfaceMeterFlags"
+      },
+      {
+        "kind": "field",
+        "name": "minimum meter value",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "alpha multiplier",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "alpha bias",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "value scale",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "opacity",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "translucency",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "min alpha",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      }
+    ],
+    "sizeBytes": 180
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterfaceNumber",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "state attached to",
+        "type": "WeaponHUDInterfaceStateAttachedTo"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "allowed view type",
+        "type": "WeaponHUDInterfaceViewType"
+      },
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "HUDInterfaceChildAnchor"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "maximum number of digits",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "HUDInterfaceNumberFlags"
+      },
+      {
+        "kind": "field",
+        "name": "number of fractional digits",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "weapon specific flags",
+        "type": "WeaponHUDInterfaceNumberWeaponSpecificFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      }
+    ],
+    "sizeBytes": 160
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterfaceCrosshairOverlay",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "frame rate",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "WeaponHUDInterfaceCrosshairOverlayFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 108
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterfaceCrosshair",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "crosshair type",
+        "type": "WeaponHUDInterfaceCrosshairType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "allowed view type",
+        "type": "WeaponHUDInterfaceViewType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "crosshair bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "crosshair overlays",
+        "type": "TagReflexive",
+        "struct": "WeaponHUDInterfaceCrosshairOverlay",
+        "maximum": 16
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterfaceOverlay",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "frame rate",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "WeaponHUDInterfaceOverlayType"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "HUDInterfaceOverlayFlashFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      }
+    ],
+    "sizeBytes": 136
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterfaceOverlayElement",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "state attached to",
+        "type": "WeaponHUDInterfaceStateAttachedTo"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "allowed view type",
+        "type": "WeaponHUDInterfaceViewType"
+      },
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "HUDInterfaceChildAnchor"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "overlay bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "overlays",
+        "type": "TagReflexive",
+        "struct": "WeaponHUDInterfaceOverlay",
+        "maximum": 16
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterfaceScreenEffect",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "mask flags",
+        "type": "WeaponHUDInterfaceScreenEffectDefinitionMaskFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "mask fullscreen",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "mask splitscreen",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "convolution flags",
+        "type": "WeaponHUDInterfaceScreenEffectDefinitionMaskFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "convolution fov in bounds",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "convolution radius out bounds",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "even more flags",
+        "type": "WeaponHUDInterfaceScreenEffectDefinitionNightVisionFlags"
+      },
+      {
+        "kind": "field",
+        "name": "night vision script source",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "night vision intensity",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "desaturation flags",
+        "type": "WeaponHUDInterfaceScreenEffectDefinitionDesaturationFlags"
+      },
+      {
+        "kind": "field",
+        "name": "desaturation script source",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "desaturation intensity",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "effect tint",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      }
+    ],
+    "sizeBytes": 184
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponHUDInterface",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "child hud",
+        "type": "TagDependency",
+        "classes": [
+          "weapon_hud_interface"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "WeaponHUDInterfaceFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "total ammo cutoff",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "loaded ammo cutoff",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "heat cutoff",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "age cutoff",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "HUDInterfaceAnchor"
+      },
+      {
+        "kind": "field",
+        "name": "canvas size",
+        "type": "HUDInterfaceCanvasSize"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "static elements",
+        "type": "TagReflexive",
+        "struct": "WeaponHUDInterfaceStaticElement",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "meter elements",
+        "type": "TagReflexive",
+        "struct": "WeaponHUDInterfaceMeter",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "number elements",
+        "type": "TagReflexive",
+        "struct": "WeaponHUDInterfaceNumber",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "crosshairs",
+        "type": "TagReflexive",
+        "struct": "WeaponHUDInterfaceCrosshair",
+        "maximum": 19
+      },
+      {
+        "kind": "field",
+        "name": "overlay elements",
+        "type": "TagReflexive",
+        "struct": "WeaponHUDInterfaceOverlayElement",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "crosshair types",
+        "type": "WeaponHUDInterfaceCrosshairTypeFlags",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "screen effect",
+        "type": "TagReflexive",
+        "struct": "WeaponHUDInterfaceScreenEffect",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 132
+      },
+      {
+        "kind": "field",
+        "name": "messaging information sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information width offset",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information offset from reference corner",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information override icon color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information frame rate",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information flags",
+        "type": "HUDInterfaceMessagingFlags"
+      },
+      {
+        "kind": "field",
+        "name": "messaging information text index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      }
+    ],
+    "tagClass": "weapon_hud_interface",
+    "sizeBytes": 380
+  }
+]

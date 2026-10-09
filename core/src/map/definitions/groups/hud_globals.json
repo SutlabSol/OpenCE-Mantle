@@ -1,0 +1,687 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "HUDGlobalsWaypointArrowFlags",
+    "width": 32,
+    "fields": [
+      "dont rotate when pointing offscreen"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "HUDGlobalsButtonIcon",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "width offset",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "offset from reference corner",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "override icon color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "frame rate",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "HUDInterfaceMessagingFlags"
+      },
+      {
+        "kind": "field",
+        "name": "text index",
+        "type": "Index"
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "enum",
+    "name": "HUDGlobalsAnniversaryRemapTargetLanguage",
+    "options": [
+      "english",
+      "french",
+      "spanish",
+      "italian",
+      "german",
+      "traditional chinese",
+      "japanese",
+      "korean",
+      "portuguese",
+      "latam spanish",
+      "polish",
+      "russian",
+      "simplified chinese"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "HUDGlobalsAnniversaryRemapTargetFlags",
+    "width": 16,
+    "fields": [
+      "legacy mode"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "HUDGlobalsAnniversaryRemapTarget",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "target bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "language",
+        "type": "HUDGlobalsAnniversaryRemapTargetLanguage"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "HUDGlobalsAnniversaryRemapTargetFlags"
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "HUDGlobalsAnniversaryRemap",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "source bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "targets",
+        "type": "TagReflexive",
+        "struct": "HUDGlobalsAnniversaryRemapTarget",
+        "maximum": 26
+      }
+    ],
+    "sizeBytes": 28
+  },
+  {
+    "kind": "struct",
+    "name": "HUDGlobalsWaypointArrow",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "opacity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "translucency",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "on screen sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "off screen sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "occluded sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "HUDGlobalsWaypointArrowFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "HUDGlobals",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "HUDInterfaceAnchor"
+      },
+      {
+        "kind": "field",
+        "name": "canvas size",
+        "type": "HUDInterfaceCanvasSize"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "fullscreen font",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "splitscreen font",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "up time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "icon color",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "text color",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "text spacing",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "item message text",
+        "type": "TagDependency",
+        "classes": [
+          "unicode_string_list"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "icon bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "alternate icon text",
+        "type": "TagDependency",
+        "classes": [
+          "unicode_string_list"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "button icons",
+        "type": "TagReflexive",
+        "struct": "HUDGlobalsButtonIcon",
+        "maximum": 18
+      },
+      {
+        "kind": "field",
+        "name": "hud help default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "hud help flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "hud help flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud help flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud help number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "hud help flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "hud help flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud help disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "hud messages",
+        "type": "TagDependency",
+        "classes": [
+          "hud_message_text"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "objective default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "objective flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "objective flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "objective flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "objective number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "objective flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "objective flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "objective disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "objective uptime ticks",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "objective fade ticks",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "top offset",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "bottom offset",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "left offset",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "right offset",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "arrow bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "waypoint arrows",
+        "type": "TagReflexive",
+        "struct": "HUDGlobalsWaypointArrow",
+        "maximum": 16
+      },
+      {
+        "kind": "pad",
+        "size": 80
+      },
+      {
+        "kind": "field",
+        "name": "hud scale in multiplayer",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 256
+      },
+      {
+        "kind": "field",
+        "name": "default weapon hud",
+        "type": "TagDependency",
+        "classes": [
+          "weapon_hud_interface"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor velocity sensitivity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "default chapter title bounds",
+        "type": "Rectangle2D"
+      },
+      {
+        "kind": "pad",
+        "size": 44
+      },
+      {
+        "kind": "field",
+        "name": "hud damage top offset",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "hud damage bottom offset",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "hud damage left offset",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "hud damage right offset",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "hud damage indicator bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "hud damage sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "hud damage multiplayer sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "hud damage color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "not much time left default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "not much time left flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "not much time left flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "not much time left flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "not much time left number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "not much time left flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "not much time left flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "not much time left disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "time out flash default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "time out flash flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "time out flash flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "time out flash flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "time out flash number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "time out flash flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "time out flash flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "time out flash disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      },
+      {
+        "kind": "field",
+        "name": "carnage report bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "loading begin text",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "loading end text",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "checkpoint begin text",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "checkpoint end text",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "checkpoint sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "anniversary hud remaps",
+        "type": "TagReflexive",
+        "struct": "HUDGlobalsAnniversaryRemap",
+        "maximum": 32
+      },
+      {
+        "kind": "pad",
+        "size": 84
+      }
+    ],
+    "tagClass": "hud_globals",
+    "sizeBytes": 1104
+  }
+]

@@ -1,0 +1,352 @@
+[
+  {
+    "kind": "enum",
+    "name": "WeatherParticleSystemRenderDirectionSource",
+    "options": [
+      "from velocity",
+      "from acceleration"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeatherParticleSystemParticleTypeFlags",
+    "width": 32,
+    "fields": [
+      "interpolate colors in hsv",
+      "along long hue path",
+      "random rotation"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "WeatherParticleSystemParticleType",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "WeatherParticleSystemParticleTypeFlags"
+      },
+      {
+        "kind": "field",
+        "name": "fade in start distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade in end distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade out start distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade out end distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade in start height",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade in end height",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade out start height",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade out end height",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 96
+      },
+      {
+        "kind": "field",
+        "name": "particle count",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "physics",
+        "type": "TagDependency",
+        "classes": [
+          "point_physics"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "acceleration magnitude",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "acceleration turning rate",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "acceleration change rate",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "particle radius",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "animation rate",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "rotation rate",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "color lower bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "color upper bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "sprite size",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 60
+      },
+      {
+        "kind": "field",
+        "name": "sprite bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "render mode",
+        "type": "ParticleOrientation"
+      },
+      {
+        "kind": "field",
+        "name": "render direction source",
+        "type": "WeatherParticleSystemRenderDirectionSource"
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      },
+      {
+        "kind": "field",
+        "name": "shader type",
+        "type": "ShaderType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "shader flags",
+        "type": "ParticleShaderFlags"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer blend function",
+        "type": "FramebufferBlendFunction"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer fade mode",
+        "type": "FramebufferFadeMode"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap flags",
+        "type": "IsUnfilteredFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "secondary bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "ParticleAnchor"
+      },
+      {
+        "kind": "field",
+        "name": "secondary bitmap flags",
+        "type": "IsUnfilteredFlag"
+      },
+      {
+        "kind": "field",
+        "name": "u animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "u animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "u animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "v animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "v animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation scale",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation center",
+        "type": "Point2D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "zsprite radius scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      }
+    ],
+    "sizeBytes": 604
+  },
+  {
+    "kind": "struct",
+    "name": "WeatherParticleSystem",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "IsUnusedFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "particle types",
+        "type": "TagReflexive",
+        "struct": "WeatherParticleSystemParticleType",
+        "maximum": 8
+      }
+    ],
+    "tagClass": "weather_particle_system",
+    "sizeBytes": 48
+  }
+]

@@ -1,0 +1,988 @@
+[
+  {
+    "kind": "enum",
+    "name": "AnimationFunction",
+    "options": [
+      "a out",
+      "b out",
+      "c out",
+      "d out"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "AnimationFunctionControls",
+    "options": [
+      "frame",
+      "scale"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "AnimationType",
+    "options": [
+      "base",
+      "overlay",
+      "replacement"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "AnimationFrameInfoType",
+    "options": [
+      "none",
+      "dx dy",
+      "dx dy dyaw",
+      "dx dy dz dyaw"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ModelAnimationsAnimationGraphNodeFlags",
+    "width": 32,
+    "fields": [
+      "ball socket",
+      "hinge",
+      "no movement"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ModelAnimationsAnimationFlags",
+    "width": 16,
+    "fields": [
+      "compressed data",
+      "world relative",
+      "25hz pal"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ModelAnimationsFlags",
+    "width": 16,
+    "fields": [
+      "compress all animations",
+      "force idle compression"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsRotation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "int16",
+        "count": 4
+      }
+    ],
+    "sizeBytes": 8
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsTransform",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "transform",
+        "type": "Point3D"
+      }
+    ],
+    "sizeBytes": 12
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationscale",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "scale",
+        "type": "Fraction"
+      }
+    ],
+    "sizeBytes": 4
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsFrameInfoDxDy",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "dx",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "dy",
+        "type": "float"
+      }
+    ],
+    "sizeBytes": 8
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsFrameInfoDxDyDyaw",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "dx",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "dy",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "dyaw",
+        "type": "float"
+      }
+    ],
+    "sizeBytes": 12
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsFrameInfoDxDyDzDyaw",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "dx",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "dy",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "dz",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "dyaw",
+        "type": "float"
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphObjectOverlay",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      },
+      {
+        "kind": "field",
+        "name": "function",
+        "type": "AnimationFunction"
+      },
+      {
+        "kind": "field",
+        "name": "function controls",
+        "type": "AnimationFunctionControls"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsUnitSeatAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphUnitSeatikPoint",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "marker",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "attach to marker",
+        "type": "TagString"
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationWeaponClassAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationWeaponTypeAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphWeaponType",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "label",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationWeaponTypeAnimation",
+        "maximum": 10
+      }
+    ],
+    "sizeBytes": 60
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphWeapon",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "grip marker",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "hand marker",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "right yaw per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "left yaw per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "right frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "left frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "down pitch per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "up pitch per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "down pitch frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "up pitch frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationWeaponClassAnimation",
+        "maximum": 55
+      },
+      {
+        "kind": "field",
+        "name": "ik point",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphUnitSeatikPoint",
+        "maximum": 8
+      },
+      {
+        "kind": "field",
+        "name": "weapon types",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphWeaponType",
+        "maximum": 64
+      }
+    ],
+    "sizeBytes": 188
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphUnitSeat",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "label",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "right yaw per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "left yaw per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "right frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "left frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "down pitch per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "up pitch per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "down pitch frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "up pitch frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationWeaponClassAnimation",
+        "maximum": 30
+      },
+      {
+        "kind": "field",
+        "name": "ik points",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphUnitSeatikPoint",
+        "maximum": 8
+      },
+      {
+        "kind": "field",
+        "name": "weapons",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphWeapon",
+        "maximum": 64
+      }
+    ],
+    "sizeBytes": 100
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsWeaponAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphWeaponAnimations",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsWeaponAnimation",
+        "maximum": 11
+      }
+    ],
+    "sizeBytes": 28
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsVehicleAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationSuspensionAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "mass point index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      },
+      {
+        "kind": "field",
+        "name": "full extension ground depth",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "full compression ground depth",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphVehicleAnimations",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "right yaw per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "left yaw per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "right frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "left frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "down pitch per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "up pitch per frame",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "down pitch frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "up pitch frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 68
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsVehicleAnimation",
+        "maximum": 8
+      },
+      {
+        "kind": "field",
+        "name": "suspension animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationSuspensionAnimation",
+        "maximum": 32
+      }
+    ],
+    "sizeBytes": 116
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsDeviceAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsDeviceAnimations",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 84
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsDeviceAnimation",
+        "maximum": 2
+      }
+    ],
+    "sizeBytes": 96
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsUnitDamageAnimations",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsFirstPersonWeapon",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphFirstPersonWeaponAnimations",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsFirstPersonWeapon",
+        "maximum": 30
+      }
+    ],
+    "sizeBytes": 28
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphSoundReference",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimationGraphNode",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "next sibling node index",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      },
+      {
+        "kind": "field",
+        "name": "first child node index",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      },
+      {
+        "kind": "field",
+        "name": "parent node index",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "node joint flags",
+        "type": "ModelAnimationsAnimationGraphNodeFlags"
+      },
+      {
+        "kind": "field",
+        "name": "base vector",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "vector range",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimationsAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "AnimationType"
+      },
+      {
+        "kind": "field",
+        "name": "frame count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "frame size",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "frame info type",
+        "type": "AnimationFrameInfoType"
+      },
+      {
+        "kind": "field",
+        "name": "node list checksum",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "node count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "loop frame index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "weight",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "key frame index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "second key frame index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "next animation",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ModelAnimationsAnimationFlags"
+      },
+      {
+        "kind": "field",
+        "name": "sound",
+        "type": "Index",
+        "struct": "ModelAnimations"
+      },
+      {
+        "kind": "field",
+        "name": "sound frame index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "left foot frame index",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "right foot frame index",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "main animation index",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "relative weight",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "frame info",
+        "type": "TagDataOffset",
+        "maximum": 32768
+      },
+      {
+        "kind": "field",
+        "name": "node transform flag data",
+        "type": "uint32",
+        "count": 2,
+        "comment": "These are two bitfields. Each bits refer to a node to which the transformation applies. The first field refers to the first 32 nodes and the second field is the second 32 nodes."
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "node rotation flag data",
+        "type": "uint32",
+        "count": 2,
+        "comment": "These are two bitfields. Each bits refer to a node to which the transformation applies. The first field refers to the first 32 nodes and the second field is the second 32 nodes."
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "node scale flag data",
+        "type": "uint32",
+        "count": 2,
+        "comment": "These are two bitfields. Each bits refer to a node to which the transformation applies. The first field refers to the first 32 nodes and the second field is the second 32 nodes."
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "offset to compressed data",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "default data",
+        "type": "TagDataOffset",
+        "maximum": 16384
+      },
+      {
+        "kind": "field",
+        "name": "frame data",
+        "type": "TagDataOffset",
+        "maximum": 1048576
+      }
+    ],
+    "sizeBytes": 180
+  },
+  {
+    "kind": "struct",
+    "name": "ModelAnimations",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "objects",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphObjectOverlay",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "units",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphUnitSeat",
+        "maximum": 2048
+      },
+      {
+        "kind": "field",
+        "name": "weapons",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphWeaponAnimations",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "vehicles",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphVehicleAnimations",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "devices",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsDeviceAnimations",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "unit damage",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsUnitDamageAnimations",
+        "maximum": 176
+      },
+      {
+        "kind": "field",
+        "name": "first person weapons",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphFirstPersonWeaponAnimations",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "sound references",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphSoundReference",
+        "maximum": 512,
+        "extendedMaximum": 2048
+      },
+      {
+        "kind": "field",
+        "name": "limp body node radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ModelAnimationsFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "nodes",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimationGraphNode",
+        "maximum": 64
+      },
+      {
+        "kind": "field",
+        "name": "animations",
+        "type": "TagReflexive",
+        "struct": "ModelAnimationsAnimation",
+        "maximum": 2048
+      }
+    ],
+    "tagClass": "model_animations",
+    "sizeBytes": 128
+  }
+]

@@ -1,0 +1,169 @@
+[
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentPlasma",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "intensity source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "intensity exponent",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "offset source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "offset amount",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "offset exponent",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "parallel brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "parallel tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "tint color source",
+        "type": "FunctionNameNullable"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "primary animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "primary animation direction",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "primary noise map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "primary noise map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "secondary animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "secondary animation direction",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "secondary noise map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "secondary noise map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "inherits": "Shader",
+    "tagClass": "shader_transparent_plasma",
+    "sizeBytes": 332
+  }
+]

@@ -1,0 +1,642 @@
+[
+  {
+    "kind": "enum",
+    "name": "DamageEffectScreenFlashType",
+    "options": [
+      "none",
+      "lighten",
+      "darken",
+      "max",
+      "min",
+      "invert",
+      "tint"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "DamageEffectScreenFlashPriority",
+    "options": [
+      "low",
+      "medium",
+      "high"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "DamageEffectSideEffect",
+    "options": [
+      "none",
+      "harmless",
+      "lethal to the unsuspecting",
+      "emp"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "DamageEffectCategory",
+    "options": [
+      "none",
+      "falling",
+      "bullet",
+      "grenade",
+      "high explosive",
+      "sniper",
+      "melee",
+      "flame",
+      "mounted weapon",
+      "vehicle",
+      "plasma",
+      "needle",
+      "shotgun"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "DamageEffectDamageFlags",
+    "width": 32,
+    "fields": [
+      "does not hurt owner",
+      "can cause headshots",
+      "pings resistant units",
+      "does not hurt friends",
+      "does not ping units",
+      "detonates explosives",
+      "only hurts shields",
+      "causes flaming death",
+      "damage indicators always point down",
+      "skips shields",
+      "only hurts one infection form",
+      "can cause multiplayer headshots",
+      "infection form pop",
+      "ignore seat scale for dir dmg",
+      "forces hard ping",
+      "does not hurt players",
+      "use 3d instantaneous acceleration",
+      "allow any non-zero acceleration value"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "DamageEffectFlags",
+    "width": 32,
+    "fields": [
+      "do not scale damage by distance"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "DamageEffect",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "cutoff scale",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "DamageEffectFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "DamageEffectScreenFlashType"
+      },
+      {
+        "kind": "field",
+        "name": "priority",
+        "type": "DamageEffectScreenFlashPriority"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade function",
+        "type": "FunctionType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "maximum intensity",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "low frequency vibrate frequency",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "low frequency vibrate duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "low frequency vibrate fade function",
+        "type": "FunctionType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "high frequency vibrate frequency",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "high frequency vibrate duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "high frequency vibrate fade function",
+        "type": "FunctionType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "temporary camera impulse duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "temporary camera impulse fade function",
+        "type": "FunctionType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "temporary camera impulse rotation",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "temporary camera impulse pushback",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "jitter",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "permanent camera impulse angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking falloff function",
+        "type": "FunctionType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking random translation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking random rotation",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking wobble function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking wobble period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "camera shaking wobble weight",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 108
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "breaking effect forward velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "breaking effect forward radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "breaking effect forward exponent",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "breaking effect outward velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "breaking effect outward radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "breaking effect outward exponent",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "damage side effect",
+        "type": "DamageEffectSideEffect"
+      },
+      {
+        "kind": "field",
+        "name": "damage category",
+        "type": "DamageEffectCategory"
+      },
+      {
+        "kind": "field",
+        "name": "damage flags",
+        "type": "DamageEffectDamageFlags"
+      },
+      {
+        "kind": "field",
+        "name": "damage aoe core radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "damage lower bound",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "damage upper bound",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "damage vehicle passthrough penalty",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "damage active camouflage damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "damage stun",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "damage maximum stun",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "damage stun time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "damage instantaneous acceleration",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "dirt",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sand",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "stone",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "snow",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "wood",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "metal hollow",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "metal thin",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "metal thick",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rubber",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "glass",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "force field",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "grunt",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hunter armor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hunter skin",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "elite",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "jackal",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "jackal energy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "engineer skin",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "engineer force field",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flood combat form",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flood carrier form",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "cyborg armor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "cyborg energy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "human armor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "human skin",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sentinel",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "monitor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "plastic",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "water",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "leaves",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "elite energy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ice",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hunter shield",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "tagClass": "damage_effect",
+    "sizeBytes": 672
+  }
+]

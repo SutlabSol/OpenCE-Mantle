@@ -1,0 +1,188 @@
+[
+  {
+    "kind": "enum",
+    "name": "DecalType",
+    "options": [
+      "scratch",
+      "splatter",
+      "burn",
+      "painted sign"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "DecalLayer",
+    "options": [
+      "primary",
+      "secondary",
+      "light",
+      "alpha tested",
+      "water"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "DecalFlags",
+    "width": 16,
+    "fields": [
+      "geometry inherited by next decal in chain",
+      "interpolate color in hsv",
+      "more colors",
+      "no random rotation",
+      "water effect",
+      "sapien snap to axis",
+      "sapien incremental counter",
+      "animation loop",
+      "preserve aspect",
+      "disabled by blood setting",
+      "sprite scale bug fix"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "Decal",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "DecalFlags"
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "DecalType"
+      },
+      {
+        "kind": "field",
+        "name": "layer",
+        "type": "DecalLayer"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "next decal in chain",
+        "type": "TagDependency",
+        "classes": [
+          "decal"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "intensity",
+        "type": "Fraction",
+        "maximum": 1,
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "color lower bounds",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "color upper bounds",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "animation loop frame",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "animation speed",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "lifetime",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "decay time",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer blend function",
+        "type": "FramebufferBlendFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "maximum sprite extent",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      }
+    ],
+    "tagClass": "decal",
+    "sizeBytes": 268
+  }
+]

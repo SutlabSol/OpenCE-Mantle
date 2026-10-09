@@ -1,0 +1,4100 @@
+[
+  {
+    "kind": "enum",
+    "name": "ScenarioType",
+    "options": [
+      "singleplayer",
+      "multiplayer",
+      "user interface"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioSpawnType",
+    "options": [
+      "none",
+      "ctf",
+      "slayer",
+      "oddball",
+      "king of the hill",
+      "race",
+      "terminator",
+      "stub",
+      "ignored1",
+      "ignored2",
+      "ignored3",
+      "ignored4",
+      "all games",
+      "all except ctf",
+      "all except race and ctf"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioNetgameFlagType",
+    "options": [
+      "ctf flag",
+      "ctf vehicle",
+      "oddball ball spawn",
+      "race track",
+      "race vehicle",
+      "vegas bank",
+      "teleport from",
+      "teleport to",
+      "hill flag"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioReturnState",
+    "options": [
+      "none",
+      "sleeping",
+      "alert",
+      "moving repeat same position",
+      "moving loop",
+      "moving loop back and forth",
+      "moving loop randomly",
+      "moving randomly",
+      "guarding",
+      "guarding at guard position",
+      "searching",
+      "fleeing"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioUniqueLeaderType",
+    "options": [
+      "normal",
+      "none",
+      "random",
+      "sgt johnson",
+      "sgt lehto"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioMajorUpgrade",
+    "options": [
+      "normal",
+      "few",
+      "many",
+      "none",
+      "all"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioChangeAttackingDefendingStateWhen",
+    "options": [
+      "never",
+      "75 strength",
+      "50 strength",
+      "25 strength",
+      "anybody dead",
+      "25 dead",
+      "50 dead",
+      "75 dead",
+      "all but one dead",
+      "all dead"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioGroupIndex",
+    "options": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h",
+      "i",
+      "j",
+      "k",
+      "l",
+      "m",
+      "n",
+      "o",
+      "p",
+      "q",
+      "r",
+      "s",
+      "t",
+      "u",
+      "v",
+      "w",
+      "x",
+      "y",
+      "z"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioTeamIndex",
+    "options": [
+      "default by unit",
+      "player",
+      "human",
+      "covenant",
+      "flood",
+      "sentinel",
+      "unused6",
+      "unused7",
+      "unused8",
+      "unused9"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioSearchBehavior",
+    "options": [
+      "normal",
+      "never",
+      "tenacious"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioAtomType",
+    "options": [
+      "pause",
+      "go to",
+      "go to and face",
+      "move in direction",
+      "look",
+      "animation mode",
+      "crouch",
+      "shoot",
+      "grenade",
+      "vehicle",
+      "running jump",
+      "targeted jump",
+      "script",
+      "animate",
+      "recording",
+      "action",
+      "vocalize",
+      "targeting",
+      "initiative",
+      "wait",
+      "loop",
+      "die",
+      "move immediate",
+      "look random",
+      "look player",
+      "look object",
+      "set radius",
+      "teleport"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioSelectionType",
+    "options": [
+      "friendly actor",
+      "disembodied",
+      "in player s vehicle",
+      "not in a vehicle",
+      "prefer sergeant",
+      "any actor",
+      "radio unit",
+      "radio sergeant"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioAddressee",
+    "options": [
+      "none",
+      "player",
+      "participant"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioScriptType",
+    "options": [
+      "startup",
+      "dormant",
+      "continuous",
+      "static",
+      "stub"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioScriptValueType",
+    "options": [
+      "unparsed",
+      "special form",
+      "function name",
+      "passthrough",
+      "void",
+      "boolean",
+      "real",
+      "short",
+      "long",
+      "string",
+      "script",
+      "trigger volume",
+      "cutscene flag",
+      "cutscene camera point",
+      "cutscene title",
+      "cutscene recording",
+      "device group",
+      "ai",
+      "ai command list",
+      "starting profile",
+      "conversation",
+      "navpoint",
+      "hud message",
+      "object list",
+      "sound",
+      "effect",
+      "damage",
+      "looping sound",
+      "animation graph",
+      "actor variant",
+      "damage effect",
+      "object definition",
+      "game difficulty",
+      "team",
+      "ai default state",
+      "actor type",
+      "hud corner",
+      "object",
+      "unit",
+      "vehicle",
+      "weapon",
+      "device",
+      "scenery",
+      "object name",
+      "unit name",
+      "vehicle name",
+      "weapon name",
+      "device name",
+      "scenery name"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioTextStyle",
+    "options": [
+      "plain",
+      "bold",
+      "italic",
+      "condense",
+      "underline"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioJustification",
+    "options": [
+      "left",
+      "right",
+      "center"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ScenarioTriggerVolumeType",
+    "options": [
+      "fixed",
+      "rotational"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioTextFlags",
+    "width": 32,
+    "fields": [
+      "wrap horizontally",
+      "wrap vertically",
+      "center vertically",
+      "bottom justify"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioFunctionFlags",
+    "width": 32,
+    "fields": [
+      "scripted",
+      "invert",
+      "additive",
+      "always active"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioSpawnNotPlaced",
+    "width": 16,
+    "fields": [
+      "automatically",
+      "on easy",
+      "on normal",
+      "on hard",
+      "use player appearance"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioUnitFlags",
+    "width": 32,
+    "fields": [
+      "dead"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioVehicleMultiplayerSpawnFlags",
+    "width": 16,
+    "fields": [
+      "slayer default",
+      "ctf default",
+      "king default",
+      "oddball default",
+      "unused",
+      "unused1",
+      "unused2",
+      "unused3",
+      "slayer allowed",
+      "ctf allowed",
+      "king allowed",
+      "oddball allowed",
+      "unused4",
+      "unused5",
+      "unused6",
+      "unused7"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioItemFlags",
+    "width": 16,
+    "fields": [
+      "initially at rest",
+      "obsolete",
+      "does accelerate"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioDeviceGroupFlags",
+    "width": 32,
+    "fields": [
+      "can change only once"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioDeviceFlags",
+    "width": 32,
+    "fields": [
+      "initially open",
+      "initially off",
+      "can change only once",
+      "position reversed",
+      "not usable from any side"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioMachineFlags",
+    "width": 32,
+    "fields": [
+      "does not operate automatically",
+      "one sided",
+      "never appears locked",
+      "opened by melee attack"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioControlFlags",
+    "width": 32,
+    "fields": [
+      "usable from both sides"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioNetgameEquipmentFlags",
+    "width": 32,
+    "fields": [
+      "levitate"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioStartingEquipmentFlags",
+    "width": 32,
+    "fields": [
+      "no grenades",
+      "plasma grenades only",
+      "type2 grenades only",
+      "type3 grenades only"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioActorStartingLocationFlags",
+    "width": 8,
+    "fields": [
+      "required"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioSquadFlags",
+    "width": 32,
+    "fields": [
+      "unused",
+      "never search",
+      "start timer immediately",
+      "no timer delay forever",
+      "magic sight after timer",
+      "automatic migration"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioSquadAttacking",
+    "width": 32,
+    "fields": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h",
+      "i",
+      "j",
+      "k",
+      "l",
+      "m",
+      "n",
+      "o",
+      "p",
+      "q",
+      "r",
+      "s",
+      "t",
+      "u",
+      "v",
+      "w",
+      "x",
+      "y",
+      "z"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioPlatoonFlags",
+    "width": 32,
+    "fields": [
+      "flee when maneuvering",
+      "say advancing when maneuver",
+      "start in defending state"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioEncounterFlags",
+    "width": 32,
+    "fields": [
+      "not initially created",
+      "respawn enabled",
+      "initially blind",
+      "initially deaf",
+      "initially braindead",
+      "3d firing positions",
+      "manual bsp index specified"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioCommandListFlags",
+    "width": 32,
+    "fields": [
+      "allow initiative",
+      "allow targeting",
+      "disable looking",
+      "disable communication",
+      "disable falling damage",
+      "manual bsp index"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioAIConversationParticipantFlags",
+    "width": 16,
+    "fields": [
+      "optional",
+      "has alternate",
+      "is alternate"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioAIConversationLineFlags",
+    "width": 16,
+    "fields": [
+      "addressee look at speaker",
+      "everyone look at speaker",
+      "everyone look at addressee",
+      "wait after until told to advance",
+      "wait until speaker nearby",
+      "wait until everyone nearby"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioAIConversationFlags",
+    "width": 16,
+    "fields": [
+      "stop if death",
+      "stop if damaged",
+      "stop if visible enemy",
+      "stop if alerted to enemy",
+      "player must be visible",
+      "stop other actions",
+      "keep trying to play",
+      "player must be looking"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioFlags",
+    "width": 16,
+    "fields": [
+      "cortana hack",
+      "use demo ui",
+      "color correction ntsc to srgb",
+      "do not apply bungie campaign tag patches"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioScriptNodeFlags",
+    "width": 16,
+    "fields": [
+      "is primitive",
+      "is script call",
+      "is global",
+      "is garbage collectable",
+      "is local variable"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioSky",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "sky",
+        "type": "TagDependency",
+        "classes": [
+          "sky"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioChildScenario",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "child scenario",
+        "type": "TagDependency",
+        "classes": [
+          "scenario"
+        ],
+        "comment": "This scenario tag will be merged into the main scenario tag (and dereferenced) on map build."
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioFunction",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioFunctionFlags"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scale period by",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "scale function by",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "wobble function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "wobble period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "wobble magnitude",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "square wave threshold",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "step count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "map to",
+        "type": "FunctionType"
+      },
+      {
+        "kind": "field",
+        "name": "sawtooth count",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "scale result by",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "bounds mode",
+        "type": "FunctionBoundsMode"
+      },
+      {
+        "kind": "field",
+        "name": "bounds",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "turn off with",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "sizeBytes": 120
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioEditorComment",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "comment",
+        "type": "TagDataOffset",
+        "maximum": 16384
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioScavengerHuntObjects",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "object name index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      }
+    ],
+    "sizeBytes": 36
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioObjectName",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "object type",
+        "type": "ObjectType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "object index",
+        "type": "Index",
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 36
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioScenery",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "field",
+        "name": "bsp indices",
+        "type": "uint16",
+        "cacheOnly": true,
+        "comment": "Unused in Gearbox versions of Halo PC; bitmask"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      }
+    ],
+    "sizeBytes": 72
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioSceneryPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "scenery"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioBiped",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "body vitality modifier",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioUnitFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 120
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioBipedPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "biped"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioVehicle",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "body vitality",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioUnitFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "multiplayer team index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "field",
+        "name": "multiplayer spawn flags",
+        "type": "ScenarioVehicleMultiplayerSpawnFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      }
+    ],
+    "sizeBytes": 120
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioVehiclePalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "vehicle"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioEquipment",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "misc flags",
+        "type": "ScenarioItemFlags"
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      }
+    ],
+    "sizeBytes": 40
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioEquipmentPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "equipment"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioWeapon",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "rounds reserved",
+        "type": "int16",
+        "comment": "does not include loaded rounds; cannot go above maximum rounds"
+      },
+      {
+        "kind": "field",
+        "name": "rounds loaded",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioItemFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 92
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioWeaponPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "weapon"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioDeviceGroup",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "initial value",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioDeviceGroupFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 52
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioMachine",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "field",
+        "name": "power group",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "position group",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "device flags",
+        "type": "ScenarioDeviceFlags"
+      },
+      {
+        "kind": "field",
+        "name": "machine flags",
+        "type": "ScenarioMachineFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioMachinePalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "device_machine"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioControl",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "field",
+        "name": "power group",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "position group",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "device flags",
+        "type": "ScenarioDeviceFlags"
+      },
+      {
+        "kind": "field",
+        "name": "control flags",
+        "type": "ScenarioControlFlags"
+      },
+      {
+        "kind": "field",
+        "name": "custom control name",
+        "type": "int16",
+        "comment": "Zero maps to \"none\", higher values map to strings in the referenced \"custom object names\" unicode string list with the first string starting at 1"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioControlPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "device_control"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioLightFixture",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "field",
+        "name": "bsp indices",
+        "type": "uint16",
+        "cacheOnly": true,
+        "comment": "Unused in Gearbox versions of Halo PC; bitmask"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "field",
+        "name": "power group",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "position group",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "device flags",
+        "type": "ScenarioDeviceFlags"
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "intensity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "falloff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "cutoff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "sizeBytes": 88
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioLightFixturePalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "device_light_fixture"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioSoundScenery",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "not placed",
+        "type": "ScenarioSpawnNotPlaced"
+      },
+      {
+        "kind": "field",
+        "name": "desired permutation",
+        "type": "int16",
+        "comment": "when non-zero the game will try use model permutations with a matching number suffix"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "appearance player index",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      }
+    ],
+    "sizeBytes": 40
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioSoundSceneryPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagDependency",
+        "classes": [
+          "sound_scenery"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioPlayerStartingProfile",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "starting health modifier",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "starting shield modifier",
+        "type": "Fraction",
+        "maximum": 3
+      },
+      {
+        "kind": "field",
+        "name": "primary weapon",
+        "type": "TagDependency",
+        "classes": [
+          "weapon"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "primary rounds loaded",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "primary rounds reserved",
+        "type": "int16",
+        "comment": "does not include loaded ammo; can go above maximum rounds"
+      },
+      {
+        "kind": "field",
+        "name": "secondary weapon",
+        "type": "TagDependency",
+        "classes": [
+          "weapon"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "secondary rounds loaded",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "secondary rounds reserved",
+        "type": "int16",
+        "comment": "does not include loaded ammo; can go above maximum rounds"
+      },
+      {
+        "kind": "field",
+        "name": "starting fragmentation grenade count",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "starting plasma grenade count",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "starting grenade type2 count",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "starting grenade type3 count",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioPlayerStartingLocation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "facing",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "team index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "bsp index",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "type 0",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 1",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 2",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 3",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      }
+    ],
+    "sizeBytes": 52
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioTriggerVolume",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "ScenarioTriggerVolumeType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "parameters",
+        "type": "float",
+        "count": 3,
+        "comment": "appears to be zero"
+      },
+      {
+        "kind": "field",
+        "name": "rotation vector forward",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation vector up",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "starting corner",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "ending corner offset",
+        "type": "Point3D"
+      }
+    ],
+    "sizeBytes": 96
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioRecordedAnimation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "version",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "raw animation data",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "unit control data version",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "field",
+        "name": "length of animation",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "recorded animation event stream",
+        "type": "TagDataOffset",
+        "maximum": 2097152
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioNetgameFlags",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "facing",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "ScenarioNetgameFlagType"
+      },
+      {
+        "kind": "field",
+        "name": "usage id",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "weapon group",
+        "type": "TagDependency",
+        "classes": [
+          "item_collection"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 112
+      }
+    ],
+    "sizeBytes": 148
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioNetgameEquipment",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioNetgameEquipmentFlags"
+      },
+      {
+        "kind": "field",
+        "name": "type 0",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 1",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 2",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 3",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "team index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "spawn time",
+        "type": "int16",
+        "comment": "0 = use default spawn time in item_collection"
+      },
+      {
+        "kind": "field",
+        "name": "unknown_ffffffff",
+        "type": "uint32",
+        "comment": "always 0xFFFFFFFF?"
+      },
+      {
+        "kind": "pad",
+        "size": 44
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "facing",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "item collection",
+        "type": "TagDependency",
+        "classes": [
+          "item_collection"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      }
+    ],
+    "sizeBytes": 144
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStartingEquipment",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioStartingEquipmentFlags"
+      },
+      {
+        "kind": "field",
+        "name": "type 0",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 1",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 2",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "field",
+        "name": "type 3",
+        "type": "ScenarioSpawnType"
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      },
+      {
+        "kind": "field",
+        "name": "item collection 1",
+        "type": "TagDependency",
+        "classes": [
+          "item_collection"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "item collection 2",
+        "type": "TagDependency",
+        "classes": [
+          "item_collection"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "item collection 3",
+        "type": "TagDependency",
+        "classes": [
+          "item_collection"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "item collection 4",
+        "type": "TagDependency",
+        "classes": [
+          "item_collection"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "item collection 5",
+        "type": "TagDependency",
+        "classes": [
+          "item_collection"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "item collection 6",
+        "type": "TagDependency",
+        "classes": [
+          "item_collection"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      }
+    ],
+    "sizeBytes": 204
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioBSPSwitchTriggerVolume",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "trigger volume",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "source",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "destination",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "unknown",
+        "type": "uint16"
+      }
+    ],
+    "sizeBytes": 8
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioDecal",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "decal type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "yaw",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "pitch",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioDecalPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "reference",
+        "type": "TagDependency",
+        "classes": [
+          "decal"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioDetailObjectCollectionPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "reference",
+        "type": "TagDependency",
+        "classes": [
+          "detail_object_collection"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioActorPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "reference",
+        "type": "TagDependency",
+        "classes": [
+          "actor_variant"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioMovePosition",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "facing",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "weight",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "time",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "sequence id",
+        "type": "int8"
+      },
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "cluster index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 34
+      },
+      {
+        "kind": "field",
+        "name": "surface index",
+        "type": "uint32",
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 80
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioActorStartingLocation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "facing",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "cluster index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "sequence id",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioActorStartingLocationFlags"
+      },
+      {
+        "kind": "field",
+        "name": "return state",
+        "type": "ScenarioReturnState"
+      },
+      {
+        "kind": "field",
+        "name": "initial state",
+        "type": "ScenarioReturnState"
+      },
+      {
+        "kind": "field",
+        "name": "actor type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "command list",
+        "type": "Index",
+        "struct": "Scenario"
+      }
+    ],
+    "sizeBytes": 28
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioSquad",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "actor type",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "platoon",
+        "type": "Index",
+        "struct": "ScenarioEncounter"
+      },
+      {
+        "kind": "field",
+        "name": "initial state",
+        "type": "ScenarioReturnState"
+      },
+      {
+        "kind": "field",
+        "name": "return state",
+        "type": "ScenarioReturnState"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioSquadFlags"
+      },
+      {
+        "kind": "field",
+        "name": "unique leader type",
+        "type": "ScenarioUniqueLeaderType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "maneuver to squad",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "squad delay time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "attacking",
+        "type": "ScenarioSquadAttacking"
+      },
+      {
+        "kind": "field",
+        "name": "attacking search",
+        "type": "ScenarioSquadAttacking"
+      },
+      {
+        "kind": "field",
+        "name": "attacking guard",
+        "type": "ScenarioSquadAttacking"
+      },
+      {
+        "kind": "field",
+        "name": "defending",
+        "type": "ScenarioSquadAttacking"
+      },
+      {
+        "kind": "field",
+        "name": "defending search",
+        "type": "ScenarioSquadAttacking"
+      },
+      {
+        "kind": "field",
+        "name": "defending guard",
+        "type": "ScenarioSquadAttacking"
+      },
+      {
+        "kind": "field",
+        "name": "pursuing",
+        "type": "ScenarioSquadAttacking"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "normal diff count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "insane diff count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "major upgrade",
+        "type": "ScenarioMajorUpgrade"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "respawn min actors",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "respawn max actors",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "respawn total",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "respawn delay",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      },
+      {
+        "kind": "field",
+        "name": "move positions",
+        "type": "TagReflexive",
+        "struct": "ScenarioMovePosition",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "starting locations",
+        "type": "TagReflexive",
+        "struct": "ScenarioActorStartingLocation",
+        "maximum": 32
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 232
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioPlatoon",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioPlatoonFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "change attacking defending state when",
+        "type": "ScenarioChangeAttackingDefendingStateWhen"
+      },
+      {
+        "kind": "field",
+        "name": "happens to",
+        "type": "Index",
+        "struct": "ScenarioEncounter"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "maneuver when",
+        "type": "ScenarioChangeAttackingDefendingStateWhen"
+      },
+      {
+        "kind": "field",
+        "name": "happens to 1",
+        "type": "Index",
+        "struct": "ScenarioEncounter"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 64
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      }
+    ],
+    "sizeBytes": 172
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioFiringPosition",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "group index",
+        "type": "ScenarioGroupIndex"
+      },
+      {
+        "kind": "field",
+        "name": "cluster index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "surface index",
+        "type": "uint32",
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 24
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioEncounter",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioEncounterFlags"
+      },
+      {
+        "kind": "field",
+        "name": "team index",
+        "type": "ScenarioTeamIndex"
+      },
+      {
+        "kind": "field",
+        "name": "one",
+        "type": "int16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "search behavior",
+        "type": "ScenarioSearchBehavior"
+      },
+      {
+        "kind": "field",
+        "name": "manual bsp index",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "respawn delay",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 74
+      },
+      {
+        "kind": "field",
+        "name": "precomputed bsp index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "squads",
+        "type": "TagReflexive",
+        "struct": "ScenarioSquad",
+        "maximum": 64
+      },
+      {
+        "kind": "field",
+        "name": "platoons",
+        "type": "TagReflexive",
+        "struct": "ScenarioPlatoon",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "firing positions",
+        "type": "TagReflexive",
+        "struct": "ScenarioFiringPosition",
+        "maximum": 512
+      },
+      {
+        "kind": "field",
+        "name": "player starting locations",
+        "type": "TagReflexive",
+        "struct": "ScenarioPlayerStartingLocation",
+        "maximum": 256
+      }
+    ],
+    "sizeBytes": 176
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioCommand",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "atom type",
+        "type": "ScenarioAtomType"
+      },
+      {
+        "kind": "field",
+        "name": "atom modifier",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "parameter1",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "parameter2",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "point 1",
+        "type": "Index",
+        "struct": "ScenarioCommandList"
+      },
+      {
+        "kind": "field",
+        "name": "point 2",
+        "type": "Index",
+        "struct": "ScenarioCommandList"
+      },
+      {
+        "kind": "field",
+        "name": "animation",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "script",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "recording",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "command",
+        "type": "Index",
+        "struct": "ScenarioCommandList"
+      },
+      {
+        "kind": "field",
+        "name": "object name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "pad",
+        "size": 6
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioCommandPoint",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "surface index",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioCommandList",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioCommandListFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "manual bsp index",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "precomputed bsp index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "commands",
+        "type": "TagReflexive",
+        "struct": "ScenarioCommand",
+        "maximum": 64
+      },
+      {
+        "kind": "field",
+        "name": "points",
+        "type": "TagReflexive",
+        "struct": "ScenarioCommandPoint",
+        "maximum": 64
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      }
+    ],
+    "sizeBytes": 96
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioAIAnimationReference",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "animation name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "animation graph",
+        "type": "TagDependency",
+        "classes": [
+          "model_animations"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 60
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioAIScriptReference",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "script name",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      }
+    ],
+    "sizeBytes": 40
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioAIRecordingReference",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "recording name",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      }
+    ],
+    "sizeBytes": 40
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioAIConversationParticipant",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioAIConversationParticipantFlags"
+      },
+      {
+        "kind": "field",
+        "name": "selection type",
+        "type": "ScenarioSelectionType"
+      },
+      {
+        "kind": "field",
+        "name": "actor type",
+        "type": "ActorType"
+      },
+      {
+        "kind": "field",
+        "name": "use this object",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "field",
+        "name": "set new name",
+        "type": "Index",
+        "struct": "Scenario"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "variant numbers",
+        "type": "uint16",
+        "count": 6,
+        "cacheOnly": true,
+        "comment": "Determines which kind of variant gets a given line. By default, this matches by tag path (bisenti = 2, fitzgerald/jenkins = 4, aussie = 5, mendoza = 6, sarge/johnson = 100, sarge2/lehto = 101, everything else = 0, null = 65535)"
+      },
+      {
+        "kind": "field",
+        "name": "encounter name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "encounter index",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 84
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioAIConversationLine",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioAIConversationLineFlags"
+      },
+      {
+        "kind": "field",
+        "name": "participant",
+        "type": "Index",
+        "struct": "ScenarioAIConversation"
+      },
+      {
+        "kind": "field",
+        "name": "addressee",
+        "type": "ScenarioAddressee",
+        "struct": "ScenarioAIConversation"
+      },
+      {
+        "kind": "field",
+        "name": "addressee participant",
+        "type": "Index",
+        "struct": "ScenarioAIConversation"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "line delay time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "variant 1",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "variant 2",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "variant 3",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "variant 4",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "variant 5",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "variant 6",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      }
+    ],
+    "sizeBytes": 124
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioAIConversation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioAIConversationFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "trigger distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "run to player dist",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      },
+      {
+        "kind": "field",
+        "name": "participants",
+        "type": "TagReflexive",
+        "struct": "ScenarioAIConversationParticipant",
+        "maximum": 8
+      },
+      {
+        "kind": "field",
+        "name": "lines",
+        "type": "TagReflexive",
+        "struct": "ScenarioAIConversationLine",
+        "maximum": 32
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 116
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioScriptParameter",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "return type",
+        "type": "ScenarioScriptValueType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      }
+    ],
+    "sizeBytes": 36
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioScript",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "script type",
+        "type": "ScenarioScriptType"
+      },
+      {
+        "kind": "field",
+        "name": "return type",
+        "type": "ScenarioScriptValueType"
+      },
+      {
+        "kind": "field",
+        "name": "root expression index",
+        "type": "uint32"
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      },
+      {
+        "kind": "field",
+        "name": "parameters",
+        "type": "TagReflexive",
+        "struct": "ScenarioScriptParameter",
+        "maximum": 16
+      }
+    ],
+    "sizeBytes": 92
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioGlobal",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "ScenarioScriptValueType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "initialization expression index",
+        "type": "int32"
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      }
+    ],
+    "sizeBytes": 92
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioReference",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "reference",
+        "type": "TagDependency",
+        "classes": [
+          "*"
+        ]
+      }
+    ],
+    "sizeBytes": 40
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioSourceFile",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "source",
+        "type": "TagDataOffset",
+        "maximum": 1048576
+      }
+    ],
+    "sizeBytes": 52
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioCutsceneFlag",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "unknown",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "facing",
+        "type": "Euler2D"
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      }
+    ],
+    "sizeBytes": 92
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioCutsceneCameraPoint",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "unknown",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "orientation",
+        "type": "Euler3D"
+      },
+      {
+        "kind": "field",
+        "name": "field of view",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioCutsceneTitle",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "unknown",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "text bounds",
+        "type": "Rectangle2D"
+      },
+      {
+        "kind": "field",
+        "name": "string index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "text style",
+        "type": "ScenarioTextStyle"
+      },
+      {
+        "kind": "field",
+        "name": "justification",
+        "type": "ScenarioJustification"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "text flags",
+        "type": "ScenarioTextFlags"
+      },
+      {
+        "kind": "field",
+        "name": "text color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shadow color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "fade in time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "up time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade out time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "sizeBytes": 96
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioBSP",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "bsp start",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "bsp size",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "bsp address",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "structure bsp",
+        "type": "TagDependency",
+        "classes": [
+          "scenario_structure_bsp"
+        ]
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioScriptNode",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "salt",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "index union",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "ScenarioScriptValueType"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioScriptNodeFlags"
+      },
+      {
+        "kind": "field",
+        "name": "next node",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "string offset",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "data",
+        "type": "ScenarioScriptNodeValue"
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioScriptNodeTable",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "maximum count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "element size",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "one",
+        "type": "uint8"
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "field",
+        "name": "data",
+        "type": "uint32"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "size",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "next id",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "first element ptr",
+        "type": "uint32"
+      }
+    ],
+    "sizeBytes": 56
+  },
+  {
+    "kind": "struct",
+    "name": "Scenario",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "don't use",
+        "type": "TagDependency",
+        "classes": [
+          "scenario_structure_bsp"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "won't use",
+        "type": "TagDependency",
+        "classes": [
+          "scenario_structure_bsp"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "can't use",
+        "type": "TagDependency",
+        "classes": [
+          "sky"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "skies",
+        "type": "TagReflexive",
+        "struct": "ScenarioSky",
+        "maximum": 8
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "ScenarioType"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioFlags"
+      },
+      {
+        "kind": "field",
+        "name": "child scenarios",
+        "type": "TagReflexive",
+        "struct": "ScenarioChildScenario",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "local north",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "pad",
+        "size": 136
+      },
+      {
+        "kind": "field",
+        "name": "predicted resources",
+        "type": "TagReflexive",
+        "struct": "PredictedResource",
+        "maximum": 1024,
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "functions",
+        "type": "TagReflexive",
+        "struct": "ScenarioFunction",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "editor scenario data",
+        "type": "TagDataOffset",
+        "maximum": 65536
+      },
+      {
+        "kind": "field",
+        "name": "comments",
+        "type": "TagReflexive",
+        "struct": "ScenarioEditorComment",
+        "maximum": 1024
+      },
+      {
+        "kind": "field",
+        "name": "scavenger hunt objects",
+        "type": "TagReflexive",
+        "struct": "ScenarioScavengerHuntObjects",
+        "maximum": 16
+      },
+      {
+        "kind": "pad",
+        "size": 212
+      },
+      {
+        "kind": "field",
+        "name": "object names",
+        "type": "TagReflexive",
+        "struct": "ScenarioObjectName",
+        "maximum": 640,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "scenery",
+        "type": "TagReflexive",
+        "struct": "ScenarioScenery",
+        "maximum": 2000,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "scenery palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioSceneryPalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "bipeds",
+        "type": "TagReflexive",
+        "struct": "ScenarioBiped",
+        "maximum": 128,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "biped palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioBipedPalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "vehicles",
+        "type": "TagReflexive",
+        "struct": "ScenarioVehicle",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "vehicle palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioVehiclePalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "equipment",
+        "type": "TagReflexive",
+        "struct": "ScenarioEquipment",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "equipment palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioEquipmentPalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "weapons",
+        "type": "TagReflexive",
+        "struct": "ScenarioWeapon",
+        "maximum": 128,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "weapon palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioWeaponPalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "device groups",
+        "type": "TagReflexive",
+        "struct": "ScenarioDeviceGroup",
+        "maximum": 128
+      },
+      {
+        "kind": "field",
+        "name": "machines",
+        "type": "TagReflexive",
+        "struct": "ScenarioMachine",
+        "maximum": 400,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "machine palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioMachinePalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "controls",
+        "type": "TagReflexive",
+        "struct": "ScenarioControl",
+        "maximum": 100,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "control palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioControlPalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "light fixtures",
+        "type": "TagReflexive",
+        "struct": "ScenarioLightFixture",
+        "maximum": 500,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "light fixture palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioLightFixturePalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "sound scenery",
+        "type": "TagReflexive",
+        "struct": "ScenarioSoundScenery",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "sound scenery palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioSoundSceneryPalette",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "pad",
+        "size": 84
+      },
+      {
+        "kind": "field",
+        "name": "player starting profile",
+        "type": "TagReflexive",
+        "struct": "ScenarioPlayerStartingProfile",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "player starting locations",
+        "type": "TagReflexive",
+        "struct": "ScenarioPlayerStartingLocation",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "trigger volumes",
+        "type": "TagReflexive",
+        "struct": "ScenarioTriggerVolume",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "recorded animations",
+        "type": "TagReflexive",
+        "struct": "ScenarioRecordedAnimation",
+        "maximum": 1024,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "netgame flags",
+        "type": "TagReflexive",
+        "struct": "ScenarioNetgameFlags",
+        "maximum": 200,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "netgame equipment",
+        "type": "TagReflexive",
+        "struct": "ScenarioNetgameEquipment",
+        "maximum": 200,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "starting equipment",
+        "type": "TagReflexive",
+        "struct": "ScenarioStartingEquipment",
+        "maximum": 200,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "bsp switch trigger volumes",
+        "type": "TagReflexive",
+        "struct": "ScenarioBSPSwitchTriggerVolume",
+        "maximum": 256,
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "decals",
+        "type": "TagReflexive",
+        "struct": "ScenarioDecal",
+        "maximum": 65536
+      },
+      {
+        "kind": "field",
+        "name": "decal palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioDecalPalette",
+        "maximum": 128,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "detail object collection palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioDetailObjectCollectionPalette",
+        "maximum": 32
+      },
+      {
+        "kind": "pad",
+        "size": 84
+      },
+      {
+        "kind": "field",
+        "name": "actor palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioActorPalette",
+        "maximum": 64
+      },
+      {
+        "kind": "field",
+        "name": "encounters",
+        "type": "TagReflexive",
+        "struct": "ScenarioEncounter",
+        "maximum": 128
+      },
+      {
+        "kind": "field",
+        "name": "command lists",
+        "type": "TagReflexive",
+        "struct": "ScenarioCommandList",
+        "maximum": 256
+      },
+      {
+        "kind": "field",
+        "name": "ai animation references",
+        "type": "TagReflexive",
+        "struct": "ScenarioAIAnimationReference",
+        "maximum": 128
+      },
+      {
+        "kind": "field",
+        "name": "ai script references",
+        "type": "TagReflexive",
+        "struct": "ScenarioAIScriptReference",
+        "maximum": 128
+      },
+      {
+        "kind": "field",
+        "name": "ai recording references",
+        "type": "TagReflexive",
+        "struct": "ScenarioAIRecordingReference",
+        "maximum": 128
+      },
+      {
+        "kind": "field",
+        "name": "ai conversations",
+        "type": "TagReflexive",
+        "struct": "ScenarioAIConversation",
+        "maximum": 128
+      },
+      {
+        "kind": "field",
+        "name": "script syntax data",
+        "type": "TagDataOffset",
+        "maximum": 655396
+      },
+      {
+        "kind": "field",
+        "name": "script string data",
+        "type": "TagDataOffset",
+        "maximum": 819200
+      },
+      {
+        "kind": "field",
+        "name": "scripts",
+        "type": "TagReflexive",
+        "struct": "ScenarioScript",
+        "maximum": 1024
+      },
+      {
+        "kind": "field",
+        "name": "globals",
+        "type": "TagReflexive",
+        "struct": "ScenarioGlobal",
+        "maximum": 512
+      },
+      {
+        "kind": "field",
+        "name": "references",
+        "type": "TagReflexive",
+        "struct": "ScenarioReference",
+        "maximum": 512
+      },
+      {
+        "kind": "field",
+        "name": "source files",
+        "type": "TagReflexive",
+        "struct": "ScenarioSourceFile",
+        "maximum": 16,
+        "nonCached": true
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "cutscene flags",
+        "type": "TagReflexive",
+        "struct": "ScenarioCutsceneFlag",
+        "maximum": 512
+      },
+      {
+        "kind": "field",
+        "name": "cutscene camera points",
+        "type": "TagReflexive",
+        "struct": "ScenarioCutsceneCameraPoint",
+        "maximum": 512
+      },
+      {
+        "kind": "field",
+        "name": "cutscene titles",
+        "type": "TagReflexive",
+        "struct": "ScenarioCutsceneTitle",
+        "maximum": 64
+      },
+      {
+        "kind": "pad",
+        "size": 108
+      },
+      {
+        "kind": "field",
+        "name": "custom object names",
+        "type": "TagDependency",
+        "classes": [
+          "unicode_string_list"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "ingame help text",
+        "type": "TagDependency",
+        "classes": [
+          "unicode_string_list"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "hud messages",
+        "type": "TagDependency",
+        "classes": [
+          "hud_message_text"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "structure bsps",
+        "type": "TagReflexive",
+        "struct": "ScenarioBSP",
+        "maximum": 16
+      }
+    ],
+    "tagClass": "scenario",
+    "sizeBytes": 1456
+  }
+]

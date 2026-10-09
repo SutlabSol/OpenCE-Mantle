@@ -1,0 +1,329 @@
+[
+  {
+    "kind": "enum",
+    "name": "ShaderModelDetailMask",
+    "options": [
+      "none",
+      "reflection mask inverse",
+      "reflection mask",
+      "self illumination mask inverse",
+      "self illumination mask",
+      "change color mask inverse",
+      "change color mask",
+      "auxiliary mask inverse",
+      "auxiliary mask"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderModelFlags",
+    "width": 16,
+    "fields": [
+      "detail after reflection",
+      "two sided",
+      "not alpha tested",
+      "alpha blended decal",
+      "true atmospheric fog",
+      "disable two sided culling",
+      "use xbox multipurpose channel order"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderModelMoreFlags",
+    "width": 16,
+    "fields": [
+      "no random phase"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderModel",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shader model flags",
+        "type": "ShaderModelFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "translucency",
+        "type": "Fraction"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "change color source",
+        "type": "FunctionNameNullable"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "shader model more flags",
+        "type": "ShaderModelMoreFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "color source",
+        "type": "FunctionNameNullable"
+      },
+      {
+        "kind": "field",
+        "name": "animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "animation color lower bound",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "animation color upper bound",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "map u scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "map v scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "base map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "multipurpose map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "detail function",
+        "type": "ShaderDetailFunction"
+      },
+      {
+        "kind": "field",
+        "name": "detail mask",
+        "type": "ShaderModelDetailMask"
+      },
+      {
+        "kind": "field",
+        "name": "detail map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "detail map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "detail map v scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "u animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "u animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "u animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "v animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "v animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation center",
+        "type": "Point2D"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "reflection falloff distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "reflection cutoff distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "parallel brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "parallel tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "reflection cube map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "unknown",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "inherits": "Shader",
+    "tagClass": "shader_model",
+    "sizeBytes": 440
+  }
+]

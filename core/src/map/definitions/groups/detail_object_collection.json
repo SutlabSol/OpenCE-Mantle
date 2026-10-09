@@ -1,0 +1,148 @@
+[
+  {
+    "kind": "enum",
+    "name": "DetailObjectCollectionType",
+    "options": [
+      "screen facing",
+      "viewer facing"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "DetailObjectCollectionTypeFlags",
+    "width": 8,
+    "fields": [
+      "unused a",
+      "unused b",
+      "interpolate color in hsv",
+      "more colors"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "DetailObjectCollectionObjectType",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "uint8"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "DetailObjectCollectionTypeFlags"
+      },
+      {
+        "kind": "field",
+        "name": "first sprite index",
+        "type": "uint8",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "sprite count",
+        "type": "uint8",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "color override factor",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "near fade distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "far fade distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "size",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "minimum color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "maximum color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "ambient color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      }
+    ],
+    "sizeBytes": 96
+  },
+  {
+    "kind": "struct",
+    "name": "DetailObjectCollection",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "collection type",
+        "type": "DetailObjectCollectionType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "global z offset",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 44
+      },
+      {
+        "kind": "field",
+        "name": "sprite plate",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "types",
+        "type": "TagReflexive",
+        "struct": "DetailObjectCollectionObjectType",
+        "maximum": 16
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      }
+    ],
+    "tagClass": "detail_object_collection",
+    "sizeBytes": 128
+  }
+]

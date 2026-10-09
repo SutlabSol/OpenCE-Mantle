@@ -1,0 +1,203 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "FontFlags",
+    "width": 32,
+    "fields": [
+      "disable mcc font override"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "FontCharacterIndex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "character index",
+        "type": "Index",
+        "struct": "Font"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "FontCharacterTables",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "character table",
+        "type": "TagReflexive",
+        "struct": "FontCharacterIndex",
+        "maximum": 256
+      }
+    ],
+    "sizeBytes": 12
+  },
+  {
+    "kind": "enum",
+    "name": "FontEncodingType",
+    "options": [
+      "unicode",
+      "cjk"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "FontCharacter",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "character",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "character width",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap width",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap height",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap origin x",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap origin y",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "hardware character index",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "pixels offset",
+        "type": "int32"
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "Font",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "FontFlags"
+      },
+      {
+        "kind": "field",
+        "name": "ascending height",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "descending height",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "leading height",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "leading width",
+        "type": "int16",
+        "cacheOnly": true,
+        "comment": "you can't actually set this; it gets overridden with (ascending height + descending height) / 5 on map build"
+      },
+      {
+        "kind": "field",
+        "name": "encoding type",
+        "type": "FontEncodingType",
+        "cacheOnly": true,
+        "comment": "only used in the jp/kr/tw xbox versions"
+      },
+      {
+        "kind": "field",
+        "name": "cjk character codes",
+        "type": "uint16",
+        "cacheOnly": true,
+        "comment": "only set if encoding type is cjk. equal to 256 + the number of font characters with a character > 256"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "character tables",
+        "type": "TagReflexive",
+        "struct": "FontCharacterTables",
+        "maximum": 256,
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "bold",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "italic",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "condense",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "underline",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "characters",
+        "type": "TagReflexive",
+        "struct": "FontCharacter",
+        "maximum": 32000,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "pixels",
+        "type": "TagDataOffset",
+        "maximum": 8388608
+      }
+    ],
+    "tagClass": "font",
+    "sizeBytes": 156
+  }
+]

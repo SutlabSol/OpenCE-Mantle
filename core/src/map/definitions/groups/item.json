@@ -1,0 +1,127 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "ItemFlags",
+    "width": 32,
+    "fields": [
+      "always maintains z up",
+      "destroyed by explosions",
+      "unaffected by gravity"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ItemFunctionIn",
+    "options": [
+      "none"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "Item",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "item flags",
+        "type": "ItemFlags"
+      },
+      {
+        "kind": "field",
+        "name": "pickup text index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "sort order",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud message value scale",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "item a in",
+        "type": "ItemFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "item b in",
+        "type": "ItemFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "item c in",
+        "type": "ItemFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "item d in",
+        "type": "ItemFunctionIn"
+      },
+      {
+        "kind": "pad",
+        "size": 164
+      },
+      {
+        "kind": "field",
+        "name": "material effects",
+        "type": "TagDependency",
+        "classes": [
+          "material_effects"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "collision sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 120
+      },
+      {
+        "kind": "field",
+        "name": "detonation delay",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "detonating effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "detonation effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      }
+    ],
+    "inherits": "Object",
+    "tagClass": "item",
+    "sizeBytes": 776
+  }
+]

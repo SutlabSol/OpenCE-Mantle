@@ -1,0 +1,424 @@
+[
+  {
+    "kind": "enum",
+    "name": "SoundFormat",
+    "options": [
+      "16-bit pcm",
+      "xbox adpcm",
+      "ima adpcm",
+      "ogg vorbis"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "SoundClass",
+    "options": [
+      "projectile impact",
+      "projectile detonation",
+      "unused",
+      "unused1",
+      "weapon fire",
+      "weapon ready",
+      "weapon reload",
+      "weapon empty",
+      "weapon charge",
+      "weapon overheat",
+      "weapon idle",
+      "unused2",
+      "unused3",
+      "object impacts",
+      "particle impacts",
+      "slow particle impacts",
+      "unused4",
+      "unused5",
+      "unit footsteps",
+      "unit dialog",
+      "unused6",
+      "unused7",
+      "vehicle collision",
+      "vehicle engine",
+      "unused8",
+      "unused9",
+      "device door",
+      "device force field",
+      "device machinery",
+      "device nature",
+      "device computers",
+      "unused10",
+      "music",
+      "ambient nature",
+      "ambient machinery",
+      "ambient computers",
+      "unused11",
+      "unused12",
+      "unused13",
+      "first person damage",
+      "unused14",
+      "unused15",
+      "unused16",
+      "unused17",
+      "scripted dialog player",
+      "scripted effect",
+      "scripted dialog other",
+      "scripted dialog force unspatialized",
+      "unused18",
+      "unused19",
+      "game event"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "SoundSampleRate",
+    "options": [
+      "22050 Hz",
+      "44100 Hz"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "SoundChannelCount",
+    "options": [
+      "mono",
+      "stereo"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "SoundFlags",
+    "width": 32,
+    "fields": [
+      "fit to adpcm blocksize",
+      "split long sound into permutations",
+      "thirsty grunt"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "SoundPermutation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "skip fraction",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "gain",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "format",
+        "type": "SoundFormat"
+      },
+      {
+        "kind": "field",
+        "name": "next permutation index",
+        "type": "Index",
+        "struct": "SoundPitchRange"
+      },
+      {
+        "kind": "field",
+        "name": "samples pointer",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "tag id 0",
+        "type": "TagID",
+        "cacheOnly": true,
+        "comment": "Set to the sound tag's tag ID"
+      },
+      {
+        "kind": "field",
+        "name": "buffer size",
+        "type": "uint32",
+        "comment": "this is the buffer size used to hold (and, for Vorbis, decompress) the 16-bit PCM data (unused in Xbox ADPCM)"
+      },
+      {
+        "kind": "field",
+        "name": "tag id 1",
+        "type": "TagID",
+        "cacheOnly": true,
+        "comment": "Set to the sound tag's tag ID"
+      },
+      {
+        "kind": "field",
+        "name": "samples",
+        "type": "TagDataOffset",
+        "maximum": 4194304
+      },
+      {
+        "kind": "field",
+        "name": "mouth data",
+        "type": "TagDataOffset",
+        "maximum": 8192
+      },
+      {
+        "kind": "field",
+        "name": "subtitle data",
+        "type": "TagDataOffset",
+        "maximum": 512
+      }
+    ],
+    "sizeBytes": 124
+  },
+  {
+    "kind": "struct",
+    "name": "SoundPitchRange",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "natural pitch",
+        "type": "float",
+        "comment": "This is the base pitch for this pitch range.\nWhen the pitch bend is equal to this, then the audio is played at normal pitch and speed.\nNote that 0 defaults to 1."
+      },
+      {
+        "kind": "field",
+        "name": "bend bounds",
+        "type": "float",
+        "bounds": true,
+        "comment": "This is the minimum and maximum bend in which this pitch range will be used.\nIf the lower bound is higher than natural pitch, then it will be set to natural pitch. Also, if the higher bound is lower than natural pitch, then it will be set to natural pitch."
+      },
+      {
+        "kind": "field",
+        "name": "actual permutation count",
+        "type": "uint16",
+        "comment": "This is the number of actual permutations in the pitch range, not including chunks due to splitting."
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "playback rate",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "permutation flags",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "last permutation index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "discarded permutation index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "permutations",
+        "type": "TagReflexive",
+        "struct": "SoundPermutation",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      }
+    ],
+    "sizeBytes": 72
+  },
+  {
+    "kind": "struct",
+    "name": "Sound",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "SoundFlags"
+      },
+      {
+        "kind": "field",
+        "name": "sound class",
+        "type": "SoundClass"
+      },
+      {
+        "kind": "field",
+        "name": "sample rate",
+        "type": "SoundSampleRate"
+      },
+      {
+        "kind": "field",
+        "name": "minimum distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "maximum distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "skip fraction",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "random pitch bounds",
+        "type": "float",
+        "bounds": true,
+        "comment": "This is the base playback rate of the sound, affecting tempo and pitch."
+      },
+      {
+        "kind": "field",
+        "name": "inner cone angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "outer cone angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "outer cone gain",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "random gain modifier",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "maximum bend per second",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "zero skip fraction modifier",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "zero gain modifier",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "zero pitch modifier",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "one skip fraction modifier",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "one gain modifier",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "one pitch modifier",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "channel count",
+        "type": "SoundChannelCount"
+      },
+      {
+        "kind": "field",
+        "name": "format",
+        "type": "SoundFormat"
+      },
+      {
+        "kind": "field",
+        "name": "promotion sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "promotion count",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "longest permutation length",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "promotion counter",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "promotion time",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "scripting time",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "scripting sound",
+        "type": "TagID",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "pitch ranges",
+        "type": "TagReflexive",
+        "struct": "SoundPitchRange",
+        "maximum": 8
+      }
+    ],
+    "tagClass": "sound",
+    "sizeBytes": 164
+  }
+]

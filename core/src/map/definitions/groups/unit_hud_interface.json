@@ -1,0 +1,1319 @@
+[
+  {
+    "kind": "enum",
+    "name": "UnitHUDInterfaceMeterPanelType",
+    "options": [
+      "integrated light"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "UnitHUDInterfaceOverlayPanelType",
+    "options": [
+      "team icon"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "UnitHUDInterfaceAuxiliaryOverlayFlags",
+    "width": 16,
+    "fields": [
+      "use team color"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "UnitHUDInterfaceHUDSoundLatchedTo",
+    "width": 32,
+    "fields": [
+      "shield recharging",
+      "shield damaged",
+      "shield low",
+      "shield empty",
+      "health low",
+      "health empty",
+      "health minor damage",
+      "health major damage"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "UnitHUDInterfaceAuxiliaryPanelMeterMoreFlags",
+    "width": 32,
+    "fields": [
+      "show only when active",
+      "flash once if activated while disabled"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "UnitHUDInterfaceAuxiliaryOverlay",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "UnitHUDInterfaceOverlayPanelType"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "UnitHUDInterfaceAuxiliaryOverlayFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      }
+    ],
+    "sizeBytes": 132
+  },
+  {
+    "kind": "struct",
+    "name": "UnitHUDInterfaceHUDSound",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "sound_looping"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "latched to",
+        "type": "UnitHUDInterfaceHUDSoundLatchedTo"
+      },
+      {
+        "kind": "field",
+        "name": "scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 56
+  },
+  {
+    "kind": "struct",
+    "name": "UnitHUDInterfaceAuxiliaryPanel",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "UnitHUDInterfaceMeterPanelType"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "background anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "background width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "background interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "background default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "background flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "background flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "background flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "background flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "background sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "background multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "meter anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "meter width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "meter height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "meter scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "meter meter bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "meter color at meter minimum",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "meter color at meter maximum",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "meter flash color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "meter empty color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "meter flags",
+        "type": "HUDInterfaceMeterFlags"
+      },
+      {
+        "kind": "field",
+        "name": "meter minimum meter value",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "meter sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "meter alpha multiplier",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "meter alpha bias",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "meter value scale",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "meter opacity",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "meter translucency",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "meter disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "meter min alpha",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "meter minimum fraction cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "meter more flags",
+        "type": "UnitHUDInterfaceAuxiliaryPanelMeterMoreFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "pad",
+        "size": 64
+      }
+    ],
+    "sizeBytes": 324
+  },
+  {
+    "kind": "struct",
+    "name": "UnitHUDInterface",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "HUDInterfaceAnchor"
+      },
+      {
+        "kind": "field",
+        "name": "canvas size",
+        "type": "HUDInterfaceCanvasSize"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "hud background anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "hud background width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud background height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud background scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "hud background interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "hud background default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "hud background flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "hud background flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud background flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud background number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "hud background flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "hud background flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hud background disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "hud background sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "hud background multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "shield panel background multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter meter bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter color at meter minimum",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter color at meter maximum",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter flash color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter empty color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter flags",
+        "type": "HUDInterfaceMeterFlags"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter minimum meter value",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter alpha multiplier",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter alpha bias",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter value scale",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter opacity",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter translucency",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter min alpha",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter overcharge minimum color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter overcharge maximum color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter overcharge flash color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "shield panel meter overcharge empty color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "health panel background anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "health panel background interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "health panel background default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "health panel background disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "health panel background sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "health panel background multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter meter bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter color at meter minimum",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter color at meter maximum",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter flash color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter empty color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter flags",
+        "type": "HUDInterfaceMeterFlags"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter minimum meter value",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter alpha multiplier",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter alpha bias",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter value scale",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter opacity",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter translucency",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter min alpha",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter medium health left color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter max color health fraction cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "health panel meter min color health fraction cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor background multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground interface bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground default color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground flashing color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground flash period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground flash delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground number of flashes",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground flash flags",
+        "type": "HUDInterfaceFlashFlags"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground flash length",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground disabled color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground sequence index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor foreground multitexture overlays",
+        "type": "TagReflexive",
+        "struct": "HUDInterfaceMultitextureOverlay",
+        "maximum": 30
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor center anchor offset",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor center width scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor center height scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor center scaling flags",
+        "type": "HUDInterfaceScalingFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "auxiliary overlay anchor",
+        "type": "HUDInterfaceAnchor"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "overlays",
+        "type": "TagReflexive",
+        "struct": "UnitHUDInterfaceAuxiliaryOverlay",
+        "maximum": 16
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "sounds",
+        "type": "TagReflexive",
+        "struct": "UnitHUDInterfaceHUDSound",
+        "maximum": 12
+      },
+      {
+        "kind": "field",
+        "name": "meters",
+        "type": "TagReflexive",
+        "struct": "UnitHUDInterfaceAuxiliaryPanel",
+        "maximum": 16
+      },
+      {
+        "kind": "pad",
+        "size": 356
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      }
+    ],
+    "tagClass": "unit_hud_interface",
+    "sizeBytes": 1388
+  }
+]

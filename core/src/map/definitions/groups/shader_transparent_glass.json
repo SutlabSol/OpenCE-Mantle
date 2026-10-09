@@ -1,0 +1,190 @@
+[
+  {
+    "kind": "enum",
+    "name": "ShaderTransparentGlassReflectionType",
+    "options": [
+      "bumped cube map",
+      "flat cube map",
+      "dynamic mirror"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderTransparentGlassFlags",
+    "width": 16,
+    "fields": [
+      "alpha tested",
+      "decal",
+      "two sided",
+      "bump map is specular mask"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentGlass",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shader transparent glass flags",
+        "type": "ShaderTransparentGlassFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      },
+      {
+        "kind": "field",
+        "name": "background tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "background tint map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "background tint map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "reflection type",
+        "type": "ShaderTransparentGlassReflectionType"
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "parallel brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "parallel tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "reflection map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "bump map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "bump map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 128
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "diffuse map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "diffuse map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "diffuse detail map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "diffuse detail map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "specular map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "specular map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "specular detail map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "specular detail map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      }
+    ],
+    "inherits": "Shader",
+    "tagClass": "shader_transparent_glass",
+    "sizeBytes": 480
+  }
+]

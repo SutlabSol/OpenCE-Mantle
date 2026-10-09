@@ -1,0 +1,153 @@
+[
+  {
+    "kind": "enum",
+    "name": "ShaderDetailLevel",
+    "options": [
+      "high",
+      "medium",
+      "low",
+      "turd"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderColorFunctionType",
+    "options": [
+      "current",
+      "next map",
+      "multiply",
+      "double multiply",
+      "add",
+      "add signed current",
+      "add signed next map",
+      "subtract current",
+      "subtract next map",
+      "blend current alpha",
+      "blend current alpha inverse",
+      "blend next map alpha",
+      "blend next map alpha inverse"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderFirstMapType",
+    "options": [
+      "2d map",
+      "first map is reflection cube map",
+      "first map is object centered cube map",
+      "first map is viewer centered cube map"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderType",
+    "options": [
+      "screen",
+      "effect",
+      "decal",
+      "environment",
+      "model",
+      "transparent generic",
+      "transparent chicago",
+      "transparent chicago extended",
+      "transparent water",
+      "transparent glass",
+      "transparent meter",
+      "transparent plasma"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ShaderDetailFunction",
+    "options": [
+      "double biased multiply",
+      "multiply",
+      "double biased add"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderFlags",
+    "width": 16,
+    "fields": [
+      "simple parameterization",
+      "ignore normals",
+      "transparent lit"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ShaderPhysicsFlags",
+    "width": 16,
+    "fields": [
+      "unused"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentExtraLayer",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "Shader",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shader flags",
+        "type": "ShaderFlags"
+      },
+      {
+        "kind": "field",
+        "name": "detail level",
+        "type": "ShaderDetailLevel"
+      },
+      {
+        "kind": "field",
+        "name": "power",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "color of emitted light",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "physics flags",
+        "type": "ShaderPhysicsFlags"
+      },
+      {
+        "kind": "field",
+        "name": "material type",
+        "type": "MaterialType"
+      },
+      {
+        "kind": "field",
+        "name": "shader type",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      }
+    ],
+    "tagClass": "shader",
+    "sizeBytes": 40
+  }
+]

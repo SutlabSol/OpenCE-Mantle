@@ -1,0 +1,1009 @@
+[
+  {
+    "kind": "enum",
+    "name": "WeaponSecondaryTriggerMode",
+    "options": [
+      "normal",
+      "slaved to primary",
+      "inhibits primary",
+      "loads alterate ammunition",
+      "loads multiple primary ammunition"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WeaponFunctionIn",
+    "options": [
+      "none",
+      "heat",
+      "primary ammunition",
+      "secondary ammunition",
+      "primary rate of fire",
+      "secondary rate of fire",
+      "ready",
+      "primary ejection port",
+      "secondary ejection port",
+      "overheated",
+      "primary charged",
+      "secondary charged",
+      "illumination",
+      "age",
+      "integrated light",
+      "primary firing",
+      "secondary firing",
+      "primary firing on",
+      "secondary firing on"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WeaponMovementPenalized",
+    "options": [
+      "always",
+      "when zoomed",
+      "when zoomed or reloading"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WeaponType",
+    "options": [
+      "undefined",
+      "shotgun",
+      "needler",
+      "plasma pistol",
+      "plasma rifle",
+      "rocket launcher"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WeaponPredictionType",
+    "options": [
+      "none",
+      "continuous",
+      "instant"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WeaponOverchargedAction",
+    "options": [
+      "none",
+      "explode",
+      "discharge"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WeaponDistributionFunction",
+    "options": [
+      "point",
+      "horizontal fan"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponMagazineFlags",
+    "width": 32,
+    "fields": [
+      "wastes rounds when reloaded",
+      "every round must be chambered"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponTriggerFlags",
+    "width": 32,
+    "fields": [
+      "tracks fired projectile",
+      "random firing effects",
+      "can fire with partial ammo",
+      "does not repeat automatically",
+      "locks in on off state",
+      "projectiles use weapon origin",
+      "sticks when dropped",
+      "ejects during chamber",
+      "discharging spews",
+      "analog rate of fire",
+      "use error when unzoomed",
+      "projectile vector cannot be adjusted",
+      "projectiles have identical error",
+      "projectile is client side only",
+      "use original unit adjust projectile ray"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "WeaponFlags",
+    "width": 32,
+    "fields": [
+      "vertical heat display",
+      "mutually exclusive triggers",
+      "attacks automatically on bump",
+      "must be readied",
+      "doesn't count toward maximum",
+      "aim assists only when zoomed",
+      "prevents grenade throwing",
+      "must be picked up",
+      "holds triggers when dropped",
+      "prevents melee attack",
+      "detonates when dropped",
+      "cannot fire at maximum age",
+      "secondary trigger overrides grenades",
+      "does not depower active camo in multilplayer",
+      "enables integrated night vision",
+      "ais use weapon melee damage",
+      "prevents crouching",
+      "uses 3rd person camera"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponMagazineObject",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "rounds",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 10
+      },
+      {
+        "kind": "field",
+        "name": "equipment",
+        "type": "TagDependency",
+        "classes": [
+          "equipment"
+        ]
+      }
+    ],
+    "sizeBytes": 28
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponMagazine",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "WeaponMagazineFlags"
+      },
+      {
+        "kind": "field",
+        "name": "rounds recharged",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "rounds total initial",
+        "type": "int16",
+        "comment": "includes loaded ammo"
+      },
+      {
+        "kind": "field",
+        "name": "rounds reserved maximum",
+        "type": "int16",
+        "comment": "does not include loaded ammo"
+      },
+      {
+        "kind": "field",
+        "name": "rounds loaded maximum",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "reload time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rounds reloaded",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "chamber time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "reloading effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "chambering effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "magazine objects",
+        "type": "TagReflexive",
+        "struct": "WeaponMagazineObject",
+        "maximum": 8
+      }
+    ],
+    "sizeBytes": 112
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponTriggerFiringEffect",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shot count lower bound",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "shot count upper bound",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "firing effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "misfire effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "empty effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "firing damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "misfire damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "empty damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      }
+    ],
+    "sizeBytes": 132
+  },
+  {
+    "kind": "struct",
+    "name": "WeaponTrigger",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "WeaponTriggerFlags"
+      },
+      {
+        "kind": "field",
+        "name": "maximum rate of fire",
+        "type": "float",
+        "bounds": true,
+        "comment": "This determines the maximum number of times this trigger can be fired per second.\nThe first value is initial rate of fire and the second value is the final rate of fire.\nWeapons cannot fire faster than once per tick, and non-positive (0 or less) rate of fire results in firing once per tick.\nBecause weapons cannot fire in between ticks, fire rate is also effectively rounded down to the nearest tickrate/n for any positive integer n (so at 30 ticks per second: 30, 15, 10, 7.5, 6, 5, 4.288, 3.75, 3.333, 3, etc.)"
+      },
+      {
+        "kind": "field",
+        "name": "acceleration time",
+        "type": "float",
+        "comment": "This is the number of seconds required to hold the trigger in order to reach the final rate of fire.\n0 acceleration time means the trigger will always use the final rate of fire."
+      },
+      {
+        "kind": "field",
+        "name": "deceleration time",
+        "type": "float",
+        "comment": "This is the number of seconds required to release the trigger in order to reach the initial rate of fire.\n0 deceleration time means the trigger will revert to the initial rate of fire the moment the trigger is released."
+      },
+      {
+        "kind": "field",
+        "name": "blurred rate of fire",
+        "type": "Fraction"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "magazine",
+        "type": "Index",
+        "struct": "Weapon",
+        "comment": "This is the index of the magazine used for drawing ammunition for this trigger.\nIf no magazine is given (null), then the weapon effectively has an unlimited amount of rounds."
+      },
+      {
+        "kind": "field",
+        "name": "rounds per shot",
+        "type": "int16",
+        "comment": "This is the amount of ammo each trigger fire uses.\nUnless the \"can fire with partial ammo\" flag is set, the trigger cannot be fired if there is less than this much ammo remaining and will, instead, reload automatically.\nFiring with partial ammo with the partial ammo flag will result in the loaded ammo reaching 0 rather than a negative amount.\nA negative value results in the magazine gaining loaded rounds upon firing."
+      },
+      {
+        "kind": "field",
+        "name": "minimum rounds loaded",
+        "type": "int16",
+        "comment": "The magazine will automatically reload if less than this much ammo remains in the magazine, and the weapon cannot fire unless this much ammo is loaded.\nUnlike \"rounds per shot\", this ignores the \"can fire with partial ammo\" flag."
+      },
+      {
+        "kind": "field",
+        "name": "projectiles between contrails",
+        "type": "int16",
+        "comment": "Contrails will not be created until this many projectiles have been fired.\nThis resets every time the trigger is released, and the first projectile will always have a contrail."
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "prediction type",
+        "type": "WeaponPredictionType",
+        "comment": "behavior of the trigger in a network predicted game."
+      },
+      {
+        "kind": "field",
+        "name": "firing noise",
+        "type": "ObjectNoise",
+        "comment": "This determines how AI will respond to the trigger being fired, if at all."
+      },
+      {
+        "kind": "field",
+        "name": "error",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "error acceleration time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "error deceleration time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "charging time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "charged time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "overcharged action",
+        "type": "WeaponOverchargedAction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "charged illumination",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "spew time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "charging effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "distribution function",
+        "type": "WeaponDistributionFunction"
+      },
+      {
+        "kind": "field",
+        "name": "projectiles per shot",
+        "type": "int16",
+        "comment": "This is the number of projectiles that spawn when the trigger is fired."
+      },
+      {
+        "kind": "field",
+        "name": "distribution angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "minimum error",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "error angle",
+        "type": "Angle",
+        "bounds": true,
+        "comment": "This determines the maximum angle the projectile can deviate from the first person camera.\nThe first value is the initial error angle and the second value is the final error angle. "
+      },
+      {
+        "kind": "field",
+        "name": "first person offset",
+        "type": "Point3D",
+        "comment": "This is the relative offset from the first person camera the projectile spawns.\nX is front (+) and back (-), Y is left (+) and right (-), Z is up (+) and down (-)."
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "projectile",
+        "type": "TagDependency",
+        "classes": [
+          "projectile"
+        ],
+        "comment": "This is the object that spawns when firing the weapon.\nThe object will spawn facing the same direction as the first person camera (along with any error angle applied, if necessary) with the velocity of the shooter."
+      },
+      {
+        "kind": "field",
+        "name": "ejection port recovery time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "illumination recovery time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "heat generated per round",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "age generated per round",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "overload time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "illumination recovery rate",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "ejection port recovery rate",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "firing acceleration rate",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "firing deceleration rate",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "error acceleration rate",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "error deceleration rate",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "firing effects",
+        "type": "TagReflexive",
+        "struct": "WeaponTriggerFiringEffect",
+        "maximum": 8
+      }
+    ],
+    "sizeBytes": 276
+  },
+  {
+    "kind": "struct",
+    "name": "Weapon",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "weapon flags",
+        "type": "WeaponFlags"
+      },
+      {
+        "kind": "field",
+        "name": "label",
+        "type": "TagString",
+        "comment": "Units that have this label in their animations will be able to pick up the weapon"
+      },
+      {
+        "kind": "field",
+        "name": "secondary trigger mode",
+        "type": "WeaponSecondaryTriggerMode"
+      },
+      {
+        "kind": "field",
+        "name": "maximum alternate shots loaded",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "weapon a in",
+        "type": "WeaponFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "weapon b in",
+        "type": "WeaponFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "weapon c in",
+        "type": "WeaponFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "weapon d in",
+        "type": "WeaponFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "ready time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ready effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "heat recovery threshold",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "overheated threshold",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "heat detonation threshold",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "heat detonation fraction",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "heat loss rate",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "heat illumination",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "overheated",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "overheat detonation",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ],
+        "comment": "This effect is played when the weapon overheats and is set to detonate as a result"
+      },
+      {
+        "kind": "field",
+        "name": "player melee damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "player melee response",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "actor firing parameters",
+        "type": "TagDependency",
+        "classes": [
+          "actor_variant"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "near reticle range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "far reticle range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "intersection reticle range",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "zoom levels",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "zoom magnification range",
+        "type": "float",
+        "bounds": true,
+        "comment": "Minimum is the magnification amount for the first zoom level, and maximum is the magnification amount for the final zoom level"
+      },
+      {
+        "kind": "field",
+        "name": "autoaim angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "autoaim range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "magnetism angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "magnetism range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "deviation angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "movement penalized",
+        "type": "WeaponMovementPenalized"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "forward movement penalty",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "sideways movement penalty",
+        "type": "Fraction"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "minimum target range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "looking time modifier",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "light power on time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "light power off time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "light power on effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "light power off effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "age heat recovery penalty",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "age rate of fire penalty",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "age misfire start",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "age misfire chance",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "first person model",
+        "type": "TagDependency",
+        "classes": [
+          "model"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "first person animations",
+        "type": "TagDependency",
+        "classes": [
+          "model_animations"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "hud interface",
+        "type": "TagDependency",
+        "classes": [
+          "weapon_hud_interface"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "pickup sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "zoom in sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "zoom out sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "active camo ding",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "active camo regrowth rate",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "weapon type",
+        "type": "WeaponType"
+      },
+      {
+        "kind": "field",
+        "name": "more predicted resources",
+        "type": "TagReflexive",
+        "struct": "PredictedResource",
+        "maximum": 1024,
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "magazines",
+        "type": "TagReflexive",
+        "struct": "WeaponMagazine",
+        "maximum": 2
+      },
+      {
+        "kind": "field",
+        "name": "triggers",
+        "type": "TagReflexive",
+        "struct": "WeaponTrigger",
+        "maximum": 2
+      }
+    ],
+    "inherits": "Item",
+    "tagClass": "weapon",
+    "sizeBytes": 1288
+  }
+]

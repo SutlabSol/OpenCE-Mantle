@@ -1,0 +1,170 @@
+[
+  {
+    "kind": "enum",
+    "name": "VirtualKeyboardKeyboardKey",
+    "options": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "0",
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h",
+      "i",
+      "j",
+      "k",
+      "l",
+      "m",
+      "n",
+      "o",
+      "p",
+      "q",
+      "r",
+      "s",
+      "t",
+      "u",
+      "v",
+      "w",
+      "x",
+      "y",
+      "z",
+      "done",
+      "shift",
+      "caps lock",
+      "symbols",
+      "backspace",
+      "left",
+      "right",
+      "space"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "VirtualKeyboardVirtualKey",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "keyboard key",
+        "type": "VirtualKeyboardKeyboardKey"
+      },
+      {
+        "kind": "field",
+        "name": "lowercase character",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "shift character",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "caps character",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "symbols character",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "shift caps character",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "shift symbols character",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "caps symbols character",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "unselected background bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "selected background bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "active background bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "sticky background bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      }
+    ],
+    "sizeBytes": 80
+  },
+  {
+    "kind": "struct",
+    "name": "VirtualKeyboard",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "display font",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "background bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "special key labels string list",
+        "type": "TagDependency",
+        "classes": [
+          "unicode_string_list"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "virtual keys",
+        "type": "TagReflexive",
+        "struct": "VirtualKeyboardVirtualKey",
+        "maximum": 44
+      }
+    ],
+    "tagClass": "virtual_keyboard",
+    "sizeBytes": 60
+  }
+]

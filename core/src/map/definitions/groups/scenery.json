@@ -1,0 +1,10 @@
+[
+  {
+    "kind": "struct",
+    "name": "Scenery",
+    "fields": [],
+    "inherits": "BasicObject",
+    "tagClass": "scenery",
+    "sizeBytes": 508
+  }
+]

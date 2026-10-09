@@ -1,0 +1,197 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "ShaderTransparentWaterFlags",
+    "width": 16,
+    "fields": [
+      "base map alpha modulates reflection",
+      "base map color modulates background",
+      "atmospheric fog",
+      "draw before fog"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentWaterRipple",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "contribution factor",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "animation angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "animation velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "map offset",
+        "type": "Vector2D"
+      },
+      {
+        "kind": "field",
+        "name": "map repeats",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "map index",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "sizeBytes": 76
+  },
+  {
+    "kind": "struct",
+    "name": "ShaderTransparentWater",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "water flags",
+        "type": "ShaderTransparentWaterFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "base map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "view perpendicular brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "view perpendicular tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "view parallel brightness",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "view parallel tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "reflection map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "ripple animation angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "ripple animation velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ripple scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ripple maps",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "ripple mipmap levels",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "ripple mipmap fade factor",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "ripple mipmap detail bias",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 64
+      },
+      {
+        "kind": "field",
+        "name": "ripples",
+        "type": "TagReflexive",
+        "struct": "ShaderTransparentWaterRipple",
+        "maximum": 4
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "inherits": "Shader",
+    "tagClass": "shader_transparent_water",
+    "sizeBytes": 320
+  }
+]

@@ -1,0 +1,1822 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "ScenarioStructureBSPMaterialFlags",
+    "width": 16,
+    "fields": [
+      "coplanar",
+      "fog plane"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ScenarioStructureBSPClusterPortalFlags",
+    "width": 32,
+    "fields": [
+      "ai can simply not hear through all this amazing stuff darn it"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPCollisionMaterial",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "material",
+        "type": "MaterialType",
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPNode",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "bounds x",
+        "type": "uint8",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "bounds y",
+        "type": "uint8",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "bounds z",
+        "type": "uint8",
+        "bounds": true
+      }
+    ],
+    "sizeBytes": 6
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPLeaf",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "bounds x",
+        "type": "uint8",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "bounds y",
+        "type": "uint8",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "bounds z",
+        "type": "uint8",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "cluster",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "surface reference count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "surface references",
+        "type": "int32"
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPSurfaceReference",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "surface",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "node",
+        "type": "int32"
+      }
+    ],
+    "sizeBytes": 8
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPSurface",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "vertex0 index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "vertex1 index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "vertex2 index",
+        "type": "Index"
+      }
+    ],
+    "sizeBytes": 6
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMaterialUncompressedRenderedVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "normal",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "binormal",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "tangent",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "texture coords",
+        "type": "Point2D"
+      }
+    ],
+    "sizeBytes": 56
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMaterialCompressedRenderedVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "normal",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "binormal",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "tangent",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "texture coords",
+        "type": "Point2D"
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMaterialUncompressedLightmapVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "normal",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "texture coords",
+        "type": "Point2D"
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMaterialCompressedLightmapVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "normal",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "texture coordinate x",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "texture coordinate y",
+        "type": "int16"
+      }
+    ],
+    "sizeBytes": 8
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMaterial",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "shader permutation",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioStructureBSPMaterialFlags"
+      },
+      {
+        "kind": "field",
+        "name": "surfaces",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "surface count",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "centroid",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "ambient color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "distant light count",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "distant light 0 color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "distant light 0 direction",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "distant light 1 color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "distant light 1 direction",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "reflection tint",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "shadow vector",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "shadow color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "plane",
+        "type": "Plane3D"
+      },
+      {
+        "kind": "field",
+        "name": "breakable surface",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "rendered vertices type",
+        "type": "VertexType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "rendered vertices count",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "rendered vertices offset",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "rendered vertices index pointer",
+        "type": "Pointer",
+        "cacheOnly": true,
+        "comment": "(Xbox only) an indirect pointer to the rendered vertices"
+      },
+      {
+        "kind": "field",
+        "name": "lightmap vertices type",
+        "type": "VertexType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "lightmap vertices count",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "lightmap vertices offset",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "lightmap vertices index pointer",
+        "type": "Pointer",
+        "cacheOnly": true,
+        "comment": "(Xbox only) an indirect pointer to the lightmap vertices"
+      },
+      {
+        "kind": "field",
+        "name": "uncompressed vertices",
+        "type": "TagDataOffset",
+        "maximum": 4864000
+      },
+      {
+        "kind": "field",
+        "name": "compressed vertices",
+        "type": "TagDataOffset",
+        "maximum": 2560000
+      }
+    ],
+    "sizeBytes": 256
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPLightmap",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "bitmap",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "materials",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPMaterial",
+        "maximum": 2048
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPLensFlare",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "lens",
+        "type": "TagDependency",
+        "classes": [
+          "lens_flare"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPLensFlareMarker",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "direction i component",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "direction j component",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "direction k component",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "lens flare index",
+        "type": "int8"
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPSubclusterSurfaceIndex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "index",
+        "type": "int32"
+      }
+    ],
+    "sizeBytes": 4
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPSubcluster",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "world bounds x",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "world bounds y",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "world bounds z",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "surface indices",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPSubclusterSurfaceIndex",
+        "maximum": 128
+      }
+    ],
+    "sizeBytes": 36
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPClusterSurfaceIndex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "index",
+        "type": "int32"
+      }
+    ],
+    "sizeBytes": 4
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMirrorVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "point",
+        "type": "Point3D"
+      }
+    ],
+    "sizeBytes": 12
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMirror",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "plane",
+        "type": "Plane3D"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "vertices",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPMirrorVertex",
+        "maximum": 512
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPClusterPortalIndex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "portal",
+        "type": "Index"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPCluster",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "sky",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "fog",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "background sound",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "sound environment",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "weather",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "transition structure bsp",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "first decal index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "decal count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "predicted resources",
+        "type": "TagReflexive",
+        "struct": "PredictedResource",
+        "maximum": 1024,
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "subclusters",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPSubcluster",
+        "maximum": 4096
+      },
+      {
+        "kind": "field",
+        "name": "first lens flare marker index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "lens flare marker count",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "surface indices",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPClusterSurfaceIndex",
+        "maximum": 32768
+      },
+      {
+        "kind": "field",
+        "name": "mirrors",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPMirror",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "portals",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPClusterPortalIndex",
+        "maximum": 128
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPClusterPortalVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "point",
+        "type": "Point3D"
+      }
+    ],
+    "sizeBytes": 12
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPClusterPortal",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "front cluster",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "back cluster",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "plane index",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "centroid",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "bounding radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ScenarioStructureBSPClusterPortalFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "vertices",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPClusterPortalVertex",
+        "maximum": 128
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPBreakableSurface",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "centroid",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "collision surface index",
+        "type": "int32"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPFogPlaneVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "point",
+        "type": "Point3D"
+      }
+    ],
+    "sizeBytes": 12
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPFogPlane",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "front region",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "material type",
+        "type": "MaterialType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "plane",
+        "type": "Plane3D"
+      },
+      {
+        "kind": "field",
+        "name": "vertices",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPFogPlaneVertex",
+        "maximum": 4096
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPFogRegion",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 36
+      },
+      {
+        "kind": "field",
+        "name": "fog",
+        "type": "Index",
+        "struct": "ScenarioStructureBSP"
+      },
+      {
+        "kind": "field",
+        "name": "weather palette",
+        "type": "Index",
+        "struct": "ScenarioStructureBSP"
+      }
+    ],
+    "sizeBytes": 40
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPFogPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "fog",
+        "type": "TagDependency",
+        "classes": [
+          "fog"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "fog scale function",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 52
+      }
+    ],
+    "sizeBytes": 136
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPWeatherPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "particle system",
+        "type": "TagDependency",
+        "classes": [
+          "weather_particle_system"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "particle system scale function",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 44
+      },
+      {
+        "kind": "field",
+        "name": "wind",
+        "type": "TagDependency",
+        "classes": [
+          "wind"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "wind direction",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "wind magnitude",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "wind scale function",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 44
+      }
+    ],
+    "sizeBytes": 240
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPWeatherPolyhedronPlane",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "plane",
+        "type": "Plane3D"
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPWeatherPolyhedron",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "bounding sphere center",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "bounding sphere radius",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "planes",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPWeatherPolyhedronPlane",
+        "maximum": 16
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPPathfindingSurface",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "data",
+        "type": "int8"
+      }
+    ],
+    "sizeBytes": 1
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPPathfindingEdge",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "midpoint",
+        "type": "int8"
+      }
+    ],
+    "sizeBytes": 1
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPBackgroundSoundPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "background sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound_looping"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "scale function",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 116
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPSoundEnvironmentPalette",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "sound environment",
+        "type": "TagDependency",
+        "classes": [
+          "sound_environment"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 80
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMarker",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Quaternion"
+      },
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      }
+    ],
+    "sizeBytes": 60
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPGlobalDetailObjectCell",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "cell x",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "cell y",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "cell z",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "offset z",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "valid layers flags",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "start index",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "count index",
+        "type": "uint32"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPGlobalDetailObject",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position x",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "position y",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "position z",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "data",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "int16"
+      }
+    ],
+    "sizeBytes": 6
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPGlobalDetailObjectCount",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "count",
+        "type": "uint16"
+      }
+    ],
+    "sizeBytes": 2
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPGlobalZReferenceVector",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "z reference i",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "z reference j",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "z reference k",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "z reference l",
+        "type": "float"
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPDetailObjectData",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "cells",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPGlobalDetailObjectCell",
+        "maximum": 262144
+      },
+      {
+        "kind": "field",
+        "name": "instances",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPGlobalDetailObject",
+        "maximum": 2097152
+      },
+      {
+        "kind": "field",
+        "name": "counts",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPGlobalDetailObjectCount",
+        "maximum": 8388608
+      },
+      {
+        "kind": "field",
+        "name": "z reference vectors",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPGlobalZReferenceVector",
+        "maximum": 262144
+      },
+      {
+        "kind": "field",
+        "name": "bullshit",
+        "type": "uint8",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 3
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPRuntimeDecal",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "decal type",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "yaw",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "pitch",
+        "type": "int8"
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMapLeafFaceVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "vertex",
+        "type": "Point2D"
+      }
+    ],
+    "sizeBytes": 8
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMapLeafFace",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "node index",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "vertices",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPMapLeafFaceVertex",
+        "maximum": 64
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPMapLeafPortalIndex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "portal index",
+        "type": "int32"
+      }
+    ],
+    "sizeBytes": 4
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPGlobalMapLeaf",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "faces",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPMapLeafFace",
+        "maximum": 256
+      },
+      {
+        "kind": "field",
+        "name": "portal indices",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPMapLeafPortalIndex",
+        "maximum": 256
+      }
+    ],
+    "sizeBytes": 24
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPLeafPortalVertex",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "point",
+        "type": "Point3D"
+      }
+    ],
+    "sizeBytes": 12
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPGlobalLeafPortal",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "plane index",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "back leaf index",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "front leaf index",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "vertices",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPLeafPortalVertex",
+        "maximum": 64
+      }
+    ],
+    "sizeBytes": 24
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSP",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "lightmaps bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "vehicle floor",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "vehicle ceiling",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "default ambient color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "default distant light 0 color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "default distant light 0 direction",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "default distant light 1 color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "default distant light 1 direction",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "default reflection tint",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "default shadow vector",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "default shadow color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "collision materials",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPCollisionMaterial",
+        "maximum": 512
+      },
+      {
+        "kind": "field",
+        "name": "collision bsp",
+        "type": "TagReflexive",
+        "struct": "ModelCollisionGeometryBSP",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "nodes",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPNode",
+        "maximum": 131072
+      },
+      {
+        "kind": "field",
+        "name": "world bounds x",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "world bounds y",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "world bounds z",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "leaves",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPLeaf",
+        "maximum": 65536
+      },
+      {
+        "kind": "field",
+        "name": "leaf surfaces",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPSurfaceReference",
+        "maximum": 262144
+      },
+      {
+        "kind": "field",
+        "name": "surfaces",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPSurface",
+        "maximum": 131072
+      },
+      {
+        "kind": "field",
+        "name": "lightmaps",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPLightmap",
+        "maximum": 128
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "lens flares",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPLensFlare",
+        "maximum": 256
+      },
+      {
+        "kind": "field",
+        "name": "lens flare markers",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPLensFlareMarker",
+        "maximum": 65536
+      },
+      {
+        "kind": "field",
+        "name": "clusters",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPCluster",
+        "maximum": 8192
+      },
+      {
+        "kind": "field",
+        "name": "cluster data",
+        "type": "TagDataOffset",
+        "maximum": 65536
+      },
+      {
+        "kind": "field",
+        "name": "cluster portals",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPClusterPortal",
+        "maximum": 512
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "breakable surfaces",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPBreakableSurface",
+        "maximum": 256
+      },
+      {
+        "kind": "field",
+        "name": "fog planes",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPFogPlane",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "fog regions",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPFogRegion",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "fog palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPFogPalette",
+        "maximum": 32
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "weather palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPWeatherPalette",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "weather polyhedra",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPWeatherPolyhedron",
+        "maximum": 32
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "pathfinding surfaces",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPPathfindingSurface",
+        "maximum": 131072
+      },
+      {
+        "kind": "field",
+        "name": "pathfinding edges",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPPathfindingEdge",
+        "maximum": 262144
+      },
+      {
+        "kind": "field",
+        "name": "background sound palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPBackgroundSoundPalette",
+        "maximum": 64
+      },
+      {
+        "kind": "field",
+        "name": "sound environment palette",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPSoundEnvironmentPalette",
+        "maximum": 64
+      },
+      {
+        "kind": "field",
+        "name": "sound pas data",
+        "type": "TagDataOffset",
+        "maximum": 131072
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "markers",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPMarker",
+        "maximum": 1024
+      },
+      {
+        "kind": "field",
+        "name": "detail objects",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPDetailObjectData",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "runtime decals",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPRuntimeDecal",
+        "maximum": 6144,
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "leaf map leaves",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPGlobalMapLeaf",
+        "maximum": 65536,
+        "nonCached": true
+      },
+      {
+        "kind": "field",
+        "name": "leaf map portals",
+        "type": "TagReflexive",
+        "struct": "ScenarioStructureBSPGlobalLeafPortal",
+        "maximum": 524288,
+        "nonCached": true
+      }
+    ],
+    "tagClass": "scenario_structure_bsp",
+    "sizeBytes": 648
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPCompiledHeader",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "pointer",
+        "type": "Pointer",
+        "cacheOnly": true,
+        "comment": "points to the BSP tag struct"
+      },
+      {
+        "kind": "field",
+        "name": "lightmap material count",
+        "type": "uint32",
+        "cacheOnly": true,
+        "comment": "(Xbox only): number of lightmap materials"
+      },
+      {
+        "kind": "field",
+        "name": "rendered vertices",
+        "type": "Pointer",
+        "cacheOnly": true,
+        "comment": "(Xbox only): pointer to array of rendered vertices"
+      },
+      {
+        "kind": "field",
+        "name": "lightmap material count again",
+        "type": "uint32",
+        "cacheOnly": true,
+        "comment": "(Xbox only): number of lightmap materials (again)"
+      },
+      {
+        "kind": "field",
+        "name": "lightmap vertices",
+        "type": "Pointer",
+        "cacheOnly": true,
+        "comment": "(Xbox only): pointer to array of lightmap vertices"
+      },
+      {
+        "kind": "field",
+        "name": "signature",
+        "type": "TagFourCC",
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 24
+  },
+  {
+    "kind": "struct",
+    "name": "ScenarioStructureBSPCompiledHeaderCEA",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "pointer",
+        "type": "Pointer",
+        "cacheOnly": true,
+        "comment": "points to the BSP tag struct"
+      },
+      {
+        "kind": "field",
+        "name": "lightmap vertex size",
+        "type": "uint32",
+        "cacheOnly": true,
+        "comment": "(CEA only): size of vertex data"
+      },
+      {
+        "kind": "field",
+        "name": "lightmap vertices",
+        "type": "uint32",
+        "cacheOnly": true,
+        "comment": "(CEA only): file offset to vertex data"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "signature",
+        "type": "TagFourCC",
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 24
+  }
+]

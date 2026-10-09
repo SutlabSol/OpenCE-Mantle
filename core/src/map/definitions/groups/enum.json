@@ -1,0 +1,170 @@
+[
+  {
+    "kind": "enum",
+    "name": "FramebufferBlendFunction",
+    "options": [
+      "alpha blend",
+      "multiply",
+      "double multiply",
+      "add",
+      "subtract",
+      "component min",
+      "component max",
+      "alpha multiply add"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "FramebufferFadeMode",
+    "options": [
+      "none",
+      "fade when perpendicular",
+      "fade when parallel"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "FunctionOut",
+    "options": [
+      "none",
+      "a out",
+      "b out",
+      "c out",
+      "d out"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "WaveFunction",
+    "options": [
+      "one",
+      "zero",
+      "cosine",
+      "cosine variable period",
+      "diagonal wave",
+      "diagonal wave variable period",
+      "slide",
+      "slide variable period",
+      "noise",
+      "jitter",
+      "wander",
+      "spark"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "MaterialType",
+    "options": [
+      "dirt",
+      "sand",
+      "stone",
+      "snow",
+      "wood",
+      "metal hollow",
+      "metal thin",
+      "metal thick",
+      "rubber",
+      "glass",
+      "force field",
+      "grunt",
+      "hunter armor",
+      "hunter skin",
+      "elite",
+      "jackal",
+      "jackal energy shield",
+      "engineer skin",
+      "engineer force field",
+      "flood combat form",
+      "flood carrier form",
+      "cyborg armor",
+      "cyborg energy shield",
+      "human armor",
+      "human skin",
+      "sentinel",
+      "monitor",
+      "plastic",
+      "water",
+      "leaves",
+      "elite energy shield",
+      "ice",
+      "hunter shield"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "FunctionType",
+    "options": [
+      "linear",
+      "early",
+      "very early",
+      "late",
+      "very late",
+      "cosine"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "FunctionBoundsMode",
+    "options": [
+      "clip",
+      "clip and normalize",
+      "scale to fit"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "FunctionScaleBy",
+    "options": [
+      "none",
+      "a in",
+      "b in",
+      "c in",
+      "d in",
+      "a out",
+      "b out",
+      "c out",
+      "d out"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "FunctionNameNullable",
+    "options": [
+      "none",
+      "a",
+      "b",
+      "c",
+      "d"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "GrenadeType",
+    "options": [
+      "human fragmentation",
+      "covenant plasma",
+      "grenade type 2",
+      "grenade type 3"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "VertexType",
+    "options": [
+      "structure bsp uncompressed rendered vertices",
+      "structure bsp compressed rendered vertices",
+      "structure bsp uncompressed lightmap vertices",
+      "structure bsp compressed lightmap vertices",
+      "model uncompressed",
+      "model compressed"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "TriangleBufferType",
+    "options": [
+      "triangle list",
+      "triangle strip"
+    ]
+  }
+]

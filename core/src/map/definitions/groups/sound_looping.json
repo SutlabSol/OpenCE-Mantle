@@ -1,0 +1,237 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "SoundLoopingTrackFlags",
+    "width": 32,
+    "fields": [
+      "fade in at start",
+      "fade out at stop",
+      "fade in alternate"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "SoundLoopingDetailFlags",
+    "width": 32,
+    "fields": [
+      "don't play with alternate",
+      "don't play without alternate"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "SoundLoopingFlags",
+    "width": 32,
+    "fields": [
+      "deafening to ais",
+      "not a loop",
+      "stops music",
+      "siege of madrigal"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "SoundLoopingTrack",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "SoundLoopingTrackFlags"
+      },
+      {
+        "kind": "field",
+        "name": "gain",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "fade in duration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "fade out duration",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "start",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "loop",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "end",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "alternate loop",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "alternate end",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      }
+    ],
+    "sizeBytes": 160
+  },
+  {
+    "kind": "struct",
+    "name": "SoundLoopingDetail",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "random period bounds",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "gain",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "SoundLoopingDetailFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      },
+      {
+        "kind": "field",
+        "name": "yaw bounds",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "pitch bounds",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "distance bounds",
+        "type": "float",
+        "bounds": true
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "SoundLooping",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "SoundLoopingFlags"
+      },
+      {
+        "kind": "field",
+        "name": "zero detail sound period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "zero detail unused",
+        "type": "float",
+        "count": 2,
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "one detail sound period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "one detail unused",
+        "type": "float",
+        "count": 2,
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "runtime scripting sound",
+        "type": "TagID",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "maximum distance",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "continuous damage effect",
+        "type": "TagDependency",
+        "classes": [
+          "continuous_damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "tracks",
+        "type": "TagReflexive",
+        "struct": "SoundLoopingTrack",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "detail sounds",
+        "type": "TagReflexive",
+        "struct": "SoundLoopingDetail",
+        "maximum": 32
+      }
+    ],
+    "tagClass": "sound_looping",
+    "sizeBytes": 84
+  }
+]

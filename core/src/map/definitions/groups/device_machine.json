@@ -1,0 +1,77 @@
+[
+  {
+    "kind": "enum",
+    "name": "MachineType",
+    "options": [
+      "door",
+      "platform",
+      "gear"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "MachineCollisionResponse",
+    "options": [
+      "pause until crushed",
+      "reverse directions"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "MachineFlags",
+    "width": 16,
+    "fields": [
+      "pathfinding obstacle",
+      "but not when open",
+      "elevator"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "DeviceMachine",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "machine type",
+        "type": "MachineType"
+      },
+      {
+        "kind": "field",
+        "name": "machine flags",
+        "type": "MachineFlags"
+      },
+      {
+        "kind": "field",
+        "name": "door open time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 80
+      },
+      {
+        "kind": "field",
+        "name": "collision response",
+        "type": "MachineCollisionResponse"
+      },
+      {
+        "kind": "field",
+        "name": "elevator node",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 52
+      },
+      {
+        "kind": "field",
+        "name": "door open time ticks",
+        "type": "uint32",
+        "cacheOnly": true
+      }
+    ],
+    "inherits": "Device",
+    "tagClass": "device_machine",
+    "sizeBytes": 804
+  }
+]

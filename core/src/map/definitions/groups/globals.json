@@ -1,0 +1,1891 @@
+[
+  {
+    "kind": "enum",
+    "name": "MultiplayerInformationSound",
+    "options": [
+      "play ball",
+      "game over",
+      "one minute to win",
+      "30 seconds to win",
+      "red team minute to win",
+      "red team 30 to win",
+      "blue team minute to win",
+      "blue team 30 to win",
+      "blue team has the flag",
+      "blue team flag returned",
+      "blue team score",
+      "red team has the flag",
+      "red team flag returned",
+      "red team score",
+      "double kill",
+      "triple kill",
+      "killtacular",
+      "running riot",
+      "killing spree",
+      "oddball",
+      "race",
+      "slayer",
+      "capture the flag",
+      "warthog",
+      "ghost",
+      "scorpion",
+      "countdown timer",
+      "teleporter activate",
+      "flag failure",
+      "countdown for respawn",
+      "hill move",
+      "player respawn",
+      "team king of the hill",
+      "team oddball",
+      "team race",
+      "team slayer",
+      "king of the hill",
+      "blue team ctf",
+      "red team ctf",
+      "hill contested",
+      "hill controlled",
+      "hill occupied",
+      "countdown timer end",
+      "ting"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "GlobalsRasterizerDataFlags",
+    "width": 16,
+    "fields": [
+      "tint edge density"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "GlobalsBreakableSurfaceParticleEffectFlags",
+    "width": 32,
+    "fields": [
+      "interpolate color in hsv",
+      "more colors"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsSound",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsCamera",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "default unit camera track",
+        "type": "TagDependency",
+        "classes": [
+          "camera_track"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsLookFunction",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "scale",
+        "type": "float"
+      }
+    ],
+    "sizeBytes": 4
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsPlayerControl",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "magnetism friction",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "magnetism adhesion",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "inconsequential target scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 52
+      },
+      {
+        "kind": "field",
+        "name": "look acceleration time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "look acceleration scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "look peg threshold",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "look default pitch rate",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "look default yaw rate",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "look autolevelling scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "minimum weapon swap ticks",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "minimum autolevelling ticks",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "minimum angle for vehicle flipping",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "look function",
+        "type": "TagReflexive",
+        "struct": "GlobalsLookFunction",
+        "maximum": 16
+      }
+    ],
+    "sizeBytes": 128
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsDifficulty",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "easy enemy damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal enemy damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard enemy damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs enemy damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy enemy vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal enemy vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard enemy vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs enemy vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy enemy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal enemy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard enemy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs enemy shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy enemy recharge",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal enemy recharge",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard enemy recharge",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs enemy recharge",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy friend damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal friend damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard friend damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs friend damage",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy friend vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal friend vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard friend vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs friend vitality",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy friend shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal friend shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard friend shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs friend shield",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy friend recharge",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal friend recharge",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard friend recharge",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs friend recharge",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy infection forms",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal infection forms",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard infection forms",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs infection forms",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "easy rate of fire",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal rate of fire",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard rate of fire",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs rate of fire",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy projectile error",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal projectile error",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard projectile error",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs projectile error",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy burst error",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal burst error",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard burst error",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs burst error",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy new target delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal new target delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard new target delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs new target delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy burst separation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal burst separation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard burst separation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs burst separation",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy target tracking",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal target tracking",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard target tracking",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs target tracking",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy target leading",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal target leading",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard target leading",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs target leading",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy overcharge chance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal overcharge chance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard overcharge chance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs overcharge chance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy special fire delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal special fire delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard special fire delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs special fire delay",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy guidance vs player",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal guidance vs player",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard guidance vs player",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs guidance vs player",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy melee delay base",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal melee delay base",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard melee delay base",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs melee delay base",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy melee delay scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal melee delay scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard melee delay scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs melee delay scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "easy grenade chance scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal grenade chance scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard grenade chance scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs grenade chance scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy grenade timer scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal grenade timer scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard grenade timer scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs grenade timer scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "easy major upgrade",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal major upgrade",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard major upgrade",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs major upgrade",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy major upgrade 1",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal major upgrade 1",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard major upgrade 1",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs major upgrade 1",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "easy major upgrade 2",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "normal major upgrade 2",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hard major upgrade 2",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "imposs major upgrade 2",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "pad",
+        "size": 84
+      }
+    ],
+    "sizeBytes": 644
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsGrenade",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "maximum count",
+        "type": "int16",
+        "maximum": 127
+      },
+      {
+        "kind": "field",
+        "name": "mp spawn default",
+        "type": "int16",
+        "maximum": 127
+      },
+      {
+        "kind": "field",
+        "name": "throwing effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "hud interface",
+        "type": "TagDependency",
+        "classes": [
+          "grenade_hud_interface"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "equipment",
+        "type": "TagDependency",
+        "classes": [
+          "equipment"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "projectile",
+        "type": "TagDependency",
+        "classes": [
+          "projectile"
+        ]
+      }
+    ],
+    "sizeBytes": 68
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsRasterizerData",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "distance attenuation",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "vector normalization",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "atmospheric fog density",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "planar fog density",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "linear corner fade",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "active camouflage distortion",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "glow",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 60
+      },
+      {
+        "kind": "field",
+        "name": "default 2d",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "default 3d",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "default cube map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "test 0",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "test 1",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "test 2",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "test 3",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "video scanline map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "video noise map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 52
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "GlobalsRasterizerDataFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "refraction amount",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "distance falloff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "hyper stealth refraction",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hyper stealth distance falloff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "hyper stealth tint color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "distance attenuation 2d",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      }
+    ],
+    "sizeBytes": 428
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsInterfaceBitmaps",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "font system",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "font terminal",
+        "type": "TagDependency",
+        "classes": [
+          "font"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "screen color table",
+        "type": "TagDependency",
+        "classes": [
+          "color_table"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "hud color table",
+        "type": "TagDependency",
+        "classes": [
+          "color_table"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "editor color table",
+        "type": "TagDependency",
+        "classes": [
+          "color_table"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "dialog color table",
+        "type": "TagDependency",
+        "classes": [
+          "color_table"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "hud globals",
+        "type": "TagDependency",
+        "classes": [
+          "hud_globals"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor sweep bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor sweep bitmap mask",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "multiplayer hud bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "localization",
+        "type": "TagDependency",
+        "classes": [
+          "string_list"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "hud digits definition",
+        "type": "TagDependency",
+        "classes": [
+          "hud_number"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "motion sensor blip bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "interface goo map1",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "interface goo map2",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "interface goo map3",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      }
+    ],
+    "sizeBytes": 304
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsWeapon",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "weapon",
+        "type": "TagDependency",
+        "classes": [
+          "item"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsCheatPowerup",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "powerup",
+        "type": "TagDependency",
+        "classes": [
+          "equipment"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsVehicle",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "vehicle",
+        "type": "TagDependency",
+        "classes": [
+          "unit"
+        ]
+      }
+    ],
+    "sizeBytes": 16
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsMultiplayerInformation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flag",
+        "type": "TagDependency",
+        "classes": [
+          "weapon"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "unit",
+        "type": "TagDependency",
+        "classes": [
+          "unit"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "vehicles",
+        "type": "TagReflexive",
+        "struct": "GlobalsVehicle",
+        "maximum": 20
+      },
+      {
+        "kind": "field",
+        "name": "hill shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "flag shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "ball",
+        "type": "TagDependency",
+        "classes": [
+          "weapon"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "sounds",
+        "type": "TagReflexive",
+        "struct": "GlobalsSound",
+        "maximum": 60
+      },
+      {
+        "kind": "pad",
+        "size": 56
+      }
+    ],
+    "sizeBytes": 160
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsPlayerInformation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "unit",
+        "type": "TagDependency",
+        "classes": [
+          "unit"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "walking speed",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "double speed multiplier",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "run forward",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "run backward",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "run sideways",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "run acceleration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sneak forward",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sneak backward",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sneak sideways",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "sneak acceleration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "airborne acceleration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "speed multiplier",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "grenade origin",
+        "type": "Point3D"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "stun movement penalty",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "stun turning penalty",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "stun jumping penalty",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "minimum stun time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "maximum stun time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "first person idle time",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "first person skip fraction",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "coop respawn effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 44
+      }
+    ],
+    "sizeBytes": 244
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsFirstPersonInterface",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "first person hands",
+        "type": "TagDependency",
+        "classes": [
+          "model"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "base bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "shield meter",
+        "type": "TagDependency",
+        "classes": [
+          "meter"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "shield meter origin",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "body meter",
+        "type": "TagDependency",
+        "classes": [
+          "meter"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "body meter origin",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "night vision on effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "night vision off effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 88
+      }
+    ],
+    "sizeBytes": 192
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsFallingDamage",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "harmful falling distance",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "falling damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "maximum falling distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "distance damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "vehicle environment collision damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "vehicle killed unit damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "vehicle collision damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "flaming death damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "maximum falling velocity",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "harmful falling velocity",
+        "type": "float",
+        "bounds": true,
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 152
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsBreakableSurfaceParticleEffect",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "particle type",
+        "type": "TagDependency",
+        "classes": [
+          "particle"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "GlobalsBreakableSurfaceParticleEffectFlags"
+      },
+      {
+        "kind": "field",
+        "name": "density",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "velocity scale",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "angular velocity",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "tint lower bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "tint upper bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      }
+    ],
+    "sizeBytes": 128
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsMaterial",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 100
+      },
+      {
+        "kind": "pad",
+        "size": 48
+      },
+      {
+        "kind": "field",
+        "name": "ground friction scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ground friction normal k1 scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ground friction normal k0 scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ground depth scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "ground damp fraction scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 76
+      },
+      {
+        "kind": "pad",
+        "size": 480
+      },
+      {
+        "kind": "field",
+        "name": "maximum vitality",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "particle effects",
+        "type": "TagReflexive",
+        "struct": "GlobalsBreakableSurfaceParticleEffect",
+        "maximum": 8
+      },
+      {
+        "kind": "pad",
+        "size": 60
+      },
+      {
+        "kind": "field",
+        "name": "melee hit sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      }
+    ],
+    "sizeBytes": 884
+  },
+  {
+    "kind": "struct",
+    "name": "GlobalsPlaylistMember",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "map name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "game variant",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "minimum experience",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "maximum experience",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "minimum player count",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "maximum player count",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "rating",
+        "type": "int32"
+      },
+      {
+        "kind": "pad",
+        "size": 64
+      }
+    ],
+    "sizeBytes": 148
+  },
+  {
+    "kind": "struct",
+    "name": "Globals",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 248
+      },
+      {
+        "kind": "field",
+        "name": "sounds",
+        "type": "TagReflexive",
+        "struct": "GlobalsSound",
+        "maximum": 2
+      },
+      {
+        "kind": "field",
+        "name": "camera",
+        "type": "TagReflexive",
+        "struct": "GlobalsCamera",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "player control",
+        "type": "TagReflexive",
+        "struct": "GlobalsPlayerControl",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "difficulty",
+        "type": "TagReflexive",
+        "struct": "GlobalsDifficulty",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "grenades",
+        "type": "TagReflexive",
+        "struct": "GlobalsGrenade",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "rasterizer data",
+        "type": "TagReflexive",
+        "struct": "GlobalsRasterizerData",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "interface bitmaps",
+        "type": "TagReflexive",
+        "struct": "GlobalsInterfaceBitmaps",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "weapon list",
+        "type": "TagReflexive",
+        "struct": "GlobalsWeapon",
+        "maximum": 20
+      },
+      {
+        "kind": "field",
+        "name": "cheat powerups",
+        "type": "TagReflexive",
+        "struct": "GlobalsCheatPowerup",
+        "maximum": 20
+      },
+      {
+        "kind": "field",
+        "name": "multiplayer information",
+        "type": "TagReflexive",
+        "struct": "GlobalsMultiplayerInformation",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "player information",
+        "type": "TagReflexive",
+        "struct": "GlobalsPlayerInformation",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "first person interface",
+        "type": "TagReflexive",
+        "struct": "GlobalsFirstPersonInterface",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "falling damage",
+        "type": "TagReflexive",
+        "struct": "GlobalsFallingDamage",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "materials",
+        "type": "TagReflexive",
+        "struct": "GlobalsMaterial",
+        "maximum": 33
+      },
+      {
+        "kind": "field",
+        "name": "playlist members",
+        "type": "TagReflexive",
+        "struct": "GlobalsPlaylistMember",
+        "maximum": 20
+      }
+    ],
+    "tagClass": "globals",
+    "sizeBytes": 428
+  }
+]

@@ -1,0 +1,34 @@
+[
+  {
+    "kind": "struct",
+    "name": "ColorTableColor",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "ColorARGB"
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ColorTable",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "colors",
+        "type": "TagReflexive",
+        "struct": "ColorTableColor",
+        "maximum": 512
+      }
+    ],
+    "tagClass": "color_table",
+    "sizeBytes": 12
+  }
+]

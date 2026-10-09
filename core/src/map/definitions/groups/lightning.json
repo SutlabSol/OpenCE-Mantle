@@ -1,0 +1,309 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "LightningMarkerFlag",
+    "width": 16,
+    "fields": [
+      "not connected to next marker"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "LightningMarker",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "attachment marker",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "LightningMarkerFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "octaves to next marker",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 76
+      },
+      {
+        "kind": "field",
+        "name": "random position bounds",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "random jitter",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "thickness",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "tint",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "pad",
+        "size": 76
+      }
+    ],
+    "sizeBytes": 228
+  },
+  {
+    "kind": "struct",
+    "name": "LightningShader",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 36
+      },
+      {
+        "kind": "field",
+        "name": "shader type",
+        "type": "ShaderType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "shader flags",
+        "type": "ParticleShaderFlags"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer blend function",
+        "type": "FramebufferBlendFunction"
+      },
+      {
+        "kind": "field",
+        "name": "framebuffer fade mode",
+        "type": "FramebufferFadeMode"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap flags",
+        "type": "IsUnfilteredFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "secondary bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "anchor",
+        "type": "ParticleAnchor"
+      },
+      {
+        "kind": "field",
+        "name": "secondary bitmap flags",
+        "type": "IsUnfilteredFlag"
+      },
+      {
+        "kind": "field",
+        "name": "u animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "u animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "u animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "u animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "v animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "v animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "v animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation function",
+        "type": "WaveFunction"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation period",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation phase",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "rotation animation center",
+        "type": "Point2D"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "zsprite radius scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      }
+    ],
+    "sizeBytes": 180
+  },
+  {
+    "kind": "struct",
+    "name": "Lightning",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "count",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "near fade distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "far fade distance",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "jitter scale source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "thickness scale source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "tint modulation source",
+        "type": "FunctionNameNullable"
+      },
+      {
+        "kind": "field",
+        "name": "brightness scale source",
+        "type": "FunctionOut"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 84
+      },
+      {
+        "kind": "field",
+        "name": "markers",
+        "type": "TagReflexive",
+        "struct": "LightningMarker",
+        "maximum": 16
+      },
+      {
+        "kind": "field",
+        "name": "shader",
+        "type": "TagReflexive",
+        "struct": "LightningShader",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 88
+      }
+    ],
+    "tagClass": "lightning",
+    "sizeBytes": 264
+  }
+]

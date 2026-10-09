@@ -1,0 +1,59 @@
+[
+  {
+    "kind": "struct",
+    "name": "ItemCollectionPermutation",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "weight",
+        "type": "float",
+        "maximum": 32768
+      },
+      {
+        "kind": "field",
+        "name": "item",
+        "type": "TagDependency",
+        "classes": [
+          "item"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 84
+  },
+  {
+    "kind": "struct",
+    "name": "ItemCollection",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "permutations",
+        "type": "TagReflexive",
+        "struct": "ItemCollectionPermutation",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "default spawn time",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 76
+      }
+    ],
+    "tagClass": "item_collection",
+    "sizeBytes": 92
+  }
+]

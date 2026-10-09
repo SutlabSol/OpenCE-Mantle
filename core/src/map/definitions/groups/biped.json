@@ -1,0 +1,364 @@
+[
+  {
+    "kind": "enum",
+    "name": "BipedFunctionIn",
+    "options": [
+      "none",
+      "flying velocity"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "BipedFlags",
+    "width": 32,
+    "fields": [
+      "turns without animating",
+      "uses player physics",
+      "flying",
+      "physics pill centered at origin",
+      "spherical",
+      "passes through other bipeds",
+      "can climb any surface",
+      "immune to falling damage",
+      "rotate while airborne",
+      "uses limp body physics",
+      "has no dying airborne",
+      "random speed increase",
+      "unit uses old ntsc player physics"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "BipedContactPoint",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "marker name",
+        "type": "TagString"
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "Biped",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "moving turning speed",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "biped flags",
+        "type": "BipedFlags"
+      },
+      {
+        "kind": "field",
+        "name": "stationary turning threshold",
+        "type": "Angle"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "biped a in",
+        "type": "BipedFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "biped b in",
+        "type": "BipedFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "biped c in",
+        "type": "BipedFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "biped d in",
+        "type": "BipedFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "don't use",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "bank angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "bank apply time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "bank decay time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "pitch ratio",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "max velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "max sidestep velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "acceleration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "deceleration",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "angular velocity maximum",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "angular acceleration maximum",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "crouch velocity modifier",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "maximum slope angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "downhill falloff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "downhill cutoff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "downhill velocity scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "uphill falloff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "uphill cutoff angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "uphill velocity scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "footsteps",
+        "type": "TagDependency",
+        "classes": [
+          "material_effects"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "jump velocity",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "maximum soft landing time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "maximum hard landing time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "minimum soft landing velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "minimum hard landing velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "maximum hard landing velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "death hard landing velocity",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "standing camera height",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "crouching camera height",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "crouch transition time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "standing collision height",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "crouching collision height",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "collision radius",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      },
+      {
+        "kind": "field",
+        "name": "autoaim width",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 108
+      },
+      {
+        "kind": "field",
+        "name": "cosine stationary turning threshold",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "crouch camera velocity",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "cosine maximum slope angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "negative sine downhill falloff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "negative sine downhill cutoff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "sine uphill falloff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "sine uphill cutoff angle",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "pelvis model node index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "head model node index",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "contact point",
+        "type": "TagReflexive",
+        "struct": "BipedContactPoint",
+        "maximum": 2
+      }
+    ],
+    "inherits": "Unit",
+    "tagClass": "biped",
+    "sizeBytes": 1268
+  }
+]

@@ -1,0 +1,138 @@
+[
+  {
+    "kind": "enum",
+    "name": "FlagTrailingEdgeShape",
+    "options": [
+      "flat",
+      "concave triangular",
+      "convex triangular",
+      "trapezoid short top",
+      "trapezoid short bottom"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "FlagAttachedEdgeShape",
+    "options": [
+      "flat",
+      "concave triangular"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "FlagAttachmentPoint",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "height to next attachment",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "marker name",
+        "type": "TagString"
+      }
+    ],
+    "sizeBytes": 52
+  },
+  {
+    "kind": "struct",
+    "name": "Flag",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "IsUnusedFlag"
+      },
+      {
+        "kind": "field",
+        "name": "trailing edge shape",
+        "type": "FlagTrailingEdgeShape"
+      },
+      {
+        "kind": "field",
+        "name": "trailing edge shape offset",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "attached edge shape",
+        "type": "FlagAttachedEdgeShape"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "width",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "height",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "cell width",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "cell height",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "red flag shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "physics",
+        "type": "TagDependency",
+        "classes": [
+          "point_physics"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "wind noise",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "blue flag shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "attachment points",
+        "type": "TagReflexive",
+        "struct": "FlagAttachmentPoint",
+        "maximum": 5
+      }
+    ],
+    "tagClass": "flag",
+    "sizeBytes": 96
+  }
+]

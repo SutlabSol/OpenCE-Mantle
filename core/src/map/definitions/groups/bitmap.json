@@ -1,0 +1,422 @@
+[
+  {
+    "kind": "enum",
+    "name": "BitmapDataType",
+    "options": [
+      "2d texture",
+      "3d texture",
+      "cube map",
+      "white"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "BitmapDataFormat",
+    "options": [
+      "a8",
+      "y8",
+      "ay8",
+      "a8y8",
+      "unused1",
+      "unused2",
+      "r5g6b5",
+      "unused3",
+      "a1r5g5b5",
+      "a4r4g4b4",
+      "x8r8g8b8",
+      "a8r8g8b8",
+      "unused4",
+      "unused5",
+      "dxt1",
+      "dxt3",
+      "dxt5",
+      "p8 bump",
+      "bc7"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "BitmapType",
+    "options": [
+      "2d textures",
+      "3d textures",
+      "cube maps",
+      "sprites",
+      "interface bitmaps"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "BitmapFormat",
+    "options": [
+      "dxt1",
+      "dxt3",
+      "dxt5",
+      "16-bit",
+      "32-bit",
+      "monochrome",
+      "bc7"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "BitmapUsage",
+    "options": [
+      "alpha blend",
+      "default",
+      "height map",
+      "detail map",
+      "light map",
+      "vector map"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "BitmapSpriteBudgetSize",
+    "options": [
+      "32x32",
+      "64x64",
+      "128x128",
+      "256x256",
+      "512x512",
+      "1024x1024"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "BitmapSpriteUsage",
+    "options": [
+      "blend add subtract max",
+      "multiply min",
+      "double multiply"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "BitmapDataFlags",
+    "width": 16,
+    "fields": [
+      "power of two dimensions",
+      "compressed",
+      "palettized",
+      "swizzled",
+      "linear",
+      "v16u16",
+      "unused",
+      "make it actually work",
+      "external",
+      "environment"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "BitmapFlags",
+    "width": 16,
+    "fields": [
+      "enable diffusion dithering",
+      "disable height map compression",
+      "uniform sprite sequences",
+      "filthy sprite bug fix",
+      "half hud scale",
+      "invert detail fade",
+      "use average color for detail fade",
+      "force hud use highres scale"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "BitmapGroupSprite",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "bitmap index",
+        "type": "Index",
+        "struct": "Bitmap"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "left",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "right",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "top",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "bottom",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "registration point",
+        "type": "Point2D"
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "BitmapGroupSequence",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "first bitmap index",
+        "type": "Index",
+        "struct": "Bitmap"
+      },
+      {
+        "kind": "field",
+        "name": "bitmap count",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "sprites",
+        "type": "TagReflexive",
+        "struct": "BitmapGroupSprite",
+        "maximum": 64,
+        "extendedMaximum": 32767
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "BitmapData",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "bitmap class",
+        "type": "TagFourCC"
+      },
+      {
+        "kind": "field",
+        "name": "width",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "height",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "depth",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "BitmapDataType"
+      },
+      {
+        "kind": "field",
+        "name": "format",
+        "type": "BitmapDataFormat"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "BitmapDataFlags"
+      },
+      {
+        "kind": "field",
+        "name": "registration point",
+        "type": "Point2DInt"
+      },
+      {
+        "kind": "field",
+        "name": "mipmap count",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "pixel data offset",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "pixel data size",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "bitmap tag id",
+        "type": "TagID",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "pointer",
+        "type": "Pointer",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "Bitmap",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "BitmapType"
+      },
+      {
+        "kind": "field",
+        "name": "encoding format",
+        "type": "BitmapFormat",
+        "comment": "Format to use when generating the tag"
+      },
+      {
+        "kind": "field",
+        "name": "usage",
+        "type": "BitmapUsage"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "BitmapFlags"
+      },
+      {
+        "kind": "field",
+        "name": "detail fade factor",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "sharpen amount",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "bump height",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "sprite budget size",
+        "type": "BitmapSpriteBudgetSize"
+      },
+      {
+        "kind": "field",
+        "name": "sprite budget count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "color plate width",
+        "type": "uint16",
+        "nonCached": true
+      },
+      {
+        "kind": "field",
+        "name": "color plate height",
+        "type": "uint16",
+        "nonCached": true
+      },
+      {
+        "kind": "field",
+        "name": "compressed color plate data",
+        "type": "TagDataOffset",
+        "maximum": 1073741824,
+        "nonCached": true
+      },
+      {
+        "kind": "field",
+        "name": "processed pixel data",
+        "type": "TagDataOffset",
+        "maximum": 1073741824,
+        "nonCached": true
+      },
+      {
+        "kind": "field",
+        "name": "blur filter size",
+        "type": "float",
+        "maximum": 10
+      },
+      {
+        "kind": "field",
+        "name": "alpha bias",
+        "type": "float",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "mipmap count",
+        "type": "uint16"
+      },
+      {
+        "kind": "field",
+        "name": "sprite usage",
+        "type": "BitmapSpriteUsage"
+      },
+      {
+        "kind": "field",
+        "name": "sprite spacing",
+        "type": "uint16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "bitmap group sequence",
+        "type": "TagReflexive",
+        "struct": "BitmapGroupSequence",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "bitmap data",
+        "type": "TagReflexive",
+        "struct": "BitmapData",
+        "maximum": 65536
+      }
+    ],
+    "tagClass": "bitmap",
+    "sizeBytes": 108
+  }
+]

@@ -1,0 +1,761 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "ModelRegionPermutationFlags",
+    "width": 32,
+    "fields": [
+      "cannot be chosen randomly"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ModelGeometryPartFlags",
+    "width": 32,
+    "fields": [
+      "stripped internal",
+      "zoner"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ModelFlags",
+    "width": 32,
+    "fields": [
+      "blend shared normals",
+      "parts have local nodes",
+      "ignore skinning"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ModelMarkerInstance",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "region index",
+        "type": "uint8"
+      },
+      {
+        "kind": "field",
+        "name": "permutation index",
+        "type": "uint8"
+      },
+      {
+        "kind": "field",
+        "name": "node index",
+        "type": "uint8"
+      },
+      {
+        "kind": "pad",
+        "size": 1
+      },
+      {
+        "kind": "field",
+        "name": "translation",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Quaternion"
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ModelMarker",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "magic identifier",
+        "type": "int16"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "instances",
+        "type": "TagReflexive",
+        "struct": "ModelMarkerInstance",
+        "maximum": 32,
+        "extendedMaximum": 32767
+      }
+    ],
+    "sizeBytes": 64
+  },
+  {
+    "kind": "struct",
+    "name": "ModelNode",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "next sibling node index",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "field",
+        "name": "first child node index",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "field",
+        "name": "parent node index",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "default translation",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "default rotation",
+        "type": "Quaternion"
+      },
+      {
+        "kind": "field",
+        "name": "node distance from parent",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "scale",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Matrix",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "translation",
+        "type": "Point3D",
+        "cacheOnly": true
+      }
+    ],
+    "sizeBytes": 156
+  },
+  {
+    "kind": "struct",
+    "name": "ModelRegionPermutationMarker",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "node index",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "rotation",
+        "type": "Quaternion"
+      },
+      {
+        "kind": "field",
+        "name": "translation",
+        "type": "Point3D"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      }
+    ],
+    "sizeBytes": 80
+  },
+  {
+    "kind": "struct",
+    "name": "ModelRegionPermutation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ModelRegionPermutationFlags"
+      },
+      {
+        "kind": "field",
+        "name": "permutation number",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "super low",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "field",
+        "name": "low",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "field",
+        "name": "medium",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "field",
+        "name": "high",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "field",
+        "name": "super high",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "markers",
+        "type": "TagReflexive",
+        "struct": "ModelRegionPermutationMarker",
+        "maximum": 64,
+        "extendedMaximum": 32767
+      }
+    ],
+    "sizeBytes": 88
+  },
+  {
+    "kind": "struct",
+    "name": "ModelRegion",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "name",
+        "type": "TagString"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "permutations",
+        "type": "TagReflexive",
+        "struct": "ModelRegionPermutation",
+        "maximum": 32,
+        "extendedMaximum": 255
+      }
+    ],
+    "sizeBytes": 76
+  },
+  {
+    "kind": "struct",
+    "name": "ModelVertexUncompressed",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "normal",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "binormal",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "tangent",
+        "type": "Vector3D"
+      },
+      {
+        "kind": "field",
+        "name": "texture coords",
+        "type": "Point2D"
+      },
+      {
+        "kind": "field",
+        "name": "node0 index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "node1 index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "node0 weight",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "node1 weight",
+        "type": "float"
+      }
+    ],
+    "sizeBytes": 68
+  },
+  {
+    "kind": "struct",
+    "name": "ModelVertexCompressed",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "normal",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "binormal",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "tangent",
+        "type": "uint32"
+      },
+      {
+        "kind": "field",
+        "name": "texture coordinate u",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "texture coordinate v",
+        "type": "int16"
+      },
+      {
+        "kind": "field",
+        "name": "node0 index",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "node1 index",
+        "type": "int8"
+      },
+      {
+        "kind": "field",
+        "name": "node0 weight",
+        "type": "uint16"
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "ModelTriangle",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "vertex0 index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "vertex1 index",
+        "type": "Index"
+      },
+      {
+        "kind": "field",
+        "name": "vertex2 index",
+        "type": "Index"
+      }
+    ],
+    "sizeBytes": 6
+  },
+  {
+    "kind": "struct",
+    "name": "ModelGeometryPart",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ModelGeometryPartFlags"
+      },
+      {
+        "kind": "field",
+        "name": "shader index",
+        "type": "Index",
+        "struct": "Model"
+      },
+      {
+        "kind": "field",
+        "name": "prev filthy part index",
+        "type": "uint8",
+        "comment": "Defaults to 255 only if next filthy part index is also zero"
+      },
+      {
+        "kind": "field",
+        "name": "next filthy part index",
+        "type": "uint8",
+        "comment": "Defaults to 255 only if prev filthy part index is also zero"
+      },
+      {
+        "kind": "field",
+        "name": "centroid primary node",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "centroid secondary node",
+        "type": "Index",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "centroid primary weight",
+        "type": "Fraction",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "centroid secondary weight",
+        "type": "Fraction",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "centroid",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "uncompressed vertices",
+        "type": "TagReflexive",
+        "struct": "ModelVertexUncompressed",
+        "maximum": 65535,
+        "nonCached": true
+      },
+      {
+        "kind": "field",
+        "name": "compressed vertices",
+        "type": "TagReflexive",
+        "struct": "ModelVertexCompressed",
+        "maximum": 65535,
+        "nonCached": true
+      },
+      {
+        "kind": "field",
+        "name": "triangles",
+        "type": "TagReflexive",
+        "struct": "ModelTriangle",
+        "maximum": 65535,
+        "nonCached": true
+      },
+      {
+        "kind": "field",
+        "name": "triangle buffer type",
+        "type": "TriangleBufferType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "triangle count",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "triangle offset",
+        "type": "uint32",
+        "cacheOnly": true,
+        "comment": "On Xbox: pointer to the triangle indices. On PC: offset to triangles relative to the end of the map's vertex data."
+      },
+      {
+        "kind": "field",
+        "name": "triangle offset 2",
+        "type": "uint32",
+        "cacheOnly": true,
+        "comment": "On Xbox: pointer to the entry in the second parts list which points to the triangle indices. On PC: same value as the first triangle offset"
+      },
+      {
+        "kind": "field",
+        "name": "vertex type",
+        "type": "VertexType",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "vertex count",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "vertex pointer",
+        "type": "Pointer",
+        "cacheOnly": true,
+        "comment": "Appears to be a pointer to the uncompressed vertices"
+      },
+      {
+        "kind": "field",
+        "name": "vertex offset",
+        "type": "uint32",
+        "cacheOnly": true,
+        "comment": "On Xbox: pointer to the entry in the second parts list which points to the triangle indices. On PC: offset to first vertex relative to the map's vertex data."
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "ModelGeometry",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "IsUnusedFlag"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      },
+      {
+        "kind": "field",
+        "name": "parts",
+        "type": "TagReflexive",
+        "struct": "ModelGeometryPart",
+        "maximum": 32,
+        "extendedMaximum": 32767
+      }
+    ],
+    "sizeBytes": 48
+  },
+  {
+    "kind": "struct",
+    "name": "ModelShaderReference",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "shader",
+        "type": "TagDependency",
+        "classes": [
+          "shader"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "permutation",
+        "type": "Index"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "Model",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ModelFlags"
+      },
+      {
+        "kind": "field",
+        "name": "node list checksum",
+        "type": "int32"
+      },
+      {
+        "kind": "field",
+        "name": "super high detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "high detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "medium detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "low detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "super low detail cutoff",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "super low detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "low detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "medium detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "high detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "super high detail node count",
+        "type": "uint16",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "base map u scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "base map v scale",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 116
+      },
+      {
+        "kind": "field",
+        "name": "markers",
+        "type": "TagReflexive",
+        "struct": "ModelMarker",
+        "maximum": 0
+      },
+      {
+        "kind": "field",
+        "name": "nodes",
+        "type": "TagReflexive",
+        "struct": "ModelNode",
+        "maximum": 64,
+        "extendedMaximum": 255
+      },
+      {
+        "kind": "field",
+        "name": "regions",
+        "type": "TagReflexive",
+        "struct": "ModelRegion",
+        "maximum": 32,
+        "extendedMaximum": 255
+      },
+      {
+        "kind": "field",
+        "name": "geometries",
+        "type": "TagReflexive",
+        "struct": "ModelGeometry",
+        "maximum": 256,
+        "extendedMaximum": 32767
+      },
+      {
+        "kind": "field",
+        "name": "shaders",
+        "type": "TagReflexive",
+        "struct": "ModelShaderReference",
+        "maximum": 32,
+        "extendedMaximum": 32767
+      }
+    ],
+    "tagClass": "model",
+    "sizeBytes": 232
+  }
+]

@@ -1,0 +1,211 @@
+[
+  {
+    "kind": "enum",
+    "name": "DeviceIn",
+    "options": [
+      "none",
+      "power",
+      "change in power",
+      "position",
+      "change in position",
+      "locked",
+      "delay"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "DeviceFlags",
+    "width": 32,
+    "fields": [
+      "position loops",
+      "position not interpolated"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "Device",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "device flags",
+        "type": "DeviceFlags"
+      },
+      {
+        "kind": "field",
+        "name": "power transition time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "power acceleration time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "position transition time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "position acceleration time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "depowered position transition time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "depowered position acceleration time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "device a in",
+        "type": "DeviceIn"
+      },
+      {
+        "kind": "field",
+        "name": "device b in",
+        "type": "DeviceIn"
+      },
+      {
+        "kind": "field",
+        "name": "device c in",
+        "type": "DeviceIn"
+      },
+      {
+        "kind": "field",
+        "name": "device d in",
+        "type": "DeviceIn"
+      },
+      {
+        "kind": "field",
+        "name": "open",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "close",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "opened",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "closed",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "depowered",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "repowered",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "delay time",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "delay effect",
+        "type": "TagDependency",
+        "classes": [
+          "sound",
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "automatic activation radius",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 84
+      },
+      {
+        "kind": "field",
+        "name": "inverse power acceleration time",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "inverse power transition time",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "inverse depowered position acceleration time",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "inverse depowered position transition time",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "inverse position acceleration time",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "inverse position transition time",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "delay time ticks",
+        "type": "float",
+        "cacheOnly": true
+      }
+    ],
+    "inherits": "Object",
+    "tagClass": "device",
+    "sizeBytes": 656
+  }
+]

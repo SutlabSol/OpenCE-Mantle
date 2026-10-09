@@ -1,0 +1,456 @@
+[
+  {
+    "kind": "enum",
+    "name": "EffectCreateIn",
+    "options": [
+      "any environment",
+      "air only",
+      "water only",
+      "space only"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "EffectViolenceMode",
+    "options": [
+      "either mode",
+      "violent mode only",
+      "nonviolent mode only"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "EffectCreate",
+    "options": [
+      "independent of camera mode",
+      "only in first person",
+      "only in third person",
+      "in first person if possible"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "EffectDistributionFunction",
+    "options": [
+      "start",
+      "end",
+      "constant",
+      "buildup",
+      "falloff",
+      "buildup and falloff"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "EffectPartFlags",
+    "width": 16,
+    "fields": [
+      "face down regardless of location decals",
+      "unused",
+      "make effect work"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "EffectPartScalesValues",
+    "width": 32,
+    "fields": [
+      "velocity",
+      "velocity delta",
+      "velocity cone angle",
+      "angular velocity",
+      "angular velocity delta",
+      "type specific scale"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "EffectParticleFlags",
+    "width": 32,
+    "fields": [
+      "stay attached to marker",
+      "random initial angle",
+      "tint from object color",
+      "interpolate tint as hsv",
+      "across the long hue path"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "EffectParticleScalesValues",
+    "width": 32,
+    "fields": [
+      "velocity",
+      "velocity delta",
+      "velocity cone angle",
+      "angular velocity",
+      "angular velocity delta",
+      "count",
+      "count delta",
+      "distribution radius",
+      "distribution radius delta",
+      "particle radius",
+      "particle radius delta",
+      "tint"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "EffectFlags",
+    "width": 32,
+    "fields": [
+      "deleted when attachment deactivates",
+      "must be deterministic xbox",
+      "must be deterministic pc",
+      "disabled in anniversary by blood setting"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "EffectLocation",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "marker name",
+        "type": "TagString"
+      }
+    ],
+    "sizeBytes": 32
+  },
+  {
+    "kind": "struct",
+    "name": "EffectPart",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "create in",
+        "type": "EffectCreateIn"
+      },
+      {
+        "kind": "field",
+        "name": "violence mode",
+        "type": "EffectViolenceMode"
+      },
+      {
+        "kind": "field",
+        "name": "location",
+        "type": "Index",
+        "struct": "Effect"
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "EffectPartFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "type class",
+        "type": "uint32",
+        "cacheOnly": true
+      },
+      {
+        "kind": "field",
+        "name": "type",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect",
+          "object",
+          "particle_system",
+          "sound",
+          "decal",
+          "light"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "velocity bounds",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "velocity cone angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "angular velocity bounds",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "radius modifier bounds",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "a scales values",
+        "type": "EffectPartScalesValues"
+      },
+      {
+        "kind": "field",
+        "name": "b scales values",
+        "type": "EffectPartScalesValues"
+      }
+    ],
+    "sizeBytes": 104
+  },
+  {
+    "kind": "struct",
+    "name": "EffectParticle",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "create in",
+        "type": "EffectCreateIn"
+      },
+      {
+        "kind": "field",
+        "name": "violence mode",
+        "type": "EffectViolenceMode"
+      },
+      {
+        "kind": "field",
+        "name": "create",
+        "type": "EffectCreate"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "location",
+        "type": "Index",
+        "struct": "Effect"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "relative direction",
+        "type": "Euler2D"
+      },
+      {
+        "kind": "field",
+        "name": "relative offset",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "relative direction vector",
+        "type": "Vector3D",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 40
+      },
+      {
+        "kind": "field",
+        "name": "particle type",
+        "type": "TagDependency",
+        "classes": [
+          "particle"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "EffectParticleFlags"
+      },
+      {
+        "kind": "field",
+        "name": "distribution function",
+        "type": "EffectDistributionFunction"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "count",
+        "type": "int16",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "distribution radius",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "velocity",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "velocity cone angle",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "angular velocity",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "radius",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "tint lower bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "field",
+        "name": "tint upper bound",
+        "type": "ColorARGB"
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "a scales values",
+        "type": "EffectParticleScalesValues"
+      },
+      {
+        "kind": "field",
+        "name": "b scales values",
+        "type": "EffectParticleScalesValues"
+      }
+    ],
+    "sizeBytes": 232
+  },
+  {
+    "kind": "struct",
+    "name": "EffectEvent",
+    "fields": [
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "skip fraction",
+        "type": "Fraction"
+      },
+      {
+        "kind": "field",
+        "name": "delay bounds",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "duration bounds",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "pad",
+        "size": 20
+      },
+      {
+        "kind": "field",
+        "name": "parts",
+        "type": "TagReflexive",
+        "struct": "EffectPart",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "particles",
+        "type": "TagReflexive",
+        "struct": "EffectParticle",
+        "maximum": 32
+      }
+    ],
+    "sizeBytes": 68
+  },
+  {
+    "kind": "struct",
+    "name": "Effect",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "EffectFlags"
+      },
+      {
+        "kind": "field",
+        "name": "loop start event",
+        "type": "Index",
+        "struct": "Effect"
+      },
+      {
+        "kind": "field",
+        "name": "loop stop event",
+        "type": "Index",
+        "struct": "Effect"
+      },
+      {
+        "kind": "field",
+        "name": "maximum damage radius",
+        "type": "float",
+        "cacheOnly": true
+      },
+      {
+        "kind": "pad",
+        "size": 28
+      },
+      {
+        "kind": "field",
+        "name": "locations",
+        "type": "TagReflexive",
+        "struct": "EffectLocation",
+        "maximum": 32
+      },
+      {
+        "kind": "field",
+        "name": "events",
+        "type": "TagReflexive",
+        "struct": "EffectEvent",
+        "maximum": 32
+      }
+    ],
+    "tagClass": "effect",
+    "sizeBytes": 64
+  }
+]

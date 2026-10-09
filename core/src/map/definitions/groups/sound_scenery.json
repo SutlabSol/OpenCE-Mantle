@@ -1,0 +1,10 @@
+[
+  {
+    "kind": "struct",
+    "name": "SoundScenery",
+    "fields": [],
+    "inherits": "BasicObject",
+    "tagClass": "sound_scenery",
+    "sizeBytes": 508
+  }
+]

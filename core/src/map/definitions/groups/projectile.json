@@ -1,0 +1,376 @@
+[
+  {
+    "kind": "enum",
+    "name": "ProjectileResponse",
+    "options": [
+      "disappear",
+      "detonate",
+      "reflect",
+      "overpenetrate",
+      "attach"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ProjectileScaleEffectsBy",
+    "options": [
+      "damage",
+      "angle"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ProjectileDetonationTimerStarts",
+    "options": [
+      "immediately",
+      "after first bounce",
+      "when at rest"
+    ]
+  },
+  {
+    "kind": "enum",
+    "name": "ProjectileFunctionIn",
+    "options": [
+      "none",
+      "range remaining",
+      "time remaining",
+      "tracer"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ProjectileFlags",
+    "width": 32,
+    "fields": [
+      "oriented along velocity",
+      "ai must use ballistic aiming",
+      "detonation max time if attached",
+      "has super combining explosion",
+      "combine initial velocity with parent velocity",
+      "random attached detonation time",
+      "minimum unattached detonation time"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ProjectileMaterialResponseFlags",
+    "width": 16,
+    "fields": [
+      "cannot be overpenetrated"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "ProjectileMaterialResponsePotentialFlags",
+    "width": 16,
+    "fields": [
+      "only against units",
+      "never against units"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "ProjectileMaterialResponse",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "ProjectileMaterialResponseFlags"
+      },
+      {
+        "kind": "field",
+        "name": "default response",
+        "type": "ProjectileResponse"
+      },
+      {
+        "kind": "field",
+        "name": "default effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "potential response",
+        "type": "ProjectileResponse"
+      },
+      {
+        "kind": "field",
+        "name": "potential flags",
+        "type": "ProjectileMaterialResponsePotentialFlags"
+      },
+      {
+        "kind": "field",
+        "name": "potential skip fraction",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "potential between",
+        "type": "Angle",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "potential and",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "potential effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 16
+      },
+      {
+        "kind": "field",
+        "name": "scale effects by",
+        "type": "ProjectileScaleEffectsBy"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "angular noise",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "velocity noise",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "detonation effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 24
+      },
+      {
+        "kind": "field",
+        "name": "initial friction",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "maximum distance",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "parallel friction",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "perpendicular friction",
+        "type": "float"
+      }
+    ],
+    "sizeBytes": 160
+  },
+  {
+    "kind": "struct",
+    "name": "Projectile",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "projectile flags",
+        "type": "ProjectileFlags"
+      },
+      {
+        "kind": "field",
+        "name": "detonation timer starts",
+        "type": "ProjectileDetonationTimerStarts"
+      },
+      {
+        "kind": "field",
+        "name": "impact noise",
+        "type": "ObjectNoise"
+      },
+      {
+        "kind": "field",
+        "name": "projectile a in",
+        "type": "ProjectileFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "projectile b in",
+        "type": "ProjectileFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "projectile c in",
+        "type": "ProjectileFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "projectile d in",
+        "type": "ProjectileFunctionIn"
+      },
+      {
+        "kind": "field",
+        "name": "super detonation",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "ai perception radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "collision radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "arming time",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "danger radius",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "effect",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "timer",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "minimum velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "maximum range",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "air gravity scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "air damage range",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "water gravity scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "water damage range",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "initial velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "final velocity",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "guided angular velocity",
+        "type": "Angle"
+      },
+      {
+        "kind": "field",
+        "name": "detonation noise",
+        "type": "ObjectNoise"
+      },
+      {
+        "kind": "pad",
+        "size": 2
+      },
+      {
+        "kind": "field",
+        "name": "detonation started",
+        "type": "TagDependency",
+        "classes": [
+          "effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "flyby sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "attached detonation damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "impact damage",
+        "type": "TagDependency",
+        "classes": [
+          "damage_effect"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 12
+      },
+      {
+        "kind": "field",
+        "name": "projectile material response",
+        "type": "TagReflexive",
+        "struct": "ProjectileMaterialResponse",
+        "maximum": 33
+      }
+    ],
+    "inherits": "Object",
+    "tagClass": "projectile",
+    "sizeBytes": 588
+  }
+]

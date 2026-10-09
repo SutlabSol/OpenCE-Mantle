@@ -1,0 +1,30 @@
+[
+  {
+    "kind": "struct",
+    "name": "UnicodeStringListString",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "string",
+        "type": "TagDataOffset",
+        "maximum": 32768
+      }
+    ],
+    "sizeBytes": 20
+  },
+  {
+    "kind": "struct",
+    "name": "UnicodeStringList",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "strings",
+        "type": "TagReflexive",
+        "struct": "UnicodeStringListString",
+        "maximum": 800
+      }
+    ],
+    "tagClass": "unicode_string_list",
+    "sizeBytes": 12
+  }
+]

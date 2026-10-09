@@ -1,0 +1,10 @@
+[
+  {
+    "kind": "struct",
+    "name": "Placeholder",
+    "fields": [],
+    "inherits": "BasicObject",
+    "tagClass": "placeholder",
+    "sizeBytes": 508
+  }
+]

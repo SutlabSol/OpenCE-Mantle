@@ -1,0 +1,215 @@
+[
+  {
+    "kind": "bitfield",
+    "name": "FogFlags",
+    "width": 32,
+    "fields": [
+      "is water",
+      "atmosphere dominant",
+      "fog screen only"
+    ]
+  },
+  {
+    "kind": "bitfield",
+    "name": "FogScreenFlags",
+    "width": 16,
+    "fields": [
+      "no environment multipass",
+      "no model multipass",
+      "no texture based falloff"
+    ]
+  },
+  {
+    "kind": "struct",
+    "name": "Fog",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "FogFlags"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "pad",
+        "size": 76
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "maximum density",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "opaque distance",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "opaque depth",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "distance to water plane",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "color",
+        "type": "ColorRGB"
+      },
+      {
+        "kind": "field",
+        "name": "flags 1",
+        "type": "FogScreenFlags"
+      },
+      {
+        "kind": "field",
+        "name": "layer count",
+        "type": "int16",
+        "maximum": 4
+      },
+      {
+        "kind": "field",
+        "name": "distance gradient",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "density gradient",
+        "type": "Fraction",
+        "maximum": 1,
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "start distance from fog plane",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "screen layers color",
+        "type": "ColorARGBInt"
+      },
+      {
+        "kind": "field",
+        "name": "rotation multiplier",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "strafing multiplier",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "zoom multiplier",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "map scale",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "map",
+        "type": "TagDependency",
+        "classes": [
+          "bitmap"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "animation period",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 4
+      },
+      {
+        "kind": "field",
+        "name": "wind velocity",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "wind period",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "wind acceleration weight",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "field",
+        "name": "wind perpendicular weight",
+        "type": "Fraction",
+        "maximum": 1
+      },
+      {
+        "kind": "pad",
+        "size": 8
+      },
+      {
+        "kind": "field",
+        "name": "background sound",
+        "type": "TagDependency",
+        "classes": [
+          "sound_looping"
+        ]
+      },
+      {
+        "kind": "field",
+        "name": "sound environment",
+        "type": "TagDependency",
+        "classes": [
+          "sound_environment"
+        ]
+      },
+      {
+        "kind": "pad",
+        "size": 120
+      }
+    ],
+    "tagClass": "fog",
+    "sizeBytes": 396
+  }
+]

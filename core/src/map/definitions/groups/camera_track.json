@@ -1,0 +1,47 @@
+[
+  {
+    "kind": "struct",
+    "name": "CameraTrackControlPoint",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "position",
+        "type": "Point3D"
+      },
+      {
+        "kind": "field",
+        "name": "orientation",
+        "type": "Quaternion"
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "sizeBytes": 60
+  },
+  {
+    "kind": "struct",
+    "name": "CameraTrack",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "flags",
+        "type": "IsUnusedFlag"
+      },
+      {
+        "kind": "field",
+        "name": "control points",
+        "type": "TagReflexive",
+        "struct": "CameraTrackControlPoint",
+        "maximum": 16
+      },
+      {
+        "kind": "pad",
+        "size": 32
+      }
+    ],
+    "tagClass": "camera_track",
+    "sizeBytes": 48
+  }
+]

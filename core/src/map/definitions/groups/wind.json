@@ -1,0 +1,40 @@
+[
+  {
+    "kind": "struct",
+    "name": "Wind",
+    "fields": [
+      {
+        "kind": "field",
+        "name": "velocity",
+        "type": "float",
+        "bounds": true
+      },
+      {
+        "kind": "field",
+        "name": "variation area",
+        "type": "Euler2D"
+      },
+      {
+        "kind": "field",
+        "name": "local variation weight",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "local variation rate",
+        "type": "float"
+      },
+      {
+        "kind": "field",
+        "name": "damping",
+        "type": "float"
+      },
+      {
+        "kind": "pad",
+        "size": 36
+      }
+    ],
+    "tagClass": "wind",
+    "sizeBytes": 64
+  }
+]
