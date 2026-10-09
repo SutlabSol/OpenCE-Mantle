@@ -19,7 +19,7 @@ needs re-verification / unverified / blocked)
 | M5 ADD / SWAP (tags with NO gbxmodel in their closure) | **needs re-verification** | Same reason as extraction - the data-dropping bug could have affected any injected tag with a font/string_list/meter/hud_message_text/input_device_defaults/model_animations/scenario field. Fixed + same-reader-verified this session; not yet confirmed in OpenCE. |
 | M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked** | `uncapturedData` warning unconditionally blocks these (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. |
 | Embedded (external=0) bitmap/sound relocation | **same-reader-verified, NOT approved for the real app** | `embedded-relocation.test.ts`, real coldsnap.map bytes. `allowEmbeddedRelocation` stays off in `map-worker.ts`. |
-| `gbxmodel` model geometry capture/relocation | **unverified / not built** | Plan not yet written (next step, pending). |
+| `gbxmodel` model geometry capture/relocation | **Stage 1 (capture) same-reader-verified; Stage 2 (injection) design-verified, NOT built/wired** | `gbxmodel-geometry.test.ts` (100% captured, 0 blocked, bloodgulch+coldsnap), `gbxmodel-combined-insertion-design.test.ts` (field table + 665-part no-patch proof) — see "gbxmodel geometry — Stage 1 capture" below |
 | Sound relocation | **same-reader-verified, bounds-only** | No deterministic size formula for compressed audio exists (stated, not guessed) - a corrupt/truncated embedded sound could still pass the bounds check. |
 | `crc32`/`tagFileChecksums` after injection | **unverified, known-stale** | M6 work, tracked P0, not started. |
 
@@ -592,10 +592,9 @@ sidewinder. Matches `build_workload.cpp` byte-for-byte.
   model_animations frame data): a pointer-based mechanism (same virtual-address translation as
   `TagReflexive`) per Invader's own codegen — confirmed safe, `external`/`file_offset` sub-fields
   are written as garbage for these groups and never read at the resolved location.
-- `gbxmodel` vertex/index references: real virtual-address pointers at compile time (confirmed
-  via `build_workload.cpp`'s generic pointer-fixup registration), not raw file offsets — safe,
-  though our schema doesn't model these specific fields yet (model data is never touched by
-  relocation anyway, just shifted as one opaque blob).
+- `gbxmodel` vertex/index references: **superseded, see "gbxmodel geometry — Stage 1 capture
+  (2026-08)" below for the real mechanism** (byte offsets into a separate model-data region, NOT
+  virtual-address pointers at all).
 
 **Header/sub-header fields that change** (4, not 3 — `tagDataSize` is separately stored, not
 auto-derived): `modelDataFileOffset`, `tagDataOffset`, `decompressedFileSize`, `tagDataSize`.
@@ -673,6 +672,80 @@ if approved, the only change needed is passing `{ allowEmbeddedRelocation: true 
    itself likely has a bug (wrong offset patched, or the asset bytes themselves got mangled) —
    this is the single most informative failure mode, please report it with the exact tag path.
 
+## gbxmodel geometry — Stage 1 capture (2026-08, same-reader unless noted)
+Staged build, approved 2026-08. **Stage 1 (capture only) is built. Stage 2 (injection) has NOT
+started and relocation stays off in the app.** `gbxmodel-geometry.ts` is a standalone module, NOT
+wired into `tag-extractor.ts`/`tag-injector.ts`/`dependency-walker.ts` — any tag whose closure
+includes a `gbxmodel` is still unconditionally blocked, unchanged.
+
+**Mechanism (real bytes, bloodgulch `vehicles\warthog\warthog` vs coldsnap
+`vehicles\coldsnap_hogs\warthog`, same reused stock model)**: vertex/triangle data for a
+`GBXModelGeometryPart` is NOT addressed via TagReflexive/TagDataOffset at all — it's raw byte
+offsets into the separate "model data" region. `vertexOffset` (uint32, struct offset 100) is
+relative to `modelDataFileOffset`. `vertexCount`×{68 uncompressed/32 compressed, by `vertexType`}
+gives an EXACT vertex byte size (0 mismatches across all 1,112 real parts in bloodgulch+coldsnap).
+`triangleOffset`/`triangleOffset2` (always equal on PC, confirmed in every sample — Xbox-only
+distinction) are relative to `modelDataFileOffset + vertexSize` (`vertexSize` is a stored
+tag-data-header field, confirmed `modelDataSize == tagDataOffset - modelDataFileOffset` exactly).
+`vertexPointer` is a RUNTIME-ONLY virtual address (213,734,156 vs 311,747,920 for the identical
+model in the two maps above; exceeds bloodgulch's 13,936,092-byte file size by 15× — never a file
+offset) — never read or patched.
+
+**Triangle byte size has no closed-form formula** (strip-join/primitive-restart count isn't
+stored) — recovered via neighbor-gap: sort every part in the WHOLE map by absolute triangle
+offset, size = next part's start minus mine (region end = `tagDataOffset` for the last one).
+Index `0xFFFF` is a legitimate primitive-restart sentinel wherever it appears. The gap is
+occasionally (37% of 1,112 real parts) exactly 1 index too large — a single trailing non-restart
+out-of-range word, confirmed build-tool scratch-memory leftover (same value, 0x2D2D, across many
+unrelated parts/tags) — trimmed; never more than 1 word in any real sample. After trimming, 0
+parts have any remaining non-restart, non-real index, in either sample map (`gbxmodel-
+geometry.test.ts`). Only `triangleBufferType=1` ("triangle strip") has real samples to verify
+against (100% of 1,112 parts) — type 0 ("triangle list") is blocked, not guessed.
+
+**Stage 1 sweep results** (`gbxmodel-geometry.test.ts`): bloodgulch 70/70 gbxmodel tags captured,
+0 blocked; coldsnap 78/78 captured, 0 blocked (447 and 665 real parts respectively). "Dropped" is
+not a real outcome of this code path — every tag is either captured or blocked, same contract as
+Issue 1's TagDataOffset fix and the bitmap/sound embedded capture.
+
+**Stage 2 prerequisites, verified this session (all same-reader, test-file-local — nothing wired
+into tag-injector.ts)**:
+1. No-patch claim, re-verified on ALL 665 coldsnap parts (not a 40-part sample) —
+   `gbxmodel-combined-insertion-design.test.ts`. 0 mismatches.
+2. Field table for ONE injection combining embedded + vertex + triangle insertion (order matters
+   — each insertion point is defined relative to the PREVIOUS ones' shifts): embedded bytes (E)
+   insert before `modelDataFileOffset`; vertex bytes (V) insert at
+   `modelDataFileOffset_new + oldVertexSize` (end of vertex region); triangle bytes (T) insert at
+   `oldTagDataOffset + E + V` (end of triangle region). Result: `modelDataFileOffset += E`;
+   `vertexSize += V`; `modelDataSize += V + T` (NOT E — embedded bytes live outside the model-data
+   region entirely); `tagDataOffset += E + V + T`; `decompressedFileSize += E + V + T` (+ any
+   tag-struct append `S`, same pre-existing ADD/SWAP mechanic, unaffected by E/V/T).
+   `tagDataSize += S` only. New part's own `vertexOffset = oldVertexSize` (pre-insert value);
+   `triangleOffset = triangleOffset2 = oldModelDataSize - oldVertexSize` (pre-insert triangle-
+   section size) — both computed from the TARGET's existing header fields alone, no scan needed.
+   Existing parts: ZERO fields patched (proven in #1).
+3. Combined 3-insertion test (`gbxmodel-combined-insertion-design.test.ts`): injects the
+   warthog's own captured part[0] (real vertex+triangle bytes from Stage 1) plus a synthetic
+   embedded payload into a coldsnap-based buffer in one pass; confirms the field table math,
+   byte-identical placement of the new part, AND an independent re-scan of all 665 pre-existing
+   parts (not just the new one) resolving correctly with 0 out-of-region and 0 byte mismatches.
+4. Triangle neighbor-gap scanning is extraction-time only (whole-SOURCE-map, read-only, paid
+   once). Injection needs NO scan of the target — confirmed by #2/#3 using only stored header
+   fields. The container would store each part's explicit captured byte length (no formula
+   needed at injection time).
+5. `model_animations` frame data and `model_collision_geometry` are **already captured today**
+   (checked real tags: coldsnap `model_animations` with 256 anims/792,520 bytes, 0 warnings;
+   `model_collision_geometry` tags in both maps, 0 warnings) — Issue 1's generic TagDataOffset fix
+   and the ordinary TagReflexive mechanism already cover them. They are NOT part of this gap.
+
+**What tests can't prove**: same-reader only, as always — this proves our own reader and writer
+agree, not that the real Halo CE/OpenCE engine accepts the layout. The index-validity check never
+proves the triangle data is semantically correct beyond "indices are in range" — a scrambled-but-
+in-range index buffer would pass and still render wrong in-game. Effort for Stage 2 itself
+(wiring into `tag-injector.ts`, a real `allowGbxmodelGeometryRelocation`-style flag, container
+format changes to carry per-part captured bytes): medium — the per-part arithmetic is now fully
+derived and tested, the remaining work is wiring + container schema + a new Vitest suite calling
+the REAL injector, not more research.
+
 
 - `/app/core/src/map/definitions/engine.ts` — schema engine (load/validate/resolve/decode/encode)
 - `/app/core/src/map/definitions/validate-tag.ts` — real-map validation (round-trip, deps, bounds)
@@ -690,10 +763,12 @@ if approved, the only change needed is passing `{ allowEmbeddedRelocation: true 
 - `/app/core/scripts/scan-embedded-data.ts` — reusable real-byte scanner for embedded (external=0)
   bitmap/sound data in any .map file (`yarn tsx scripts/scan-embedded-data.ts /path/to/map`); run
   this FIRST against any user-supplied custom map before touching relocation work
+- `/app/core/src/map/gbxmodel-geometry.ts` — Stage 1 gbxmodel vertex/triangle capture (2026-08),
+  standalone, NOT wired into tag-extractor.ts/tag-injector.ts, relocation stays off
 - `/app/core/tests/definitions.test.ts`, `tag-extractor.test.ts`, `tag-injector.test.ts`,
   `container-v2.test.ts`, `embedded-data-fields.test.ts`, `embedded-relocation.test.ts`,
-  `tagdata-capture.test.ts` (new 2026-08: real-byte font capture, negative test, 4-map property
-  sweep for Issue 1) — validation suites (**101/101 passing** as of 2026-08; desktop Vitest 33/33)
+  `tagdata-capture.test.ts`, `gbxmodel-geometry.test.ts`, `gbxmodel-combined-insertion-design.test.ts`
+  (new 2026-08) — validation suites (**109/109 passing** as of 2026-08; desktop Vitest 33/33)
 - `/app/core/scripts/generate-definitions.mjs` — regenerate `groups/*.json` from a fresh Invader
   clone if definitions ever need updating (`INVADER_DIR=/path/to/invader/.../definition node
   scripts/generate-definitions.mjs`)
