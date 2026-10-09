@@ -11,6 +11,40 @@ Milestones: M1 header/index parse, M2 decompress/recompress, M3 GUI shell, M4 de
 extraction, M5 tag injection/swap, M6 export + CRC32 recalc. Future: M7 field-level tag editor,
 Phase 2 3D scenario editor.
 
+## Decisions (user-approved — point here instead of re-explaining)
+- 2026-08: Standing rules captured in `/app/memory/RULES.md` (work on copies, temp+rename writes,
+  SAMPLE_MAPS_DIR helper, Node 22/Yarn 1 only, verified-by-tests/mock-preview/unverified reporting,
+  stop-and-ask on ambiguous offset/size/flag, stay inside the named milestone, embedded-data
+  relocation stays disabled until verified against real bytes, external data needs a fingerprint
+  check not just bounds, BSP-flagged containers refuse/warn, dependency reuse not duplication,
+  pre-write validation, path normalization, ≤25-line handoff notes).
+- 2026-08: Settings UI approved with: per-pick + per-use validation (file type for the slot,
+  readable header/entry count), 3 status states (not-configured / missing-or-unreadable /
+  mismatched-with-this-map — the 3rd shown contextually in InjectDialog, not Settings), main
+  process owns pickers + settings.json (renderer only ever gets a status back), resource maps
+  opened read-only and read by offset (never loaded whole into memory), corrupt settings.json
+  falls back to defaults. "Pick Halo CE maps folder" auto-detect button raised as optional,
+  **not yet built, no user decision recorded either way** — ask again if revisited.
+- 2026-08: `.ocetags` container v2 approved with: resource-map identity block per type (filename,
+  size, entry count, header+entry-table fingerprint — not whole-file hash), per-ref coverage
+  (whole-tag / sound-samples / bitmap-mipmap) + verified/unverified status, `tagIndex` local to
+  the container (not the source map), `externalData: "referenced"` reserved for a future
+  'embedded' value without a format break, version>2 refused with a plain message, v1 fixture
+  kept and tested, reader still rejects any `scenario_structure_bsp` tag.
+- 2026-08: Embedded (external=0) bitmap/sound relocation approved as **disabled** until verified
+  against real bytes in ui.map. Neither sample map contains one (scanned: 222 internal ui.map
+  bitmaps + 125 sound permutations, 100% external=1; bloodgulch.map has zero internal
+  bitmap/sound tags). Main agent additionally decided NOT to write a synthetic
+  relocation-algorithm fixture (would mean building, and risking false confidence in, the real
+  feature under a "synthetic" label) — flagged to user, **no explicit ruling recorded yet**.
+- 2026-08: M5 build order approved: Step A (ADD mode only) → stop for review → Step B (SWAP,
+  keeps target's tag ID) → stop → Step C (conflict dialog: skip/replace/rename + "apply to all",
+  using the existing `ConfirmDialog.tsx`). Never overwrite source map (temp+rename to a new file
+  via Save As), validate before writing (tag/size limits, missing deps, unresolved refs), reuse
+  existing target dependencies instead of duplicating, normalize paths (backslashes,
+  case-insensitive) for conflict detection while preserving original casing on write, flag
+  header/CRC32 fix-ups rather than pulling M6 work into M5.
+
 ## Status as of 2026-08 (this session)
 
 ### Done
