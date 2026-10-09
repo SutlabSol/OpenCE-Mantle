@@ -169,6 +169,15 @@ by a full M4 **frontend/UI integration** pass (see below), which is now done and
 - Per-mipmap `BitmapDataFlags.external` bit not checked (no occurrence found in sample maps).
 - `spheroid` tag group is genuinely **uncertain** — no reliable source exists for it anywhere
   (even Reclaimer's own author calls it a guess), and it doesn't appear in either sample map.
+- **OPEN ITEM (P0, blocks embedded-data relocation)**: embedded (external=0) bitmap/sound raw-data
+  relocation is unimplemented and the ADD/SWAP injector actively blocks any tag with one (plain-
+  language warning). Re-confirmed 2026-08 with a reusable scanner
+  (`core/scripts/scan-embedded-data.ts`): 0 embedded bitmap/sound fields in ui.map (251 non-
+  external bitmap/sound tags checked) or bloodgulch.map (0 non-external bitmap/sound tags at all).
+  User has custom maps with embedded custom-art bitmaps/sounds and will supply a small one to
+  `/app/sample_maps/` (filename TBD) once ready — do NOT implement/enable relocation against a
+  synthetic-only fixture; wait for that real file, scan it the same way, propose enabling, and
+  get explicit user approval before turning it on.
 
 ## Upcoming (pending user go-ahead — M4 UI is done, waiting for user's own Electron/Windows test)
 - Sounds.map resolution (parse external sound pointers before M5) — explicitly deferred by user.
@@ -177,6 +186,72 @@ by a full M4 **frontend/UI integration** pass (see below), which is now done and
 - M7: field-level tag editor reusing this definition layer (promote any group's field naming from
   "array of numbers" to named sub-fields as needed).
 - Phase 2: 3D scenario editor (three.js viewport, BSP/model rendering, Forge-like placement).
+
+## M5 Step B: SWAP-mode tag injection (done 2026-08, this session)
+
+Before any code, user required an exhaustive real-byte search of ui.map/bloodgulch.map for
+embedded (external=0) bitmap/sound data (blocker carried over from the previous session). Built
+a reusable scanner `core/scripts/scan-embedded-data.ts` (uses the same `walkDependencies`
+`embeddedRawData` detection the injector itself relies on - no separate parsing logic, so results
+match what the injector's relocation guard sees). **Result: 0 embedded fields found.** ui.map has
+251 non-external bitmap/sound tags (575 external-resource-map data fields, 0 embedded); bloodgulch
+has 0 non-external bitmap/sound tags at all. Reported to user per the decision tree they specified;
+user confirmed: keep relocation disabled, proceed with Step B/C for tags that don't need it, track
+as an open item (see "Known simplifications" below), and supply a small custom map with one real
+embedded bitmap later for actual verification - filename/tag TBD from user when they have it ready.
+
+- **Core** (`tag-injector.ts`): generalized `planAddInjection`/`applyAddInjection` into
+  `planInjection(mode, ...)`/`applyInjection(...)` (mode-agnostic, `AddInjectionPlan` etc. kept as
+  type aliases for compat) plus new `planSwapInjection`/`applySwapInjection` wrappers. SWAP mode:
+  a matched tag (same normalized path+class already in target) gets its struct data REPLACED in
+  place - new data appended past the (shifted) existing region like ADD's new entries, but the
+  EXISTING array slot's tagId/path pointer/primary class are left untouched, only
+  `tagDataPointerOrResourceIndex`/secondary/tertiary class are patched. Key finding reused from
+  Step A: a matched tag's tagId never changes in SWAP mode (whether its own swap succeeds or falls
+  back to untouched), so nothing that depends on a matched tag by internal reference can ever be
+  blocked by that matched tag's own swap outcome - only true appends (`toAdd`) participate in the
+  block-cascade. A matched tag that CAN'T be swapped (embedded-data warning, missing dependency,
+  OR the target entry is itself whole-tag-external with no struct pointer to repoint) falls back
+  to untouched/reused, reported in BOTH `reused` and the relevant blocked list (intentionally not
+  mutually exclusive - "reused" means nothing changed, the blocked list says why a requested swap
+  didn't happen). Tests: 3 new tests in `tag-injector.test.ts` using REAL bytes - "weapons\frag
+  grenade\shaders\frag metal" (shader_model) exists non-external in both ui.map and bloodgulch.map
+  (genuine in-place-swappable match), its 3 bitmap dependencies exist in bloodgulch as whole-tag-
+  EXTERNAL entries (genuine "can't swap into this" case), full apply + re-parse + 1500+-tag
+  validation. **Core: 62/62 Vitest pass.**
+- **Electron**: `shared-types.ts` threads `InjectionMode` through `WorkerRequest.planInject` and
+  `OpenceApi.planInject(path, mode)`; `InjectPlanSummary` gained `mode`/`toSwap`, counts gained
+  `swapped`; `ApplyInjectResult` gained `swappedCount`. `map-worker.ts`/`main.ts`/`preload.ts`
+  updated to pass mode through unchanged otherwise (same temp-file-then-rename write, same
+  Save-As/overwrite-refusal guards from Step A).
+- **Frontend**: `InjectDialog.tsx` gained a new first phase, `choose-mode` (two buttons: "Add new
+  tags" / "Swap into existing tags", `inject-mode-add`/`inject-mode-swap`/`inject-mode-cancel`),
+  before the existing picking->planning->review->apply->result flow (mode is for the whole
+  operation - per-tag choice is Step C, not built yet). Review phase summary line and a new "Will
+  be swapped (keeps existing tagId)" `WarningGroup` section added; `nothingToAdd`/confirm-gating
+  logic extended to include `counts.swapped`. `dev-mock.ts`/`test-fixtures/dependency-fixtures.ts`
+  extended with SWAP-mode mock plans (clean + blocked) built from the same real tag paths used in
+  the core tests, so the mock preview matches reality.
+- **Testing**: core 62/62 ✅ (incl. 3 new real-byte SWAP tests), desktop electron/renderer `tsc
+  --noEmit` clean ✅, desktop Vitest 25/25 ✅ (unchanged, no existing InjectDialog RTL suite to
+  break), `testing_agent` E2E on the new choose-mode screen + SWAP-mode InjectDialog via browser
+  mock: 100% (9/9 requirements), 0 console errors, 0 bugs (`/app/test_reports/iteration_7.json`).
+  **NOT YET verified**: real Electron shell / real map SWAP in OpenCE on Windows (headless
+  container can't run it) - same caveat as Step A, user will test themselves.
+- **Per explicit user instruction this session: STOPPING here for review before Step C** (the
+  conflict dialog - skip/replace/rename + "apply to all", using the existing `ConfirmDialog.tsx`).
+  Not built yet.
+
+### What to test in OpenCE on Windows (Step B, in addition to Step A's steps)
+1. Extract a tag that already exists in your target map at the same path (e.g. re-extract a stock
+   weapon/vehicle tag you've modified, or a retextured version of one) into a `.ocetags` file.
+2. Tools > Inject Tags... > choose "Swap into existing tags" > pick that container > review (should
+   show "to swap" for the matching tag, "reused" for anything that can't be swapped e.g. whole-tag-
+   external matches) > confirm > Save As a NEW file.
+3. Load the NEW file in-game: the map's EXISTING placements of that tag (scenery, weapon spawns,
+   etc. already in the scenario) should now show the swapped content WITHOUT needing to add any
+   new placement - this is the whole point of SWAP vs ADD. Report back: does it load, and do
+   existing placements pick up the new content correctly?
 
 ## M5 Step A: ADD-mode tag injection (done 2026-08)
 User required a cited, verified design (not asserted) before any code — see
@@ -268,8 +343,7 @@ against real bytes in the sample maps.
    one (a modded map with brand-new textures not in stock bitmaps.map) — this SHOULD be blocked
    with a plain-language warning, confirming the disabled-relocation guard works as intended.
 
-### M5 remaining (Step B/C, not started — build order from user, one step at a time)
-- Step B: SWAP mode (keeps the target tag's existing tag ID so references TO it stay valid).
+### M5 remaining (Step C, not started — user said stop for review after Step B, done below)
 - Step C: conflict dialog (skip/replace/rename, "apply to all") using the existing
   `ConfirmDialog.tsx`, plus pre-write validation surfaced in the UI.
 
@@ -277,14 +351,17 @@ against real bytes in the sample maps.
 - `/app/core/src/map/definitions/engine.ts` — schema engine (load/validate/resolve/decode/encode)
 - `/app/core/src/map/definitions/validate-tag.ts` — real-map validation (round-trip, deps, bounds)
 - `/app/core/src/map/dependency-walker.ts`, `tag-extractor.ts`, `container.ts` — M4 core logic
-- `/app/core/src/map/tag-injector.ts` — M5 Step A injection engine (plan/apply ADD mode)
+- `/app/core/src/map/tag-injector.ts` — M5 Step A+B injection engine (plan/apply ADD + SWAP modes)
 - `/app/desktop/electron/worker-manager.ts`, `map-worker.ts`, `main.ts` — M4/M5 persistent worker + IPC
 - `/app/desktop/src/components/DependencyDialog.tsx`, `TagBrowser.tsx` — M4 UI
-- `/app/desktop/src/components/InjectDialog.tsx`, `SettingsDialog.tsx` — M5 Step A UI
+- `/app/desktop/src/components/InjectDialog.tsx`, `SettingsDialog.tsx` — M5 Step A+B UI (mode choice + review)
 - `/app/core/src/map/definitions/SOURCES.md` — provenance table, must stay updated
 - `/app/core/src/map/resource-map.ts` — bitmaps.map/sounds.map/loc.map parser + fingerprinting
+- `/app/core/scripts/scan-embedded-data.ts` — reusable real-byte scanner for embedded (external=0)
+  bitmap/sound data in any .map file (`yarn tsx scripts/scan-embedded-data.ts /path/to/map`); run
+  this FIRST against any user-supplied custom map before touching relocation work
 - `/app/core/tests/definitions.test.ts`, `tag-extractor.test.ts`, `tag-injector.test.ts`,
-  `container-v2.test.ts` — validation suites (**59/59 passing**)
+  `container-v2.test.ts` — validation suites (**62/62 passing**)
 - `/app/core/scripts/generate-definitions.mjs` — regenerate `groups/*.json` from a fresh Invader
   clone if definitions ever need updating (`INVADER_DIR=/path/to/invader/.../definition node
   scripts/generate-definitions.mjs`)

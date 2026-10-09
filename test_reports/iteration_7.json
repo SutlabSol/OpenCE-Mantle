@@ -1,0 +1,36 @@
+{
+  "summary": "E2E frontend testing of M5 Step B (SWAP mode) InjectDialog via Vite dev server with mocked window.opence (?mock=inject-clean / ?mock=inject-blocked). All 9 feature requirements from the review request pass with 0 console errors. The new 'choose-mode' phase, SWAP-mode plan summary / 'Will be swapped' warning group, ack-gated confirm, swap-mode result text, and ADD-mode regression all behave as specified.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/test_reports/iteration_7.json"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "InjectDialog ~351 lines, still a single-file component but readable; splitting the choose-mode screen into its own subcomponent would make phase handling clearer if the file grows further.",
+    "handleConfirm log line 'Injected X tag(s), swapped Y (Z reused)' always prints 'swapped Y' even for ADD mode (Y will be 0) - fine for debug telemetry, matches spec; no action needed.",
+    "needsAck still treats hasMismatch as a blocker (correct); in SWAP-clean the 3 external-ref 'resource-map-indexed (external)' entries land in blockedOther (not externalRefStatuses mismatch), so needsAck is triggered via blockedOther - consistent with ADD mode.",
+    "WarningGroup items are collapsed by default - the group title shows a count badge '(1)' so the item presence is observable without expanding, meeting the spec's 'check the group title + its items render' requirement.",
+    "All data-testids promised in the review request are present and stable: inject-mode-add, inject-mode-swap, inject-mode-cancel, inject-dialog-summary, inject-understand-checkbox, inject-confirm-button, inject-confirm-disabled-reason, inject-result."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (desktop app, no HTTP backend)", "frontend": "100% (9/9 feature requirements, 0 console errors)"},
+  "verified_flows": [
+    "Choose-mode phase: dialog opens on toolbar-inject-button showing inject-mode-add, inject-mode-swap, inject-mode-cancel.",
+    "Choose-mode phase closes via Escape key, × button (inject-dialog-close), and inject-mode-cancel button.",
+    "SWAP mode + ?mock=inject-clean: planInject called with 'swap', summary exactly 'From \"ui\" (swap mode): 0 to add, 1 to swap, 3 reused, 3 blocked'. 'Will be swapped (keeps existing tagId) (1)' section renders; expanded content includes the 'frag grenade\\\\shaders\\\\frag metal' entry.",
+    "SWAP mode + inject-clean: confirm button disabled with inject-confirm-disabled-reason='Check \"I understand\" below...' because blockedOther=3; checking inject-understand-checkbox enables confirm.",
+    "SWAP mode apply: result text 'Injected 0 tag(s), swapped 1 (3 reused, not duplicated).' - swappedCount renders correctly, no undefined/NaN.",
+    "SWAP mode + ?mock=inject-blocked: summary 'From \"ui\" (swap mode): 0 to add, 0 to swap, 1 reused, 1 blocked'; Blocked - embedded data WarningGroup present; confirm gated by understand checkbox.",
+    "ADD mode regression: inject-mode-add -> picking -> planning -> review with summary containing '(add mode)' label, existing flow unchanged.",
+    "Menu parity: menu-item-tools-inject-tags opens the new choose-mode screen (not legacy direct-to-picking).",
+    "0 console errors / 0 page errors across all SWAP, ADD, and dismiss flows."
+  ],
+  "test_credentials": "N/A",
+  "seed_data_creation": "None (uses existing dev-mock.ts + buildMockInjectPlan fixtures with 3rd mode parameter).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "M5 Step B frontend is fully working in browser-mock mode. Next session will likely add Step C (per-tag conflict dialog with skip/replace/rename choice when ADD mode encounters path collisions). When Step C arrives: expect a new intermediate phase between 'planning' and 'review' that surfaces conflicts; current choose-mode screen will likely become the mode default only (per-tag override happens in conflict dialog). Toolbar testids and menu testids unchanged. Core logic (planInjection/applyInjection for SWAP) already covered by 62/62 Vitest incl. real-byte SWAP tests on bloodgulch.map/ui.map - not re-verified here (frontend-only mandate)."
+}
