@@ -50,7 +50,9 @@ cd core && yarn inspect-map /path/to/some.map   # developer-only CLI, not part o
 
 ```bash
 cd desktop
-yarn build                      # builds core, builds the renderer (dist/), compiles Electron (dist-electron/)
+yarn build                      # builds the renderer (dist/) and bundles Electron main/preload/worker
+                                 # (dist-electron/) via esbuild, inlining core/src directly -
+                                 # no separate core build step needed
 ```
 
 ## Package a Windows build

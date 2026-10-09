@@ -205,3 +205,45 @@ action-string convention (low risk, hobby-scope) or the ternary-as-expression st
 fixed to if/else alongside the testid fix). Electron shell itself (main/preload/menu/worker)
 was separately smoke-tested under Xvfb by the main agent (launches cleanly, no JS errors) -
 native dialogs/menus still need manual verification on the user's own Windows machine.
+
+## Bug fix: packaged .exe crashed with "Cannot find module '../../core/dist/index'" (2026-07)
+User reported: works in dev mode, breaks in the built .exe. ROOT CAUSE: electron-builder
+never packaged the separate /app/core folder at all, so the worker thread's relative
+require('../../core/dist/index') broke once bundled into app.asar (only worked in dev because
+core/dist existed on disk nearby). A SECOND latent issue was found and fixed while validating
+the first: the electron-builder "files" field had been left unset at one point, which made it
+package raw source (electron/*.ts, src/*.tsx, unbuilt index.html) instead of the compiled
+dist/ and dist-electron/ output.
+
+Fix:
+- Replaced plain `tsc` with `esbuild` (`desktop/esbuild.electron.mjs`) to bundle
+  `electron/main.ts`/`preload.ts`/`map-worker.ts` into `dist-electron/*.js`, INLINING
+  `core/src` directly at build time (map-worker.ts now imports `'../../core/src/index'`
+  instead of `'../../core/dist/index'`) - zero runtime dependency on a separate core folder.
+- `electron` and `@mongodb-js/zstd` (native addon) marked as esbuild externals.
+- `@mongodb-js/zstd` added as a real `dependencies` entry of `desktop/package.json` (was only
+  in `core`'s deps before) so electron-builder packages + rebuilds its native binary for
+  Electron's ABI and asar-unpacks it correctly.
+- Restored an explicit `files` allowlist (`dist/**`, `dist-electron/**`, `package.json`,
+  excluding raw `electron/`/`src/`) and added `directories.output: "release"` so
+  electron-builder's own output folder no longer collides with Vite's `dist/` renderer
+  output folder.
+- `desktop/package.json` scripts updated: `build:electron` now runs esbuild;
+  `build:core`/`dist`-folder dependency on `core`'s own tsc build removed (no longer needed -
+  esbuild reads `core/src` directly). `core`'s own build/tests/README are unaffected.
+
+Verified (testing_agent, iteration 2, since this is a packaging bug unreachable via browser
+automation - verified via the actual packaging pipeline instead):
+- Full `electron-builder --linux dir` packaging run completed, including the native
+  `@mongodb-js/zstd` rebuild step for Electron's ABI.
+- Inspected the resulting `app.asar`: contains ONLY `dist-electron/*.js(.map)`, `dist/`
+  (built renderer), `package.json` - no raw source, no stale core reference.
+- Extracted the REAL packaged `map-worker.js` + its asar-unpacked native `@mongodb-js/zstd`
+  and ran it in an actual Node `worker_threads` context against the real
+  `/app/sample_maps/bloodgulch.map` - printed `RESULT ok 2455` (parsed correctly, no
+  `MODULE_NOT_FOUND`), the most direct possible reproduction of the user's exact bug scenario.
+- Renderer regression (12 Playwright assertions from M3) re-ran clean, zero console errors.
+- Residual limitation: verified on linux-arm64 packaging (this sandbox has no Windows); the
+  same esbuild-bundling + files-allowlist + native-rebuild mechanism is platform-agnostic in
+  electron-builder, but the user should still confirm the Windows portable/NSIS build on
+  their own machine per `/app/README.md`.
