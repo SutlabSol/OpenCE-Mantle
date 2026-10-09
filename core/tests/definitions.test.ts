@@ -5,7 +5,7 @@ import { validateAllDefinitions, getAllTagGroupNames, getGroupDefinition } from 
 import { validateStructInstance, locateStructureBsp } from '../src/map/definitions/validate-tag';
 import { resolveTagDataPointer } from '../src/map/tag-index';
 import { parseResourceMap, resourceIndexResolves } from '../src/map/resource-map';
-import { sampleMapPath, hasSampleMaps, missingSampleMapsMessage } from './helpers/sample-maps';
+import { sampleMapPath, hasSampleMaps, missingSampleMapsMessage, skippableTest } from './helpers/sample-maps';
 
 const REQUIRED_SAMPLES = ['bloodgulch.map', 'ui.map'];
 const haveSamples = hasSampleMaps(REQUIRED_SAMPLES);
@@ -148,11 +148,10 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     );
   }
 
-  it('bloodgulch.map: external bitmap tag references resolve to valid entries in bitmaps.map', () => {
+  const bitmapsGate = skippableTest(['bitmaps.map']);
+  it.skipIf(bitmapsGate.skip)(`bloodgulch.map: external bitmap tag references resolve to valid entries in bitmaps.map${bitmapsGate.titleSuffix}`, () => {
     const mapBuffer = fs.readFileSync(sampleMapPath('bloodgulch.map'));
-    const bitmapsMapPath = sampleMapPath('bitmaps.map');
-    if (!fs.existsSync(bitmapsMapPath)) return;
-    const bitmapsBuffer = fs.readFileSync(bitmapsMapPath);
+    const bitmapsBuffer = fs.readFileSync(sampleMapPath('bitmaps.map'));
     const resourceMap = parseResourceMap(bitmapsBuffer);
 
     const inspected = inspectCustomEditionMap(mapBuffer);

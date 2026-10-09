@@ -37,3 +37,16 @@ export function missingSampleMapsMessage(names: string[]): string {
   const missing = names.filter((n) => !hasSampleMap(n));
   return `missing sample map(s) [${missing.join(', ')}] in "${sampleMapsDir()}" - set SAMPLE_MAPS_DIR or see core/README.md`;
 }
+
+/**
+ * For a single `it()` inside an otherwise-always-collected describe block: tells you whether to
+ * skip it and what to append to its title, so the reason (which file, where it looked for it)
+ * shows up directly in the Vitest summary instead of a bare "skipped" with no explanation.
+ * Only ever calls the cheap `fs.existsSync` check (via `hasSampleMap`) - never reads file
+ * contents at describe/module scope, only the `it`/`beforeAll` body does that.
+ */
+export function skippableTest(names: string[]): { skip: boolean; titleSuffix: string } {
+  const missing = names.filter((n) => !hasSampleMap(n));
+  if (missing.length === 0) return { skip: false, titleSuffix: '' };
+  return { skip: true, titleSuffix: ` [SKIPPED: missing ${missing.join(', ')} in "${sampleMapsDir()}"]` };
+}

@@ -101,6 +101,29 @@ $env:SAMPLE_MAPS_DIR = "C:\HaloCE\maps"; yarn test
 The resolution logic lives in one place, `tests/helpers/sample-maps.ts` - no test or script in
 this repo hardcodes an absolute path to the sample maps directory.
 
+### Which sample files each suite needs
+
+Every test is gated on exactly the file(s) **it** needs (never a blanket per-file skip) - if a
+test needs a file you don't have, only that test skips, with the missing filename(s) and the
+searched path embedded right in the test's title so it shows up in the Vitest summary, not a
+bare "skipped" with no explanation.
+
+| Test file                       | bloodgulch.map | ui.map | bitmaps.map | sounds.map | loc.map |
+|----------------------------------|:---:|:---:|:---:|:---:|:---:|
+| `definitions.test.ts`           | ✔ (1 test) | ✔ (1 test) | ✔ (1 test, also needs bloodgulch.map) | – | – |
+| `dependency-walker.test.ts`     | ✔ (whole file) | – | – | – | – |
+| `tag-extractor.test.ts`         | ✔ (whole file) | – | – | – | – |
+| `tag-footprints.test.ts`        | ✔ (1 of 2 tests) | – | – | – | – |
+| `compression.real-map.test.ts`  | ✔ (per-file tests, runs for whichever of the two exist) | ✔ (same) | – | – | – |
+| `container-v2.test.ts`          | ✔ (1 of 4 tests) | ✔ (1 of 4 tests, same test as bitmaps.map) | ✔ (same test) | – | – |
+| `tag-injector.test.ts`          | ✔ (whole file, 9 tests) | ✔ (whole file, same 9) | ✔ (1 of the 9, additionally) | – | – |
+| `relocation-synthetic.test.ts`  | – | – | – | – | – |
+| everything else (`header`, `open-map`, `tag-index`, `compression`, `fourcc`) | – | – | – | – | – |
+
+`sounds.map`/`loc.map` aren't read by any current test (sound/loc resource-map parsing is
+exercised with synthetic buffers only, not real sample files, so far) — if that changes, update
+this table.
+
 ## Layout
 
 ```

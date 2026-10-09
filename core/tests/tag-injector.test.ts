@@ -8,7 +8,7 @@ import { planAddInjection, applyAddInjection, normalizeTagPath, computeNewTagId 
 import { computeResourceMapIdentity } from '../src/map/resource-map';
 import { validateStructInstance } from '../src/map/definitions/validate-tag';
 import { getGroupDefinition } from '../src/map/definitions/engine';
-import { hasSampleMap, readSampleMap, missingSampleMapsMessage } from './helpers/sample-maps';
+import { hasSampleMap, readSampleMap, missingSampleMapsMessage, skippableTest } from './helpers/sample-maps';
 import type { CacheFileHeader } from '../src/map/header';
 import type { TagIndex } from '../src/map/tag-index';
 
@@ -108,7 +108,8 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     expect(plan.kind).toBe('refused');
   });
 
-  it('resource map fingerprint: reports match/mismatch/unconfigured correctly', () => {
+  const fingerprintGate = skippableTest(['bitmaps.map']);
+  it.skipIf(fingerprintGate.skip)(`resource map fingerprint: reports match/mismatch/unconfigured correctly${fingerprintGate.titleSuffix}`, () => {
     const bitmapsBuf = readSampleMap('bitmaps.map');
     const identity = computeResourceMapIdentity(bitmapsBuf);
     const mutated = Buffer.from(bitmapsBuf);
