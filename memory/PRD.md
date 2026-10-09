@@ -194,6 +194,36 @@ by a full M4 **frontend/UI integration** pass (see below), which is now done and
   "array of numbers" to named sub-fields as needed).
 - Phase 2: 3D scenario editor (three.js viewport, BSP/model rendering, Forge-like placement).
 
+## Tools > Verify Embedded Data (done 2026-08)
+Map-agnostic, read-only GUI diagnostic (new Decisions-section rule: no logic keyed to a specific
+map name/tag path/size - verified by code review, zero such branches). Core:
+`core/src/map/embedded-data-verifier.ts` - `verifyEmbeddedData(buffer, header, tagIndex)` reuses
+`walkDependencies`'s existing per-field embedded/external detection (same decode path the M5
+injector's relocation guard uses - no reimplementation), adds bounds/overlap/readability checks
+for embedded assets only (external offsets point into a different file, never bounds-checked
+against the open map), and reports unrecognized tag classes or out-of-bounds top-level structs as
+BLOCKED rather than guessed. Also fixed a real gap found while building this: `collectFromStruct`
+in `dependency-walker.ts` used to silently skip a reflexive array whose pointer/count resolves
+outside the file - now emits a new `'invalidReflexive'` warning kind instead (generic, benefits
+every consumer, zero behavior change for valid maps - confirmed by the unchanged 62/62 then 73/73
+regression count). `formatEmbeddedDataReport()` renders the plain-language text used by the
+dialog's "Copy report" button. Electron: new `tags:verifyEmbeddedData` IPC
+(`main.ts`/`map-worker.ts`/`preload.ts`/`shared-types.ts`), Tools menu item (native + in-app
+`MenuBar`) opens `VerifyEmbeddedDataDialog.tsx` (loading -> report-with-copy-button -> error
+phases, no "apply" step - this feature never writes anything). Dev-mock fixtures:
+`?mock=verify-clean` / `?mock=verify-blocked`.
+**Testing**: core 73/73 Vitest (11 new in `embedded-data-verifier.test.ts` - 3 real-map regression
+against ui.map/bloodgulch.map/sidewinder.map confirming 0 false positives, defensive-path unit
+tests for unrecognized-class/out-of-bounds-struct blocking built without faking a binary map
+layout, pure `rangesOverlap`/`formatEmbeddedDataReport` tests). Desktop: 33/33 Vitest (5 new RTL
+tests for the dialog), both electron+renderer `tsc --noEmit` clean, esbuild bundle clean.
+Per the user's new standing rule, **no testing_agent/screenshot used** - targeted Vitest only.
+
+## Staged for next turn: Yoyorast_Island.map (2026-08)
+Uploaded by user for Task 3 (relocation-via-copy-without-region-start research). Saved to
+`sample_maps/Yoyorast_Island.map` but **NOT YET analyzed** - user said stop after Task 2.
+
+
 ## Relocation verification attempt #2: sidewinder.map (2026-08, read-only)
 User uploaded `sample_maps/sidewinder.map` (real CE 609, 2420 tags, 14.8MB) as a candidate real
 embedded-bitmap example. Ran the SAME generic scanner used on ui.map/bloodgulch.map (no map-name

@@ -36,7 +36,8 @@ __export(map_worker_exports, {
   runApplyInject: () => runApplyInject,
   runExtractTags: () => runExtractTags,
   runGetDependencies: () => runGetDependencies,
-  runPlanInject: () => runPlanInject
+  runPlanInject: () => runPlanInject,
+  runVerifyEmbeddedData: () => runVerifyEmbeddedData
 });
 module.exports = __toCommonJS(map_worker_exports);
 var import_worker_threads = require("worker_threads");
@@ -34335,7 +34336,16 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const childBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (childBase < 0 || childBase + value.value.count * childSize > buffer.length) continue;
+      if (childBase < 0 || childBase + value.value.count * childSize > buffer.length) {
+        warn({
+          originalIndex: rootOriginalIndex,
+          path: `${contextPath}.${field.name}`,
+          group: "",
+          kind: "invalidReflexive",
+          message: `"${contextPath}.${field.name}" (${value.value.count} x "${childStructName}") resolves outside this file (pointer base ${childBase}) - unrecognized/corrupt layout, not walked further.`
+        });
+        continue;
+      }
       const n = Math.min(value.value.count, MAX_ELEMENTS_WALKED_PER_REFLEXIVE);
       for (let i = 0; i < n; i++) {
         collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, rootOriginalIndex, enqueue, warn);
@@ -34939,6 +34949,136 @@ function applySwapInjection(targetBuffer, targetHeader, targetTagIndex, containe
   return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan);
 }
 
+// ../core/src/map/embedded-data-verifier.ts
+function rangesOverlap(aOffset, aSize, bOffset, bSize) {
+  return aOffset < bOffset + bSize && bOffset < aOffset + aSize;
+}
+function verifyEmbeddedData(buffer, header, tagIndex) {
+  const knownGroups = new Set(getAllTagGroupNames());
+  const candidates = tagIndex.entries.filter((e) => !e.isExternal && (e.primaryClassName === "bitmap" || e.primaryClassName === "sound"));
+  const blockedTags = [];
+  const checkedIndices = [];
+  for (const e of candidates) {
+    const group = e.primaryClassName;
+    if (!knownGroups.has(group)) {
+      blockedTags.push({ tagPath: e.path, group, reason: "Unrecognized tag class - no definition registered. Not guessed." });
+      continue;
+    }
+    const structName = getGroupDefinition(group).name;
+    const resolved = resolveStruct(structName);
+    const fileOffset = resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    if (fileOffset < 0 || fileOffset + resolved.totalSize > buffer.length) {
+      blockedTags.push({
+        tagPath: e.path,
+        group,
+        reason: `The tag's own struct resolves outside this file (offset ${fileOffset}, ${resolved.totalSize} bytes, file is ${buffer.length} bytes) - cannot read it safely, not guessed.`
+      });
+      continue;
+    }
+    checkedIndices.push(e.index);
+  }
+  const walk = checkedIndices.length > 0 ? walkDependencies(buffer, header, tagIndex, checkedIndices) : { tags: [], externalTags: [], warnings: [] };
+  for (const t of [...walk.tags, ...walk.externalTags]) {
+    if (t.status !== "ok") {
+      blockedTags.push({ tagPath: t.path, group: t.group, reason: `Unexpected tag status "${t.status}" for a bitmap/sound tag - treated as unrecognized, not guessed.` });
+    }
+  }
+  for (const w of walk.warnings) {
+    if (w.kind === "invalidReflexive") {
+      const entry = candidates.find((e) => e.index === w.originalIndex);
+      blockedTags.push({ tagPath: entry?.path ?? `tag #${w.originalIndex}`, group: entry?.primaryClassName ?? "", reason: `${w.message} Not guessed.` });
+    }
+  }
+  const assets = [];
+  for (const w of walk.warnings) {
+    if (w.kind !== "embeddedRawData" && w.kind !== "externalData") continue;
+    const entry = candidates.find((e) => e.index === w.originalIndex);
+    const fileOffset = w.fileOffset ?? 0;
+    const size = w.size ?? 0;
+    const inBounds = w.kind === "embeddedRawData" ? fileOffset >= 0 && size >= 0 && fileOffset + size <= buffer.length : true;
+    let readable = false;
+    if (w.kind === "embeddedRawData" && inBounds) {
+      try {
+        readable = buffer.subarray(fileOffset, fileOffset + size).length === size;
+      } catch {
+        readable = false;
+      }
+    }
+    assets.push({
+      tagPath: entry?.path ?? `tag #${w.originalIndex}`,
+      group: entry?.primaryClassName ?? "",
+      fieldPath: w.path,
+      location: w.kind === "embeddedRawData" ? "embedded" : "external",
+      resourceMap: w.resourceMap,
+      fileOffset,
+      size,
+      inBounds,
+      overlapsWith: [],
+      // External bytes live in a different file (bitmaps.map/sounds.map) not necessarily open
+      // here - readability of those is a separate, already-existing fingerprint check
+      // (resource-map.ts), not re-done here.
+      readable: w.kind === "embeddedRawData" ? readable : true
+    });
+  }
+  const embedded = assets.filter((a) => a.location === "embedded" && a.inBounds);
+  for (let i = 0; i < embedded.length; i++) {
+    for (let j = i + 1; j < embedded.length; j++) {
+      if (rangesOverlap(embedded[i].fileOffset, embedded[i].size, embedded[j].fileOffset, embedded[j].size)) {
+        embedded[i].overlapsWith.push(`${embedded[j].tagPath} ${embedded[j].fieldPath}`);
+        embedded[j].overlapsWith.push(`${embedded[i].tagPath} ${embedded[i].fieldPath}`);
+      }
+    }
+  }
+  return {
+    totalBitmapSoundTags: candidates.length,
+    checkedTags: checkedIndices.length,
+    blockedTags,
+    assets,
+    counts: {
+      embedded: assets.filter((a) => a.location === "embedded").length,
+      external: assets.filter((a) => a.location === "external").length,
+      embeddedInBounds: assets.filter((a) => a.location === "embedded" && a.inBounds).length,
+      embeddedOutOfBounds: assets.filter((a) => a.location === "embedded" && !a.inBounds).length,
+      overlapping: assets.filter((a) => a.overlapsWith.length > 0).length,
+      unreadable: assets.filter((a) => a.location === "embedded" && a.inBounds && !a.readable).length,
+      blockedTags: blockedTags.length
+    }
+  };
+}
+function formatEmbeddedDataReport(report, mapLabel) {
+  const lines = [
+    `Embedded data verification - "${mapLabel}"`,
+    `${report.totalBitmapSoundTags} bitmap/sound tags total, ${report.checkedTags} checked, ${report.blockedTags.length} blocked.`,
+    `${report.counts.embedded} embedded asset(s), ${report.counts.external} external (resource-map) asset(s).`,
+    `Embedded: ${report.counts.embeddedInBounds} in bounds, ${report.counts.embeddedOutOfBounds} OUT OF BOUNDS, ${report.counts.overlapping} overlapping, ${report.counts.unreadable} unreadable.`,
+    ""
+  ];
+  if (report.blockedTags.length > 0) {
+    lines.push("BLOCKED (unrecognized layout - not guessed):");
+    for (const b of report.blockedTags) lines.push(`  "${b.tagPath}" (${b.group || "unknown"}) - ${b.reason}`);
+    lines.push("");
+  }
+  const problems = report.assets.filter((a) => !a.inBounds || a.overlapsWith.length > 0 || a.location === "embedded" && !a.readable);
+  if (problems.length > 0) {
+    lines.push("PROBLEMS FOUND:");
+    for (const a of problems) {
+      const issues = [];
+      if (!a.inBounds) issues.push("OUT OF BOUNDS");
+      if (a.location === "embedded" && !a.readable) issues.push("UNREADABLE");
+      if (a.overlapsWith.length > 0) issues.push(`overlaps with: ${a.overlapsWith.join(", ")}`);
+      lines.push(`  "${a.tagPath}" ${a.fieldPath} (${a.location}, offset ${a.fileOffset}, ${a.size} bytes) - ${issues.join("; ")}`);
+    }
+    lines.push("");
+  } else if (report.checkedTags > 0) {
+    lines.push("No bounds, overlap, or readability problems found among the checked assets.");
+    lines.push("");
+  }
+  if (report.counts.embedded === 0) {
+    lines.push("No embedded (external=0) bitmap/sound data in this map - everything routes through bitmaps.map/sounds.map.");
+  }
+  return lines.join("\n");
+}
+
 // electron/map-worker.ts
 var currentMap = null;
 var currentInject = null;
@@ -35186,6 +35326,19 @@ function runApplyInject(task) {
     currentInject = null;
   }
 }
+function runVerifyEmbeddedData(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "Open and decompress a map before verifying embedded data.");
+  try {
+    progress(task.requestId, "Checking bitmap/sound data", 40);
+    const report = verifyEmbeddedData(currentMap.buffer, currentMap.header, currentMap.tagIndex);
+    const mapLabel = currentMap.header.scenarioName || currentMap.filePath;
+    const reportText = formatEmbeddedDataReport(report, mapLabel);
+    progress(task.requestId, "Done", 100);
+    sendResult(task.requestId, { ok: true, mapLabel, totalBitmapSoundTags: report.totalBitmapSoundTags, checkedTags: report.checkedTags, counts: report.counts, reportText });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
     if (task.type === "cancel") {
@@ -35198,6 +35351,7 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "extractTags") runExtractTags(task);
     else if (task.type === "planInject") runPlanInject(task);
     else if (task.type === "applyInject") runApplyInject(task);
+    else if (task.type === "verifyEmbeddedData") runVerifyEmbeddedData(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -35216,6 +35370,7 @@ try {
   runApplyInject,
   runExtractTags,
   runGetDependencies,
-  runPlanInject
+  runPlanInject,
+  runVerifyEmbeddedData
 });
 //# sourceMappingURL=map-worker.js.map

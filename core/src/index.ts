@@ -15,3 +15,4 @@ export * from './map/dependency-walker';
 export * from './map/tag-extractor';
 export * from './map/container';
 export * from './map/tag-injector';
+export * from './map/embedded-data-verifier';

@@ -14,6 +14,7 @@ const api: OpenceApi = {
   pickInjectContainer: () => ipcRenderer.invoke('tags:pickInjectContainer'),
   planInject: (containerPath: string, mode: InjectionMode) => ipcRenderer.invoke('tags:planInject', containerPath, mode),
   applyInject: () => ipcRenderer.invoke('tags:applyInject'),
+  verifyEmbeddedData: () => ipcRenderer.invoke('tags:verifyEmbeddedData'),
   openContainingFolder: (filePath: string) => ipcRenderer.invoke('app:openContainingFolder', filePath),
   getSettings: () => ipcRenderer.invoke('app:getSettings'),
   notImplemented: (feature: string) => ipcRenderer.send('app:notImplemented', feature),

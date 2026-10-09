@@ -162,6 +162,20 @@ export type ApplyInjectResult =
   | { ok: false; code: 'CANCELLED'; message: string }
   | { ok: false; code: string; message: string };
 
+export interface VerifyEmbeddedDataCounts {
+  embedded: number;
+  external: number;
+  embeddedInBounds: number;
+  embeddedOutOfBounds: number;
+  overlapping: number;
+  unreadable: number;
+  blockedTags: number;
+}
+
+export type VerifyEmbeddedDataResult =
+  | { ok: true; mapLabel: string; totalBitmapSoundTags: number; checkedTags: number; counts: VerifyEmbeddedDataCounts; reportText: string }
+  | { ok: false; code: string; message: string };
+
 /* --------------------------- main <-> worker thread protocol (internal) --------------------------- */
 
 export type WorkerRequest =
@@ -171,6 +185,7 @@ export type WorkerRequest =
   | { type: 'extractTags'; requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }
   | { type: 'planInject'; requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
   | { type: 'applyInject'; requestId: string; outputPath: string }
+  | { type: 'verifyEmbeddedData'; requestId: string }
   | { type: 'cancel'; requestId: string };
 
 export type WorkerResponse =
@@ -194,6 +209,7 @@ export interface OpenceApi {
   pickInjectContainer(): Promise<{ path: string } | null>;
   planInject(containerPath: string, mode: InjectionMode): Promise<PlanInjectResult>;
   applyInject(): Promise<ApplyInjectResult>;
+  verifyEmbeddedData(): Promise<VerifyEmbeddedDataResult>;
   openContainingFolder(filePath: string): Promise<void>;
   getSettings(): Promise<AppSettings>;
   notImplemented(feature: string): void;

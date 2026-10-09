@@ -17,6 +17,8 @@ import {
   computeResourceMapIdentity,
   getGroupDefinition,
   validateAllDefinitions,
+  verifyEmbeddedData,
+  formatEmbeddedDataReport,
   AllTagsExcludedError,
   OperationCancelledError,
   ContainerFormatError,
@@ -36,6 +38,7 @@ import type {
   InjectPlanSummary,
   InjectionMode,
   ResourceMapKind,
+  VerifyEmbeddedDataResult,
 } from './shared-types';
 
 /**
@@ -330,6 +333,20 @@ export function runApplyInject(task: { requestId: string; outputPath: string }) 
   }
 }
 
+export function runVerifyEmbeddedData(task: { requestId: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'Open and decompress a map before verifying embedded data.');
+  try {
+    progress(task.requestId, 'Checking bitmap/sound data', 40);
+    const report = verifyEmbeddedData(currentMap.buffer, currentMap.header, currentMap.tagIndex);
+    const mapLabel = currentMap.header.scenarioName || currentMap.filePath;
+    const reportText = formatEmbeddedDataReport(report, mapLabel);
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, { ok: true, mapLabel, totalBitmapSoundTags: report.totalBitmapSoundTags, checkedTags: report.checkedTags, counts: report.counts, reportText } satisfies VerifyEmbeddedDataResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -342,6 +359,7 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'extractTags') runExtractTags(task);
     else if (task.type === 'planInject') runPlanInject(task);
     else if (task.type === 'applyInject') runApplyInject(task);
+    else if (task.type === 'verifyEmbeddedData') runVerifyEmbeddedData(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

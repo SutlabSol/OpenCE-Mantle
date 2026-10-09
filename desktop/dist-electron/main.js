@@ -34112,6 +34112,24 @@ async function applyInjectFlow() {
     currentInjectContainerPath = null;
   }
 }
+async function verifyEmbeddedDataFlow() {
+  if (!currentMapPath || currentMapCompressed) return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before verifying embedded data." };
+  sendLog("info", "Verifying embedded bitmap/sound data...");
+  const { promise } = sendWorkerRequest(
+    { type: "verifyEmbeddedData" },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "verifyEmbeddedData", stage, percent })
+  );
+  try {
+    const result = await promise;
+    if (result.ok) sendLog("info", `Embedded data check: ${result.counts.embedded} embedded, ${result.counts.external} external, ${result.counts.blockedTags} blocked.`);
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Embedded data check failed: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
 function showAboutDialog() {
   if (!mainWindow) return;
   import_electron3.dialog.showMessageBox(mainWindow, {
@@ -34145,6 +34163,7 @@ function buildMenu() {
         { type: "separator" },
         { label: "Extract Tags...", accelerator: "CmdOrCtrl+E", click: () => mainWindow?.webContents.send("menu:action", "extract-tags") },
         { label: "Inject Tags...", click: () => mainWindow?.webContents.send("menu:action", "inject-tags") },
+        { label: "Verify Embedded Data...", click: () => mainWindow?.webContents.send("menu:action", "verify-embedded-data") },
         { type: "separator" },
         { label: "Settings...", click: () => mainWindow?.webContents.send("menu:action", "settings") }
       ]
@@ -34190,6 +34209,7 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("tags:pickInjectContainer", () => pickInjectContainerFlow());
   import_electron3.ipcMain.handle("tags:planInject", (_e, containerPath, mode) => planInjectFlow(containerPath, mode));
   import_electron3.ipcMain.handle("tags:applyInject", () => applyInjectFlow());
+  import_electron3.ipcMain.handle("tags:verifyEmbeddedData", () => verifyEmbeddedDataFlow());
   import_electron3.ipcMain.handle("app:openContainingFolder", (_e, filePath) => {
     if (typeof filePath === "string" && filePath) import_electron3.shell.showItemInFolder(filePath);
   });

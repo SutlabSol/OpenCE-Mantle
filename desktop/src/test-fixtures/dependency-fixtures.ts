@@ -1,4 +1,4 @@
-import type { DependencyWalkSummary, DependencyTagInfo, DependencyNotExtractedInfo, DependencyWarningInfo, InjectPlanSummary, InjectionMode } from '../../electron/shared-types';
+import type { DependencyWalkSummary, DependencyTagInfo, DependencyNotExtractedInfo, DependencyWarningInfo, InjectPlanSummary, InjectionMode, VerifyEmbeddedDataResult } from '../../electron/shared-types';
 
 /**
  * Realistic dependency-walk fixtures shared between `dev-mock.ts` (Vite browser preview) and
@@ -16,6 +16,8 @@ export const MOCK_SCENARIOS = [
   'slow-progress',
   'inject-clean',
   'inject-blocked',
+  'verify-clean',
+  'verify-blocked',
 ] as const;
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
@@ -243,5 +245,55 @@ export function buildMockInjectPlan(scenario: MockScenario, containerPath: strin
     blockedOther: [],
     externalRefStatuses: [{ path: 'sky\\space\\bitmaps\\star mask', group: 'bitmap', resourceMap: 'bitmaps.map', status: 'match' }],
     refusedRoots: [],
+  };
+}
+
+/** Tools > Verify Embedded Data fixtures (dev preview via `?mock=verify-clean` / `?mock=verify-blocked`). */
+export function buildMockVerifyEmbeddedDataResult(scenario: MockScenario): VerifyEmbeddedDataResult {
+  if (scenario === 'verify-blocked') {
+    const totalBitmapSoundTags = 3;
+    const checkedTags = 2;
+    const counts = { embedded: 2, external: 4, embeddedInBounds: 1, embeddedOutOfBounds: 1, overlapping: 2, unreadable: 0, blockedTags: 1 };
+    return {
+      ok: true,
+      mapLabel: 'yoyorast island',
+      totalBitmapSoundTags,
+      checkedTags,
+      counts,
+      reportText: [
+        'Embedded data verification - "yoyorast island"',
+        `${totalBitmapSoundTags} bitmap/sound tags total, ${checkedTags} checked, ${counts.blockedTags} blocked.`,
+        `${counts.embedded} embedded asset(s), ${counts.external} external (resource-map) asset(s).`,
+        `Embedded: ${counts.embeddedInBounds} in bounds, ${counts.embeddedOutOfBounds} OUT OF BOUNDS, ${counts.overlapping} overlapping, ${counts.unreadable} unreadable.`,
+        '',
+        'BLOCKED (unrecognized layout - not guessed):',
+        '  "levels\\test\\custom\\weapons\\custom_rifle" (bitmap) - Unrecognized tag class. Not guessed.',
+        '',
+        'PROBLEMS FOUND:',
+        '  "levels\\test\\custom\\bitmaps\\muzzle_flash" bitmap data[0].pixel data (embedded, offset 9999999, 4096 bytes) - OUT OF BOUNDS',
+        '  "levels\\test\\custom\\bitmaps\\scope_lens" bitmap data[0].pixel data (embedded, offset 512, 2048 bytes) - overlaps with: levels\\test\\custom\\bitmaps\\scope_frame bitmap data[0].pixel data',
+        '',
+      ].join('\n'),
+    };
+  }
+  const totalBitmapSoundTags = 251;
+  const checkedTags = 251;
+  const counts = { embedded: 0, external: 575, embeddedInBounds: 0, embeddedOutOfBounds: 0, overlapping: 0, unreadable: 0, blockedTags: 0 };
+  return {
+    ok: true,
+    mapLabel: 'ui',
+    totalBitmapSoundTags,
+    checkedTags,
+    counts,
+    reportText: [
+      'Embedded data verification - "ui"',
+      `${totalBitmapSoundTags} bitmap/sound tags total, ${checkedTags} checked, ${counts.blockedTags} blocked.`,
+      `${counts.embedded} embedded asset(s), ${counts.external} external (resource-map) asset(s).`,
+      `Embedded: ${counts.embeddedInBounds} in bounds, ${counts.embeddedOutOfBounds} OUT OF BOUNDS, ${counts.overlapping} overlapping, ${counts.unreadable} unreadable.`,
+      '',
+      'No bounds, overlap, or readability problems found among the checked assets.',
+      '',
+      'No embedded (external=0) bitmap/sound data in this map - everything routes through bitmaps.map/sounds.map.',
+    ].join('\n'),
   };
 }

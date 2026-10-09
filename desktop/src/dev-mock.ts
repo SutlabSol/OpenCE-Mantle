@@ -14,7 +14,7 @@ import type {
   ApplyInjectResult,
   InjectionMode,
 } from '../electron/shared-types';
-import { parseMockScenario, buildMockSummary, buildMockInjectPlan } from './test-fixtures/dependency-fixtures';
+import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult } from './test-fixtures/dependency-fixtures';
 
 /**
  * Dev-only mock of window.opence, used when previewing the renderer in a plain browser
@@ -157,6 +157,10 @@ export function installDevMock() {
         swappedCount: plan.counts.swapped,
         staleChecksumWarning: "This map's CRC32 and tag checksum are now stale (recalculating them is Milestone 6) - some tools/servers that verify them may reject it until then.",
       };
+    },
+    verifyEmbeddedData: async () => {
+      await fakeProgress('verifyEmbeddedData');
+      return buildMockVerifyEmbeddedDataResult(scenario);
     },
     onProgress: (cb) => {
       progressListeners.add(cb);

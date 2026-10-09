@@ -15,6 +15,7 @@ import DependencyDialog from './components/DependencyDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import InjectDialog from './components/InjectDialog';
 import SettingsDialog from './components/SettingsDialog';
+import VerifyEmbeddedDataDialog from './components/VerifyEmbeddedDataDialog';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
 const LARGE_SELECTION_CONFIRM_THRESHOLD = 200;
@@ -27,6 +28,7 @@ export default function App() {
   const [largeSelectionConfirm, setLargeSelectionConfirm] = useState<number[] | null>(null);
   const [injectDialogOpen, setInjectDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
   const { logs, progress, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
@@ -36,6 +38,7 @@ export default function App() {
   const canRecompress = hasMap && !isCompressed;
   const canExtract = mapState?.status === 'ok';
   const canInject = mapState?.status === 'ok';
+  const canVerifyEmbeddedData = mapState?.status === 'ok';
   const isWalkOrExtractRunning = extractSelection !== null || largeSelectionConfirm !== null;
 
   const requestExtract = (indices: number[]) => {
@@ -59,6 +62,7 @@ export default function App() {
     const offMenu = window.opence.onMenuAction((action) => {
       if (action === 'extract-tags') requestExtract(Array.from(selectedTagIndices));
       else if (action === 'inject-tags') setInjectDialogOpen(true);
+      else if (action === 'verify-embedded-data') setVerifyDialogOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
       else if (action.endsWith('-stub')) log('warn', `${action.replace('-stub', '')} is coming in a later milestone.`);
     });
@@ -159,6 +163,7 @@ export default function App() {
               { label: 'Recompress Map', onClick: handleRecompress, disabled: !canRecompress },
               { label: 'Extract Tags...', onClick: () => requestExtract(Array.from(selectedTagIndices)), disabled: !!extractDisabledReason },
               { label: 'Inject Tags...', onClick: () => setInjectDialogOpen(true), disabled: !canInject },
+              { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Settings...', onClick: () => setSettingsDialogOpen(true) },
             ],
           },
@@ -207,6 +212,7 @@ export default function App() {
       {extractSelection && <DependencyDialog selectedIndices={extractSelection} onClose={() => setExtractSelection(null)} log={log} />}
       {injectDialogOpen && <InjectDialog onClose={() => setInjectDialogOpen(false)} log={log} />}
       {settingsDialogOpen && <SettingsDialog onClose={() => setSettingsDialogOpen(false)} />}
+      {verifyDialogOpen && <VerifyEmbeddedDataDialog onClose={() => setVerifyDialogOpen(false)} log={log} />}
 
       {largeSelectionConfirm && (
         <ConfirmDialog

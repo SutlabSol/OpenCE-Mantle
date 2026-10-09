@@ -35,7 +35,7 @@ export interface WalkedTag {
   requiredBy: string[];
 }
 
-export type WarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'embeddedRawData' | 'bspTag';
+export type WarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'embeddedRawData' | 'bspTag' | 'invalidReflexive';
 
 export interface WalkerWarning {
   originalIndex: number;
@@ -274,7 +274,16 @@ function collectFromStruct(
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const childBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (childBase < 0 || childBase + value.value.count * childSize > buffer.length) continue;
+      if (childBase < 0 || childBase + value.value.count * childSize > buffer.length) {
+        warn({
+          originalIndex: rootOriginalIndex,
+          path: `${contextPath}.${field.name}`,
+          group: '',
+          kind: 'invalidReflexive',
+          message: `"${contextPath}.${field.name}" (${value.value.count} x "${childStructName}") resolves outside this file (pointer base ${childBase}) - unrecognized/corrupt layout, not walked further.`,
+        });
+        continue;
+      }
       const n = Math.min(value.value.count, MAX_ELEMENTS_WALKED_PER_REFLEXIVE);
       for (let i = 0; i < n; i++) {
         collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, rootOriginalIndex, enqueue, warn);
