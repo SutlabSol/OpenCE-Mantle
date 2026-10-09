@@ -5,9 +5,11 @@ import { validateAllDefinitions, getAllTagGroupNames, getGroupDefinition } from 
 import { validateStructInstance, locateStructureBsp } from '../src/map/definitions/validate-tag';
 import { resolveTagDataPointer } from '../src/map/tag-index';
 import { parseResourceMap, resourceIndexResolves } from '../src/map/resource-map';
+import { sampleMapPath, hasSampleMaps, missingSampleMapsMessage } from './helpers/sample-maps';
 
-const SAMPLE_DIR = '/app/sample_maps';
-const haveSamples = fs.existsSync(`${SAMPLE_DIR}/bloodgulch.map`) && fs.existsSync(`${SAMPLE_DIR}/ui.map`);
+const REQUIRED_SAMPLES = ['bloodgulch.map', 'ui.map'];
+const haveSamples = hasSampleMaps(REQUIRED_SAMPLES);
+const suiteTitle = haveSamples ? 'tag definitions validated against real maps' : `tag definitions validated against real maps [${missingSampleMapsMessage(REQUIRED_SAMPLES)}]`;
 
 /** Tier 1 per the user's brief: fully defined + zero-failure validated this round. */
 const TIER1_GROUPS = [
@@ -49,12 +51,12 @@ describe('tag definitions registry', () => {
   });
 });
 
-describe.skipIf(!haveSamples)('tag definitions validated against real maps', () => {
-  for (const mapName of ['bloodgulch.map', 'ui.map']) {
+describe.skipIf(!haveSamples)(suiteTitle, () => {
+  for (const mapName of REQUIRED_SAMPLES) {
     it(
       `${mapName}: every defined tag parses (round-trip + dependency + reflexive bounds); zero failures on Tier-1 groups`,
       () => {
-        const buffer = fs.readFileSync(`${SAMPLE_DIR}/${mapName}`);
+        const buffer = fs.readFileSync(sampleMapPath(mapName));
         const inspected = inspectCustomEditionMap(buffer);
         expect(inspected.status).toBe('ok');
         if (inspected.status !== 'ok') return;
@@ -147,8 +149,8 @@ describe.skipIf(!haveSamples)('tag definitions validated against real maps', () 
   }
 
   it('bloodgulch.map: external bitmap tag references resolve to valid entries in bitmaps.map', () => {
-    const mapBuffer = fs.readFileSync(`${SAMPLE_DIR}/bloodgulch.map`);
-    const bitmapsMapPath = `${SAMPLE_DIR}/bitmaps.map`;
+    const mapBuffer = fs.readFileSync(sampleMapPath('bloodgulch.map'));
+    const bitmapsMapPath = sampleMapPath('bitmaps.map');
     if (!fs.existsSync(bitmapsMapPath)) return;
     const bitmapsBuffer = fs.readFileSync(bitmapsMapPath);
     const resourceMap = parseResourceMap(bitmapsBuffer);

@@ -1,21 +1,34 @@
-import { describe, expect, it } from 'vitest';
-import * as fs from 'fs';
+import { describe, expect, it, beforeAll } from 'vitest';
 import { inspectCustomEditionMap } from '../src/map/open-map';
 import { extractTagSet, verifyExtractedTagSet, AllTagsExcludedError } from '../src/map/tag-extractor';
 import { serializeContainer, deserializeContainer, ContainerHasBspError, OCETAGS_MAGIC, OCETAGS_FORMAT_VERSION } from '../src/map/container';
+import { hasSampleMap, readSampleMap, missingSampleMapsMessage } from './helpers/sample-maps';
+import type { CacheFileHeader } from '../src/map/header';
+import type { TagIndex } from '../src/map/tag-index';
 
-const SAMPLE_DIR = '/app/sample_maps';
-const haveBloodgulch = fs.existsSync(`${SAMPLE_DIR}/bloodgulch.map`);
+const haveBloodgulch = hasSampleMap('bloodgulch.map');
+const suiteTitle = haveBloodgulch
+  ? 'tag-extractor BSP guard + .ocetags container (M4)'
+  : `tag-extractor BSP guard + .ocetags container (M4) [${missingSampleMapsMessage(['bloodgulch.map'])}]`;
 
-describe.skipIf(!haveBloodgulch)('tag-extractor BSP guard + .ocetags container (M4)', () => {
-  const buffer = fs.readFileSync(`${SAMPLE_DIR}/bloodgulch.map`);
-  const inspected = inspectCustomEditionMap(buffer);
-  if (inspected.status !== 'ok') throw new Error('sample map did not parse');
-  const { header, tagIndex } = inspected;
+describe.skipIf(!haveBloodgulch)(suiteTitle, () => {
+  let buffer: Buffer;
+  let header: CacheFileHeader;
+  let tagIndex: TagIndex;
+  let scenarioIndex: number;
+  let bspIndex: number;
+  let warthogIndex: number;
 
-  const scenarioIndex = tagIndex.entries.find((e) => e.primaryClassName === 'scenario')!.index;
-  const bspIndex = tagIndex.entries.find((e) => e.primaryClassName === 'scenario_structure_bsp')!.index;
-  const warthogIndex = tagIndex.entries.find((e) => e.path === 'vehicles\\warthog\\mp_warthog' && e.primaryClassName === 'vehicle')!.index;
+  beforeAll(() => {
+    buffer = readSampleMap('bloodgulch.map');
+    const inspected = inspectCustomEditionMap(buffer);
+    if (inspected.status !== 'ok') throw new Error('sample map did not parse');
+    header = inspected.header;
+    tagIndex = inspected.tagIndex;
+    scenarioIndex = tagIndex.entries.find((e) => e.primaryClassName === 'scenario')!.index;
+    bspIndex = tagIndex.entries.find((e) => e.primaryClassName === 'scenario_structure_bsp')!.index;
+    warthogIndex = tagIndex.entries.find((e) => e.path === 'vehicles\\warthog\\mp_warthog' && e.primaryClassName === 'vehicle')!.index;
+  });
 
   it('extracting the scenario excludes the BSP, reports it in notExtracted, and flags the container', () => {
     const set = extractTagSet(buffer, header, tagIndex, [scenarioIndex]);

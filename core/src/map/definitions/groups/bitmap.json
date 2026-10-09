@@ -241,7 +241,9 @@
       {
         "kind": "field",
         "name": "flags",
-        "type": "BitmapDataFlags"
+        "type": "BitmapDataFlags",
+        "externalDataSibling": { "offsetField": "pixel data offset", "sizeField": "pixel data size", "resourceMap": "bitmaps.map" },
+        "comment": "externalDataSibling: SOURCE (read 2026-08) invader/src/build/build_workload.cpp line ~1430 (embedded: pixel_data_offset = raw-data-region offset within THIS map) and invader/src/resource/resource.cpp line ~427 (external: pixel_data_offset = byte offset within bitmaps.map, flags |= BITMAP_DATA_FLAGS_FLAG_EXTERNAL). Confirmed against real bytes: every internal bitmap in ui.map has external=1 and pixel_data_offset exactly matches a bitmaps.map resource entry's dataOffset."
       },
       {
         "kind": "field",

@@ -12,6 +12,9 @@ import PropertiesPalette from './components/PropertiesPalette';
 import LogPanel from './components/LogPanel';
 import StatusBar from './components/StatusBar';
 import DependencyDialog from './components/DependencyDialog';
+import ConfirmDialog from './components/ConfirmDialog';
+import InjectDialog from './components/InjectDialog';
+import SettingsDialog from './components/SettingsDialog';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
 const LARGE_SELECTION_CONFIRM_THRESHOLD = 200;
@@ -21,6 +24,9 @@ export default function App() {
   const [focusedTag, setFocusedTag] = useState<TagEntrySummary | null>(null);
   const [selectedTagIndices, setSelectedTagIndices] = useState<Set<number>>(new Set());
   const [extractSelection, setExtractSelection] = useState<number[] | null>(null);
+  const [largeSelectionConfirm, setLargeSelectionConfirm] = useState<number[] | null>(null);
+  const [injectDialogOpen, setInjectDialogOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const { logs, progress, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
@@ -29,15 +35,15 @@ export default function App() {
   const canDecompress = hasMap && isCompressed;
   const canRecompress = hasMap && !isCompressed;
   const canExtract = mapState?.status === 'ok';
-  const canInject = hasMap;
-  const isWalkOrExtractRunning = extractSelection !== null;
+  const canInject = mapState?.status === 'ok';
+  const isWalkOrExtractRunning = extractSelection !== null || largeSelectionConfirm !== null;
 
   const requestExtract = (indices: number[]) => {
     if (!canExtract || isWalkOrExtractRunning || indices.length === 0) return;
     log('info', `Extract requested: ${indices.length} tag(s) selected.`);
     if (indices.length > LARGE_SELECTION_CONFIRM_THRESHOLD) {
-      const ok = window.confirm(`You're about to walk dependencies for ${indices.length} tags - this may take a moment. Continue?`);
-      if (!ok) return;
+      setLargeSelectionConfirm(indices);
+      return;
     }
     setExtractSelection(indices);
   };
@@ -46,11 +52,14 @@ export default function App() {
     setFocusedTag(null);
     setSelectedTagIndices(new Set());
     setExtractSelection(null);
+    setLargeSelectionConfirm(null);
   };
 
   useEffect(() => {
     const offMenu = window.opence.onMenuAction((action) => {
       if (action === 'extract-tags') requestExtract(Array.from(selectedTagIndices));
+      else if (action === 'inject-tags') setInjectDialogOpen(true);
+      else if (action === 'settings') setSettingsDialogOpen(true);
       else if (action.endsWith('-stub')) log('warn', `${action.replace('-stub', '')} is coming in a later milestone.`);
     });
     const offLoaded = window.opence.onMapLoaded((result) => {
@@ -149,7 +158,8 @@ export default function App() {
               { label: 'Decompress Map', onClick: handleDecompress, disabled: !canDecompress },
               { label: 'Recompress Map', onClick: handleRecompress, disabled: !canRecompress },
               { label: 'Extract Tags...', onClick: () => requestExtract(Array.from(selectedTagIndices)), disabled: !!extractDisabledReason },
-              { label: 'Inject Tags...', onClick: () => notImplemented('Inject Tags'), disabled: !canInject },
+              { label: 'Inject Tags...', onClick: () => setInjectDialogOpen(true), disabled: !canInject },
+              { label: 'Settings...', onClick: () => setSettingsDialogOpen(true) },
             ],
           },
           { label: 'Help', items: [{ label: 'About', onClick: () => window.opence.showAbout() }] },
@@ -164,7 +174,7 @@ export default function App() {
         onDecompress={handleDecompress}
         onRecompress={handleRecompress}
         onExtract={() => requestExtract(Array.from(selectedTagIndices))}
-        onInject={() => notImplemented('Inject Tags')}
+        onInject={() => setInjectDialogOpen(true)}
         progress={progress}
       />
 
@@ -195,6 +205,30 @@ export default function App() {
       <StatusBar mapState={mapState} />
 
       {extractSelection && <DependencyDialog selectedIndices={extractSelection} onClose={() => setExtractSelection(null)} log={log} />}
+      {injectDialogOpen && <InjectDialog onClose={() => setInjectDialogOpen(false)} log={log} />}
+      {settingsDialogOpen && <SettingsDialog onClose={() => setSettingsDialogOpen(false)} />}
+
+      {largeSelectionConfirm && (
+        <ConfirmDialog
+          testId="large-selection-confirm-dialog"
+          title="Large selection"
+          message={`You're about to walk dependencies for ${largeSelectionConfirm.length} tags - this may take a moment. Continue?`}
+          onEscape={() => setLargeSelectionConfirm(null)}
+          buttons={[
+            {
+              label: 'Continue',
+              variant: 'primary',
+              testId: 'large-selection-confirm-continue',
+              onClick: () => {
+                const indices = largeSelectionConfirm;
+                setLargeSelectionConfirm(null);
+                setExtractSelection(indices);
+              },
+            },
+            { label: 'Cancel', autoFocus: true, testId: 'large-selection-confirm-cancel', onClick: () => setLargeSelectionConfirm(null) },
+          ]}
+        />
+      )}
     </div>
   );
 }

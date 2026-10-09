@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
 import type { TagEntrySummary } from '../../electron/shared-types';
 
 interface Props {
@@ -28,12 +29,32 @@ function slugify(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group';
 }
 
+function smallButtonStyle(): CSSProperties {
+  return {
+    background: 'var(--bg-panel-header)',
+    color: 'var(--text-secondary)',
+    border: '1px solid var(--border)',
+    borderRadius: 2,
+    padding: '5px 8px',
+    fontSize: 11,
+    whiteSpace: 'nowrap',
+  };
+}
+
 export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChange, onExtractRequested, extractDisabledReason }: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
-  const [closedGroups, setClosedGroups] = useState<Set<string>>(() => new Set());
+  const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set());
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; index: number } | null>(null);
+
+  // A brand new `tags` array means a different map was opened - start fully collapsed again.
+  // Does NOT fire on re-renders of the same map (e.g. after closing the dependency dialog).
+  useEffect(() => {
+    setOpenGroups(new Set());
+    setSearch('');
+    setFocusedIndex(null);
+  }, [tags]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -46,6 +67,8 @@ export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChang
     };
   }, [contextMenu]);
 
+  const isSearching = search.trim().length > 0;
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return tags;
@@ -54,25 +77,35 @@ export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChang
     );
   }, [tags, search]);
 
+  const groupKeyOf = (t: TagEntrySummary) => (groupMode === 'class' ? t.primaryClassName : topFolder(t.path));
+
   const groups = useMemo(() => {
     const map = new Map<string, TagEntrySummary[]>();
     for (const t of filtered) {
-      const key = groupMode === 'class' ? t.primaryClassName : topFolder(t.path);
+      const key = groupKeyOf(t);
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(t);
     }
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [filtered, groupMode]);
 
-  // Groups start expanded (matches the earlier "always browsable" behaviour); users collapse ones they don't need.
-  const effectiveOpen = (key: string) => (search.trim() ? true : !closedGroups.has(key));
+  const allGroupKeys = useMemo(() => new Set(tags.map(groupKeyOf)), [tags, groupMode]);
+
+  // While searching, every group shown already contains only matches (see `filtered` above), so
+  // it's always expanded; the manual `openGroups` set underneath is left untouched and takes
+  // over again the moment the search is cleared (toggleGroup also no-ops while searching).
+  const effectiveOpen = (key: string) => (isSearching ? true : openGroups.has(key));
 
   const toggleGroup = (key: string) => {
-    const next = new Set(closedGroups);
+    if (isSearching) return;
+    const next = new Set(openGroups);
     if (next.has(key)) next.delete(key);
     else next.add(key);
-    setClosedGroups(next);
+    setOpenGroups(next);
   };
+
+  const expandAll = () => setOpenGroups(new Set(allGroupKeys));
+  const collapseAll = () => setOpenGroups(new Set());
 
   const toggleSelect = (index: number) => {
     const next = new Set(selected);
@@ -96,7 +129,7 @@ export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChang
     onFocusTag(t);
   };
 
-  const handleRowContextMenu = (e: React.MouseEvent, t: TagEntrySummary) => {
+  const handleRowContextMenu = (e: ReactMouseEvent, t: TagEntrySummary) => {
     e.preventDefault();
     if (!selected.has(t.index)) onSelectedChange(new Set([t.index]));
     setContextMenu({ x: e.clientX, y: e.clientY, index: t.index });
@@ -130,12 +163,21 @@ export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChang
             <option value="class">By class</option>
             <option value="folder">By folder</option>
           </select>
+          <button data-testid="expand-all-button" onClick={expandAll} title="Expand all groups" style={smallButtonStyle()}>
+            Expand all
+          </button>
+          <button data-testid="collapse-all-button" onClick={collapseAll} title="Collapse all groups" style={smallButtonStyle()}>
+            Collapse all
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
           <button
             data-testid="extract-selected-button"
             disabled={selected.size === 0 || !!extractDisabledReason}
             title={extractDisabledReason ?? undefined}
             onClick={requestExtract}
             style={{
+              flex: 1,
               background: selected.size && !extractDisabledReason ? 'var(--accent-cyan)' : 'var(--bg-panel-header)',
               color: selected.size && !extractDisabledReason ? '#06202c' : 'var(--text-dim)',
               border: '1px solid var(--border)',

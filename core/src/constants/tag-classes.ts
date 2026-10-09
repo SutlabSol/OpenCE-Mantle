@@ -129,3 +129,10 @@ export const TAG_CLASS_NONE = 0xffffffff;
 export function lookupTagClass(fourcc: number): TagClassInfo | null {
   return CLASS_BY_FOURCC.get(fourcc) ?? null;
 }
+
+const CLASS_BY_NAME = new Map<string, TagClassInfo>(TAG_CLASSES.map((c) => [c.name, c]));
+
+/** Looks up a tag class by its group name (e.g. "vehicle") rather than fourcc. Used by the M5 injector to write new tag index entries from a container's `group` field. */
+export function lookupTagClassByName(name: string): TagClassInfo | null {
+  return CLASS_BY_NAME.get(name) ?? null;
+}

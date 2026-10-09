@@ -4,6 +4,7 @@ import { parseCacheFileHeader } from '../src/map/header';
 import { parseTagIndex } from '../src/map/tag-index';
 import { estimateTagFootprints } from '../src/map/tag-footprints';
 import { buildFakeMap } from './fixtures/build-fake-map';
+import { sampleMapPath, hasSampleMap, missingSampleMapsMessage } from './helpers/sample-maps';
 
 describe('estimateTagFootprints', () => {
   it('gives each internal tag a positive footprint that sums to roughly the tag data size', () => {
@@ -22,17 +23,21 @@ describe('estimateTagFootprints', () => {
     expect(footprints.find((f) => f.tagIndex === 2)?.estimatedSize).toBeNull(); // external
   });
 
-  if (fs.existsSync('/app/sample_maps/bloodgulch.map')) {
-    it('real map: internal footprints sum to no more than the tag data size', () => {
-      const buffer = fs.readFileSync('/app/sample_maps/bloodgulch.map');
-      const header = parseCacheFileHeader(buffer);
-      const tagIndex = parseTagIndex(buffer, header);
-      const footprints = estimateTagFootprints(header, tagIndex);
+  const haveBloodgulch = hasSampleMap('bloodgulch.map');
+  const title = haveBloodgulch
+    ? 'real map: internal footprints sum to no more than the tag data size'
+    : `real map: internal footprints sum to no more than the tag data size [${missingSampleMapsMessage(['bloodgulch.map'])}]`;
 
-      const total = footprints.reduce((sum, f) => sum + (f.estimatedSize ?? 0), 0);
-      expect(total).toBeLessThanOrEqual(header.tagDataSize);
-      expect(total).toBeGreaterThan(header.tagDataSize * 0.5); // sanity: most of the section is accounted for
-      expect(footprints.every((f) => f.estimatedSize === null || f.estimatedSize >= 0)).toBe(true);
-    });
-  }
+  it.skipIf(!haveBloodgulch)(title, () => {
+    const buffer = fs.readFileSync(sampleMapPath('bloodgulch.map'));
+    const header = parseCacheFileHeader(buffer);
+    const tagIndex = parseTagIndex(buffer, header);
+    const footprints = estimateTagFootprints(header, tagIndex);
+
+    const total = footprints.reduce((sum, f) => sum + (f.estimatedSize ?? 0), 0);
+    expect(total).toBeLessThanOrEqual(header.tagDataSize);
+    expect(total).toBeGreaterThan(header.tagDataSize * 0.5); // sanity: most of the section is accounted for
+    expect(footprints.every((f) => f.estimatedSize === null || f.estimatedSize >= 0)).toBe(true);
+  });
 });
+

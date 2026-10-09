@@ -1,12 +1,20 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import { inspectCustomEditionMap } from '../src/map/open-map';
 import { getAllTagGroupNames } from '../src/map/definitions/engine';
+
+const SAMPLE_MAPS_DIR = process.env.SAMPLE_MAPS_DIR ? path.resolve(process.env.SAMPLE_MAPS_DIR) : path.resolve(__dirname, '../../sample_maps');
 
 const perGroup = new Map<string, number>();
 for (const g of getAllTagGroupNames()) perGroup.set(g, 0);
 
 for (const mapName of ['bloodgulch.map', 'ui.map']) {
-  const buffer = fs.readFileSync(`/app/sample_maps/${mapName}`);
+  const mapPath = path.join(SAMPLE_MAPS_DIR, mapName);
+  if (!fs.existsSync(mapPath)) {
+    console.log(`Skipping ${mapName}: not found at ${mapPath} (set SAMPLE_MAPS_DIR or see core/README.md)`);
+    continue;
+  }
+  const buffer = fs.readFileSync(mapPath);
   const inspected = inspectCustomEditionMap(buffer);
   if (inspected.status !== 'ok') continue;
   for (const entry of inspected.tagIndex.entries) {

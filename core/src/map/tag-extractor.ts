@@ -25,6 +25,8 @@ export interface ExtractedTag {
   group: string;
   path: string;
   structName: string;
+  secondaryClassFourCC: number | null;
+  tertiaryClassFourCC: number | null;
   /**
    * The tag's root struct followed by every reflexive descendant, flattened into one
    * self-contained buffer. TagReflexive pointer fields are rewritten to LOCAL byte offsets
@@ -253,7 +255,9 @@ export function extractTagSet(
       notExtractedByOriginal,
     );
 
-    return { originalIndex: t.originalIndex, group: t.group, path: t.path, structName, data: Buffer.concat(outChunks), dependencies };
+    return { originalIndex: t.originalIndex, group: t.group, path: t.path, structName, data: Buffer.concat(outChunks), dependencies,
+      secondaryClassFourCC: tagIndex.entries[t.originalIndex].secondaryClassFourCC,
+      tertiaryClassFourCC: tagIndex.entries[t.originalIndex].tertiaryClassFourCC };
   });
 
   options.onProgress?.(extractableWalked.length, extractableWalked.length);

@@ -1,0 +1,304 @@
+import { forwardRef, useEffect, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
+import type { InjectPlanSummary, ApplyInjectResult } from '../../electron/shared-types';
+import { WarningGroup } from './WarningGroup';
+
+type Phase = 'picking' | 'planning' | 'plan-error' | 'review' | 'applying' | 'result' | 'apply-error';
+
+interface Props {
+  onClose: () => void;
+  log: (level: 'info' | 'warn' | 'error', message: string) => void;
+}
+
+/**
+ * Milestone 5, Step A: ADD-mode tag injection. User picks a `.ocetags` container (never a path
+ * typed in, always the native file dialog, in main.ts); this dialog shows the dry-run plan
+ * (reused/added/blocked/external-reference warnings) and only writes anything once confirmed -
+ * the actual write goes through the native Save As dialog too (main.ts, never overwrites the
+ * open map). SWAP mode and the conflict dialog are Step B/C, not built yet.
+ */
+export default function InjectDialog({ onClose, log }: Props) {
+  const [phase, setPhase] = useState<Phase>('picking');
+  const [plan, setPlan] = useState<InjectPlanSummary | null>(null);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [understand, setUnderstand] = useState(false);
+  const [applyResult, setApplyResult] = useState<ApplyInjectResult | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const startedRef = useRef(false);
+
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    (async () => {
+      const picked = await window.opence.pickInjectContainer();
+      if (!picked) {
+        onClose();
+        return;
+      }
+      setPhase('planning');
+      const res = await window.opence.planInject(picked.path);
+      if (res.ok) {
+        setPlan(res.plan);
+        setPhase('review');
+      } else {
+        setErrorMessage(res.message);
+        setPhase('plan-error');
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    dialogRef.current?.focus();
+  }, [phase]);
+
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      onClose();
+    }
+  };
+
+  const handleConfirm = async () => {
+    setPhase('applying');
+    const res = await window.opence.applyInject();
+    setApplyResult(res);
+    if (res.ok) {
+      log('info', `Injected ${res.addedCount} tag(s) (${res.reusedCount} reused) into ${res.outputPath}`);
+      setPhase('result');
+    } else if (res.code === 'CANCELLED') {
+      setPhase('review');
+    } else {
+      setErrorMessage(res.message);
+      setPhase('apply-error');
+    }
+  };
+
+  if (phase === 'picking' || phase === 'planning') {
+    return (
+      <Overlay>
+        <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
+          <div data-testid="inject-dialog-loading" style={{ padding: 24, textAlign: 'center', color: 'var(--text-secondary)' }}>
+            {phase === 'picking' ? 'Waiting for file selection...' : 'Planning injection...'}
+          </div>
+        </DialogShell>
+      </Overlay>
+    );
+  }
+
+  if (phase === 'plan-error') {
+    return (
+      <Overlay>
+        <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
+          <div data-testid="inject-dialog-plan-error" style={{ padding: 20 }}>
+            <div style={{ color: 'var(--error-text)', marginBottom: 10 }}>Couldn&apos;t plan this injection.</div>
+            <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', marginBottom: 16 }}>{errorMessage}</div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button data-testid="inject-dialog-plan-error-close" onClick={onClose} style={buttonStyle()}>
+                Close
+              </button>
+            </div>
+          </div>
+        </DialogShell>
+      </Overlay>
+    );
+  }
+
+  if (!plan) return null;
+
+  if (phase === 'applying') {
+    return (
+      <Overlay>
+        <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
+          <div data-testid="inject-progress" style={{ padding: 24, textAlign: 'center', color: 'var(--text-secondary)' }}>
+            Writing injected map...
+          </div>
+        </DialogShell>
+      </Overlay>
+    );
+  }
+
+  if (phase === 'result' && applyResult?.ok) {
+    return (
+      <Overlay>
+        <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
+          <div data-testid="inject-result" style={{ padding: 20 }}>
+            <div style={{ color: 'var(--success-text)', marginBottom: 10, fontSize: 13 }}>
+              Injected {applyResult.addedCount} tag(s) ({applyResult.reusedCount} reused, not duplicated).
+            </div>
+            <div style={{ fontSize: 12, fontFamily: 'var(--mono-font)', color: 'var(--text-secondary)', wordBreak: 'break-all', marginBottom: 14 }}>{applyResult.outputPath}</div>
+            <div data-testid="inject-result-crc-warning" style={{ fontSize: 11.5, color: 'var(--warn-text)', marginBottom: 14 }}>
+              {applyResult.staleChecksumWarning}
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button data-testid="inject-result-open-folder" onClick={() => window.opence.openContainingFolder(applyResult.outputPath)} style={buttonStyle()}>
+                Open containing folder
+              </button>
+              <button data-testid="inject-result-close" onClick={onClose} style={buttonStyle(true)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </DialogShell>
+      </Overlay>
+    );
+  }
+
+  if (phase === 'apply-error') {
+    return (
+      <Overlay>
+        <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
+          <div data-testid="inject-apply-error" style={{ padding: 20 }}>
+            <div style={{ color: 'var(--error-text)', marginBottom: 10 }}>Injection failed - nothing was written.</div>
+            <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', marginBottom: 16 }}>{errorMessage}</div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button data-testid="inject-apply-error-back" onClick={() => setPhase('review')} style={buttonStyle()}>
+                Back
+              </button>
+            </div>
+          </div>
+        </DialogShell>
+      </Overlay>
+    );
+  }
+
+  // phase === 'review'
+  const hasBlocking = plan.refusedRoots.length > 0;
+  const hasMismatch = plan.externalRefStatuses.some((r) => r.status === 'mismatch');
+  const needsAck = hasBlocking || plan.blockedEmbedded.length > 0 || plan.blockedOther.length > 0 || hasMismatch;
+  const nothingToAdd = plan.counts.added === 0 && plan.counts.reused === 0;
+
+  let confirmDisabledReason = '';
+  if (nothingToAdd) confirmDisabledReason = 'Nothing from this container can be added to the target map.';
+  else if (needsAck && !understand) confirmDisabledReason = 'Check "I understand" below to confirm you have read the warnings.';
+
+  return (
+    <Overlay>
+      <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose} wide>
+        <div data-testid="inject-dialog-summary" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12.5, color: 'var(--text-secondary)' }}>
+          From &quot;{plan.sourceMapName}&quot;: {plan.counts.added} to add, {plan.counts.reused} reused, {plan.counts.blockedEmbedded + plan.counts.blockedOther} blocked
+        </div>
+
+        <div style={{ padding: '10px 16px', maxHeight: 420, overflowY: 'auto' }}>
+          <WarningGroup
+            title="Refused (root selection)"
+            severity="blocking"
+            items={plan.refusedRoots.map((r, i) => ({ key: `root-${i}`, text: `"${r.path}"`, detail: r.reasons }))}
+          />
+          <WarningGroup
+            title="Blocked - embedded data (relocation disabled)"
+            severity="blocking"
+            items={plan.blockedEmbedded.map((b, i) => ({ key: `emb-${i}`, text: `"${b.path}" (${b.group})`, detail: b.reasons }))}
+          />
+          <WarningGroup
+            title="Blocked - other"
+            severity="blocking"
+            items={plan.blockedOther.map((b, i) => ({ key: `oth-${i}`, text: `"${b.path}" (${b.group})`, detail: b.reasons }))}
+          />
+          <WarningGroup
+            title="External resource map references"
+            severity={hasMismatch ? 'blocking' : 'info'}
+            items={plan.externalRefStatuses.map((r, i) => ({
+              key: `ext-${i}`,
+              text: `"${r.path}" needs ${r.resourceMap} - ${describeRefStatus(r.status)}`,
+            }))}
+          />
+          <WarningGroup title="Will be added" severity="info" items={plan.toAdd.map((t, i) => ({ key: `add-${i}`, text: `"${t.path}" (${t.group})` }))} />
+          <WarningGroup title="Reused (already present in target)" severity="info" items={plan.reused.map((t, i) => ({ key: `reuse-${i}`, text: `"${t.path}" (${t.group})` }))} />
+        </div>
+
+        <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)' }}>
+          {needsAck && !nothingToAdd && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 12, color: 'var(--text-secondary)' }}>
+              <input data-testid="inject-understand-checkbox" type="checkbox" checked={understand} onChange={(e) => setUnderstand(e.target.checked)} />
+              I understand some tags will be skipped or may reference the wrong resource map data.
+            </label>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button data-testid="inject-dialog-cancel" onClick={onClose} style={buttonStyle()}>
+              Cancel
+            </button>
+            <button
+              data-testid="inject-confirm-button"
+              disabled={!!confirmDisabledReason}
+              title={confirmDisabledReason || undefined}
+              onClick={handleConfirm}
+              style={buttonStyle(!confirmDisabledReason)}
+            >
+              Choose location and inject
+            </button>
+          </div>
+          {confirmDisabledReason && (
+            <div data-testid="inject-confirm-disabled-reason" style={{ marginTop: 6, fontSize: 11, color: 'var(--text-dim)', textAlign: 'right' }}>
+              {confirmDisabledReason}
+            </div>
+          )}
+        </div>
+      </DialogShell>
+    </Overlay>
+  );
+}
+
+function describeRefStatus(status: string): string {
+  switch (status) {
+    case 'match':
+      return 'matches your configured resource map';
+    case 'mismatch':
+      return 'DOES NOT MATCH your configured resource map - may show wrong data in-game';
+    case 'unconfigured-on-target':
+      return 'no resource map configured (Settings) - cannot verify';
+    default:
+      return 'could not be verified when it was extracted';
+  }
+}
+
+function Overlay({ children }: { children: ReactNode }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
+      {children}
+    </div>
+  );
+}
+
+const DialogShell = forwardRef<HTMLDivElement, { testid: string; children: ReactNode; onKeyDown: (e: KeyboardEvent) => void; onClose: () => void; wide?: boolean }>(
+  ({ testid, children, onKeyDown, onClose, wide }, ref) => (
+    <div
+      ref={ref}
+      data-testid={testid}
+      role="dialog"
+      aria-modal="true"
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
+      style={{
+        width: wide ? 640 : 420,
+        maxHeight: '85vh',
+        background: 'var(--bg-panel)',
+        border: '1px solid var(--border)',
+        borderRadius: 4,
+        boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: 'var(--bg-panel-header)', borderBottom: '1px solid var(--border)' }}>
+        <span style={{ fontSize: 13, fontWeight: 600 }}>Inject Tags</span>
+        <button data-testid="inject-dialog-close" onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-dim)', fontSize: 16, lineHeight: 1 }}>
+          ×
+        </button>
+      </div>
+      {children}
+    </div>
+  ),
+);
+
+function buttonStyle(primary = false): CSSProperties {
+  return {
+    background: primary ? 'var(--accent-cyan)' : 'var(--bg-panel-header)',
+    color: primary ? '#06202c' : 'var(--text-primary)',
+    border: '1px solid var(--border)',
+    borderRadius: 2,
+    padding: '6px 14px',
+    fontSize: 12,
+  };
+}

@@ -71,6 +71,36 @@ yarn build    # tsc type-check + compile to dist/
 yarn inspect-map /path/to/some.map   # developer-only CLI, prints parsed header + tag list
 ```
 
+### Sample maps (for the real-map test suites)
+
+Several test files (`definitions.test.ts`, `dependency-walker.test.ts`, `tag-extractor.test.ts`,
+`compression.real-map.test.ts`, `tag-footprints.test.ts`) run extra assertions against real
+`.map` files if you have them, and **skip themselves automatically** (with a clear message
+naming which file is missing and where it looked) if you don't.
+
+By default they look in `<repo root>/sample_maps` (i.e. next to `core/` and `desktop/`) - on
+Windows that's typically:
+
+```
+C:\path\to\opence\sample_maps\bloodgulch.map
+C:\path\to\opence\sample_maps\ui.map
+C:\path\to\opence\sample_maps\bitmaps.map     (optional - resource map checks)
+C:\path\to\opence\sample_maps\sounds.map      (optional - resource map checks)
+```
+
+To use a different location (any OS), set `SAMPLE_MAPS_DIR` before running tests:
+
+```bash
+# bash/macOS/Linux
+SAMPLE_MAPS_DIR=/path/to/maps yarn test
+
+# Windows PowerShell
+$env:SAMPLE_MAPS_DIR = "C:\HaloCE\maps"; yarn test
+```
+
+The resolution logic lives in one place, `tests/helpers/sample-maps.ts` - no test or script in
+this repo hardcodes an absolute path to the sample maps directory.
+
 ## Layout
 
 ```

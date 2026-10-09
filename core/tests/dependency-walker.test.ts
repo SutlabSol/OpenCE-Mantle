@@ -1,20 +1,30 @@
-import { describe, expect, it } from 'vitest';
-import * as fs from 'fs';
+import { describe, expect, it, beforeAll } from 'vitest';
 import { inspectCustomEditionMap } from '../src/map/open-map';
 import { walkDependencies, UNCERTAIN_GROUPS } from '../src/map/dependency-walker';
 import { extractTagSet, verifyExtractedTagSet } from '../src/map/tag-extractor';
+import { hasSampleMap, readSampleMap, missingSampleMapsMessage } from './helpers/sample-maps';
+import type { CacheFileHeader } from '../src/map/header';
+import type { TagIndex } from '../src/map/tag-index';
 
-const SAMPLE_DIR = '/app/sample_maps';
-const haveBloodgulch = fs.existsSync(`${SAMPLE_DIR}/bloodgulch.map`);
+const haveBloodgulch = hasSampleMap('bloodgulch.map');
+const suiteTitle = haveBloodgulch ? 'dependency walker + extraction (M4)' : `dependency walker + extraction (M4) [${missingSampleMapsMessage(['bloodgulch.map'])}]`;
 
-describe.skipIf(!haveBloodgulch)('dependency walker + extraction (M4)', () => {
-  const buffer = fs.readFileSync(`${SAMPLE_DIR}/bloodgulch.map`);
-  const inspected = inspectCustomEditionMap(buffer);
-  if (inspected.status !== 'ok') throw new Error('sample map did not parse');
-  const { header, tagIndex } = inspected;
+describe.skipIf(!haveBloodgulch)(suiteTitle, () => {
+  let buffer: Buffer;
+  let header: CacheFileHeader;
+  let tagIndex: TagIndex;
+  let warthogIndex: number;
+  let assaultRifleIndex: number;
 
-  const warthogIndex = tagIndex.entries.find((e) => e.path === 'vehicles\\warthog\\mp_warthog' && e.primaryClassName === 'vehicle')!.index;
-  const assaultRifleIndex = tagIndex.entries.find((e) => e.path === 'weapons\\assault rifle\\assault rifle' && e.primaryClassName === 'weapon')!.index;
+  beforeAll(() => {
+    buffer = readSampleMap('bloodgulch.map');
+    const inspected = inspectCustomEditionMap(buffer);
+    if (inspected.status !== 'ok') throw new Error('sample map did not parse');
+    header = inspected.header;
+    tagIndex = inspected.tagIndex;
+    warthogIndex = tagIndex.entries.find((e) => e.path === 'vehicles\\warthog\\mp_warthog' && e.primaryClassName === 'vehicle')!.index;
+    assaultRifleIndex = tagIndex.entries.find((e) => e.path === 'weapons\\assault rifle\\assault rifle' && e.primaryClassName === 'weapon')!.index;
+  });
 
   it('walks the full dependency closure of a vehicle (warthog) with no crashes and sane warnings', () => {
     const walk = walkDependencies(buffer, header, tagIndex, [warthogIndex]);
@@ -23,7 +33,7 @@ describe.skipIf(!haveBloodgulch)('dependency walker + extraction (M4)', () => {
     expect(walk.tags.some((t) => t.group === 'gbxmodel')).toBe(true);
     // Every warning must reference a real kind and not crash the walk.
     for (const w of walk.warnings) {
-      expect(['uncertainGroup', 'noDefinition', 'externalTag', 'externalData', 'bspTag']).toContain(w.kind);
+      expect(['uncertainGroup', 'noDefinition', 'externalTag', 'externalData', 'embeddedRawData', 'bspTag']).toContain(w.kind);
     }
     // eslint-disable-next-line no-console
     console.log(`warthog closure: ${walk.tags.length} internal tags, ${walk.externalTags.length} external, ${walk.warnings.length} warnings`);

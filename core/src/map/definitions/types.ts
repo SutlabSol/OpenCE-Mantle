@@ -58,6 +58,14 @@ export interface DefinitionValueField {
   fileOffset?: boolean;
   /** Only present when type === "TagDataOffset": this data lives in an external resource map (e.g. "sounds.map") when this instance is marked external, not inline in this file. */
   externalFileOffset?: string;
+  /**
+   * Only present on a bitfield-typed field whose bitfield defines an "external" bit (e.g.
+   * BitmapData.flags): names the sibling fields (in the SAME struct) that hold the raw asset's
+   * offset/size, and which resource map it lives in when the bit is set. Lets the dependency
+   * walker generically detect per-mipmap external/embedded bitmap data without hardcoding
+   * "BitmapData"/"pixel data offset" by name anywhere in TS code.
+   */
+  externalDataSibling?: { offsetField: string; sizeField: string; resourceMap: string };
   comment?: string;
 }
 

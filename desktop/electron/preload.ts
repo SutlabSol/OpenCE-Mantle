@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest } from './shared-types';
+import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind } from './shared-types';
 
 const api: OpenceApi = {
   openMapDialog: () => ipcRenderer.invoke('dialog:openMap'),
@@ -9,6 +9,11 @@ const api: OpenceApi = {
   getDependencies: (originalIndices: number[]) => ipcRenderer.invoke('deps:get', originalIndices),
   extractTags: (request: ExtractTagsRequest) => ipcRenderer.invoke('tags:extract', request),
   cancelExtraction: () => ipcRenderer.send('tags:cancelExtract'),
+  pickResourceMap: (kind: ResourceMapKind) => ipcRenderer.invoke('resourceMaps:pick', kind),
+  getResourceMapStatuses: () => ipcRenderer.invoke('resourceMaps:getStatuses'),
+  pickInjectContainer: () => ipcRenderer.invoke('tags:pickInjectContainer'),
+  planInject: (containerPath: string) => ipcRenderer.invoke('tags:planInject', containerPath),
+  applyInject: () => ipcRenderer.invoke('tags:applyInject'),
   openContainingFolder: (filePath: string) => ipcRenderer.invoke('app:openContainingFolder', filePath),
   getSettings: () => ipcRenderer.invoke('app:getSettings'),
   notImplemented: (feature: string) => ipcRenderer.send('app:notImplemented', feature),

@@ -1,17 +1,30 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { OCETAGS_EXTENSION } from '../../core/src/index';
+import { OCETAGS_EXTENSION, validateResourceMapFile } from '../../core/src/index';
 import { getRecentMaps, addRecentMap } from './recent-maps';
-import { getSettings, setLastExtractDir } from './settings';
+import { getSettings, setLastExtractDir, setResourceMapPath } from './settings';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
-import type { LoadMapResult, CompressionResult, LogEvent, GetDependenciesResult, ExtractTagsRequest, ExtractTagsResult } from './shared-types';
+import type {
+  LoadMapResult,
+  CompressionResult,
+  LogEvent,
+  GetDependenciesResult,
+  ExtractTagsRequest,
+  ExtractTagsResult,
+  ResourceMapKind,
+  ResourceMapStatus,
+  ResourceMapPickResult,
+  PlanInjectResult,
+  ApplyInjectResult,
+} from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
 let currentMapPath: string | null = null;
 let currentMapCompressed = false;
 let currentMapScenarioName: string | null = null;
 let currentExtractRequestId: string | null = null;
+let currentInjectContainerPath: string | null = null;
 
 const isDev = !app.isPackaged;
 
@@ -232,6 +245,128 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
   }
 }
 
+const RESOURCE_MAP_FILTER_NAMES: Record<ResourceMapKind, string> = { bitmaps: 'bitmaps.map', sounds: 'sounds.map', loc: 'loc.map' };
+
+function readResourceMapStatus(kind: ResourceMapKind, filePath: string | null): ResourceMapStatus {
+  if (!filePath) return { state: 'not-configured' };
+  try {
+    const buffer = fs.readFileSync(filePath);
+    const result = validateResourceMapFile(buffer, kind);
+    if (!result.ok) return { state: 'missing-or-unreadable', path: filePath, error: result.error };
+    return { state: 'ok', path: filePath, fileSizeBytes: buffer.length, entryCount: result.identity.entryCount };
+  } catch (err) {
+    return { state: 'missing-or-unreadable', path: filePath, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Main process owns the picker and settings.json end-to-end - the renderer only ever receives a status back, never a path (user's explicit requirement). */
+async function pickResourceMapFlow(kind: ResourceMapKind): Promise<ResourceMapPickResult> {
+  if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: `Pick ${RESOURCE_MAP_FILTER_NAMES[kind]}`,
+    filters: [{ name: 'Halo CE Resource Map', extensions: ['map'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || filePaths.length === 0) return { ok: false, code: 'CANCELLED' };
+
+  const status = readResourceMapStatus(kind, filePaths[0]);
+  if (status.state !== 'ok') {
+    sendLog('warn', `Rejected ${filePaths[0]} for the ${RESOURCE_MAP_FILTER_NAMES[kind]} slot: ${status.state === 'missing-or-unreadable' ? status.error : 'unknown error'}`);
+    return { ok: true, status }; // not saved - picker shows the rejection, settings.json is untouched
+  }
+  setResourceMapPath(kind, filePaths[0]);
+  sendLog('info', `${RESOURCE_MAP_FILTER_NAMES[kind]} set to ${filePaths[0]} (${status.entryCount} entries).`);
+  return { ok: true, status };
+}
+
+function getResourceMapStatusesFlow(): Record<ResourceMapKind, ResourceMapStatus> {
+  const settings = getSettings();
+  return {
+    bitmaps: readResourceMapStatus('bitmaps', settings.resourceMaps.bitmaps),
+    sounds: readResourceMapStatus('sounds', settings.resourceMaps.sounds),
+    loc: readResourceMapStatus('loc', settings.resourceMaps.loc),
+  };
+}
+
+async function pickInjectContainerFlow(): Promise<{ path: string } | null> {
+  if (!mainWindow) return null;
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Inject tags from...',
+    filters: [{ name: 'OpenCE Tag Set', extensions: ['ocetags'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || filePaths.length === 0) return null;
+  return { path: filePaths[0] };
+}
+
+async function planInjectFlow(containerPath: string): Promise<PlanInjectResult> {
+  if (!currentMapPath || currentMapCompressed) return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress the target map before injecting tags into it.' };
+  currentInjectContainerPath = containerPath;
+  const settings = getSettings();
+  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
+  for (const kind of ['bitmaps', 'sounds', 'loc'] as ResourceMapKind[]) {
+    const p = settings.resourceMaps[kind];
+    if (p) resourceMapPaths[kind] = p;
+  }
+  sendLog('info', `Planning injection from ${containerPath}`);
+  const { promise } = sendWorkerRequest<PlanInjectResult>({ type: 'planInject', containerPath, resourceMapPaths }, sendLog, (stage, percent) =>
+    mainWindow?.webContents.send('map:progress', { taskId: 'planInject', stage, percent }),
+  );
+  try {
+    return await promise;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Injection plan failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+async function applyInjectFlow(): Promise<ApplyInjectResult> {
+  if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (!currentInjectContainerPath) return { ok: false, code: 'NO_PLAN', message: 'Run "Inject Tags..." and review the plan before applying it.' };
+
+  const defaultPath = currentMapPath.replace(/\.map$/i, '_injected.map');
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save injected map as',
+    defaultPath,
+    filters: [{ name: 'Halo CE Map', extensions: ['map'] }],
+  });
+  if (canceled || !filePath) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+
+  const resolvedTarget = path.resolve(filePath);
+  if (resolvedTarget === path.resolve(currentMapPath)) {
+    return { ok: false, code: 'REFUSED_SOURCE_PATH', message: 'You cannot overwrite the map you are injecting into. Choose a different location.' };
+  }
+  if (fs.existsSync(resolvedTarget)) {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Overwrite', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      message: `"${path.basename(resolvedTarget)}" already exists.`,
+      detail: 'Do you want to overwrite it?',
+    });
+    if (response !== 0) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+  }
+
+  sendLog('info', `Writing injected map to ${resolvedTarget}`);
+  const { promise } = sendWorkerRequest<ApplyInjectResult>({ type: 'applyInject', outputPath: resolvedTarget }, sendLog, (stage, percent) =>
+    mainWindow?.webContents.send('map:progress', { taskId: 'applyInject', stage, percent }),
+  );
+  try {
+    const result = await promise;
+    if (result.ok) sendLog('info', `Injected ${result.addedCount} tag(s) (${result.reusedCount} reused) into ${result.outputPath}`);
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Injection failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  } finally {
+    currentInjectContainerPath = null;
+  }
+}
+
 function showAboutDialog() {
   if (!mainWindow) return;
   dialog.showMessageBox(mainWindow, {
@@ -272,7 +407,9 @@ function buildMenu() {
         { label: 'Recompress Map', click: () => recompressFlow() },
         { type: 'separator' },
         { label: 'Extract Tags...', accelerator: 'CmdOrCtrl+E', click: () => mainWindow?.webContents.send('menu:action', 'extract-tags') },
-        { label: 'Inject Tags...', click: () => mainWindow?.webContents.send('menu:action', 'inject-stub') },
+        { label: 'Inject Tags...', click: () => mainWindow?.webContents.send('menu:action', 'inject-tags') },
+        { type: 'separator' },
+        { label: 'Settings...', click: () => mainWindow?.webContents.send('menu:action', 'settings') },
       ],
     },
     {
@@ -315,6 +452,11 @@ app.whenReady().then(() => {
   ipcMain.on('tags:cancelExtract', () => {
     if (currentExtractRequestId) cancelWorkerRequest(currentExtractRequestId, sendLog);
   });
+  ipcMain.handle('resourceMaps:pick', (_e, kind: ResourceMapKind) => pickResourceMapFlow(kind));
+  ipcMain.handle('resourceMaps:getStatuses', () => getResourceMapStatusesFlow());
+  ipcMain.handle('tags:pickInjectContainer', () => pickInjectContainerFlow());
+  ipcMain.handle('tags:planInject', (_e, containerPath: string) => planInjectFlow(containerPath));
+  ipcMain.handle('tags:applyInject', () => applyInjectFlow());
   ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
   });

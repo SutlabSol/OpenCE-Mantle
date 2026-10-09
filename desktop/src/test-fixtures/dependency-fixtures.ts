@@ -1,10 +1,22 @@
-import type { DependencyWalkSummary, DependencyTagInfo, DependencyNotExtractedInfo, DependencyWarningInfo } from '../../electron/shared-types';
+import type { DependencyWalkSummary, DependencyTagInfo, DependencyNotExtractedInfo, DependencyWarningInfo, InjectPlanSummary } from '../../electron/shared-types';
 
 /**
  * Realistic dependency-walk fixtures shared between `dev-mock.ts` (Vite browser preview) and
  * the DependencyDialog/TagBrowser component tests, so both exercise the exact same data shapes.
  */
-export const MOCK_SCENARIOS = ['clean', 'scenario-bsp', 'external-data', 'spheroid', 'bsp-only', 'large-list', 'deps-error', 'extract-error', 'slow-progress'] as const;
+export const MOCK_SCENARIOS = [
+  'clean',
+  'scenario-bsp',
+  'external-data',
+  'spheroid',
+  'bsp-only',
+  'large-list',
+  'deps-error',
+  'extract-error',
+  'slow-progress',
+  'inject-clean',
+  'inject-blocked',
+] as const;
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
 export function parseMockScenario(search: string): MockScenario {
@@ -160,4 +172,32 @@ export function buildMockSummary(scenario: MockScenario): DependencyWalkSummary 
     default:
       return cleanSummary();
   }
+}
+
+/** M5 Step A inject-plan fixtures (dev preview via `?mock=inject-clean` / `?mock=inject-blocked`). */
+export function buildMockInjectPlan(scenario: MockScenario, containerPath: string): InjectPlanSummary {
+  if (scenario === 'inject-blocked') {
+    return {
+      containerPath,
+      sourceMapName: 'ui',
+      counts: { totalInClosure: 3, reused: 0, added: 1, blockedEmbedded: 1, blockedOther: 1, externalReferenced: 1 },
+      toAdd: [{ path: 'ui\\ticker', group: 'font' }],
+      reused: [],
+      blockedEmbedded: [{ path: 'sky\\space\\bitmaps\\synthetic_embedded', group: 'bitmap', reasons: ['Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone.'] }],
+      blockedOther: [{ path: 'ui\\gamespy', group: 'font', reasons: ['Depends on "fonts\\missing_in_target" (font), a resource-map tag not present in the target map.'] }],
+      externalRefStatuses: [{ path: 'sky\\space\\bitmaps\\star mask', group: 'bitmap', resourceMap: 'bitmaps.map', status: 'unconfigured-on-target' }],
+      refusedRoots: [{ path: 'ui\\gamespy', reasons: ['Depends on "fonts\\missing_in_target" (font), a resource-map tag not present in the target map.'] }],
+    };
+  }
+  return {
+    containerPath,
+    sourceMapName: 'ui',
+    counts: { totalInClosure: 2, reused: 1, added: 1, blockedEmbedded: 0, blockedOther: 0, externalReferenced: 1 },
+    toAdd: [{ path: 'ui\\ticker', group: 'font' }],
+    reused: [{ path: 'ui\\small_ui', group: 'font' }],
+    blockedEmbedded: [],
+    blockedOther: [],
+    externalRefStatuses: [{ path: 'sky\\space\\bitmaps\\star mask', group: 'bitmap', resourceMap: 'bitmaps.map', status: 'match' }],
+    refusedRoots: [],
+  };
 }

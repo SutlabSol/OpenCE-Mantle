@@ -1,5 +1,19 @@
-import type { LoadMapResult, OpenceApi, ProgressEvent, LogEvent, GetDependenciesResult, ExtractTagsRequest, ExtractTagsResult, AppSettings } from '../electron/shared-types';
-import { parseMockScenario, buildMockSummary } from './test-fixtures/dependency-fixtures';
+import type {
+  LoadMapResult,
+  OpenceApi,
+  ProgressEvent,
+  LogEvent,
+  GetDependenciesResult,
+  ExtractTagsRequest,
+  ExtractTagsResult,
+  AppSettings,
+  ResourceMapKind,
+  ResourceMapStatus,
+  ResourceMapPickResult,
+  PlanInjectResult,
+  ApplyInjectResult,
+} from '../electron/shared-types';
+import { parseMockScenario, buildMockSummary, buildMockInjectPlan } from './test-fixtures/dependency-fixtures';
 
 /**
  * Dev-only mock of window.opence, used when previewing the renderer in a plain browser
@@ -52,6 +66,11 @@ export function installDevMock() {
   const progressListeners = new Set<(e: ProgressEvent) => void>();
   const logListeners = new Set<(e: LogEvent) => void>();
   let extractCancelled = false;
+  const mockResourceMapStatuses: Record<ResourceMapKind, ResourceMapStatus> = {
+    bitmaps: { state: 'not-configured' },
+    sounds: { state: 'not-configured' },
+    loc: { state: 'not-configured' },
+  };
 
   const fakeProgress = async (taskId: string) => {
     for (const [stage, percent] of [['Reading file', 10], ['Processing', 50], ['Writing file', 85], ['Done', 100]] as const) {
@@ -107,11 +126,34 @@ export function installDevMock() {
     openContainingFolder: async (filePath: string) => {
       logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) Would open containing folder for ${filePath}`, timestamp: Date.now() }));
     },
-    getSettings: async (): Promise<AppSettings> => ({ lastExtractDir: null }),
+    getSettings: async (): Promise<AppSettings> => ({ lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } }),
     notImplemented: (feature) => logListeners.forEach((cb) => cb({ level: 'warn', message: `${feature} not implemented yet`, timestamp: Date.now() })),
     showAbout: async () => logListeners.forEach((cb) => cb({ level: 'info', message: 'About OpenCE Modding Tool v0.1.0-dev', timestamp: Date.now() })),
     getAppVersion: async () => '0.1.0-dev',
     getRecentMaps: async () => ['C:/HaloCE/maps/bloodgulch.map'],
+    pickResourceMap: async (kind): Promise<ResourceMapPickResult> => {
+      const status: ResourceMapStatus = { state: 'ok', path: `C:\\HaloCE\\${kind}.map`, fileSizeBytes: 123_547_749, entryCount: 1706 };
+      mockResourceMapStatuses[kind] = status;
+      logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) ${kind}.map set to ${status.path}`, timestamp: Date.now() }));
+      return { ok: true, status };
+    },
+    getResourceMapStatuses: async () => ({ ...mockResourceMapStatuses }),
+    pickInjectContainer: async () => ({ path: 'C:\\Users\\Dev\\Documents\\ui_ticker.ocetags' }),
+    planInject: async (containerPath) => {
+      await new Promise((r) => setTimeout(r, 200));
+      return { ok: true, plan: buildMockInjectPlan(scenario, containerPath) };
+    },
+    applyInject: async (): Promise<ApplyInjectResult> => {
+      await fakeProgress('applyInject');
+      const plan = buildMockInjectPlan(scenario, 'mock.ocetags');
+      return {
+        ok: true,
+        outputPath: 'C:\\HaloCE\\maps\\bloodgulch_injected.map',
+        addedCount: plan.counts.added,
+        reusedCount: plan.counts.reused,
+        staleChecksumWarning: "This map's CRC32 and tag checksum are now stale (recalculating them is Milestone 6) - some tools/servers that verify them may reject it until then.",
+      };
+    },
     onProgress: (cb) => {
       progressListeners.add(cb);
       return () => progressListeners.delete(cb);

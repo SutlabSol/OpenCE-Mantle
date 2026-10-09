@@ -9,12 +9,17 @@ import {
   walkDependencies,
   extractTagSet,
   serializeContainer,
+  deserializeContainer,
+  planAddInjection,
+  applyAddInjection,
+  computeResourceMapIdentity,
   getGroupDefinition,
   validateAllDefinitions,
   AllTagsExcludedError,
   OperationCancelledError,
+  ContainerFormatError,
 } from '../../core/src/index';
-import type { CacheFileHeader, TagIndex } from '../../core/src/index';
+import type { CacheFileHeader, TagIndex, OceContainer, AddInjectionPlan, ResourceMapConfig } from '../../core/src/index';
 import type {
   LoadMapResult,
   WorkerRequest,
@@ -24,6 +29,10 @@ import type {
   DependencyWarningInfo,
   GetDependenciesResult,
   ExtractTagsResult,
+  PlanInjectResult,
+  ApplyInjectResult,
+  InjectPlanSummary,
+  ResourceMapKind,
 } from './shared-types';
 
 /**
@@ -32,7 +41,7 @@ import type {
  * later request (`getDependencies`/`extractTags`) reuses it instead of re-reading/re-sending it.
  * All file I/O lives here, not in `/core` - `/core` stays pure (no fs/worker_threads imports).
  */
-interface LoadedMap {
+export interface LoadedMap {
   filePath: string;
   buffer: Buffer;
   header: CacheFileHeader;
@@ -40,16 +49,33 @@ interface LoadedMap {
 }
 
 let currentMap: LoadedMap | null = null;
+let currentInject: { container: OceContainer; plan: AddInjectionPlan } | null = null;
 const cancelledRequests = new Set<string>();
 
+type Sink = (msg: { type: string; requestId?: string; [key: string]: unknown }) => void;
+let sink: Sink = (msg) => parentPort?.postMessage(msg);
+
+/** Test-only hook: redirect posted messages to a capture array instead of `parentPort` (which is null outside a real worker thread). */
+export function __setSinkForTest(fn: Sink): void {
+  sink = fn;
+}
+/** Test-only hook: inject an already-parsed map, skipping the real `inspect` file-read step. */
+export function __setCurrentMapForTest(map: LoadedMap | null): void {
+  currentMap = map;
+}
+/** Test-only hook: mirrors what a real `{ type: 'cancel' }` message does. */
+export function __cancelForTest(requestId: string): void {
+  cancelledRequests.add(requestId);
+}
+
 function progress(requestId: string, stage: string, percent: number) {
-  parentPort?.postMessage({ type: 'progress', requestId, stage, percent });
+  sink({ type: 'progress', requestId, stage, percent });
 }
 function sendResult(requestId: string, payload: unknown) {
-  parentPort?.postMessage({ type: 'result', requestId, payload });
+  sink({ type: 'result', requestId, payload });
 }
 function sendError(requestId: string, code: string, message: string) {
-  parentPort?.postMessage({ type: 'error', requestId, code, message });
+  sink({ type: 'error', requestId, code, message });
 }
 
 function handleTaskError(requestId: string, err: unknown) {
@@ -130,7 +156,7 @@ async function runCompression(task: { requestId: string; type: 'compress' | 'dec
   sendResult(task.requestId, { outputPath: task.outputPath, originalSize: buffer.length, newSize: output.length });
 }
 
-function runGetDependencies(task: { requestId: string; originalIndices: number[] }) {
+export function runGetDependencies(task: { requestId: string; originalIndices: number[] }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   const cancelCtl = makeCancelController(task.requestId);
   try {
@@ -178,7 +204,7 @@ function runGetDependencies(task: { requestId: string; originalIndices: number[]
   }
 }
 
-function runExtractTags(task: { requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }) {
+export function runExtractTags(task: { requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   const cancelCtl = makeCancelController(task.requestId);
   const tempPath = `${task.outputPath}.tmp-${randomUUID()}`;
@@ -217,6 +243,85 @@ function runExtractTags(task: { requestId: string; originalIndices: number[]; ou
   }
 }
 
+function summarizePlan(containerPath: string, container: OceContainer, plan: AddInjectionPlan): InjectPlanSummary {
+  return {
+    containerPath,
+    sourceMapName: container.sourceMapName,
+    counts: plan.counts,
+    toAdd: plan.toAdd.map((t) => ({ path: t.path, group: t.group })),
+    reused: Array.from(plan.reusedByLocalIndex.keys()).map((li) => ({ path: container.tags[li].path, group: container.tags[li].group })),
+    blockedEmbedded: plan.blockedEmbedded.map((b) => ({ path: b.path, group: b.group, reasons: b.reasons })),
+    blockedOther: plan.blockedOther.map((b) => ({ path: b.path, group: b.group, reasons: b.reasons })),
+    externalRefStatuses: plan.externalRefStatuses.map((r) => ({ path: r.path, group: container.tags[r.localIndex]?.group ?? '', resourceMap: r.resourceMap, status: r.status })),
+    refusedRoots: plan.refusedRoots.map((r) => ({ path: r.path, reasons: r.reasons })),
+  };
+}
+
+export function runPlanInject(task: { requestId: string; containerPath: string; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open to inject into.');
+  try {
+    progress(task.requestId, 'Reading container file', 10);
+    const containerBuffer = fs.readFileSync(task.containerPath);
+    const container = deserializeContainer(containerBuffer);
+
+    progress(task.requestId, 'Checking configured resource maps', 40);
+    const resourceMapConfig: ResourceMapConfig = {};
+    for (const kind of ['bitmaps', 'sounds', 'loc'] as ResourceMapKind[]) {
+      const p = task.resourceMapPaths[kind];
+      if (!p) continue;
+      try {
+        resourceMapConfig[kind] = { identity: computeResourceMapIdentity(fs.readFileSync(p)) };
+      } catch {
+        /* unreadable/invalid configured resource map - treated as not configured for this plan */
+      }
+    }
+
+    progress(task.requestId, 'Planning injection', 70);
+    const planResult = planAddInjection(currentMap.tagIndex, container, resourceMapConfig);
+    if (planResult.kind === 'refused') {
+      currentInject = null;
+      return sendError(task.requestId, 'PLAN_REFUSED', planResult.reason);
+    }
+    currentInject = { container, plan: planResult };
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, { ok: true, plan: summarizePlan(task.containerPath, container, planResult) } satisfies PlanInjectResult);
+  } catch (err) {
+    currentInject = null;
+    if (err instanceof ContainerFormatError) return sendError(task.requestId, 'CONTAINER_FORMAT_ERROR', err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+
+export function runApplyInject(task: { requestId: string; outputPath: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  if (!currentInject) return sendError(task.requestId, 'NO_PLAN', 'Run "Inject Tags..." and review the plan before applying it.');
+  const tempPath = `${task.outputPath}.tmp-${randomUUID()}`;
+  try {
+    progress(task.requestId, 'Writing tag data', 30);
+    const injected = applyAddInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan);
+    progress(task.requestId, 'Writing output file', 80);
+    fs.writeFileSync(tempPath, injected);
+    fs.renameSync(tempPath, task.outputPath);
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      outputPath: task.outputPath,
+      addedCount: currentInject.plan.counts.added,
+      reusedCount: currentInject.plan.counts.reused,
+      staleChecksumWarning: 'This map\'s CRC32 and tag checksum are now stale (recalculating them is Milestone 6) - some tools/servers that verify them may reject it until then.',
+    } satisfies ApplyInjectResult);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch {
+      /* best-effort cleanup only */
+    }
+    handleTaskError(task.requestId, err);
+  } finally {
+    currentInject = null;
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -227,6 +332,8 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'compress' || task.type === 'decompress') await runCompression(task);
     else if (task.type === 'getDependencies') runGetDependencies(task);
     else if (task.type === 'extractTags') runExtractTags(task);
+    else if (task.type === 'planInject') runPlanInject(task);
+    else if (task.type === 'applyInject') runApplyInject(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

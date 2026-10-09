@@ -14,3 +14,4 @@ export * from './map/definitions/validate-tag';
 export * from './map/dependency-walker';
 export * from './map/tag-extractor';
 export * from './map/container';
+export * from './map/tag-injector';

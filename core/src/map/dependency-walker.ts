@@ -35,7 +35,7 @@ export interface WalkedTag {
   requiredBy: string[];
 }
 
-export type WarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'bspTag';
+export type WarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'embeddedRawData' | 'bspTag';
 
 export interface WalkerWarning {
   originalIndex: number;
@@ -43,6 +43,12 @@ export interface WalkerWarning {
   group: string;
   kind: WarningKind;
   message: string;
+  /** Only set for 'externalData'/'embeddedRawData': which resource map this field's data lives in when external (e.g. "bitmaps.map"). */
+  resourceMap?: string;
+  /** Only set for 'externalData'/'embeddedRawData': the raw byte offset recorded in the field (into the resource map if external, into this same map's raw-data region if embedded). */
+  fileOffset?: number;
+  /** Only set for 'externalData'/'embeddedRawData': size in bytes of the referenced data. */
+  size?: number;
 }
 
 export interface WalkResult {
@@ -184,7 +190,7 @@ export function walkDependencies(
       continue;
     }
 
-    collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, baseMemoryAddress, entry.path, entry.path, (dep) => queue.push(dep), (w) => warnings.push(w));
+    collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, baseMemoryAddress, entry.path, entry.path, index, (dep) => queue.push(dep), (w) => warnings.push(w));
   }
 
   options.onProgress?.(visited.size, 0);
@@ -231,6 +237,7 @@ function collectFromStruct(
   baseMemoryAddress: number,
   contextPath: string,
   rootPath: string,
+  rootOriginalIndex: number,
   enqueue: (item: QueueItem) => void,
   warn: (w: WalkerWarning) => void,
 ): void {
@@ -270,29 +277,60 @@ function collectFromStruct(
       if (childBase < 0 || childBase + value.value.count * childSize > buffer.length) continue;
       const n = Math.min(value.value.count, MAX_ELEMENTS_WALKED_PER_REFLEXIVE);
       for (let i = 0; i < n; i++) {
-        collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, enqueue, warn);
+        collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, rootOriginalIndex, enqueue, warn);
       }
     } else if (value.kind === 'tagDataOffset' && value.value.size > 0) {
-      if (field.def.type === 'TagDataOffset' && field.def.externalFileOffset && value.value.external !== 0) {
-        warn({
-          originalIndex: -1,
-          path: contextPath,
-          group: '',
-          kind: 'externalData',
-          message: `"${contextPath}.${field.name}" (${value.value.size} bytes) lives in "${field.def.externalFileOffset}", not resolved this milestone (flagged only).`,
-        });
+      if (field.def.type === 'TagDataOffset' && field.def.externalFileOffset) {
+        const fieldContext = `${contextPath}.${field.name}`;
+        if (value.value.external !== 0) {
+          warn({
+            originalIndex: rootOriginalIndex,
+            path: fieldContext,
+            group: '',
+            kind: 'externalData',
+            message: `"${fieldContext}" (${value.value.size} bytes) lives in "${field.def.externalFileOffset}", not resolved this milestone (flagged only).`,
+            resourceMap: field.def.externalFileOffset,
+            fileOffset: value.value.fileOffset,
+            size: value.value.size,
+          });
+        } else {
+          warn({
+            originalIndex: rootOriginalIndex,
+            path: fieldContext,
+            group: '',
+            kind: 'embeddedRawData',
+            message: `"${fieldContext}" (${value.value.size} bytes) is embedded in this map's own raw-data region (file offset ${value.value.fileOffset}), outside this tag's own struct bytes - not carried by extraction/injection this milestone (flagged only).`,
+            resourceMap: field.def.externalFileOffset,
+            fileOffset: value.value.fileOffset,
+            size: value.value.size,
+          });
+        }
       }
     } else if (value.kind === 'bitfield') {
       const bitfieldDef = field.def.type ? getBitfieldDefinition(field.def.type) : undefined;
       const externalBit = bitfieldDef?.fields.indexOf('external') ?? -1;
-      if (externalBit >= 0 && (value.value & (1 << externalBit)) !== 0) {
-        warn({
-          originalIndex: -1,
-          path: contextPath,
-          group: '',
-          kind: 'externalData',
-          message: `"${contextPath}.${field.name}" has its "external" flag set (per-mipmap bitmap data in bitmaps.map) - not resolved this milestone (flagged only).`,
-        });
+      const sibling = field.def.externalDataSibling;
+      if (externalBit >= 0 && sibling) {
+        const offsetVal = decoded.get(sibling.offsetField);
+        const sizeVal = decoded.get(sibling.sizeField);
+        const size = offsetVal && sizeVal && offsetVal.kind === 'basic' && sizeVal.kind === 'basic' ? (sizeVal.value as number) : 0;
+        const fileOffsetValue = offsetVal && offsetVal.kind === 'basic' ? (offsetVal.value as number) : 0;
+        if (size > 0) {
+          const fieldContext = `${contextPath}.${field.name}`;
+          const bitSet = (value.value & (1 << externalBit)) !== 0;
+          warn({
+            originalIndex: rootOriginalIndex,
+            path: fieldContext,
+            group: '',
+            kind: bitSet ? 'externalData' : 'embeddedRawData',
+            message: bitSet
+              ? `"${fieldContext}" has its "external" flag set (${size} bytes in "${sibling.resourceMap}") - not resolved this milestone (flagged only).`
+              : `"${fieldContext}" (${size} bytes) is embedded in this map's own raw-data region (file offset ${fileOffsetValue}), outside this tag's own struct bytes - not carried by extraction/injection this milestone (flagged only).`,
+            resourceMap: sibling.resourceMap,
+            fileOffset: fileOffsetValue,
+            size,
+          });
+        }
       }
     }
   }

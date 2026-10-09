@@ -69,7 +69,7 @@ export interface DependencyNotExtractedInfo {
   requiredBy: string[];
 }
 
-export type DependencyWarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'bspTag';
+export type DependencyWarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'embeddedRawData' | 'bspTag';
 
 export interface DependencyWarningInfo {
   originalIndex: number;
@@ -108,7 +108,55 @@ export type ExtractTagsResult =
 
 export interface AppSettings {
   lastExtractDir: string | null;
+  resourceMaps: { bitmaps: string | null; sounds: string | null; loc: string | null };
 }
+
+/* ------------------------------- M5 Step A: ADD-mode injection ------------------------------- */
+
+export type ResourceMapKind = 'bitmaps' | 'sounds' | 'loc';
+
+/** One row of the Settings "Resource Maps" section. */
+export type ResourceMapStatus =
+  | { state: 'not-configured' }
+  | { state: 'missing-or-unreadable'; path: string; error: string }
+  | { state: 'ok'; path: string; fileSizeBytes: number; entryCount: number };
+
+export type ResourceMapPickResult = { ok: true; status: ResourceMapStatus } | { ok: false; code: 'CANCELLED' } | { ok: false; code: string; message: string };
+
+export interface InjectPlanTagSummary {
+  path: string;
+  group: string;
+}
+export interface InjectPlanBlockedSummary extends InjectPlanTagSummary {
+  reasons: string[];
+}
+export interface InjectPlanExternalRefSummary extends InjectPlanTagSummary {
+  resourceMap: string;
+  status: 'match' | 'mismatch' | 'unconfigured-on-target' | 'unverified-at-extraction';
+}
+export interface InjectPlanRefusedRootSummary {
+  path: string;
+  reasons: string[];
+}
+
+export interface InjectPlanSummary {
+  containerPath: string;
+  sourceMapName: string;
+  counts: { totalInClosure: number; reused: number; added: number; blockedEmbedded: number; blockedOther: number; externalReferenced: number };
+  toAdd: InjectPlanTagSummary[];
+  reused: InjectPlanTagSummary[];
+  blockedEmbedded: InjectPlanBlockedSummary[];
+  blockedOther: InjectPlanBlockedSummary[];
+  externalRefStatuses: InjectPlanExternalRefSummary[];
+  refusedRoots: InjectPlanRefusedRootSummary[];
+}
+
+export type PlanInjectResult = { ok: true; plan: InjectPlanSummary } | { ok: false; code: string; message: string };
+
+export type ApplyInjectResult =
+  | { ok: true; outputPath: string; addedCount: number; reusedCount: number; staleChecksumWarning: string }
+  | { ok: false; code: 'CANCELLED'; message: string }
+  | { ok: false; code: string; message: string };
 
 /* --------------------------- main <-> worker thread protocol (internal) --------------------------- */
 
@@ -117,6 +165,8 @@ export type WorkerRequest =
   | { type: 'compress' | 'decompress'; requestId: string; filePath: string; outputPath: string }
   | { type: 'getDependencies'; requestId: string; originalIndices: number[] }
   | { type: 'extractTags'; requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }
+  | { type: 'planInject'; requestId: string; containerPath: string; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
+  | { type: 'applyInject'; requestId: string; outputPath: string }
   | { type: 'cancel'; requestId: string };
 
 export type WorkerResponse =
@@ -135,6 +185,11 @@ export interface OpenceApi {
   getDependencies(originalIndices: number[]): Promise<GetDependenciesResult>;
   extractTags(request: ExtractTagsRequest): Promise<ExtractTagsResult>;
   cancelExtraction(): void;
+  pickResourceMap(kind: ResourceMapKind): Promise<ResourceMapPickResult>;
+  getResourceMapStatuses(): Promise<Record<ResourceMapKind, ResourceMapStatus>>;
+  pickInjectContainer(): Promise<{ path: string } | null>;
+  planInject(containerPath: string): Promise<PlanInjectResult>;
+  applyInject(): Promise<ApplyInjectResult>;
   openContainingFolder(filePath: string): Promise<void>;
   getSettings(): Promise<AppSettings>;
   notImplemented(feature: string): void;

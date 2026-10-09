@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import * as fs from 'fs';
-import { compressCustomEditionMap, decompressCustomEditionMap } from '../src/map/compression';
 import { inspectCustomEditionMap } from '../src/map/open-map';
+import { compressCustomEditionMap, decompressCustomEditionMap } from '../src/map/compression';
+import { sampleMapPath, hasSampleMap, missingSampleMapsMessage } from './helpers/sample-maps';
+import * as fs from 'fs';
 
 /**
  * Validates the Milestone 2 round-trip requirement against the real maps the user supplied
@@ -10,13 +11,17 @@ import { inspectCustomEditionMap } from '../src/map/open-map';
  * byte-for-byte, then decompress -> recompress -> decompress again must still match.
  * Skipped automatically if the sample maps aren't present on disk (e.g. a fresh clone).
  */
-const SAMPLE_DIR = '/app/sample_maps';
-const samples = ['bloodgulch.map', 'ui.map'].filter((name) => fs.existsSync(`${SAMPLE_DIR}/${name}`));
+const ALL_SAMPLES = ['bloodgulch.map', 'ui.map'];
+const samples = ALL_SAMPLES.filter((name) => hasSampleMap(name));
+const suiteTitle =
+  samples.length === ALL_SAMPLES.length
+    ? 'real map compression round trip'
+    : `real map compression round trip [${missingSampleMapsMessage(ALL_SAMPLES)}]`;
 
-describe.skipIf(samples.length === 0)('real map compression round trip', () => {
+describe.skipIf(samples.length === 0)(suiteTitle, () => {
   for (const name of samples) {
     it(`${name}: compress -> decompress reproduces the original byte-for-byte`, async () => {
-      const original = fs.readFileSync(`${SAMPLE_DIR}/${name}`);
+      const original = fs.readFileSync(sampleMapPath(name));
 
       const inspected = inspectCustomEditionMap(original);
       expect(inspected.status).toBe('ok');
@@ -30,7 +35,7 @@ describe.skipIf(samples.length === 0)('real map compression round trip', () => {
     }, 60_000);
 
     it(`${name}: decompress -> recompress -> decompress is byte-identical (brief's stated requirement)`, async () => {
-      const original = fs.readFileSync(`${SAMPLE_DIR}/${name}`);
+      const original = fs.readFileSync(sampleMapPath(name));
       const compressedOnce = await compressCustomEditionMap(original, 19);
       const decompressedOnce = await decompressCustomEditionMap(compressedOnce);
       const compressedTwice = await compressCustomEditionMap(decompressedOnce, 19);
