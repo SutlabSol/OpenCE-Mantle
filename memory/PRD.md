@@ -16,8 +16,8 @@ needs re-verification / unverified / blocked)
 | Feature | Status | How |
 |---|---|---|
 | M4 extraction (general) | **needs re-verification** | Was "done" before the font/string_list/meter/etc data-dropping bug was found; the bug is now fixed and same-reader-verified (101/101 core Vitest), but no fix this session has been run by the user on Windows/OpenCE yet. See "Windows check" below to move this to verified without a full OpenCE session. |
-| M5 ADD / SWAP (tags with NO gbxmodel in their closure) | **needs re-verification** | Same reason as extraction - the data-dropping bug could have affected any injected tag with a font/string_list/meter/hud_message_text/input_device_defaults/model_animations/scenario field. Fixed + same-reader-verified this session; not yet confirmed in OpenCE. **Also affected by the open dependency-order P0 (2026-10-11, see Decisions):** ADD/SWAP can assign tag references to the wrong fields (e.g. 116 ui_widget_definition tags in bloodgulch); do not trust injected maps until that is fixed. |
-| M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked; needs re-verification once unblocked** | `uncapturedData` warning unconditionally blocks these in ADD, and since 2026-10-11 (commit 2ee3c9e) in SWAP too (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. Once unblocked, these tags are also hit by the dependency-order P0 (weapons/projectiles/vehicles/bipeds appear in its counts). |
+| M5 ADD / SWAP (tags with NO gbxmodel in their closure) | **needs re-verification** | Same reason as extraction - the data-dropping bug could have affected any injected tag with a font/string_list/meter/hud_message_text/input_device_defaults/model_animations/scenario field. Fixed + same-reader-verified this session; not yet confirmed in OpenCE. **Dependency-order P0 (2026-10-11, see Decisions): fixed on branch `fix/dependency-order`, verified by tests (independent source-vs-output comparison on 4 maps + same-reader unit tests), not yet confirmed in OpenCE.** Every map previously written by ADD/SWAP is untrusted (SWAP of globals wrote 11 wrong references with no error) - re-create it with the fixed build. |
+| M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked; needs re-verification once unblocked** | `uncapturedData` warning unconditionally blocks these in ADD, and since 2026-10-11 (commit 2ee3c9e) in SWAP too (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. The dependency-order P0 that also affected weapons/projectiles/vehicles/bipeds is fixed (see Decisions); re-check once unblocked. |
 | Embedded (external=0) bitmap/sound relocation | **same-reader-verified, NOT approved for the real app** | `embedded-relocation.test.ts`, real coldsnap.map bytes. `allowEmbeddedRelocation` stays off in `map-worker.ts`. |
 | `gbxmodel` model geometry capture/relocation | **Stage 1 (capture) same-reader-verified; Stage 2 (injection) design-verified, NOT built/wired** | `gbxmodel-geometry.test.ts` (100% captured, 0 blocked, bloodgulch+coldsnap), `gbxmodel-combined-insertion-design.test.ts` (field table + 665-part no-patch proof) — see "gbxmodel geometry — Stage 1 capture" below |
 | Sound relocation | **same-reader-verified, bounds-only** | No deterministic size formula for compressed audio exists (stated, not guessed) - a corrupt/truncated embedded sound could still pass the bounds check. |
@@ -93,7 +93,8 @@ needs re-verification / unverified / blocked)
     extractionFailed, uncertainGroup. embeddedRawData has its own check in both modes. BSP
     refuses the whole plan. Missing external/unresolved/notExtracted dependencies block in
     both modes. externalData stays informational (fingerprint status only).
-- 2026-10-11: **TRACKED P0, NOT FIXED - dependency-order mismatch between extractor and
+- 2026-10-11: **FIXED - see the "Dependency-order fix" entry directly below, which also corrects
+  this entry's counts and its "289 threw" figure. Dependency-order mismatch between extractor and
   injector.** `tag-extractor.ts` records each tag's `dependencies` in two-phase order: all of a
   struct's own fields first, then each reflexive's children. `tag-injector.ts`'s
   `rewriteAddedTagData` consumes them with a single cursor in depth-first field order. Whenever a
@@ -114,6 +115,42 @@ needs re-verification / unverified / blocked)
   dependencies are both resolvable. Gbxmodel closures are blocked today, which hides most
   weapon/vehicle cases. Fix and plan: branch `fix/dependency-order`, research first, pending
   user approval. Not started.
+- 2026-10-11: **Dependency-order fix (user-approved with conditions; branch
+  `fix/dependency-order`, commits f4e2118 fix, ed29721 tests).**
+  - Research corrections to the entry above. (a) A SECOND mechanism: the extractor skips
+    `nonCached` fields but the old reader counted them. `meter`'s two nonCached dependencies
+    ("stencil bitmaps", "source bitmap") are non-null in `ui\hud\cyborg shield`/`cyborg body`, in
+    all 4 maps, so the cursor ran off the end (TypeError). (b) Corrected counts of tags whose
+    entry at some position names a DIFFERENT target (simulated reader order, same-reader):
+    bloodgulch 161, ui 279, sidewinder 161, coldsnap 181 (the earlier 159/277/159/179 plus the 2
+    meters each). (c) **Silent corruption confirmed:** in-memory SWAP of bloodgulch, sidewinder
+    and coldsnap into themselves wrote `globals\globals` with **11 wrong references and no
+    error** (e.g. `multiplayer information[0].vehicles[0].vehicle` -> a shader), found by an
+    independent source-vs-output comparison. ui.map: 0. (d) **"289 threw" was mislabelled.**
+    Reconciled against the unfixed code: of the 524 widgets ADD ui -> bloodgulch plans, 141
+    threw directly, 148 more were then blocked by the cascade behind them (289 not written),
+    and 235 were written correctly. Applied one tag at a time (no cascade), 168 throw.
+  - **Every map written by ADD/SWAP before this fix is untrusted** - re-create it. Saved
+    `.ocetags` containers are NOT affected: every entry matched its own fieldPath's source
+    target on all 4 maps (51,829 entries, 0 wrong, 0 duplicate paths; independent check).
+  - Fix: `rewriteAddedTagData` looks each TagDependency field's entry up by `fieldPath` (no
+    cursor). The path is built by the extractor's own `childFieldPath`/`reflexiveElementPath`.
+    `nonCached` fields are skipped exactly like the extractor skips them, bytes left as in the
+    source (user decision: do not null them unless shown the game never reads them).
+    `planInjection` (`checkDependencyMap`) blocks a tag, with a reason, on a non-null field
+    with no entry, an unknown/renamed fieldPath, duplicate entries, a null mismatch, or data
+    that no longer fits the schema. Apply never throws for these. Entries for nonCached fields
+    (older containers) are ignored, including in the dependency cascade.
+  - Container format: **no version bump**. The extractor's output is unchanged (its path strings are now
+    built by the shared helpers, same format), and
+    `fieldPath` has been stored in the same format since v1, so v1-v4 containers inject correctly.
+  - Verified by tests: `dependency-order.real-map.test.ts` (SWAP each of the 4 maps into itself
+    + ADD ui -> bloodgulch: no throw, 0 wrong targets, independent of extractor/injector code
+    but sharing the schema engine and tag-index parser). Every planned tag is now written:
+    SWAP 1498/1405/1477/1735, ADD 704 incl. all 524 widgets. `dependency-fieldpath.test.ts`
+    (synthetic tags with expected targets fixed by construction, real bloodgulch target, output
+    read back with codec primitives; shares the schema engine for field offsets). All 15 new
+    tests fail on the old injector. Not yet confirmed in OpenCE.
 - 2026-08 (this session): Fixed Issue 1 (P0, silently dropped data fields). Root cause: the
   `uncapturedData` guard logic and the plain-`TagDataOffset` pointer-capture branch in
   `tag-extractor.ts`'s `flattenStruct` were already present in this session's uncommitted work
