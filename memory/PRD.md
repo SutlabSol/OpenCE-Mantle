@@ -16,12 +16,13 @@ needs re-verification / unverified / blocked)
 | Feature | Status | How |
 |---|---|---|
 | M4 extraction (general) | **needs re-verification** | Was "done" before the font/string_list/meter/etc data-dropping bug was found; the bug is now fixed and same-reader-verified (101/101 core Vitest), but no fix this session has been run by the user on Windows/OpenCE yet. See "Windows check" below to move this to verified without a full OpenCE session. |
-| M5 ADD / SWAP (tags with NO gbxmodel in their closure) | **needs re-verification** | Same reason as extraction - the data-dropping bug could have affected any injected tag with a font/string_list/meter/hud_message_text/input_device_defaults/model_animations/scenario field. Fixed + same-reader-verified this session; not yet confirmed in OpenCE. **Dependency-order P0 (2026-10-11, see Decisions): fixed on branch `fix/dependency-order`, verified by tests (independent source-vs-output comparison on 4 maps + same-reader unit tests), not yet confirmed in OpenCE.** Every map previously written by ADD/SWAP is untrusted (SWAP of globals wrote 11 wrong references with no error) - re-create it with the fixed build. |
+| M5 ADD / SWAP (tags with NO gbxmodel in their closure) | **needs re-verification** (until the user loads a fixed map in OpenCE) | The earlier "data-dropping fixed" covered EXTRACTION only: the injector never converted those data-block pointers back, so every injected font/string_list/meter/hud_message_text/input_device_defaults/model_animations/scenario data block pointed outside the tag data (see "Swap load failure" in Decisions). Fixed on branch `fix/swap-load-failure`, verified by tests (independent tree diff + pointer/alignment audit), not yet confirmed in OpenCE. **Dependency-order P0 (2026-10-11, see Decisions): fixed on branch `fix/dependency-order`, verified by tests (independent source-vs-output comparison on 4 maps + same-reader unit tests), not yet confirmed in OpenCE.** Every map previously written by ADD/SWAP is untrusted (SWAP of globals wrote 11 wrong references with no error) - re-create it with the fixed build. |
 | M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked; needs re-verification once unblocked** | `uncapturedData` warning unconditionally blocks these in ADD, and since 2026-10-11 (commit 2ee3c9e) in SWAP too (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. The dependency-order P0 that also affected weapons/projectiles/vehicles/bipeds is fixed (see Decisions); re-check once unblocked. |
 | Embedded (external=0) bitmap/sound relocation | **same-reader-verified, NOT approved for the real app** | `embedded-relocation.test.ts`, real coldsnap.map bytes. `allowEmbeddedRelocation` stays off in `map-worker.ts`. |
 | `gbxmodel` model geometry capture/relocation | **Stage 1 (capture) same-reader-verified; Stage 2 (injection) design-verified, NOT built/wired** | `gbxmodel-geometry.test.ts` (100% captured, 0 blocked, bloodgulch+coldsnap), `gbxmodel-combined-insertion-design.test.ts` (field table + 665-part no-patch proof) — see "gbxmodel geometry — Stage 1 capture" below |
 | Sound relocation | **same-reader-verified, bounds-only** | No deterministic size formula for compressed audio exists (stated, not guessed) - a corrupt/truncated embedded sound could still pass the bounds check. |
-| `crc32`/`tagFileChecksums` after injection | **unverified, known-stale** | M6 work, tracked P0, not started. |
+| Header `crc32` on save (Inject, File > Save As) | **verified by tests, not yet confirmed in OpenCE** | Recomputed by `finalizeForSave` on every save (branch `fix/swap-load-failure`); reproduces the stored crc32 of all 5 CE sample maps. |
+| Sub-header `tagFileChecksums` (tag data +0x8) after injection | **unverified** | Left unchanged on purpose. Nothing in this repo or the notes shows what validates it; whether the game checks it is unverified. The save result says so. |
 
 ### Windows check to move "M4 extraction" to verified (no OpenCE needed)
 1. Build, open `ui.map`, extract `ui\ticker` (Tools > Extract Tags, search "ticker", pick the
@@ -35,6 +36,60 @@ needs re-verification / unverified / blocked)
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: **Roadmap order (user-approved).** Replaces the older ordering in the 2026-10
+  converter entry ("M5/M6 work is paused") and the "Upcoming" section.
+  1. Fix the swap load failure, including real Save As, scenario-name setting and CRC32
+     recalculation (branch `fix/swap-load-failure`).
+  2. Halo Demo / HaloMD -> Custom Edition converter. Phase 1 (retail-layout, version 7) first,
+     reusing the CRC and header code. Phase 2 (true demo layout, version 6, pointer rebase)
+     only after Phase 1 is confirmed in OpenCE. Notes: memory/demo-converter.md.
+  3. M7a: in-place tag editor for fixed-size edits (numbers, enums, flags, tag references,
+     strings, palette swaps). Example targets: change a weapon's projectile, rate of fire or
+     spread; swap a vehicle or scenery palette entry.
+  4. M7b: block add, delete and resize, then the scenario placement work (Forge-style).
+  Paused until after this: embedded relocation, gbxmodel geometry stage 2, full M6 export.
+- 2026-10-11: **Swap load failure (branch `fix/swap-load-failure`, user-approved with
+  conditions).** The user's SWAP of `globals\globals` with dependencies into bloodgulch (1037
+  swapped, 50 gbxmodels blocked) showed a blank blue screen in OpenCE; the original with only the
+  name changed loads, and a corrected CRC32 alone did not help. Reproduced in memory: same
+  +3,582,368 bytes, same 140 misaligned tags, same CRC 0x43d032f3.
+  - **Cause (most likely): 862 data-block pointers never converted.** The extractor rewrites
+    every pointer-based TagDataOffset to a tag-local offset; `rewriteAddedTagData` converted
+    reflexive pointers back but never these. In that run: 845 in model_animations ("default
+    data", "frame data", "frame info"), 15 string_list strings, 2 meter "encoded stencil"; all
+    pointed outside the tag data (the original has 0). ADD used the same function, so every
+    earlier ADD/SWAP output with fonts, strings, meters, animations, scripts etc. is INVALID -
+    re-create it. Saved `.ocetags` files are still fine (the container data was correct).
+    "Data-dropping fixed" (2026-08) covered extraction only. The dependency-order tests only
+    compared references, which is why this was missed.
+  - **Alignment.** All 5 CE maps: every tag, reflexive and data pointer is 4-aligned from the
+    tag data start; Tool pads every odd-length block (bloodgulch 154, all padded); spread over
+    mod 16 is even, so 16 is not required. Path strings are packed and NOT aligned. Our append
+    left 140 of 1037 tag pointers and 948 reflexives at 2 mod 4 (2-byte animation struct arrays
+    with odd counts, odd-length strings/stencils).
+  - **Tag reference path pointers.** All 5 CE maps: every non-null reference's path pointer
+    equals the target tag-array entry's path pointer (external targets too), path size 0;
+    null references are 0/0. The injector used to zero them.
+  - **Header/tag space were fine:** tag data + largest BSP 10.3 MB < 23 MiB, BSP address still
+    13.8 MB above the end of tag data; tag count, scenario ID, model data unchanged.
+  - **CRC recipe confirmed** on all 5 CE maps (bloodgulch 0x7b309554): CRC-32 register seeded
+    0xFFFFFFFF, no final XOR (= inverted standard CRC-32) over each BSP in the scenario's
+    "structure bsps" order (bsp start, bsp size), then model data (modelDataFileOffset,
+    modelDataSize), then tag data (tagDataOffset, tagDataSize).
+  - **Tag-data header field order settled:** +0x4 is the scenario tag ID, +0x8 is the tag-file
+    checksum (the Halo Map Structure PDF has them reversed; the converter notes were right).
+  - **Fix:** shared `isRelocatedTagDataField` (extractor + injector); data-block pointers
+    converted on apply and range-checked at plan time; reference path pointers written as in
+    real maps; apply-time re-layout (`alignTagData`) puts every block 4-aligned from the tag data
+    start with zero padding (no container format change, v1-v4 still work); `cache-crc.ts` +
+    `finalize-map.ts` (shared with the converter) set the scenario name from the file name
+    (max 31 chars, printable ASCII, warnings) and recompute crc32; File > Save As is real; Inject
+    and Save As both go through `finalizeForSave`. The tag-file checksum is left alone.
+  - **Flagged, not fixed:** the decompress path (`map-worker.ts` `runCompression`) writes
+    straight to the output file, not temp file then rename.
+  - **Labels:** real-map tests use an independent audit (`core/tests/helpers/tag-data-audit.ts`:
+    schema engine + header/tag-index parser only, none of the extractor/injector walking code).
+    CRC tests compare against the crc32 Tool stored and node:zlib. Nothing confirmed in OpenCE.
 - 2026-10-11: Dependency dialog warning groups follow how core actually treats each kind, display
   only: `uncapturedData` -> "Cannot be captured / blocked for injection" (blocking; injector blocks
   ADD/SWAP unconditionally); `embeddedRawData` -> own "Embedded data (injection blocked this
@@ -258,7 +313,8 @@ needs re-verification / unverified / blocked)
   injection (tag-array growth OR embedded insertion) — tracked P0, not fixed this session (M6
   work). The Inject result dialog and worker already surface this (`staleChecksumWarning`,
   updated wording 2026-08: "Checksums were not updated. This map may be rejected by some loaders
-  until M6 (export + CRC) is done.").
+  until M6 (export + CRC) is done."). **Superseded 2026-10-11 (Swap load failure entry):** crc32
+  is now recomputed on every save; only the tag-file checksum caveat remains in the warning.
 - 2026-08: M5 build order approved: Step A (ADD mode only) → stop for review → Step B (SWAP,
   keeps target's tag ID) → stop → Step C (conflict dialog: skip/replace/rename + "apply to all",
   using the existing `ConfirmDialog.tsx`). Never overwrite source map (temp+rename to a new file
@@ -275,7 +331,8 @@ needs re-verification / unverified / blocked)
   convert in place; refuse maps that are already 609. Open item: the tag-data-header field order
   (checksum vs scenario ID at +0x4/+0x8) differs between the Halo Map Structure PDF and the
   research notes, so confirm it from real bytes before relying on it. M5/M6 work is paused,
-  not cancelled.
+  not cancelled. **Update 2026-10-11:** field order settled (+0x4 scenario tag ID, +0x8 tag-file
+  checksum); ordering superseded by "Roadmap order" at the top of Decisions.
 
 ## Status as of 2026-08 (this session)
 
@@ -408,7 +465,7 @@ by a full M4 **frontend/UI integration** pass (see below), which is now done and
   citations. NOT implemented - proposed to the user, waiting for explicit approval before writing
   any code. Still true: do NOT implement/enable against a synthetic-only fixture.
 
-## Upcoming (pending user go-ahead — M4 UI is done, waiting for user's own Electron/Windows test)
+## Upcoming (SUPERSEDED 2026-10-11 by "Roadmap order" in Decisions - kept for history)
 - Sounds.map resolution (parse external sound pointers before M5) — explicitly deferred by user.
 - M5: tag injection/swap (ADD/SWAP modes), reading the `.ocetags` container from M4.
 - M6: export map + recalc CRC32.
