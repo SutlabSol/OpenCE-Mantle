@@ -104,18 +104,19 @@ describe('ADD keeps every existing tag intact (independent: fixed engine base, r
     cs = load('coldsnap.map');
   });
 
-  it.skipIf(gate.skip)(`ADD ui\\shell\\main_menu\\halo_logo into bloodgulch (the user's bg_add1 case): 2 added, +1346 bytes, 0 bad tags, 17,429 pointers moved = the independent census${gate.titleSuffix}`, () => {
+  it.skipIf(gate.skip)(`ADD ui\\shell\\main_menu\\halo_logo into bloodgulch (the user's bg_add1 case): 2 added, +1346 bytes, 0 bad tags, 17,523 pointers moved = the independent census${gate.titleSuffix}`, () => {
     const root = ui.ti.entries.findIndex((e) => e.primaryClassName === 'ui_widget_definition' && e.path === 'ui\\shell\\main_menu\\halo_logo');
     expect(root).toBeGreaterThanOrEqual(0);
     const { p, result } = addAndAudit(ui, bg, [root]);
     expect(p.toAdd.length).toBe(2);
     expect(result.buffer.length - bg.buf.length).toBe(1346); // same growth as bg_add1.map
     const census = pointerCensus(bg.buf, bg.ti);
-    expect(census.total).toBe(17429); // bloodgulch: 2455 path + (1569 + 333 external sounds) data + 5019 reflexive + 1088 data block + (6954 + 11 in external sounds) reference path
+    expect(census.total).toBe(17523); // bloodgulch: 2455 path + (1569 + 333 external sounds) data + 5019 reflexive + 1088 data block + (6954 + 11 in external sounds) reference path + 94 BSP reference path
     expect(result.rebase).not.toBeNull();
-    expect(result.rebase!.visited).toEqual({ tagPath: census.tagPath, tagData: census.tagData, reflexive: census.reflexive, dataBlock: census.dataBlock, referencePath: census.referencePath });
+    expect(result.rebase!.visited).toEqual({ tagPath: census.tagPath, tagData: census.tagData, reflexive: census.reflexive, dataBlock: census.dataBlock, referencePath: census.referencePath, bspReferencePath: census.bspReferencePath });
+    expect(census.bspReferencePath).toBe(94); // the user's hand count
     expect(result.rebase!.rebased).toEqual(result.rebase!.visited); // every pointer lies past the array
-    expect(result.rebase!.totalRebased).toBe(17429);
+    expect(result.rebase!.totalRebased).toBe(17523);
   }, 300_000);
 
   for (const target of ['bloodgulch.map', 'coldsnap.map']) {
@@ -204,16 +205,16 @@ describe('ADD refusals', () => {
 
 describe('pointer-rebase in place (the converter Phase 2 use)', () => {
   const gate = skippableTest(['bloodgulch.map']);
-  it.skipIf(gate.skip)(`moving bloodgulch's whole tag data to base 0x4BF10000 and back touches 17,429 pointers each way and restores every byte${gate.titleSuffix}`, () => {
+  it.skipIf(gate.skip)(`moving bloodgulch's whole tag data to base 0x4BF10000 and back touches 17,523 pointers each way and restores every byte${gate.titleSuffix}`, () => {
     const bg = load('bloodgulch.map');
     const buf = Buffer.from(bg.buf);
     const layout = tagDataLayoutOf(bg.header, bg.ti);
     const delta = 0x4bf10000 - 0x40440000;
     const there = rebaseTagDataPointersInPlace(buf, layout, { from: 0x40440000, to: 0x40440000 + bg.header.tagDataSize, delta });
-    expect(there.totalRebased).toBe(17429);
+    expect(there.totalRebased).toBe(17523);
     expect(buf.equals(bg.buf)).toBe(false);
     const back = rebaseTagDataPointersInPlace(buf, { ...layout, baseMemoryAddress: 0x4bf10000 }, { from: 0x4bf10000, to: 0x4bf10000 + bg.header.tagDataSize, delta: -delta });
-    expect(back.totalRebased).toBe(17429);
+    expect(back.totalRebased).toBe(17523);
     expect(buf.equals(bg.buf)).toBe(true);
   }, 300_000);
 });

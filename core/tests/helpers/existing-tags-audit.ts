@@ -160,18 +160,68 @@ export interface PointerCensus {
   reflexive: number;
   dataBlock: number;
   referencePath: number;
+  bspReferencePath: number;
   total: number;
+}
+
+/** One reference path pointer inside a BSP: `at` is its file offset, `value` the stored pointer. */
+export interface BspReferencePath {
+  at: number;
+  value: number;
+  where: string;
+}
+
+/**
+ * Every non-zero reference path pointer inside the BSPs the scenario lists, by this helper's own
+ * walk: the scenario's "structure bsps" give bsp start / bsp address, the BSP header's first word
+ * is the BSP struct's address, and the BSP's blocks resolve in BSP space.
+ */
+export function bspReferencePaths(buf: Buffer, ti: TagIndex): BspReferencePath[] {
+  const m = raw(buf);
+  const found: BspReferencePath[] = [];
+  const scenario = ti.entries[ti.scenarioTagId & 0xffff];
+  const scenarioStruct = getGroupStructName('scenario')!;
+  const bsps = decodeStruct(buf, fileOf(m, scenario.tagDataPointerOrResourceIndex), scenarioStruct).get('structure bsps');
+  if (bsps?.kind !== 'reflexive') return found;
+  const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === 'structure bsps')!;
+  const elementStruct = field.def.type === 'TagReflexive' ? field.def.struct : '';
+  const elementSize = resolveStruct(elementStruct).totalSize;
+  for (let b = 0; b < bsps.value.count; b++) {
+    const el = decodeStruct(buf, fileOf(m, bsps.value.pointerLow) + b * elementSize, elementStruct);
+    const start = Number((el.get('bsp start') as { value: number }).value);
+    const address = Number((el.get('bsp address') as { value: number }).value);
+    const inBsp = (p: number) => start + (((p >>> 0) - address) | 0);
+    const seen = new Set<string>();
+    const walk = (structName: string, at: number, where: string) => {
+      const key = `${structName}@${at}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const d = decodeStruct(buf, at, structName);
+      for (const f of resolveStruct(structName).fields) {
+        const v = d.get(f.name);
+        if (!v || f.def.nonCached) continue;
+        if (v.kind === 'dependency' && v.value.pathPointer >>> 0 !== 0) found.push({ at: at + f.offset + 4, value: v.value.pathPointer >>> 0, where: `${where}.${f.name}` });
+        else if (v.kind === 'reflexive' && f.def.type === 'TagReflexive' && v.value.count > 0) {
+          const size = resolveStruct(f.def.struct).totalSize;
+          for (let k = 0; k < v.value.count; k++) walk(f.def.struct, inBsp(v.value.pointerLow) + k * size, `${where}.${f.name}[${k}]`);
+        }
+      }
+    };
+    walk(getGroupStructName('scenario_structure_bsp')!, inBsp(buf.readUInt32LE(start)), `structure bsps[${b}]`);
+  }
+  return found;
 }
 
 /**
  * Counts every pointer the engine follows in an ORIGINAL map's tag data, by its own walk (separate
  * code from pointer-rebase.ts): every entry's path pointer, the data pointer of every non-BSP entry
  * whose data field is a tag-data address (internal tags and external sounds - decided by value
- * here), non-null reflexive pointers, pointer-based data blocks, non-zero reference path pointers.
+ * here), non-null reflexive pointers, pointer-based data blocks, non-zero reference path pointers,
+ * and the reference path pointers inside the BSPs (`bspReferencePaths`).
  */
 export function pointerCensus(buf: Buffer, ti: TagIndex): PointerCensus {
   const m = raw(buf);
-  const c: PointerCensus = { tagPath: 0, tagData: 0, reflexive: 0, dataBlock: 0, referencePath: 0, total: 0 };
+  const c: PointerCensus = { tagPath: 0, tagData: 0, reflexive: 0, dataBlock: 0, referencePath: 0, bspReferencePath: 0, total: 0 };
   const seen = new Set<string>();
   const walk = (structName: string, at: number) => {
     const key = `${structName}@${at}`;
@@ -200,6 +250,7 @@ export function pointerCensus(buf: Buffer, ti: TagIndex): PointerCensus {
     c.tagData++;
     walk(getGroupStructName(e.primaryClassName!)!, fileOf(m, e.tagDataPointerOrResourceIndex));
   }
-  c.total = c.tagPath + c.tagData + c.reflexive + c.dataBlock + c.referencePath;
+  c.bspReferencePath = bspReferencePaths(buf, ti).length;
+  c.total = c.tagPath + c.tagData + c.reflexive + c.dataBlock + c.referencePath + c.bspReferencePath;
   return c;
 }
