@@ -259,6 +259,32 @@ describe.skipIf(!haveMaps)(title, () => {
     }
   });
 
+  it('the exact bytes written to disk, read back and loaded with NO edits, are blocked by ADD and SWAP', () => {
+    const corrupted = Buffer.from(src);
+    corrupted.writeUInt32LE((src.length + 0x10000 - anchor + base) >>> 0, pick.fileOffset + pick.field.offset + 4); // case (b)
+    const written = serializeContainer(extractTagSet(corrupted, header, tagIndex, [pick.index]), 'src');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ocetags-test-'));
+    const file = path.join(dir, `${randomUUID()}.ocetags`);
+    try {
+      fs.writeFileSync(file, written);
+      const readBack = fs.readFileSync(file);
+      expect(readBack.equals(written)).toBe(true); // byte-identical, nothing edited
+      const container = deserializeContainer(readBack); // planning below uses only this + the target index
+      expect(container.formatVersion).toBe(OCETAGS_FORMAT_VERSION);
+      expect(container.tags.find((t) => t.originalIndex === pick.index)!.injectionBlockers?.map((b) => b.kind)).toEqual(['invalidReflexive']);
+
+      const add = outcome(planAddInjection(targetIndex, container), container, pick.index);
+      expect(add.status).toBe('blocked');
+      expect(add.reasons).toContain('invalid/corrupt layout');
+      const swap = outcome(planSwapInjection(tagIndex, container), container, pick.index);
+      expect(swap.status).toBe('blocked');
+      expect(swap.reasons).toContain('invalid/corrupt layout');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('(e) an unexpected exception while extracting one tag blocks only that tag with a structured message; the rest of the selection still extracts', () => {
     // Corrupt the tag-array entry (in memory) so the root struct straddles EOF - the walker skips
     // it silently, and decoding it in the extractor throws.
