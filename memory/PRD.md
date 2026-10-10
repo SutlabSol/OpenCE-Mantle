@@ -69,7 +69,11 @@ needs re-verification / unverified / blocked)
     with odd counts, odd-length strings/stencils).
   - **Tag reference path pointers.** All 5 CE maps: every non-null reference's path pointer
     equals the target tag-array entry's path pointer (external targets too), path size 0;
-    null references are 0/0. The injector used to zero them.
+    null references are 0/0. The injector used to zero them. Re-measured 2026-10-11 (bloodgulch
+    6954/6954, sidewinder 6929/6929, coldsnap 8123/8123, ui 3311/3311, Yoyorast 6660/6660 match;
+    every null ref 0/0) and pinned by a test on all 5 maps plus every injected output
+    (`referencePathPointerIssues`). Path strings re-measured: spread evenly over mod 4 in all 5
+    maps, so they stay packed.
   - **Header/tag space were fine:** tag data + largest BSP 10.3 MB < 23 MiB, BSP address still
     13.8 MB above the end of tag data; tag count, scenario ID, model data unchanged.
   - **CRC recipe confirmed** on all 5 CE maps (bloodgulch 0x7b309554): CRC-32 register seeded
