@@ -195,6 +195,17 @@ export function resolvePointer(pointer: number, fileOffsetAnchor: number, baseMe
   return fileOffsetAnchor + (pointer - baseMemoryAddress);
 }
 
+/**
+ * True if `[start, start + size)` lies entirely inside a buffer of `bufferLength` bytes. The one
+ * bounds rule shared by `dependency-walker.ts` and `tag-extractor.ts` for pointer-resolved data
+ * (TagReflexive arrays, TagDataOffset bytes), so the walker's warning and the extractor's skip
+ * can never disagree. A negative `start` is always out of bounds - never let it reach
+ * `Buffer.subarray`, which would treat it as an offset from the END of the file.
+ */
+export function isRangeInBuffer(start: number, size: number, bufferLength: number): boolean {
+  return Number.isSafeInteger(start) && Number.isSafeInteger(size) && start >= 0 && size >= 0 && start + size <= bufferLength;
+}
+
 export function getAllTagGroupNames(): string[] {
   return Array.from(tagGroupNameToStructName.keys());
 }

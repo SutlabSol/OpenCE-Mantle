@@ -1,6 +1,6 @@
 import { fourCCToString } from '../constants/tag-classes';
 import { resolveTagDataPointer } from './tag-index';
-import { resolveStruct, decodeStruct, getGroupDefinition, resolvePointer } from './definitions/engine';
+import { resolveStruct, decodeStruct, getGroupDefinition, resolvePointer, isRangeInBuffer } from './definitions/engine';
 import { walkDependencies } from './dependency-walker';
 import type { WalkerWarning, WalkOptions } from './dependency-walker';
 import { findEmbeddedDataFields, validateBitmapAssetSize } from './embedded-data-fields';
@@ -34,6 +34,22 @@ export interface ExtractedEmbeddedPatch {
   patchWidth: number;
 }
 
+/**
+ * A reason, decided at extraction time and stored per tag in the container (v4+), why this tag
+ * must never be injected. The injector reads these straight from the saved `.ocetags` file - no
+ * source map or walker re-run needed.
+ * - `invalidReflexive`: a TagReflexive array resolves (partly or entirely) outside the source
+ *   map. Its 12 bytes are left exactly as in the source (an unrelocated source-map pointer), and
+ *   nothing below it was captured.
+ * - `extractionFailed`: an unexpected exception while flattening this tag. `data` holds only the
+ *   unmodified root struct bytes (or nothing), `dependencies` is empty.
+ */
+export interface InjectionBlocker {
+  kind: 'invalidReflexive' | 'extractionFailed';
+  fieldPath: string;
+  message: string;
+}
+
 export interface ExtractedTag {
   originalIndex: number;
   group: string;
@@ -53,6 +69,8 @@ export interface ExtractedTag {
   /** Embedded (external=0) bitmap/sound raw bytes captured from the source map, deduped by (fileOffset, size). Empty if this tag has none, or if any one of them failed validation (see `embeddedCaptureBlockedReasons` on the returned set's warnings - a mismatch blocks the WHOLE tag, never a partial relocation). */
   embeddedRawDataAssets: ExtractedEmbeddedAsset[];
   embeddedRawDataPatches: ExtractedEmbeddedPatch[];
+  /** Non-empty = this tag is blocked from ADD/SWAP (see `InjectionBlocker`). */
+  injectionBlockers: InjectionBlocker[];
 }
 
 /** A tag that was walked but whose group is not yet extractable (e.g. `scenario_structure_bsp`). */
@@ -175,6 +193,7 @@ function flattenStruct(
   runningOffset: { value: number },
   dependencies: ExtractedDependencyRef[],
   embeddedCapture: EmbeddedCaptureState,
+  injectionBlockers: InjectionBlocker[],
   fieldPath: string,
   tagIndex: TagIndex,
   localIndexByOriginal: Map<number, number>,
@@ -210,6 +229,18 @@ function flattenStruct(
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const srcChildBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      if (!isRangeInBuffer(srcChildBase, value.value.count * childSize, buffer.length)) {
+        // Same rule as the walker's 'invalidReflexive' warning (shared helper). Copy nothing,
+        // recurse into nothing, don't advance runningOffset, and leave the field's 12 bytes as
+        // in the source. That unrelocated source-map pointer is only safe because the injector
+        // refuses any tag carrying this blocker (see `tag-injector.ts`).
+        injectionBlockers.push({
+          kind: 'invalidReflexive',
+          fieldPath: path,
+          message: `"${path}" (${value.value.count} x "${childStructName}") resolves outside the source map (file offset ${srcChildBase}, map is ${buffer.length} bytes) - not captured, the WHOLE tag is blocked from injection.`,
+        });
+        continue;
+      }
       const localArrayStart = runningOffset.value;
       myBytes.writeUInt32LE(localArrayStart, field.offset + 4);
       myBytes.writeUInt32LE(0, field.offset + 8);
@@ -232,7 +263,7 @@ function flattenStruct(
       // walker already flagged this with an 'uncapturedData' warning that blocks the WHOLE tag
       // from injection - see `dependency-walker.ts`).
       const srcBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (srcBase >= 0 && srcBase + value.value.size <= buffer.length) {
+      if (isRangeInBuffer(srcBase, value.value.size, buffer.length)) {
         const localOffset = runningOffset.value;
         const bytes = Buffer.from(buffer.subarray(srcBase, srcBase + value.value.size));
         outChunks.push(bytes);
@@ -259,6 +290,7 @@ function flattenStruct(
         runningOffset,
         dependencies,
         embeddedCapture,
+        injectionBlockers,
         `${fieldPath}.${work.fieldName}[${i}]`,
         tagIndex,
         localIndexByOriginal,
@@ -316,53 +348,72 @@ export function extractTagSet(
     options.onProgress?.(i, extractableWalked.length);
 
     const structName = getGroupDefinition(t.group).name;
-    const fileOffsetAnchor = t.bspLocation ? t.bspLocation.fileOffsetAnchor : header.tagDataOffset;
-    const baseMemoryAddress = t.bspLocation ? t.bspLocation.baseMemoryAddress : tagIndex.baseMemoryAddress;
-    const fileOffset = t.bspLocation
-      ? t.bspLocation.fileOffset
-      : resolveTagDataPointer(tagIndex.entries[t.originalIndex].tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const entry = tagIndex.entries[t.originalIndex];
+    const common = { originalIndex: t.originalIndex, group: t.group, path: t.path, structName,
+      secondaryClassFourCC: entry.secondaryClassFourCC, tertiaryClassFourCC: entry.tertiaryClassFourCC };
+    let fileOffset = -1;
+    try {
+      const fileOffsetAnchor = t.bspLocation ? t.bspLocation.fileOffsetAnchor : header.tagDataOffset;
+      const baseMemoryAddress = t.bspLocation ? t.bspLocation.baseMemoryAddress : tagIndex.baseMemoryAddress;
+      fileOffset = t.bspLocation
+        ? t.bspLocation.fileOffset
+        : resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
 
-    const dependencies: ExtractedDependencyRef[] = [];
-    const outChunks: Buffer[] = [];
-    const runningOffset = { value: 0 };
-    const embeddedCapture: EmbeddedCaptureState = { dedupeKeyToAssetIndex: new Map(), assets: [], patches: [], blockedReasons: [] };
-    const rootResolved = resolveStruct(structName);
-    const rootBytes = Buffer.from(buffer.subarray(fileOffset, fileOffset + rootResolved.totalSize));
-    outChunks.push(rootBytes);
-    runningOffset.value += rootResolved.totalSize;
-    flattenStruct(
-      buffer,
-      structName,
-      fileOffset,
-      rootBytes,
-      0,
-      fileOffsetAnchor,
-      baseMemoryAddress,
-      outChunks,
-      runningOffset,
-      dependencies,
-      embeddedCapture,
-      t.path,
-      tagIndex,
-      localIndexByOriginal,
-      notExtractedByOriginal,
-    );
+      const dependencies: ExtractedDependencyRef[] = [];
+      const outChunks: Buffer[] = [];
+      const runningOffset = { value: 0 };
+      const embeddedCapture: EmbeddedCaptureState = { dedupeKeyToAssetIndex: new Map(), assets: [], patches: [], blockedReasons: [] };
+      const injectionBlockers: InjectionBlocker[] = [];
+      const rootResolved = resolveStruct(structName);
+      const rootBytes = Buffer.from(buffer.subarray(fileOffset, fileOffset + rootResolved.totalSize));
+      outChunks.push(rootBytes);
+      runningOffset.value += rootResolved.totalSize;
+      flattenStruct(
+        buffer,
+        structName,
+        fileOffset,
+        rootBytes,
+        0,
+        fileOffsetAnchor,
+        baseMemoryAddress,
+        outChunks,
+        runningOffset,
+        dependencies,
+        embeddedCapture,
+        injectionBlockers,
+        t.path,
+        tagIndex,
+        localIndexByOriginal,
+        notExtractedByOriginal,
+      );
 
-    if (embeddedCapture.blockedReasons.length > 0) {
-      extraWarnings.push({
-        originalIndex: t.originalIndex,
-        path: t.path,
-        group: t.group,
-        kind: 'embeddedRawData',
-        message: `"${t.path}" has embedded raw data that could not be safely captured, so NONE of it was captured (never a partial relocation): ${embeddedCapture.blockedReasons.join(' ')}`,
-      });
+      if (embeddedCapture.blockedReasons.length > 0) {
+        extraWarnings.push({
+          originalIndex: t.originalIndex,
+          path: t.path,
+          group: t.group,
+          kind: 'embeddedRawData',
+          message: `"${t.path}" has embedded raw data that could not be safely captured, so NONE of it was captured (never a partial relocation): ${embeddedCapture.blockedReasons.join(' ')}`,
+        });
+      }
+
+      return { ...common, data: Buffer.concat(outChunks), dependencies,
+        embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
+        embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches,
+        injectionBlockers };
+    } catch (err) {
+      if (err instanceof OperationCancelledError) throw err;
+      // One bad tag must not fail the whole selection with a raw exception. Keep the tag in the
+      // set (so anything depending on it is blocked too, via the injector's dependency cascade)
+      // with only its unmodified root struct bytes, no dependencies, and a blocker.
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      const message = `"${t.path}" (${t.group}) could not be extracted (unexpected error: ${detail}) - the tag is blocked from injection; the rest of the selection was extracted normally.`;
+      extraWarnings.push({ originalIndex: t.originalIndex, path: t.path, group: t.group, kind: 'extractionFailed', message });
+      const rootSize = resolveStruct(structName).totalSize;
+      const data = isRangeInBuffer(fileOffset, rootSize, buffer.length) ? Buffer.from(buffer.subarray(fileOffset, fileOffset + rootSize)) : Buffer.alloc(0);
+      return { ...common, data, dependencies: [], embeddedRawDataAssets: [], embeddedRawDataPatches: [],
+        injectionBlockers: [{ kind: 'extractionFailed' as const, fieldPath: t.path, message }] };
     }
-
-    return { originalIndex: t.originalIndex, group: t.group, path: t.path, structName, data: Buffer.concat(outChunks), dependencies,
-      secondaryClassFourCC: tagIndex.entries[t.originalIndex].secondaryClassFourCC,
-      tertiaryClassFourCC: tagIndex.entries[t.originalIndex].tertiaryClassFourCC,
-      embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
-      embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches };
   });
 
   options.onProgress?.(extractableWalked.length, extractableWalked.length);

@@ -60,6 +60,7 @@ import type { TagIndex, TagIndexEntry } from './tag-index';
 import { resolveStruct, decodeStruct, resolvePointer } from './definitions/engine';
 import { decodeReflexive, decodeDependency, encodeDependency } from './definitions/codec';
 import type { OceContainer, OceContainerTag, ExternalResourceRef } from './container';
+import { OCETAGS_FORMAT_VERSION } from './container';
 import type { ExtractedDependencyRef } from './tag-extractor';
 import type { ResourceMapIdentity } from './resource-map';
 import { resourceMapIdentitiesMatch } from './resource-map';
@@ -169,7 +170,7 @@ export type AddInjectionRefusal = InjectionRefusal;
 /** @deprecated kept as an alias - use `InjectionCounts`. */
 export type AddInjectionCounts = InjectionCounts;
 
-const OCETAGS_SUPPORTED_MAX_VERSION = 3;
+const OCETAGS_SUPPORTED_MAX_VERSION = OCETAGS_FORMAT_VERSION;
 
 function warningMessagesOfKind(container: OceContainer, kind: string): Map<number, string[]> {
   const byOriginal = new Map<number, string[]>();
@@ -229,12 +230,27 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
   const embeddedWarningsByOriginal = embeddedWarningMessages(container);
   const embeddedCapturedByOriginal = embeddedCapturedCounts(container);
   const uncapturedDataByOriginal = warningMessagesOfKind(container, 'uncapturedData');
+  const invalidReflexiveByOriginal = warningMessagesOfKind(container, 'invalidReflexive');
+  const extractionFailedByOriginal = warningMessagesOfKind(container, 'extractionFailed');
 
-  /** Unconditional - unlike embedded relocation, there is no opt-in for data the extractor structurally cannot carry at all (model geometry, an out-of-bounds pointer). Applied to ADD candidates AND matched SWAP candidates alike. */
-  function uncapturedDataBlockReason(t: OceContainerTag): string | null {
-    const msgs = uncapturedDataByOriginal.get(t.originalIndex);
-    if (!msgs || msgs.length === 0) return null;
-    return `This tag has data that cannot be captured or relocated: ${msgs.join('; ')}`;
+  /**
+   * Unconditional - unlike embedded relocation, there is no opt-in for a tag the extractor
+   * structurally could not carry: uncaptured data (model geometry, an unresolvable data pointer),
+   * an out-of-bounds TagReflexive (its pointer is left unrelocated in `data`), or an extraction
+   * error. Applied to ADD candidates AND matched SWAP candidates alike. Reads only the container:
+   * v4 per-tag `injectionBlockers`, plus the persisted walker `warnings` (the only source for
+   * v1-v3 containers). null = not blocked.
+   */
+  function structuralBlockReason(t: OceContainerTag): string | null {
+    const reasons: string[] = [];
+    const uncaptured = uncapturedDataByOriginal.get(t.originalIndex) ?? [];
+    if (uncaptured.length > 0) reasons.push(`This tag has data that cannot be captured or relocated: ${uncaptured.join('; ')}`);
+    const blockers = t.injectionBlockers ?? [];
+    const invalid = [...blockers.filter((b) => b.kind === 'invalidReflexive').map((b) => b.message), ...(blockers.length > 0 ? [] : invalidReflexiveByOriginal.get(t.originalIndex) ?? [])];
+    if (invalid.length > 0) reasons.push(`This tag has an invalid/corrupt layout (a reflexive outside the source map) and cannot be relocated: ${invalid.join('; ')}`);
+    const failed = [...blockers.filter((b) => b.kind === 'extractionFailed').map((b) => b.message), ...(blockers.length > 0 ? [] : extractionFailedByOriginal.get(t.originalIndex) ?? [])];
+    if (failed.length > 0) reasons.push(`This tag failed to extract and cannot be injected: ${failed.join('; ')}`);
+    return reasons.length > 0 ? reasons.join(' ') : null;
   }
 
   /** null = not blocked by embedded data. Otherwise the reason to surface. */
@@ -257,10 +273,10 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
   for (const li of candidateAdd) {
     const t = container.tags[li];
     const reasons: string[] = [];
-    const uncaptured = uncapturedDataBlockReason(t);
-    if (uncaptured) {
+    const structural = structuralBlockReason(t);
+    if (structural) {
       blockedUncapturedSet.add(li);
-      reasons.push(uncaptured);
+      reasons.push(structural);
     }
     const embedded = embeddedBlockReason(t);
     if (embedded) {
@@ -321,9 +337,9 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
     if (existing.isExternal) {
       reasons.push(`The existing "${t.path}" (${t.group}) in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.`);
     }
-    const uncapturedBlockMsg = uncapturedDataBlockReason(t);
-    if (uncapturedBlockMsg) {
-      reasons.push(uncapturedBlockMsg);
+    const structuralBlockMsg = structuralBlockReason(t);
+    if (structuralBlockMsg) {
+      reasons.push(structuralBlockMsg);
     }
     const embeddedBlockMsg = embeddedBlockReason(t);
     if (embeddedBlockMsg) {
@@ -514,6 +530,11 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   // arbitrary, both just append struct data past the (shifted) existing data region.
   const writeTags: OceContainerTag[] = [...plan.toAdd, ...plan.toSwap.map((s) => container.tags[s.localIndex])];
 
+  for (const t of writeTags) {
+    if (t.injectionBlockers && t.injectionBlockers.length > 0) {
+      throw new Error(`Internal error: "${t.path}" reached applyInjection() with injection blockers (${t.injectionBlockers.map((b) => b.kind).join(', ')}) - planInjection() should have blocked it.`);
+    }
+  }
   if (!options.allowEmbeddedRelocation) {
     for (const t of writeTags) {
       if (t.embeddedRawDataPatches && t.embeddedRawDataPatches.length > 0) {

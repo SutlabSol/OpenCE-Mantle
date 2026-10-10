@@ -22,14 +22,15 @@ type WarningGroupId = 'uncaptured' | 'embedded' | 'invalidLayout' | 'external' |
 
 /**
  * Display order + severity. Severity mirrors what core actually does with each kind (see
- * `tag-injector.ts`): uncapturedData blocks ADD/SWAP unconditionally, embeddedRawData blocks
- * ADD/SWAP while embedded relocation is disabled, invalidReflexive stops the walker (the injector
- * doesn't consult it, so it is NOT labelled as an injection block).
+ * `tag-injector.ts`): uncapturedData and extractionFailed block ADD/SWAP unconditionally,
+ * embeddedRawData blocks ADD/SWAP while embedded relocation is disabled, invalidReflexive stops
+ * the walker AND blocks ADD/SWAP unconditionally (the extractor leaves that reflexive's pointer
+ * unrelocated and records a per-tag blocker in the container).
  */
 const WARNING_GROUPS: { id: WarningGroupId; title: string; severity: 'blocking' | 'info' }[] = [
   { id: 'uncaptured', title: 'Cannot be captured / blocked for injection', severity: 'blocking' },
   { id: 'embedded', title: 'Embedded data (injection blocked while embedded relocation is disabled)', severity: 'blocking' },
-  { id: 'invalidLayout', title: 'Invalid / corrupt layout (not walked)', severity: 'blocking' },
+  { id: 'invalidLayout', title: 'Invalid / corrupt layout (not walked, blocked for injection)', severity: 'blocking' },
   { id: 'external', title: 'External data', severity: 'info' },
   { id: 'uncertain', title: 'Undefined/uncertain groups', severity: 'info' },
   { id: 'unresolved', title: 'Unresolved references', severity: 'info' },
@@ -39,6 +40,7 @@ const WARNING_GROUPS: { id: WarningGroupId; title: string; severity: 'blocking' 
 /** Exhaustive over core's WARNING_KINDS - a new kind in core fails `yarn typecheck` until it's mapped here. */
 const GROUP_BY_KIND: Record<DependencyWarningKind, WarningGroupId> = {
   uncapturedData: 'uncaptured',
+  extractionFailed: 'uncaptured',
   embeddedRawData: 'embedded',
   invalidReflexive: 'invalidLayout',
   externalTag: 'external',

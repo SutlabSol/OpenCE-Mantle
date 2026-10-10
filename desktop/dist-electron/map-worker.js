@@ -34123,6 +34123,9 @@ function resolveStruct(name, _visiting = /* @__PURE__ */ new Set()) {
 function resolvePointer(pointer, fileOffsetAnchor, baseMemoryAddress) {
   return fileOffsetAnchor + (pointer - baseMemoryAddress);
 }
+function isRangeInBuffer(start, size, bufferLength) {
+  return Number.isSafeInteger(start) && Number.isSafeInteger(size) && start >= 0 && size >= 0 && start + size <= bufferLength;
+}
 function getAllTagGroupNames() {
   return Array.from(tagGroupNameToStructName.keys());
 }
@@ -34442,13 +34445,13 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const childBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (childBase < 0 || childBase + value.value.count * childSize > buffer.length) {
+      if (!isRangeInBuffer(childBase, value.value.count * childSize, buffer.length)) {
         warn({
           originalIndex: rootOriginalIndex,
           path: `${contextPath}.${field.name}`,
           group: "",
           kind: "invalidReflexive",
-          message: `"${contextPath}.${field.name}" (${value.value.count} x "${childStructName}") resolves outside this file (pointer base ${childBase}) - unrecognized/corrupt layout, not walked further.`
+          message: `"${contextPath}.${field.name}" (${value.value.count} x "${childStructName}") resolves outside this file (pointer base ${childBase}) - unrecognized/corrupt layout, not walked further; the WHOLE tag is blocked from injection.`
         });
         continue;
       }
@@ -34467,7 +34470,7 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
       }
     } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size > 0) {
       const resolved2 = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (resolved2 < 0 || resolved2 + value.value.size > buffer.length) {
+      if (!isRangeInBuffer(resolved2, value.value.size, buffer.length)) {
         warn({
           originalIndex: rootOriginalIndex,
           path: `${contextPath}.${field.name}`,
@@ -34566,7 +34569,7 @@ function captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fiel
     capture.patches.push({ assetIndex, patchOffset: myAbsoluteOffset + match.patchOffset, patchWidth: match.patchWidth });
   }
 }
-function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, embeddedCapture, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
+function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, embeddedCapture, injectionBlockers, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(buffer, fileOffset, structName);
   captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fieldPath, embeddedCapture);
@@ -34583,6 +34586,14 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const srcChildBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      if (!isRangeInBuffer(srcChildBase, value.value.count * childSize, buffer.length)) {
+        injectionBlockers.push({
+          kind: "invalidReflexive",
+          fieldPath: path,
+          message: `"${path}" (${value.value.count} x "${childStructName}") resolves outside the source map (file offset ${srcChildBase}, map is ${buffer.length} bytes) - not captured, the WHOLE tag is blocked from injection.`
+        });
+        continue;
+      }
       const localArrayStart = runningOffset.value;
       myBytes.writeUInt32LE(localArrayStart, field.offset + 4);
       myBytes.writeUInt32LE(0, field.offset + 8);
@@ -34597,7 +34608,7 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
       reflexiveWork.push({ fieldName: field.name, childStructName, childSize, srcChildBase, localArrayStart, count: value.value.count, childBytesList });
     } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size > 0) {
       const srcBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (srcBase >= 0 && srcBase + value.value.size <= buffer.length) {
+      if (isRangeInBuffer(srcBase, value.value.size, buffer.length)) {
         const localOffset = runningOffset.value;
         const bytes = Buffer.from(buffer.subarray(srcBase, srcBase + value.value.size));
         outChunks.push(bytes);
@@ -34621,6 +34632,7 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
         runningOffset,
         dependencies,
         embeddedCapture,
+        injectionBlockers,
         `${fieldPath}.${work.fieldName}[${i}]`,
         tagIndex,
         localIndexByOriginal,
@@ -34659,55 +34671,80 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
     if (options.signal?.aborted) throw new OperationCancelledError();
     options.onProgress?.(i, extractableWalked.length);
     const structName = getGroupDefinition(t.group).name;
-    const fileOffsetAnchor = t.bspLocation ? t.bspLocation.fileOffsetAnchor : header.tagDataOffset;
-    const baseMemoryAddress = t.bspLocation ? t.bspLocation.baseMemoryAddress : tagIndex.baseMemoryAddress;
-    const fileOffset = t.bspLocation ? t.bspLocation.fileOffset : resolveTagDataPointer(tagIndex.entries[t.originalIndex].tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
-    const dependencies = [];
-    const outChunks = [];
-    const runningOffset = { value: 0 };
-    const embeddedCapture = { dedupeKeyToAssetIndex: /* @__PURE__ */ new Map(), assets: [], patches: [], blockedReasons: [] };
-    const rootResolved = resolveStruct(structName);
-    const rootBytes = Buffer.from(buffer.subarray(fileOffset, fileOffset + rootResolved.totalSize));
-    outChunks.push(rootBytes);
-    runningOffset.value += rootResolved.totalSize;
-    flattenStruct(
-      buffer,
-      structName,
-      fileOffset,
-      rootBytes,
-      0,
-      fileOffsetAnchor,
-      baseMemoryAddress,
-      outChunks,
-      runningOffset,
-      dependencies,
-      embeddedCapture,
-      t.path,
-      tagIndex,
-      localIndexByOriginal,
-      notExtractedByOriginal
-    );
-    if (embeddedCapture.blockedReasons.length > 0) {
-      extraWarnings.push({
-        originalIndex: t.originalIndex,
-        path: t.path,
-        group: t.group,
-        kind: "embeddedRawData",
-        message: `"${t.path}" has embedded raw data that could not be safely captured, so NONE of it was captured (never a partial relocation): ${embeddedCapture.blockedReasons.join(" ")}`
-      });
-    }
-    return {
+    const entry = tagIndex.entries[t.originalIndex];
+    const common = {
       originalIndex: t.originalIndex,
       group: t.group,
       path: t.path,
       structName,
-      data: Buffer.concat(outChunks),
-      dependencies,
-      secondaryClassFourCC: tagIndex.entries[t.originalIndex].secondaryClassFourCC,
-      tertiaryClassFourCC: tagIndex.entries[t.originalIndex].tertiaryClassFourCC,
-      embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
-      embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches
+      secondaryClassFourCC: entry.secondaryClassFourCC,
+      tertiaryClassFourCC: entry.tertiaryClassFourCC
     };
+    let fileOffset = -1;
+    try {
+      const fileOffsetAnchor = t.bspLocation ? t.bspLocation.fileOffsetAnchor : header.tagDataOffset;
+      const baseMemoryAddress = t.bspLocation ? t.bspLocation.baseMemoryAddress : tagIndex.baseMemoryAddress;
+      fileOffset = t.bspLocation ? t.bspLocation.fileOffset : resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+      const dependencies = [];
+      const outChunks = [];
+      const runningOffset = { value: 0 };
+      const embeddedCapture = { dedupeKeyToAssetIndex: /* @__PURE__ */ new Map(), assets: [], patches: [], blockedReasons: [] };
+      const injectionBlockers = [];
+      const rootResolved = resolveStruct(structName);
+      const rootBytes = Buffer.from(buffer.subarray(fileOffset, fileOffset + rootResolved.totalSize));
+      outChunks.push(rootBytes);
+      runningOffset.value += rootResolved.totalSize;
+      flattenStruct(
+        buffer,
+        structName,
+        fileOffset,
+        rootBytes,
+        0,
+        fileOffsetAnchor,
+        baseMemoryAddress,
+        outChunks,
+        runningOffset,
+        dependencies,
+        embeddedCapture,
+        injectionBlockers,
+        t.path,
+        tagIndex,
+        localIndexByOriginal,
+        notExtractedByOriginal
+      );
+      if (embeddedCapture.blockedReasons.length > 0) {
+        extraWarnings.push({
+          originalIndex: t.originalIndex,
+          path: t.path,
+          group: t.group,
+          kind: "embeddedRawData",
+          message: `"${t.path}" has embedded raw data that could not be safely captured, so NONE of it was captured (never a partial relocation): ${embeddedCapture.blockedReasons.join(" ")}`
+        });
+      }
+      return {
+        ...common,
+        data: Buffer.concat(outChunks),
+        dependencies,
+        embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
+        embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches,
+        injectionBlockers
+      };
+    } catch (err) {
+      if (err instanceof OperationCancelledError) throw err;
+      const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      const message = `"${t.path}" (${t.group}) could not be extracted (unexpected error: ${detail}) - the tag is blocked from injection; the rest of the selection was extracted normally.`;
+      extraWarnings.push({ originalIndex: t.originalIndex, path: t.path, group: t.group, kind: "extractionFailed", message });
+      const rootSize = resolveStruct(structName).totalSize;
+      const data = isRangeInBuffer(fileOffset, rootSize, buffer.length) ? Buffer.from(buffer.subarray(fileOffset, fileOffset + rootSize)) : Buffer.alloc(0);
+      return {
+        ...common,
+        data,
+        dependencies: [],
+        embeddedRawDataAssets: [],
+        embeddedRawDataPatches: [],
+        injectionBlockers: [{ kind: "extractionFailed", fieldPath: t.path, message }]
+      };
+    }
   });
   options.onProgress?.(extractableWalked.length, extractableWalked.length);
   return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...walk.warnings, ...extraWarnings] };
@@ -34715,7 +34752,7 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
 
 // ../core/src/map/container.ts
 var OCETAGS_MAGIC = "OCETAGS";
-var OCETAGS_FORMAT_VERSION = 3;
+var OCETAGS_FORMAT_VERSION = 4;
 var OCETAGS_MIN_SUPPORTED_VERSION = 1;
 var ContainerFormatError = class extends Error {
   constructor(message) {
@@ -34770,7 +34807,8 @@ function serializeContainer(set, sourceMapName, resourceMapIdentities = {}) {
       secondaryClassFourCC: t.secondaryClassFourCC,
       tertiaryClassFourCC: t.tertiaryClassFourCC,
       embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
-      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p }))
+      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p })),
+      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b }))
     })),
     notExtracted: set.notExtracted,
     warnings: set.warnings,
@@ -34822,7 +34860,7 @@ var RESOURCE_MAP_KEY = {
   "sounds.map": "sounds",
   "loc.map": "loc"
 };
-var OCETAGS_SUPPORTED_MAX_VERSION = 3;
+var OCETAGS_SUPPORTED_MAX_VERSION = OCETAGS_FORMAT_VERSION;
 function warningMessagesOfKind(container, kind) {
   const byOriginal = /* @__PURE__ */ new Map();
   for (const w of container.warnings) {
@@ -34860,10 +34898,18 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
   const embeddedWarningsByOriginal = embeddedWarningMessages(container);
   const embeddedCapturedByOriginal = embeddedCapturedCounts(container);
   const uncapturedDataByOriginal = warningMessagesOfKind(container, "uncapturedData");
-  function uncapturedDataBlockReason(t) {
-    const msgs = uncapturedDataByOriginal.get(t.originalIndex);
-    if (!msgs || msgs.length === 0) return null;
-    return `This tag has data that cannot be captured or relocated: ${msgs.join("; ")}`;
+  const invalidReflexiveByOriginal = warningMessagesOfKind(container, "invalidReflexive");
+  const extractionFailedByOriginal = warningMessagesOfKind(container, "extractionFailed");
+  function structuralBlockReason(t) {
+    const reasons = [];
+    const uncaptured = uncapturedDataByOriginal.get(t.originalIndex) ?? [];
+    if (uncaptured.length > 0) reasons.push(`This tag has data that cannot be captured or relocated: ${uncaptured.join("; ")}`);
+    const blockers = t.injectionBlockers ?? [];
+    const invalid = [...blockers.filter((b) => b.kind === "invalidReflexive").map((b) => b.message), ...blockers.length > 0 ? [] : invalidReflexiveByOriginal.get(t.originalIndex) ?? []];
+    if (invalid.length > 0) reasons.push(`This tag has an invalid/corrupt layout (a reflexive outside the source map) and cannot be relocated: ${invalid.join("; ")}`);
+    const failed = [...blockers.filter((b) => b.kind === "extractionFailed").map((b) => b.message), ...blockers.length > 0 ? [] : extractionFailedByOriginal.get(t.originalIndex) ?? []];
+    if (failed.length > 0) reasons.push(`This tag failed to extract and cannot be injected: ${failed.join("; ")}`);
+    return reasons.length > 0 ? reasons.join(" ") : null;
   }
   function embeddedBlockReason(t) {
     const msgs = embeddedWarningsByOriginal.get(t.originalIndex);
@@ -34883,10 +34929,10 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
   for (const li of candidateAdd) {
     const t = container.tags[li];
     const reasons = [];
-    const uncaptured = uncapturedDataBlockReason(t);
-    if (uncaptured) {
+    const structural = structuralBlockReason(t);
+    if (structural) {
       blockedUncapturedSet.add(li);
-      reasons.push(uncaptured);
+      reasons.push(structural);
     }
     const embedded = embeddedBlockReason(t);
     if (embedded) {
@@ -34938,6 +34984,10 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
     const reasons = [];
     if (existing.isExternal) {
       reasons.push(`The existing "${t.path}" (${t.group}) in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.`);
+    }
+    const structuralBlockMsg = structuralBlockReason(t);
+    if (structuralBlockMsg) {
+      reasons.push(structuralBlockMsg);
     }
     const embeddedBlockMsg = embeddedBlockReason(t);
     if (embeddedBlockMsg) {
@@ -35073,6 +35123,11 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
   const swappedCount = plan.toSwap.length;
   if (addedCount === 0 && swappedCount === 0) return Buffer.from(targetBuffer);
   const writeTags = [...plan.toAdd, ...plan.toSwap.map((s) => container.tags[s.localIndex])];
+  for (const t of writeTags) {
+    if (t.injectionBlockers && t.injectionBlockers.length > 0) {
+      throw new Error(`Internal error: "${t.path}" reached applyInjection() with injection blockers (${t.injectionBlockers.map((b) => b.kind).join(", ")}) - planInjection() should have blocked it.`);
+    }
+  }
   if (!options.allowEmbeddedRelocation) {
     for (const t of writeTags) {
       if (t.embeddedRawDataPatches && t.embeddedRawDataPatches.length > 0) {

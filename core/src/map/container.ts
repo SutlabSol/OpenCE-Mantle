@@ -19,13 +19,18 @@
  * (or a v3 container that couldn't fully capture it - see `tag-extractor.ts`) stays blocked
  * with a "re-extract to enable relocation" message - see `tag-injector.ts`. Relocation itself
  * stays behind an explicit, test-only opt-in until approved (see PRD.md "Relocation research").
+ *
+ * v4 adds: per-tag `injectionBlockers` - reasons decided at extraction time why a tag must never
+ * be injected (an out-of-bounds TagReflexive left unrelocated, or an unexpected extraction
+ * error). The injector blocks on these from the saved file alone. v1-v3 containers don't have
+ * the field; the injector falls back to their persisted walker `warnings` instead.
  */
-import type { ExtractedTagSet, ExtractedDependencyRef, ExtractedEmbeddedAsset, ExtractedEmbeddedPatch } from './tag-extractor';
+import type { ExtractedTagSet, ExtractedDependencyRef, ExtractedEmbeddedAsset, ExtractedEmbeddedPatch, InjectionBlocker } from './tag-extractor';
 import type { WalkerWarning } from './dependency-walker';
 import type { ResourceMapIdentity } from './resource-map';
 
 export const OCETAGS_MAGIC = 'OCETAGS';
-export const OCETAGS_FORMAT_VERSION = 3;
+export const OCETAGS_FORMAT_VERSION = 4;
 export const OCETAGS_MIN_SUPPORTED_VERSION = 1;
 export const OCETAGS_EXTENSION = '.ocetags';
 
@@ -57,6 +62,8 @@ export interface OceContainerTag {
   /** Added in v3; undefined when read from a v1/v2 container - relocation stays blocked for those. */
   embeddedRawDataAssets?: OceContainerEmbeddedRawDataAsset[];
   embeddedRawDataPatches?: OceContainerEmbeddedRawDataPatch[];
+  /** Added in v4; undefined when read from a v1-v3 container. Non-empty = blocked from ADD/SWAP. */
+  injectionBlockers?: InjectionBlocker[];
 }
 
 export interface OceContainerNotExtracted {
@@ -163,6 +170,7 @@ export function serializeContainer(
       tertiaryClassFourCC: t.tertiaryClassFourCC,
       embeddedRawDataAssets: t.embeddedRawDataAssets.map((a: ExtractedEmbeddedAsset) => ({ kind: a.kind, data: a.data.toString('base64') })),
       embeddedRawDataPatches: t.embeddedRawDataPatches.map((p: ExtractedEmbeddedPatch) => ({ ...p })),
+      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
     })),
     notExtracted: set.notExtracted,
     warnings: set.warnings,

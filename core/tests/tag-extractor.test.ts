@@ -152,7 +152,7 @@ describe.skipIf(!haveColdsnap)(captureSuiteTitle, () => {
     const tag = set.tags.find((t) => t.originalIndex === bitmapIndex)!;
     const container = deserializeContainer(serializeContainer(set, 'coldsnap'));
     const containerTag = container.tags.find((t) => t.originalIndex === bitmapIndex)!;
-    expect(container.formatVersion).toBe(3);
+    expect(container.formatVersion).toBe(OCETAGS_FORMAT_VERSION); // assets/patches were added in v3; still carried by every later version
     expect(containerTag.embeddedRawDataAssets?.length).toBe(tag.embeddedRawDataAssets.length);
     expect(containerTag.embeddedRawDataPatches).toEqual(tag.embeddedRawDataPatches);
     for (let i = 0; i < tag.embeddedRawDataAssets.length; i++) {

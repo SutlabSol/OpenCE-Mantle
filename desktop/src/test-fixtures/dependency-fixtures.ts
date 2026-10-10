@@ -154,7 +154,7 @@ function blockedDataSummary(): DependencyWalkSummary {
       path: 'weapons\\assault rifle\\assault rifle.triggers',
       group: '',
       kind: 'invalidReflexive',
-      message: '"weapons\\assault rifle\\assault rifle.triggers" (2 x "WeaponTrigger") resolves outside this file (pointer base -4096) - unrecognized/corrupt layout, not walked further.',
+      message: '"weapons\\assault rifle\\assault rifle.triggers" (2 x "WeaponTrigger") resolves outside this file (pointer base -4096) - unrecognized/corrupt layout, not walked further; the WHOLE tag is blocked from injection.',
     },
   ];
   return { requestedOriginalIndices: [30], extractableTags, notExtractedTags: [], externalTags: [], warnings, totalEstimatedSize: 58248, allExcluded: false };

@@ -104,13 +104,15 @@ describe('DependencyDialog', () => {
     for (const [slug, fragment] of [
       ['cannot-be-captured-blocked-for-injection', 'model geometry part(s)'],
       ['embedded-data-injection-blocked-while-embedded-relocation-is-disabled', 'embedded in this map'],
-      ['invalid-corrupt-layout-not-walked', 'resolves outside this file'],
+      ['invalid-corrupt-layout-not-walked-blocked-for-injection', 'resolves outside this file'],
     ]) {
       expect(screen.getByTestId(`warning-group-${slug}`).textContent).toContain('NEEDS ATTENTION');
       await userEvent.click(screen.getByTestId(`warning-group-toggle-${slug}`));
       expect(screen.getByTestId(`warning-group-items-${slug}`).textContent).toContain(fragment);
     }
     expect(screen.queryByTestId('warning-group-other-warnings')).not.toBeInTheDocument();
+    // invalidReflexive now blocks ADD/SWAP in core, so its group title must say so.
+    expect(screen.getByTestId('warning-group-toggle-invalid-corrupt-layout-not-walked-blocked-for-injection').textContent).toContain('blocked for injection');
 
     const confirm = screen.getByTestId('dependency-confirm-button');
     expect(confirm).toBeDisabled();

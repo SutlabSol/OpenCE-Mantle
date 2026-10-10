@@ -6,6 +6,7 @@ import { serializeContainer, deserializeContainer } from '../src/map/container';
 import { planAddInjection } from '../src/map/tag-injector';
 import { resolveStruct, decodeStruct, resolvePointer, getGroupDefinition } from '../src/map/definitions/engine';
 import { resolveTagDataPointer } from '../src/map/tag-index';
+import { computeExpectedExtractedLength } from './helpers/expected-length';
 import { hasSampleMap, hasSampleMaps, readSampleMap, missingSampleMapsMessage } from './helpers/sample-maps';
 import type { CacheFileHeader } from '../src/map/header';
 import type { TagIndex } from '../src/map/tag-index';
@@ -105,40 +106,6 @@ describe.skipIf(!haveUi)(uiTitle, () => {
     expect(blockedEntry!.reasons.join(' ')).toContain('cannot be captured or relocated');
   });
 });
-
-/**
- * Independently re-derives (from `resolveStruct`/`decodeStruct`/`resolvePointer` only - the
- * SAME low-level primitives `tag-extractor.ts` uses, but NOT calling any of its own
- * flatten/capture code) the expected byte length of one extracted tag's flattened buffer:
- * its own struct size, plus every reflexive descendant (recursively), plus every plain
- * (non-external, non-nonCached) TagDataOffset field's size IF its pointer resolves in-bounds
- * (0 otherwise - matching the extractor's own skip-on-unresolvable behavior, not a defect).
- * Labelled "same-reader": this reuses our own definitions engine, so a shared blind spot in
- * both would not be caught - it does NOT independently verify against the real Halo CE engine.
- */
-function computeExpectedExtractedLength(buffer: Buffer, structName: string, fileOffset: number, anchor: number, base: number): number {
-  const resolved = resolveStruct(structName);
-  if (fileOffset < 0 || fileOffset + resolved.totalSize > buffer.length) return resolved.totalSize;
-  const decoded = decodeStruct(buffer, fileOffset, structName);
-  let total = resolved.totalSize;
-  for (const field of resolved.fields) {
-    const value = decoded.get(field.name);
-    if (!value || field.def.nonCached) continue;
-    if (value.kind === 'reflexive' && value.value.count > 0) {
-      const childStructName = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
-      if (!childStructName) continue;
-      const childSize = resolveStruct(childStructName).totalSize;
-      const childBase = resolvePointer(value.value.pointerLow, anchor, base);
-      for (let i = 0; i < value.value.count; i++) {
-        total += childSize + (computeExpectedExtractedLength(buffer, childStructName, childBase + i * childSize, anchor, base) - childSize);
-      }
-    } else if (value.kind === 'tagDataOffset' && field.def.type === 'TagDataOffset' && !field.def.externalFileOffset && value.value.size > 0) {
-      const srcBase = resolvePointer(value.value.pointerLow, anchor, base);
-      if (srcBase >= 0 && srcBase + value.value.size <= buffer.length) total += value.value.size;
-    }
-  }
-  return total;
-}
 
 const SWEEP_MAPS = ['bloodgulch.map', 'ui.map', 'sidewinder.map', 'coldsnap.map'];
 

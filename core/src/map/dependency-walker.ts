@@ -3,7 +3,7 @@ import { resolveTagDataPointer } from './tag-index';
 import { OperationCancelledError } from './errors';
 import type { CacheFileHeader } from './header';
 import type { TagIndex } from './tag-index';
-import { resolveStruct, decodeStruct, getAllTagGroupNames, getGroupDefinition, resolvePointer } from './definitions/engine';
+import { resolveStruct, decodeStruct, getAllTagGroupNames, getGroupDefinition, resolvePointer, isRangeInBuffer } from './definitions/engine';
 import { findEmbeddedDataFields } from './embedded-data-fields';
 
 /** NULL tag id sentinel (0xFFFFFFFF), see TagDependency / TagID. */
@@ -36,8 +36,13 @@ export interface WalkedTag {
   requiredBy: string[];
 }
 
-/** Every warning kind the walker/extractor can emit. The desktop IPC type and Dependency dialog derive from this list - add new kinds here. */
-export const WARNING_KINDS = ['uncertainGroup', 'noDefinition', 'externalTag', 'externalData', 'embeddedRawData', 'bspTag', 'invalidReflexive', 'uncapturedData'] as const;
+/**
+ * Every warning kind the walker/extractor can emit. The desktop IPC type and Dependency dialog
+ * derive from this list - add new kinds here. `extractionFailed` is emitted only by
+ * `tag-extractor.ts` (an unexpected exception while flattening one tag - that tag is blocked from
+ * injection, the rest of the selection still extracts).
+ */
+export const WARNING_KINDS = ['uncertainGroup', 'noDefinition', 'externalTag', 'externalData', 'embeddedRawData', 'bspTag', 'invalidReflexive', 'uncapturedData', 'extractionFailed'] as const;
 
 export type WarningKind = (typeof WARNING_KINDS)[number];
 
@@ -278,13 +283,13 @@ function collectFromStruct(
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const childBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (childBase < 0 || childBase + value.value.count * childSize > buffer.length) {
+      if (!isRangeInBuffer(childBase, value.value.count * childSize, buffer.length)) {
         warn({
           originalIndex: rootOriginalIndex,
           path: `${contextPath}.${field.name}`,
           group: '',
           kind: 'invalidReflexive',
-          message: `"${contextPath}.${field.name}" (${value.value.count} x "${childStructName}") resolves outside this file (pointer base ${childBase}) - unrecognized/corrupt layout, not walked further.`,
+          message: `"${contextPath}.${field.name}" (${value.value.count} x "${childStructName}") resolves outside this file (pointer base ${childBase}) - unrecognized/corrupt layout, not walked further; the WHOLE tag is blocked from injection.`,
         });
         continue;
       }
@@ -312,7 +317,7 @@ function collectFromStruct(
       // captured by the extractor (see `tag-extractor.ts`). Only warn here if it DOESN'T
       // resolve - the normal (in-bounds) case needs no warning, it's captured fine.
       const resolved2 = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (resolved2 < 0 || resolved2 + value.value.size > buffer.length) {
+      if (!isRangeInBuffer(resolved2, value.value.size, buffer.length)) {
         warn({
           originalIndex: rootOriginalIndex,
           path: `${contextPath}.${field.name}`,
