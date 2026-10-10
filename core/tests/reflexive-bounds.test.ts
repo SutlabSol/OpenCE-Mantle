@@ -285,6 +285,36 @@ describe.skipIf(!haveMaps)(title, () => {
     expect(outcome(planSwapInjection(tagIndex, container), container, pick.index).status).toBe('blocked');
   });
 
+  it('(f) a tag of an unknown class (noDefinition) is blocked on its own; a good tag in the same selection still extracts', () => {
+    // In-memory tag-index copy: give one tag a class name with no registered definition.
+    const unknownGroup = 'no_such_group';
+    expect(getAllTagGroupNames()).not.toContain(unknownGroup);
+    const corruptIndex: TagIndex = { ...tagIndex, entries: tagIndex.entries.map((e) => (e.index === pick.index ? { ...e, primaryClassName: unknownGroup } : e)) };
+    const other = tagIndex.entries.find((e) => e.index !== pick.index && !e.isExternal && e.primaryClassName === tagIndex.entries[pick.index].primaryClassName)!;
+
+    const walk = walkDependencies(src, header, corruptIndex, [pick.index, other.index]);
+    expect(walk.warnings.some((w) => w.kind === 'noDefinition' && w.originalIndex === pick.index)).toBe(true);
+
+    const set = extractTagSet(src, header, corruptIndex, [pick.index, other.index]); // must not throw
+    const bad = set.tags.find((t) => t.originalIndex === pick.index)!;
+    const good = set.tags.find((t) => t.originalIndex === other.index)!;
+    expect(bad.injectionBlockers.map((b) => b.kind)).toEqual(['extractionFailed']);
+    expect(bad.injectionBlockers[0].message).toContain(`No tag group definition registered for "${unknownGroup}"`);
+    expect(bad.structName).toBe('');
+    expect(bad.data.length).toBe(0);
+    expect(bad.dependencies).toEqual([]);
+    expect(good.injectionBlockers).toEqual([]);
+    expect(good.data.length).toBe(computeExpectedExtractedLength(src, getGroupDefinition(other.primaryClassName!).name, resolveTagDataPointer(other.tagDataPointerOrResourceIndex, header, base), anchor, base));
+
+    const container = roundTrip(set);
+    const add = planAddInjection(targetIndex, container);
+    const addBad = outcome(add, container, pick.index);
+    expect(addBad.status).toBe('blocked');
+    expect(addBad.reasons).toContain('failed to extract');
+    expect(outcome(add, container, other.index).status).toBe('added');
+    expect(outcome(planSwapInjection(tagIndex, container), container, pick.index).status).toBe('blocked');
+  });
+
   it('defense in depth: applyInjection refuses a tag carrying blockers even if a plan lets it through', () => {
     const set = extractTagSet(src, header, tagIndex, [pick.index]);
     const container = roundTrip(set);

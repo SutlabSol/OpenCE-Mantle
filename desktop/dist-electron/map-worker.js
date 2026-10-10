@@ -34646,9 +34646,10 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
   const extractableWalked = [];
   const notExtracted = [];
   const notExtractedByOriginal = /* @__PURE__ */ new Map();
+  const knownGroups = new Set(getAllTagGroupNames());
   for (const t of walk.tags) {
-    const def = getGroupDefinition(t.group);
-    if (def.extractable === false) {
+    const def = knownGroups.has(t.group) ? getGroupDefinition(t.group) : null;
+    if (def && def.extractable === false) {
       const entry = {
         originalIndex: t.originalIndex,
         group: t.group,
@@ -34670,18 +34671,18 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
   const tags = extractableWalked.map((t, i) => {
     if (options.signal?.aborted) throw new OperationCancelledError();
     options.onProgress?.(i, extractableWalked.length);
-    const structName = getGroupDefinition(t.group).name;
     const entry = tagIndex.entries[t.originalIndex];
     const common = {
       originalIndex: t.originalIndex,
       group: t.group,
       path: t.path,
-      structName,
       secondaryClassFourCC: entry.secondaryClassFourCC,
       tertiaryClassFourCC: entry.tertiaryClassFourCC
     };
+    let structName = "";
     let fileOffset = -1;
     try {
+      structName = getGroupDefinition(t.group).name;
       const fileOffsetAnchor = t.bspLocation ? t.bspLocation.fileOffsetAnchor : header.tagDataOffset;
       const baseMemoryAddress = t.bspLocation ? t.bspLocation.baseMemoryAddress : tagIndex.baseMemoryAddress;
       fileOffset = t.bspLocation ? t.bspLocation.fileOffset : resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
@@ -34723,6 +34724,7 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
       }
       return {
         ...common,
+        structName,
         data: Buffer.concat(outChunks),
         dependencies,
         embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
@@ -34734,10 +34736,11 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
       const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       const message = `"${t.path}" (${t.group}) could not be extracted (unexpected error: ${detail}) - the tag is blocked from injection; the rest of the selection was extracted normally.`;
       extraWarnings.push({ originalIndex: t.originalIndex, path: t.path, group: t.group, kind: "extractionFailed", message });
-      const rootSize = resolveStruct(structName).totalSize;
-      const data = isRangeInBuffer(fileOffset, rootSize, buffer.length) ? Buffer.from(buffer.subarray(fileOffset, fileOffset + rootSize)) : Buffer.alloc(0);
+      const rootSize = structName ? resolveStruct(structName).totalSize : 0;
+      const data = rootSize > 0 && isRangeInBuffer(fileOffset, rootSize, buffer.length) ? Buffer.from(buffer.subarray(fileOffset, fileOffset + rootSize)) : Buffer.alloc(0);
       return {
         ...common,
+        structName,
         data,
         dependencies: [],
         embeddedRawDataAssets: [],

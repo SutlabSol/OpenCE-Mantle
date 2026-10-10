@@ -1,6 +1,6 @@
 import { fourCCToString } from '../constants/tag-classes';
 import { resolveTagDataPointer } from './tag-index';
-import { resolveStruct, decodeStruct, getGroupDefinition, resolvePointer, isRangeInBuffer } from './definitions/engine';
+import { resolveStruct, decodeStruct, getGroupDefinition, getAllTagGroupNames, resolvePointer, isRangeInBuffer } from './definitions/engine';
 import { walkDependencies } from './dependency-walker';
 import type { WalkerWarning, WalkOptions } from './dependency-walker';
 import { findEmbeddedDataFields, validateBitmapAssetSize } from './embedded-data-fields';
@@ -319,9 +319,12 @@ export function extractTagSet(
   const extractableWalked: typeof walk.tags = [];
   const notExtracted: NotExtractedTag[] = [];
   const notExtractedByOriginal = new Map<number, NotExtractedTag>();
+  const knownGroups = new Set(getAllTagGroupNames());
   for (const t of walk.tags) {
-    const def = getGroupDefinition(t.group);
-    if (def.extractable === false) {
+    // A tag with no registered definition (the walker's 'noDefinition' case) is NOT looked up
+    // here - it goes on to the per-tag try below, which blocks just that tag (extractionFailed).
+    const def = knownGroups.has(t.group) ? getGroupDefinition(t.group) : null;
+    if (def && def.extractable === false) {
       const entry: NotExtractedTag = {
         originalIndex: t.originalIndex,
         group: t.group,
@@ -347,12 +350,13 @@ export function extractTagSet(
     if (options.signal?.aborted) throw new OperationCancelledError();
     options.onProgress?.(i, extractableWalked.length);
 
-    const structName = getGroupDefinition(t.group).name;
     const entry = tagIndex.entries[t.originalIndex];
-    const common = { originalIndex: t.originalIndex, group: t.group, path: t.path, structName,
+    const common = { originalIndex: t.originalIndex, group: t.group, path: t.path,
       secondaryClassFourCC: entry.secondaryClassFourCC, tertiaryClassFourCC: entry.tertiaryClassFourCC };
+    let structName = ''; // stays '' if the group has no definition (noDefinition)
     let fileOffset = -1;
     try {
+      structName = getGroupDefinition(t.group).name;
       const fileOffsetAnchor = t.bspLocation ? t.bspLocation.fileOffsetAnchor : header.tagDataOffset;
       const baseMemoryAddress = t.bspLocation ? t.bspLocation.baseMemoryAddress : tagIndex.baseMemoryAddress;
       fileOffset = t.bspLocation
@@ -397,7 +401,7 @@ export function extractTagSet(
         });
       }
 
-      return { ...common, data: Buffer.concat(outChunks), dependencies,
+      return { ...common, structName, data: Buffer.concat(outChunks), dependencies,
         embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
         embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches,
         injectionBlockers };
@@ -405,13 +409,14 @@ export function extractTagSet(
       if (err instanceof OperationCancelledError) throw err;
       // One bad tag must not fail the whole selection with a raw exception. Keep the tag in the
       // set (so anything depending on it is blocked too, via the injector's dependency cascade)
-      // with only its unmodified root struct bytes, no dependencies, and a blocker.
+      // with only its unmodified root struct bytes (none if the group has no definition or the
+      // root is out of bounds), no dependencies, and a blocker.
       const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       const message = `"${t.path}" (${t.group}) could not be extracted (unexpected error: ${detail}) - the tag is blocked from injection; the rest of the selection was extracted normally.`;
       extraWarnings.push({ originalIndex: t.originalIndex, path: t.path, group: t.group, kind: 'extractionFailed', message });
-      const rootSize = resolveStruct(structName).totalSize;
-      const data = isRangeInBuffer(fileOffset, rootSize, buffer.length) ? Buffer.from(buffer.subarray(fileOffset, fileOffset + rootSize)) : Buffer.alloc(0);
-      return { ...common, data, dependencies: [], embeddedRawDataAssets: [], embeddedRawDataPatches: [],
+      const rootSize = structName ? resolveStruct(structName).totalSize : 0;
+      const data = rootSize > 0 && isRangeInBuffer(fileOffset, rootSize, buffer.length) ? Buffer.from(buffer.subarray(fileOffset, fileOffset + rootSize)) : Buffer.alloc(0);
+      return { ...common, structName, data, dependencies: [], embeddedRawDataAssets: [], embeddedRawDataPatches: [],
         injectionBlockers: [{ kind: 'extractionFailed' as const, fieldPath: t.path, message }] };
     }
   });
@@ -429,6 +434,11 @@ export function verifyExtractedTagSet(set: ExtractedTagSet): string[] {
   const errors: string[] = [];
 
   for (const tag of set.tags) {
+    if (tag.injectionBlockers.some((b) => b.kind === 'extractionFailed')) {
+      // No flattened data to check (and possibly no struct definition at all) - report it, don't walk it.
+      errors.push(`${tag.path} (#${tag.originalIndex}): not extracted (extractionFailed) - blocked from injection.`);
+      continue;
+    }
     verifyLocalStruct(tag.data, tag.structName, 0, `${tag.path} (#${tag.originalIndex})`, errors);
     for (const dep of tag.dependencies) {
       if (dep.kind === 'unresolved') {
