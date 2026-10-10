@@ -1,8 +1,9 @@
 # OpenCE Modding Tool
 
 A free, non-commercial GUI desktop tool for modding Halo: Custom Edition (PC, map header
-version `609`) maps — open a map, decompress/recompress it, browse its tags, and (in later
-milestones) extract/inject tags and export a valid `.map`. Built for maps intended to run on
+version `609`) maps — open a map, decompress/recompress it, browse its tags, extract tags
+(with dependencies) to `.ocetags` files, and inject them into other maps. Exporting a
+fully valid `.map` with recalculated checksums is planned (M6). Built for maps intended to run on
 [OpenCE](https://github.com/OpenCommunityEdition/OpenCE), which loads standard Custom
 Edition caches directly.
 
@@ -13,13 +14,15 @@ Edition caches directly.
 ```
 core/      Pure TypeScript map/tag library (no Electron/React/DOM). Unit tested with Vitest.
 desktop/   Electron main process + preload + React (Vite) renderer - the actual GUI app.
-           (Named "desktop" instead of the brief's literal "/app" to avoid colliding with
-           this sandbox's own root path - see /app/memory/PRD.md.)
+memory/    PRD.md (milestone status + approved decisions) and RULES.md (standing dev rules).
 ```
+
+`backend/`, `frontend/`, and `tests/` are unused scaffolding from the original hosting
+template and are not part of the app.
 
 ## Install
 
-Requires Node.js 18+ and Yarn.
+Requires Node.js 22 LTS (`>=20 <23`) and Yarn 1.
 
 ```bash
 cd core && yarn install
@@ -29,22 +32,31 @@ cd ../desktop && yarn install
 ## Run in development
 
 ```bash
-cd core && yarn build          # core must be built once before the desktop app can import it
-cd ../desktop
+cd desktop
 yarn dev:renderer               # terminal 1: Vite dev server (renderer UI on http://localhost:5173)
 yarn dev:electron               # terminal 2: compiles main/preload/worker and launches Electron
 ```
 
 The Electron window loads the Vite dev server in development, so renderer edits hot-reload.
+The desktop app imports `core/src` directly, so there's no separate `core` build step.
+
+To preview just the UI in a plain browser (no Electron), open http://localhost:5173 while
+`yarn dev:renderer` is running - a dev-only mock of the Electron API is used, and
+`?mock=<scenario>` picks a scenario (see `desktop/src/test-fixtures/dependency-fixtures.ts`).
 
 ## Test
 
 ```bash
-cd core && yarn test            # 29 Vitest tests: header, tag index, FourCC, compression,
-                                 # and real-map round-trip tests (auto-skipped if
-                                 # /app/sample_maps isn't present)
+cd core && yarn test            # Vitest: parsing, compression, definitions, dependency walker,
+                                 # extraction, container, injection, real-map tests
+cd desktop && yarn test         # Vitest (jsdom): renderer components + Electron-side logic
+cd desktop && yarn typecheck
 cd core && yarn inspect-map /path/to/some.map   # developer-only CLI, not part of the shipped app
 ```
+
+Real-map tests read `.map` files from `<repo root>/sample_maps` (or `SAMPLE_MAPS_DIR` if set)
+and skip themselves, naming the missing file, when a map isn't there. See `core/README.md`
+for which tests need which maps.
 
 ## Build (all platforms, produces unpackaged app)
 
@@ -57,21 +69,16 @@ yarn build                      # builds the renderer (dist/) and bundles Electr
 
 ## Package a Windows build
 
-This sandbox is a headless Linux container with no Windows and no display, so a tested
-Windows `.exe` cannot be produced here. Run these commands **on your own Windows machine**
-(or Linux/macOS with Wine installed, for cross-building):
+Run these on Windows (or Linux/macOS with Wine installed, for cross-building):
 
 ```bash
-cd core && yarn install && yarn build
-cd ../desktop && yarn install
+cd desktop && yarn install
 yarn dist:win            # portable .exe + NSIS installer
 # or, for just the portable exe:
 yarn dist:win:portable
 ```
 
-Output lands wherever electron-builder places it (default: `desktop/dist/`, alongside the
-Vite renderer output - add `"directories": { "output": "release" }` under the `build` key in
-`desktop/package.json` if you'd rather it go to a separate folder).
+Output lands in `desktop/release/`.
 
 **Native module note**: map decompression uses `@mongodb-js/zstd` (a native Node addon).
 `electron-builder` rebuilds native modules for Electron's own Node ABI automatically on
@@ -110,8 +117,14 @@ non-GPL source instead.
 
 ## Milestone status
 
-See `/app/memory/PRD.md` for the full progress log. As of this writing: M1 (header/tag index
-parsing) and M2 (decompress/recompress) are done and tested against real maps; M3 (this GUI
-shell) is done. M4 (dependency walker + extract), M5 (inject), and M6 (export + CRC) are not
-yet implemented - their menu items are present but show a "coming in a later milestone" log
-message rather than silently doing nothing.
+See `memory/PRD.md` for the full status table and progress log. In short:
+
+- **M1** (header/tag index parsing), **M2** (decompress/recompress), **M3** (GUI shell): done.
+- **M4** (dependency walker + tag extraction to `.ocetags`): implemented; needs
+  re-verification on Windows after a data-capture fix.
+- **M5** (tag injection): Step A (ADD) and Step B (SWAP) implemented; Step C (conflict
+  dialog) not started. Tags whose dependencies include a `gbxmodel` are currently blocked
+  (model geometry isn't captured yet). Relocating embedded bitmap/sound data is built but
+  disabled in the app pending approval.
+- **M6** (export + CRC32 recalculation): not started. Until then, maps written by injection
+  have stale checksums and may be rejected by some loaders.
