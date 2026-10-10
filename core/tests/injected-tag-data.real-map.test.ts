@@ -5,6 +5,7 @@ import type { OceContainer } from '../src/map/container';
 import { planInjection, applyInjection } from '../src/map/tag-injector';
 import type { InjectionMode, InjectionPlan } from '../src/map/tag-injector';
 import { readSampleMap, skippableTest } from './helpers/sample-maps';
+import { planThatFitsTagSpace } from './helpers/fit-tag-space';
 import { auditMap, tagBlocks, blocksOutsideTagData, treeDiff, findTag, entryPathPointer, referencePathPointerIssues } from './helpers/tag-data-audit';
 import type { AuditMap, Block } from './helpers/tag-data-audit';
 
@@ -128,7 +129,8 @@ describe('injected tag data matches its source (real maps, independent audit)', 
     it.skipIf(g.skip)(`SWAP ${name} into a copy of itself: 0 pointers outside tag data, aligned, padding zero, tree diff clean${g.titleSuffix}`, () => {
       const m = auditMap(readSampleMap(name));
       expect(sourceMisaligned(m)).toEqual([]);
-      const { out, written, appendStart } = inject('swap', m, container(m, wholeMapRoots(m), name), m);
+      const { container: c } = planThatFitsTagSpace('swap', { buffer: m.buf, header: m.header, tagIndex: m.ti }, wholeMapRoots(m), (r) => container(m, r, name));
+      const { out, written, appendStart } = inject('swap', m, c, m);
       const r = audit(m, out, written, appendStart);
       expect(written.length).toBeGreaterThan(0);
       expect(r.outside).toEqual([]);

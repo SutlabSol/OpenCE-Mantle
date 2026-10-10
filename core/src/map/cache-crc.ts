@@ -42,36 +42,45 @@ export function computeCacheCrc32(buffer: Buffer, regions: CrcRegion[]): number 
   return crc >>> 0;
 }
 
-/** The CRC regions of an uncompressed Custom Edition (609) map, found through the schema (scenario "structure bsps"). */
-export function ceCrcRegions(buffer: Buffer, header: CacheFileHeader, tagIndex: TagIndex): CrcRegion[] {
+/**
+ * The scenario's "structure bsps" as file regions (bsp start, bsp size), in order, found through
+ * the schema. `purpose` starts every error message ("Cannot compute the map checksum", ...).
+ */
+export function ceStructureBspRegions(buffer: Buffer, header: CacheFileHeader, tagIndex: TagIndex, purpose = 'Cannot compute the map checksum'): CrcRegion[] {
   const regions: CrcRegion[] = [];
   const scenario = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];
   if (!scenario || scenario.tagId !== tagIndex.scenarioTagId >>> 0 || scenario.isExternal) {
-    throw new CorruptMapError('Cannot compute the map checksum: the scenario tag ID in the tag data header does not name a scenario tag in this map.');
+    throw new CorruptMapError(`${purpose}: the scenario tag ID in the tag data header does not name a scenario tag in this map.`);
   }
   const scenarioStruct = getGroupStructName('scenario')!;
   const scenarioAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
   if (!isRangeInBuffer(scenarioAt, resolveStruct(scenarioStruct).totalSize, buffer.length)) {
-    throw new CorruptMapError('Cannot compute the map checksum: the scenario tag data is outside the file.');
+    throw new CorruptMapError(`${purpose}: the scenario tag data is outside the file.`);
   }
   const bsps = decodeStruct(buffer, scenarioAt, scenarioStruct).get('structure bsps');
   if (bsps?.kind === 'reflexive' && bsps.value.count > 0) {
     const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === 'structure bsps')!;
     const bspStruct = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
-    if (!bspStruct) throw new CorruptMapError('Cannot compute the map checksum: "structure bsps" is not a block list in this build\'s definitions.');
+    if (!bspStruct) throw new CorruptMapError(`${purpose}: "structure bsps" is not a block list in this build's definitions.`);
     const size = resolveStruct(bspStruct).totalSize;
     const base = resolvePointer(bsps.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
     if (!isRangeInBuffer(base, bsps.value.count * size, buffer.length)) {
-      throw new CorruptMapError('Cannot compute the map checksum: the scenario\'s structure BSP list is outside the file.');
+      throw new CorruptMapError(`${purpose}: the scenario's structure BSP list is outside the file.`);
     }
     for (let i = 0; i < bsps.value.count; i++) {
       const d = decodeStruct(buffer, base + i * size, bspStruct);
       const start = d.get('bsp start');
       const length = d.get('bsp size');
-      if (start?.kind !== 'basic' || length?.kind !== 'basic') throw new CorruptMapError('Cannot compute the map checksum: unexpected structure BSP layout.');
+      if (start?.kind !== 'basic' || length?.kind !== 'basic') throw new CorruptMapError(`${purpose}: unexpected structure BSP layout.`);
       regions.push({ offset: Number(start.value), size: Number(length.value), label: `structure bsp ${i}` });
     }
   }
+  return regions;
+}
+
+/** The CRC regions of an uncompressed Custom Edition (609) map, found through the schema (scenario "structure bsps"). */
+export function ceCrcRegions(buffer: Buffer, header: CacheFileHeader, tagIndex: TagIndex): CrcRegion[] {
+  const regions = ceStructureBspRegions(buffer, header, tagIndex);
   regions.push({ offset: tagIndex.modelDataFileOffset, size: tagIndex.modelDataSize, label: 'model data' });
   regions.push({ offset: header.tagDataOffset, size: header.tagDataSize, label: 'tag data' });
   return regions;

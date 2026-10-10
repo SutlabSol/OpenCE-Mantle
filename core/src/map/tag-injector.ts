@@ -49,12 +49,13 @@
  * - CRC32 / tag checksum recalculation: that is Milestone 6's job. This module leaves both
  *   fields byte-for-byte as in the target map and the caller must surface them as stale.
  */
-import { TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file';
+import { CE_TAG_SPACE_SIZE, TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file';
 import { fourCCFromString, lookupTagClassByName } from '../constants/tag-classes';
 import type { CacheFileHeader } from './header';
 import type { TagIndex, TagIndexEntry } from './tag-index';
 import { collectTagDataPointers, applyPointerShift, tagDataLayoutOf, UnwalkableTagError } from './pointer-rebase';
 import type { RebaseCounts } from './pointer-rebase';
+import { ceStructureBspRegions } from './cache-crc';
 import { resolveStruct, decodeStruct, resolvePointer, isRangeInBuffer } from './definitions/engine';
 import { decodeReflexive, decodeDependency, encodeDependency } from './definitions/codec';
 import type { OceContainer, OceContainerTag, ExternalResourceRef } from './container';
@@ -442,6 +443,23 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
     }
   }
 
+  // Tag space: the grown tag data (new entries, appended data with its alignment padding, new path
+  // strings) plus the largest BSP must fit, exactly as applyInjection will lay it out.
+  const writeTags = [...toAddLocalIndices.map((li) => container.tags[li]), ...toSwap.map((s) => container.tags[s.localIndex])];
+  if (writeTags.length > 0) {
+    const layout = layoutAppend(target.buffer.length, target.header.tagDataOffset, toAddLocalIndices.length * TAG_ENTRY_SIZE, 0, writeTags.map((t) => alignTagData(Buffer.from(t.data, 'base64'), t.structName).data), toAddLocalIndices.map((li) => container.tags[li].path));
+    const newTagDataSize = layout.newFileLength - target.header.tagDataOffset;
+    const bsps = ceStructureBspRegions(target.buffer, target.header, targetTagIndex, 'Cannot check the tag space');
+    const largestBsp = bsps.reduce((n, r) => Math.max(n, r.size), 0);
+    if (newTagDataSize + largestBsp > CE_TAG_SPACE_SIZE) {
+      const mib = (n: number) => `${(n / (1024 * 1024)).toFixed(2)} MiB`;
+      return {
+        kind: 'refused',
+        reason: `The result would not fit in the game's tag space: tag data would be ${mib(newTagDataSize)} (now ${mib(target.header.tagDataSize)}) and the largest BSP is ${mib(largestBsp)}, ${mib(newTagDataSize + largestBsp)} in total; the limit is ${mib(CE_TAG_SPACE_SIZE)}. Inject fewer tags.`,
+      };
+    }
+  }
+
   return {
     kind: 'ok',
     mode,
@@ -681,6 +699,30 @@ function alignTagData(data: Buffer, structName: string): { data: Buffer; mapOffs
   return { data: out, mapOffset };
 }
 
+/**
+ * Where appended data lands: each tag's (already aligned) data block at a 4-byte boundary from the
+ * tag data start, then the new entries' path strings packed back to back (no alignment, like real
+ * maps). `delta` is the tag array growth, `insertSize` the embedded-data insertion before it.
+ * Shared by `planInjection` (tag space check) and `applyInjection`, so both see the same size.
+ */
+function layoutAppend(oldFileLength: number, oldTagDataOffset: number, delta: number, insertSize: number, dataBuffers: Buffer[], newPaths: string[]): { structOffsets: number[]; pathOffsets: number[]; pathBuffers: Buffer[]; newFileLength: number } {
+  const newTagDataOffset = oldTagDataOffset + insertSize;
+  const structOffsets: number[] = [];
+  let running = oldFileLength + insertSize + delta;
+  for (const b of dataBuffers) {
+    running += padToAlignment(running - newTagDataOffset); // aligned from the tag data start, not the file start (coldsnap's tagDataOffset is 2 mod 4)
+    structOffsets.push(running);
+    running += b.length;
+  }
+  const pathOffsets: number[] = [];
+  const pathBuffers = newPaths.map((p) => Buffer.from(`${p}\0`, 'ascii'));
+  for (const b of pathBuffers) {
+    pathOffsets.push(running);
+    running += b.length;
+  }
+  return { structOffsets, pathOffsets, pathBuffers, newFileLength: running };
+}
+
 function dependenciesByPath(t: OceContainerTag): Map<string, ExtractedDependencyRef> {
   return new Map((t.dependencies as ExtractedDependencyRef[]).map((d) => [d.fieldPath, d]));
 }
@@ -789,23 +831,8 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
 
   const laidOut = writeTags.map((t) => alignTagData(Buffer.from(t.data, 'base64'), t.structName));
   const dataBuffers = laidOut.map((l) => l.data);
-  const structDataStart = oldFileLength + insertSize + delta;
-  const structOffsets: number[] = [];
-  let running = structDataStart;
-  for (const b of dataBuffers) {
-    running += padToAlignment(running - newTagDataOffset); // aligned from the tag data start, not the file start (coldsnap's tagDataOffset is 2 mod 4)
-    structOffsets.push(running);
-    running += b.length;
-  }
-  // Path strings only needed for brand-new entries - swapped entries reuse their existing path
-  // pointer. Packed back to back with no alignment, exactly like the path strings in real maps.
-  const pathOffsets: number[] = [];
-  const pathBuffers = plan.toAdd.map((t) => Buffer.from(`${t.path}\0`, 'ascii'));
-  for (const b of pathBuffers) {
-    pathOffsets.push(running);
-    running += b.length;
-  }
-  const newFileLength = running;
+  // Path strings only for brand-new entries - swapped entries reuse their existing path pointer.
+  const { structOffsets, pathOffsets, pathBuffers, newFileLength } = layoutAppend(oldFileLength, subHeaderOffset, delta, insertSize, dataBuffers, plan.toAdd.map((t) => t.path));
 
   const out = Buffer.alloc(newFileLength);
   targetBuffer.copy(out, 0, 0, insertPos); // header + BSP + rest of raw-data region, byte-for-byte, unmoved

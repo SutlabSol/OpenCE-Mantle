@@ -78,3 +78,10 @@ export const CE_BASE_MEMORY_ADDRESS = 0x40440000;
 
 /** The only tag array pointer a valid CE map has: the array follows the tag data header. */
 export const CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
+
+/**
+ * Tag space: tag data and the loaded BSP share this much memory from the base (the BSP is loaded
+ * at base + tag space - bsp size), so tag data size + the largest BSP must fit. 23 MiB on PC/CE
+ * and demo (`memory/demo-converter.md`, Invader `gbx-custom`).
+ */
+export const CE_TAG_SPACE_SIZE = 23 * 1024 * 1024;

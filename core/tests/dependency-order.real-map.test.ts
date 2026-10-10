@@ -6,8 +6,8 @@ import type { CacheFileHeader } from '../src/map/header';
 import { resolveStruct, decodeStruct, resolvePointer, isRangeInBuffer, getGroupStructName } from '../src/map/definitions/engine';
 import { extractTagSet } from '../src/map/tag-extractor';
 import { serializeContainer, deserializeContainer } from '../src/map/container';
-import type { OceContainer } from '../src/map/container';
-import { planInjection, applyInjection } from '../src/map/tag-injector';
+import { applyInjection } from '../src/map/tag-injector';
+import { planThatFitsTagSpace } from './helpers/fit-tag-space';
 import type { InjectionMode } from '../src/map/tag-injector';
 import { readSampleMap, skippableTest } from './helpers/sample-maps';
 
@@ -66,15 +66,10 @@ function targetKey(ti: TagIndex, tagId: number): string {
   return e && e.tagId === tagId ? `${e.primaryClassName}|${e.path.toLowerCase()}` : `invalid tagId 0x${tagId.toString(16)}`;
 }
 
-function wholeMapContainer(m: LoadedMap, name: string): OceContainer {
-  const roots = m.ti.entries.filter((e) => !e.isExternal && e.primaryClassName !== 'scenario' && e.primaryClassName !== 'scenario_structure_bsp').map((e) => e.index);
-  return deserializeContainer(serializeContainer(extractTagSet(m.buf, m.header, m.ti, roots), name));
-}
-
+/** Every non-scenario tag as roots, halved only if the result wouldn't fit the tag space (`planThatFitsTagSpace`). */
 function injectAndCompare(src: LoadedMap, srcName: string, tgt: LoadedMap, mode: InjectionMode) {
-  const container = wholeMapContainer(src, srcName);
-  const plan = planInjection(mode, { buffer: tgt.buf, header: tgt.header, tagIndex: tgt.ti }, container);
-  if (plan.kind !== 'ok') throw new Error(`plan refused: ${plan.reason}`);
+  const roots = src.ti.entries.filter((e) => !e.isExternal && e.primaryClassName !== 'scenario' && e.primaryClassName !== 'scenario_structure_bsp').map((e) => e.index);
+  const { container, plan } = planThatFitsTagSpace(mode, { buffer: tgt.buf, header: tgt.header, tagIndex: tgt.ti }, roots, (r) => deserializeContainer(serializeContainer(extractTagSet(src.buf, src.header, src.ti, r), srcName)));
   const depMapBlocked = [...plan.blockedOther, ...plan.blockedEmbedded].filter((b) => b.reasons.some((r) => DEP_MAP_BLOCK_TEXT.some((s) => r.includes(s))));
 
   const out = applyInjection(tgt.buf, tgt.header, tgt.ti, container, plan); // must not throw
