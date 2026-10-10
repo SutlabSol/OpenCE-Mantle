@@ -30,6 +30,10 @@ var fs4 = __toESM(require("fs"));
 // ../core/src/constants/cache-file.ts
 var CHIMERA_COMPRESSED_ENGINE_MASK = 2249850880;
 var TAG_STRING_SIZE = 32;
+var TAG_DATA_HEADER_PC_SIZE = 40;
+var CE_BASE_MEMORY_ADDRESS = 1078198272;
+var CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
+var CE_TAG_SPACE_SIZE = 23 * 1024 * 1024;
 
 // ../core/src/constants/tag-classes.ts
 function fourCCFromString(code) {
