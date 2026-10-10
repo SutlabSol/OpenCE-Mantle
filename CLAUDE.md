@@ -68,7 +68,7 @@ Real-map tests read from `<repo root>/sample_maps`, or from `SAMPLE_MAPS_DIR` if
 - `definitions/` is the data-driven tag schema engine. `groups/*.json` is generated from Invader's definition JSON by `scripts/generate-definitions.mjs`. Don't hand-edit it without updating `SOURCES.md`. `engine.ts` computes field offsets at runtime and throws if a struct's computed size differs from the declared `sizeBytes`. There is no per-tag hardcoded parsing.
 - `dependency-walker.ts` computes dependency closures and emits typed warnings (`externalData`, `uncapturedData`, BSP, ...). Some kinds block injection. Any closure containing a `gbxmodel` is currently blocked, because model geometry isn't wired into the extractor/injector yet.
 - `tag-extractor.ts` flattens tags into a self-contained `ExtractedTagSet` (appends reflexive/pointer data and rewrites pointers to local offsets). Fields marked `nonCached` are skipped.
-- `container.ts` defines the `.ocetags` format (versioned JSON, currently v3; v1 and v2 still readable).
+- `container.ts` defines the `.ocetags` format (versioned JSON, currently v4; v1 to v3 still readable).
 - `tag-injector.ts` plans and applies ADD/SWAP injection. Embedded (external=0) relocation sits behind `InjectionOptions.allowEmbeddedRelocation`, default false. **Keep it disabled in the app until the user approves.** `map-worker.ts` must never set it.
 - `resource-map.ts` and `embedded-data-verifier.ts` handle bitmaps/sounds/loc map identity and embedded-data checks.
 - `gbxmodel-geometry.ts` is Stage 1 (capture only, standalone). It is not wired into the extractor or injector.
