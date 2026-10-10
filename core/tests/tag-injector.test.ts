@@ -164,6 +164,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const targetCopy = Buffer.from(bgBuffer); // never mutate the original sample
     const injected = applyAddInjection(targetCopy, bgHeader, bgTagIndex, container, plan);
     expect(targetCopy.equals(bgBuffer)).toBe(true); // confirms the source buffer was never mutated
+    expect(injected.readUInt32LE(bgHeader.tagDataOffset)).toBe(0x40440028); // array pointer unchanged; the old "re-anchor" lowered it and the engine blue-screened
 
     const reparsed = inspectCustomEditionMap(injected);
     expect(reparsed.status).toBe('ok');
@@ -175,8 +176,8 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     expect(newTicker).toBeDefined();
     expect(newStarMask).toBeDefined();
 
-    // Validate EVERY tag (old AND new) - the regression check that the global
-    // tag_array_address re-anchor trick didn't silently break any pre-existing tag's pointers.
+    // Validate EVERY tag (old AND new). Same-reader: this re-parses with our own reader; the
+    // independent check of existing tags is add-preserves-existing-tags.real-map.test.ts.
     const errors: string[] = [];
     const stats = { structsVisited: 0, dependenciesChecked: 0, reflexivesChecked: 0, elementsBoundsChecked: 0 };
     let validated = 0;

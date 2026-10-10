@@ -148,6 +148,7 @@ describe('injected tag data matches its source (real maps, independent audit)', 
     expect(sourceMisaligned(ui)).toEqual([]);
     expect(sourceMisaligned(bg)).toEqual([]);
     const { out, written, appendStart } = inject('add', ui, container(ui, wholeMapRoots(ui), 'ui.map'), bg);
+    expect(out.buf.readUInt32LE(out.header.tagDataOffset)).toBe(0x40440028); // the array pointer the engine reads never moves (also enforced by parseTagIndex)
     const r = audit(ui, out, written, appendStart);
     expect(written.length).toBeGreaterThan(0);
     expect(r.outside).toEqual([]);
