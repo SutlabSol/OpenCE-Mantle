@@ -68,3 +68,13 @@ export const TAG_DATA_HEADER_PC_SIZE = 0x28;
 
 /** Size of one `CacheFileTagDataTag` entry (invader/hek/map.hpp: `static_assert(... == 0x20)`). */
 export const TAG_ENTRY_SIZE = 0x20;
+
+/**
+ * Virtual address the engine loads Custom Edition (and PC retail) tag data at. Fixed, never
+ * inferred: Invader's `gbx-custom` engine info and `memory/demo-converter.md` (true demo uses
+ * 0x4BF10000). Every CE sample map stores the tag array pointer as this + 0x28.
+ */
+export const CE_BASE_MEMORY_ADDRESS = 0x40440000;
+
+/** The only tag array pointer a valid CE map has: the array follows the tag data header. */
+export const CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;

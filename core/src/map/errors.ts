@@ -6,6 +6,22 @@ export class CorruptMapError extends Error {
   }
 }
 
+/**
+ * The tag data header's tag array pointer isn't the one every Custom Edition map has. Most likely
+ * the map was written by ADD in an earlier build of this tool (which lowered this pointer instead
+ * of moving the pointers after the tag array); the game can't load it.
+ */
+export class UnexpectedTagArrayAddressError extends CorruptMapError {
+  constructor(public readonly found: number, public readonly expected: number) {
+    super(
+      `This map's tag array pointer is 0x${found.toString(16).toUpperCase()}, but every Custom Edition map has 0x${expected.toString(16).toUpperCase()}. ` +
+        'It was most likely written by Inject Tags (ADD) in an earlier, broken build of OpenCE Modding Tool, and the game cannot load it. ' +
+        'Re-create it from the original map with this build.',
+    );
+    this.name = 'UnexpectedTagArrayAddressError';
+  }
+}
+
 /** Human-readable names for engine values we recognize but do not support, for clear dialogs. */
 const KNOWN_ENGINE_NAMES: Record<number, string> = {
   5: 'Halo: Combat Evolved (Xbox)',

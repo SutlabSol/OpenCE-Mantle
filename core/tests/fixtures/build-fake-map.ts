@@ -1,4 +1,4 @@
-import { CacheFileEngine, CacheFileLiteral, ScenarioType, TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE, CHIMERA_COMPRESSED_ENGINE_MASK } from '../../src/constants/cache-file';
+import { CacheFileEngine, CacheFileLiteral, ScenarioType, TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE, CHIMERA_COMPRESSED_ENGINE_MASK, CE_BASE_MEMORY_ADDRESS } from '../../src/constants/cache-file';
 import { fourCCFromString, TAG_CLASS_NONE } from '../../src/constants/tag-classes';
 import { writeFixedString } from '../../src/binary/strings';
 
@@ -28,7 +28,7 @@ const TAG_DATA_OFFSET = HEADER_SIZE; // tag data section starts right after the 
 
 /** Builds a complete, byte-accurate synthetic Custom Edition .map buffer for tests. */
 export function buildFakeMap(options: FixtureOptions): Buffer {
-  const baseMemoryAddress = options.baseMemoryAddress ?? 0x50000000;
+  const baseMemoryAddress = options.baseMemoryAddress ?? CE_BASE_MEMORY_ADDRESS; // the engine's fixed CE base; anything else is rejected by parseTagIndex
   const tagArrayFileOffset = TAG_DATA_OFFSET + TAG_DATA_HEADER_PC_SIZE;
   const tagArrayAddress = baseMemoryAddress + (tagArrayFileOffset - TAG_DATA_OFFSET);
 

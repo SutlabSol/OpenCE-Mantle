@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseCacheFileHeader } from '../src/map/header';
-import { parseTagIndex } from '../src/map/tag-index';
-import { CorruptMapError } from '../src/map/errors';
+import { parseTagIndex, inferBaseMemoryAddressForClassifier } from '../src/map/tag-index';
+import { CorruptMapError, UnexpectedTagArrayAddressError } from '../src/map/errors';
 import { buildFakeMap } from './fixtures/build-fake-map';
 
 describe('parseTagIndex', () => {
@@ -38,16 +38,31 @@ describe('parseTagIndex', () => {
     expect(tagIndex.entries[3].secondaryClassFourCC).toBeNull();
   });
 
-  it('resolves tag paths correctly via the inferred base memory address, for any base address', () => {
+  it('rejects a map whose tag array pointer is not 0x40440028 (e.g. lowered by an earlier broken ADD), with a message that says to re-create it', () => {
+    // A self-consistent map at another base: the old inferring reader would have accepted it.
+    const buffer = buildFakeMap({ baseMemoryAddress: 0x40440000 - 64, tags: [{ primaryClass: 'weap', tagId: 1, path: 'weapons\\pistol\\pistol' }] });
+    const header = parseCacheFileHeader(buffer);
+    expect(() => parseTagIndex(buffer, header)).toThrow(UnexpectedTagArrayAddressError);
+    expect(() => parseTagIndex(buffer, header)).toThrow(/0x4043FFE8.*0x40440028.*earlier, broken build.*Re-create it/s);
+    expect(() => parseTagIndex(buffer, header)).toThrow(CorruptMapError);
+  });
+
+  it('inferBaseMemoryAddressForClassifier (converter only) guesses the base from the array pointer', () => {
+    expect(inferBaseMemoryAddressForClassifier(0x40440028)).toBe(0x40440000);
+    expect(inferBaseMemoryAddressForClassifier(0x4bf10028)).toBe(0x4bf10000);
+  });
+
+  it('uses the fixed CE base 0x40440000 (not inferred) and resolves paths through it', () => {
     const buffer = buildFakeMap({
-      baseMemoryAddress: 0x12340000,
       tags: [
         { primaryClass: 'bipd', tagId: 1, path: 'characters\\masterchief\\masterchief' },
         { primaryClass: 'weap', tagId: 2, path: 'weapons\\pistol\\pistol' },
       ],
     });
     const header = parseCacheFileHeader(buffer);
+    expect(buffer.readUInt32LE(header.tagDataOffset)).toBe(0x40440028);
     const tagIndex = parseTagIndex(buffer, header);
+    expect(tagIndex.baseMemoryAddress).toBe(0x40440000);
     expect(tagIndex.entries[0].path).toBe('characters\\masterchief\\masterchief');
     expect(tagIndex.entries[1].path).toBe('weapons\\pistol\\pistol');
   });

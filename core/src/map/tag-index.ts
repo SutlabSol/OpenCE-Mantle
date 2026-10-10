@@ -1,7 +1,7 @@
 import { TAG_CLASS_NONE, fourCCToString, lookupTagClass } from '../constants/tag-classes';
-import { TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file';
+import { CE_BASE_MEMORY_ADDRESS, CE_TAG_ARRAY_ADDRESS, TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file';
 import { readCString } from '../binary/strings';
-import { CorruptMapError } from './errors';
+import { CorruptMapError, UnexpectedTagArrayAddressError } from './errors';
 import type { CacheFileHeader } from './header';
 
 /**
@@ -42,7 +42,7 @@ export interface TagIndex {
   modelDataFileOffset: number;
   vertexSize: number;
   modelDataSize: number;
-  /** Inferred virtual base address used to resolve all pointers in the tag data section. */
+  /** Virtual base address of the tag data: always `CE_BASE_MEMORY_ADDRESS` for a CE map (fixed, not inferred). */
   baseMemoryAddress: number;
   entries: TagIndexEntry[];
 }
@@ -55,15 +55,23 @@ export function resolveTagDataPointer(pointer: number, header: CacheFileHeader, 
 }
 
 /**
+ * Base address a reader would GUESS from a tag array pointer, assuming the array follows the tag
+ * data header. For the Demo/HaloMD converter's classifier only (to tell layouts apart, e.g.
+ * 0x40440000 vs the true demo's 0x4BF10000). Never use it to read a CE map: the engine's base is
+ * fixed, and a map whose array pointer was moved resolves to garbage in the game even though
+ * this guess makes it look fine to us (PRD 2026-10-11 "ADD tag-array growth").
+ */
+export function inferBaseMemoryAddressForClassifier(tagArrayAddress: number): number {
+  return (tagArrayAddress - TAG_DATA_HEADER_PC_SIZE) >>> 0;
+}
+
+/**
  * Parses the tag index (tag data header + tag array + tag path strings) for a decompressed
- * Custom Edition map.
- *
- * ASSUMPTION (stated explicitly): the tag array is located immediately after the
- * `CacheFileTagDataHeaderPC` struct, i.e. at file offset `tagDataOffset + 0x28`. This matches
- * how Tool.exe lays out the tag data section and is how every known community tool reads it.
- * The virtual base memory address is then INFERRED as
- * `tagArrayAddress - (tagDataOffset + 0x28)` rather than assumed from a hardcoded constant,
- * following the technique documented in invader/hek/map.hpp's `GameEngineInfo::base_memory_address_is_inferred`.
+ * Custom Edition map. The base is the fixed `CE_BASE_MEMORY_ADDRESS`, and the tag array must be
+ * where Tool puts it, right after the `CacheFileTagDataHeaderPC` (array pointer
+ * `CE_TAG_ARRAY_ADDRESS`). Any other array pointer is rejected with
+ * `UnexpectedTagArrayAddressError`: earlier builds of this tool wrote such maps with ADD, and the
+ * engine can't load them.
  */
 export function parseTagIndex(buffer: Buffer, header: CacheFileHeader): TagIndex {
   const tagDataHeaderOffset = header.tagDataOffset;
@@ -80,9 +88,9 @@ export function parseTagIndex(buffer: Buffer, header: CacheFileHeader): TagIndex
   const vertexSize = buffer.readUInt32LE(tagDataHeaderOffset + 0x1c);
   const modelDataSize = buffer.readUInt32LE(tagDataHeaderOffset + 0x20);
 
+  if (tagArrayAddress !== CE_TAG_ARRAY_ADDRESS) throw new UnexpectedTagArrayAddressError(tagArrayAddress, CE_TAG_ARRAY_ADDRESS);
   const tagArrayFileOffset = tagDataHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
-  // baseMemoryAddress solves: tagArrayAddress == baseMemoryAddress + (tagArrayFileOffset - tagDataOffset)
-  const baseMemoryAddress = (tagArrayAddress - tagArrayFileOffset + header.tagDataOffset) >>> 0;
+  const baseMemoryAddress = CE_BASE_MEMORY_ADDRESS;
 
   if (tagArrayFileOffset + tagCount * TAG_ENTRY_SIZE > buffer.length) {
     throw new CorruptMapError('Tag count from the tag index is out of bounds of the file (map may be corrupt).');
