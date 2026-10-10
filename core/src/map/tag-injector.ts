@@ -602,6 +602,68 @@ function rewriteAddedTagData(
   }
 }
 
+/** Tag data blocks start at a multiple of this from the start of tag data, as in every real CE map checked (Tool pads odd-length blocks). */
+const TAG_DATA_BLOCK_ALIGNMENT = 4;
+
+function padToAlignment(length: number): number {
+  return (TAG_DATA_BLOCK_ALIGNMENT - (length % TAG_DATA_BLOCK_ALIGNMENT)) % TAG_DATA_BLOCK_ALIGNMENT;
+}
+
+/**
+ * Re-lays out one container tag's flattened data so every block - the root struct, each
+ * reflexive array, each relocated data block (`isRelocatedTagDataField`) - starts at a multiple
+ * of 4 from the tag's own start, with zero bytes between blocks. Real maps align every tag,
+ * reflexive and data pointer to 4 from the tag data start; containers v1-v4 store blocks back to
+ * back (a 2-byte animation struct array or an odd-length string shifts everything after it), so
+ * this runs at apply time and the container format is unchanged. Block order is the extractor's
+ * two-phase order. Pointers in the result are still LOCAL offsets, now into the new buffer;
+ * `mapOffset` maps an offset in the old buffer to the new one (embedded-asset patch offsets).
+ * `planInjection` has already checked every block lies inside `data` (`collectDependencyFields`).
+ */
+function alignTagData(data: Buffer, structName: string): { data: Buffer; mapOffset: (oldOffset: number) => number } {
+  const copies: { from: number; to: number; length: number }[] = [];
+  const pointerWrites: { at: number; value: number }[] = [];
+  let length = 0;
+  const place = (from: number, size: number): number => {
+    length += padToAlignment(length);
+    const to = length;
+    copies.push({ from, to, length: size });
+    length += size;
+    return to;
+  };
+  const visit = (name: string, oldAt: number, newAt: number): void => {
+    const decoded = decodeStruct(data, oldAt, name);
+    const children: { struct: string; size: number; count: number; oldBase: number; newBase: number }[] = [];
+    for (const field of resolveStruct(name).fields) {
+      const value = decoded.get(field.name);
+      if (!value || field.def.nonCached) continue;
+      const childStruct = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
+      if (value.kind === 'reflexive' && value.value.count > 0 && childStruct) {
+        const size = resolveStruct(childStruct).totalSize;
+        const newBase = place(value.value.pointerLow, value.value.count * size);
+        pointerWrites.push({ at: newAt + field.offset + 4, value: newBase });
+        children.push({ struct: childStruct, size, count: value.value.count, oldBase: value.value.pointerLow, newBase });
+      } else if (isRelocatedTagDataField(field, value)) {
+        pointerWrites.push({ at: newAt + field.offset + 12, value: place(value.value.pointerLow, value.value.size) });
+      }
+    }
+    for (const c of children) {
+      for (let i = 0; i < c.count; i++) visit(c.struct, c.oldBase + i * c.size, c.newBase + i * c.size);
+    }
+  };
+  place(0, resolveStruct(structName).totalSize);
+  visit(structName, 0, 0);
+  const out = Buffer.alloc(length);
+  for (const c of copies) data.copy(out, c.to, c.from, c.from + c.length);
+  for (const w of pointerWrites) out.writeUInt32LE(w.value, w.at);
+  const mapOffset = (oldOffset: number): number => {
+    const c = copies.find((x) => oldOffset >= x.from && oldOffset < x.from + x.length);
+    if (!c) throw new Error(`Internal error: offset ${oldOffset} is not inside any block of the tag's data.`);
+    return c.to + (oldOffset - c.from);
+  };
+  return { data: out, mapOffset };
+}
+
 function dependenciesByPath(t: OceContainerTag): Map<string, ExtractedDependencyRef> {
   return new Map((t.dependencies as ExtractedDependencyRef[]).map((d) => [d.fieldPath, d]));
 }
@@ -696,15 +758,18 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   const newTagDataOffset = subHeaderOffset + insertSize;
   const newArrayOffset = arrayOffset + insertSize;
 
-  const dataBuffers = writeTags.map((t) => Buffer.from(t.data, 'base64'));
+  const laidOut = writeTags.map((t) => alignTagData(Buffer.from(t.data, 'base64'), t.structName));
+  const dataBuffers = laidOut.map((l) => l.data);
   const structDataStart = oldFileLength + insertSize + delta;
   const structOffsets: number[] = [];
   let running = structDataStart;
   for (const b of dataBuffers) {
+    running += padToAlignment(running - newTagDataOffset); // aligned from the tag data start, not the file start (coldsnap's tagDataOffset is 2 mod 4)
     structOffsets.push(running);
     running += b.length;
   }
-  // Path strings only needed for brand-new entries - swapped entries reuse their existing path pointer.
+  // Path strings only needed for brand-new entries - swapped entries reuse their existing path
+  // pointer. Packed back to back with no alignment, exactly like the path strings in real maps.
   const pathOffsets: number[] = [];
   const pathBuffers = plan.toAdd.map((t) => Buffer.from(`${t.path}\0`, 'ascii'));
   for (const b of pathBuffers) {
@@ -789,7 +854,7 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   // `embedded-data-fields.ts`). Must run AFTER the struct-data copies above.
   for (let i = 0; i < writeTags.length; i++) {
     for (const patch of writeTags[i].embeddedRawDataPatches ?? []) {
-      out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + patch.patchOffset);
+      out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + laidOut[i].mapOffset(patch.patchOffset));
     }
   }
 
