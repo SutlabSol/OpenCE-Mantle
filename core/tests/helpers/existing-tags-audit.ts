@@ -32,6 +32,9 @@ function raw(buf: Buffer): RawMap {
 const fileOf = (m: RawMap, pointer: number) => m.tagDataOffset + (((pointer >>> 0) - ENGINE_BASE) | 0);
 const inTagData = (m: RawMap, at: number, length: number) => at >= m.tagDataOffset && at + length <= m.tagDataOffset + m.tagDataSize && at + length <= m.buf.length;
 
+/** Whether a tag-array data field holds an address inside the map's tag data. Decided by value here on purpose (independent of the injector, which decides by group). */
+const isTagDataAddress = (m: RawMap, value: number) => inTagData(m, fileOf(m, value), 1);
+
 const isPointerData = (f: { def: { type: string; nonCached?: boolean; externalFileOffset?: boolean } }) => f.def.type === 'TagDataOffset' && !f.def.nonCached && !f.def.externalFileOffset;
 
 export interface ExistingTagsReport {
@@ -91,6 +94,7 @@ export function auditExistingTags(sourceBuf: Buffer, sourceIndex: TagIndex, outp
         if (want !== got) report(i, `${p}: reference path "${want}" -> "${got}"`);
       } else if (av.kind === 'reflexive' && bv.kind === 'reflexive' && f.def.type === 'TagReflexive') {
         if (av.value.count === 0) continue; // compared as raw bytes below (pointer included)
+        if (av.value.pointerLow >>> 0 === 0) continue; // blocks in a resource map (external sound pitch ranges): raw bytes below
         pointerBytes.fill(1, f.offset + 4, f.offset + 8);
         if (av.value.count !== bv.value.count) {
           report(i, `${p}: count ${av.value.count} -> ${bv.value.count}`);
@@ -131,8 +135,11 @@ export function auditExistingTags(sourceBuf: Buffer, sourceIndex: TagIndex, outp
       report(i, `tag #${i}: path "${e.path}" -> "${outPath}"`);
       continue;
     }
-    if (e.isExternal || e.primaryClassName === 'scenario_structure_bsp') {
-      if (u32(src.buf, se + 0x14) !== u32(out.buf, oe + 0x14)) report(i, `tag #${i} ${e.path}: data pointer / resource index changed`);
+    // An external entry whose data field is an address (external sounds keep their base struct in
+    // the map) is compared like an internal tag; a resource index or a BSP entry must be unchanged.
+    const sourceData = u32(src.buf, se + 0x14);
+    if (e.primaryClassName === 'scenario_structure_bsp' || (e.isExternal && !isTagDataAddress(src, sourceData))) {
+      if (sourceData !== u32(out.buf, oe + 0x14)) report(i, `tag #${i} ${e.path}: data pointer / resource index changed`);
       continue;
     }
     if (skip.has(i)) continue;
@@ -158,8 +165,9 @@ export interface PointerCensus {
 
 /**
  * Counts every pointer the engine follows in an ORIGINAL map's tag data, by its own walk (separate
- * code from pointer-rebase.ts): every entry's path pointer, internal non-BSP entries' data
- * pointers, non-null reflexive pointers, pointer-based data blocks, non-zero reference path pointers.
+ * code from pointer-rebase.ts): every entry's path pointer, the data pointer of every non-BSP entry
+ * whose data field is a tag-data address (internal tags and external sounds - decided by value
+ * here), non-null reflexive pointers, pointer-based data blocks, non-zero reference path pointers.
  */
 export function pointerCensus(buf: Buffer, ti: TagIndex): PointerCensus {
   const m = raw(buf);
@@ -176,7 +184,8 @@ export function pointerCensus(buf: Buffer, ti: TagIndex): PointerCensus {
       if (v.kind === 'dependency') {
         if (v.value.pathPointer >>> 0 !== 0) c.referencePath++;
       } else if (v.kind === 'reflexive' && f.def.type === 'TagReflexive') {
-        if (v.value.pointerLow >>> 0 !== 0) c.reflexive++;
+        if (v.value.pointerLow >>> 0 === 0) continue; // count 0, or blocks in a resource map
+        c.reflexive++;
         const size = resolveStruct(f.def.struct).totalSize;
         for (let k = 0; k < v.value.count; k++) walk(f.def.struct, fileOf(m, v.value.pointerLow) + k * size);
       } else if (v.kind === 'tagDataOffset' && isPointerData(f) && (v.value.size > 0 || v.value.pointerLow >>> 0 !== 0)) {
@@ -186,7 +195,8 @@ export function pointerCensus(buf: Buffer, ti: TagIndex): PointerCensus {
   };
   for (const e of ti.entries) {
     c.tagPath++;
-    if (e.isExternal || e.primaryClassName === 'scenario_structure_bsp') continue;
+    if (e.primaryClassName === 'scenario_structure_bsp') continue;
+    if (e.isExternal && !isTagDataAddress(m, e.tagDataPointerOrResourceIndex >>> 0)) continue; // resource index
     c.tagData++;
     walk(getGroupStructName(e.primaryClassName!)!, fileOf(m, e.tagDataPointerOrResourceIndex));
   }

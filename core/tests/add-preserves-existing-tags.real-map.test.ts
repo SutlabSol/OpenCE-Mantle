@@ -62,7 +62,9 @@ function addAndAudit(src: LoadedMap, tgt: LoadedMap, roots: number[]): { p: Inje
   expect(r.tagArrayAddress).toBe(0x40440028);
   expect(r.problems).toEqual([]);
   expect(r.badTags).toBe(0);
-  expect(r.compared).toBe(tgt.ti.entries.filter((e) => !e.isExternal && e.primaryClassName !== 'scenario_structure_bsp').length);
+  // Internal non-BSP tags plus external entries whose data field is a tag-data address (sounds).
+  const isAddress = (v: number) => v >>> 0 >= ENGINE_BASE && v >>> 0 < ENGINE_BASE + tgt.header.tagDataSize;
+  expect(r.compared).toBe(tgt.ti.entries.filter((e) => e.primaryClassName !== 'scenario_structure_bsp' && (!e.isExternal || isAddress(e.tagDataPointerOrResourceIndex))).length);
   // New entries: read raw with the fixed base - path string and root struct inside the tag data.
   const outTagData = out.readUInt32LE(0x10);
   const outTagDataEnd = outTagData + out.readUInt32LE(0x14);
@@ -102,18 +104,18 @@ describe('ADD keeps every existing tag intact (independent: fixed engine base, r
     cs = load('coldsnap.map');
   });
 
-  it.skipIf(gate.skip)(`ADD ui\\shell\\main_menu\\halo_logo into bloodgulch (the user's bg_add1 case): 2 added, +1346 bytes, 0 bad tags, 17,085 pointers moved = the independent census${gate.titleSuffix}`, () => {
+  it.skipIf(gate.skip)(`ADD ui\\shell\\main_menu\\halo_logo into bloodgulch (the user's bg_add1 case): 2 added, +1346 bytes, 0 bad tags, 17,429 pointers moved = the independent census${gate.titleSuffix}`, () => {
     const root = ui.ti.entries.findIndex((e) => e.primaryClassName === 'ui_widget_definition' && e.path === 'ui\\shell\\main_menu\\halo_logo');
     expect(root).toBeGreaterThanOrEqual(0);
     const { p, result } = addAndAudit(ui, bg, [root]);
     expect(p.toAdd.length).toBe(2);
     expect(result.buffer.length - bg.buf.length).toBe(1346); // same growth as bg_add1.map
     const census = pointerCensus(bg.buf, bg.ti);
-    expect(census.total).toBe(17085); // measured on bloodgulch: 2455 + 1569 + 5019 + 1088 + 6954
+    expect(census.total).toBe(17429); // bloodgulch: 2455 path + (1569 + 333 external sounds) data + 5019 reflexive + 1088 data block + (6954 + 11 in external sounds) reference path
     expect(result.rebase).not.toBeNull();
     expect(result.rebase!.visited).toEqual({ tagPath: census.tagPath, tagData: census.tagData, reflexive: census.reflexive, dataBlock: census.dataBlock, referencePath: census.referencePath });
     expect(result.rebase!.rebased).toEqual(result.rebase!.visited); // every pointer lies past the array
-    expect(result.rebase!.totalRebased).toBe(17085);
+    expect(result.rebase!.totalRebased).toBe(17429);
   }, 300_000);
 
   for (const target of ['bloodgulch.map', 'coldsnap.map']) {
@@ -202,16 +204,16 @@ describe('ADD refusals', () => {
 
 describe('pointer-rebase in place (the converter Phase 2 use)', () => {
   const gate = skippableTest(['bloodgulch.map']);
-  it.skipIf(gate.skip)(`moving bloodgulch's whole tag data to base 0x4BF10000 and back touches 17,085 pointers each way and restores every byte${gate.titleSuffix}`, () => {
+  it.skipIf(gate.skip)(`moving bloodgulch's whole tag data to base 0x4BF10000 and back touches 17,429 pointers each way and restores every byte${gate.titleSuffix}`, () => {
     const bg = load('bloodgulch.map');
     const buf = Buffer.from(bg.buf);
     const layout = tagDataLayoutOf(bg.header, bg.ti);
     const delta = 0x4bf10000 - 0x40440000;
     const there = rebaseTagDataPointersInPlace(buf, layout, { from: 0x40440000, to: 0x40440000 + bg.header.tagDataSize, delta });
-    expect(there.totalRebased).toBe(17085);
+    expect(there.totalRebased).toBe(17429);
     expect(buf.equals(bg.buf)).toBe(false);
     const back = rebaseTagDataPointersInPlace(buf, { ...layout, baseMemoryAddress: 0x4bf10000 }, { from: 0x4bf10000, to: 0x4bf10000 + bg.header.tagDataSize, delta: -delta });
-    expect(back.totalRebased).toBe(17085);
+    expect(back.totalRebased).toBe(17429);
     expect(buf.equals(bg.buf)).toBe(true);
   }, 300_000);
 });

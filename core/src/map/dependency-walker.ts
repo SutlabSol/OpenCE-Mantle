@@ -63,7 +63,7 @@ export interface WalkerWarning {
 export interface WalkResult {
   /** Fully-walked tags with data present in this map (status 'ok' or 'bsp'), in discovery order. */
   tags: WalkedTag[];
-  /** Tags whose data lives in a resource map (bitmaps.map/sounds.map/loc.map) - not walked further. */
+  /** External tags: data in a resource map (bitmaps.map/sounds.map/loc.map; an external sound keeps only its base struct in this map) - not walked further. */
   externalTags: WalkedTag[];
   warnings: WalkerWarning[];
 }
@@ -128,7 +128,7 @@ export function walkDependencies(
         path: entry.path,
         group,
         kind: 'externalTag',
-        message: `"${entry.path}" (${group}) lives in a resource map (bitmaps.map/sounds.map/loc.map), not this map. Not walked further; sounds.map/loc.map resolution is a follow-up milestone.`,
+        message: `"${entry.path}" (${group}) is an external tag: its data is in a resource map (bitmaps.map/sounds.map/loc.map; an external sound keeps only its base struct in this map). Not extracted; a tag that uses it is matched by path in the target map.`,
       });
       continue;
     }

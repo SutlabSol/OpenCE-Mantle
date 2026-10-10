@@ -11,7 +11,11 @@
  *
  * Pointer sites (measured on all 5 CE sample maps, PRD 2026-10-11 "ADD tag-array growth"):
  * - tag array entry path pointer (+0x10) - every entry, external ones too;
- * - tag array entry data pointer (+0x14) - internal, non-BSP entries;
+ * - tag array entry data pointer (+0x14) - internal non-BSP entries, AND external entries of a
+ *   group that keeps its base struct in the map (`EXTERNAL_GROUPS_WITH_BASE_STRUCT`: sound). The
+ *   external flag does not mean "resource index" for those: an external sound's data field is
+ *   the address of its base struct in tag data; only its pitch ranges are in sounds.map (pointer
+ *   null). Missing this blue-screened ADD maps in OpenCE (user-confirmed 2026-10-11);
  * - TagReflexive pointer (+4) - including count-0 reflexives with a non-null pointer (0 seen);
  * - pointer-based TagDataOffset (+12) - not `externalFileOffset` (that is a file offset);
  * - TagDependency path pointer (+4) when non-zero.
@@ -63,6 +67,22 @@ export interface TagDataPointerSite {
   tagIndex: number;
 }
 
+/**
+ * External (resource-map) groups whose tag-array data field is the ADDRESS of a base struct kept
+ * in this map's tag data, not a resource index. Measured on all 5 CE sample maps: every external
+ * sound (bloodgulch 333, sidewinder 334, coldsnap 327, Yoyorast 323) holds an address of a
+ * 164-byte Sound struct whose `pitch ranges` reflexive has a null pointer (data in sounds.map).
+ */
+export const EXTERNAL_GROUPS_WITH_BASE_STRUCT: readonly string[] = ['sound'];
+
+/**
+ * External groups whose data field is a resource-map index (nothing in tag data). Measured: every
+ * external bitmap (448/439/406/416), font (3), unicode_string_list (100/100/95/97) and
+ * hud_message_text (1) holds an index below 0x10000. An external entry of any other group is
+ * refused rather than guessed.
+ */
+export const EXTERNAL_GROUPS_WITH_RESOURCE_INDEX: readonly string[] = ['bitmap', 'font', 'unicode_string_list', 'hud_message_text'];
+
 export class UnwalkableTagError extends Error {
   constructor(
     public readonly tagIndex: number,
@@ -104,9 +124,14 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout): T
     const entryAt = layout.tagArrayFileOffset + e.index * TAG_ENTRY_SIZE;
     if (!inTagData(buffer.readUInt32LE(entryAt + 0x10), 1)) fail('its path pointer is outside the tag data');
     addSite('tagPath', entryAt + 0x10, e.index);
-    if (e.isExternal) continue;
-
     const dataPointer = buffer.readUInt32LE(entryAt + 0x14);
+    // External: the group decides whether the data field is an address (base struct kept in the
+    // map) or a resource index. Never decided by the value.
+    const resourceBacked = e.isExternal && EXTERNAL_GROUPS_WITH_BASE_STRUCT.includes(group);
+    if (e.isExternal && !resourceBacked) {
+      if (EXTERNAL_GROUPS_WITH_RESOURCE_INDEX.includes(group)) continue;
+      fail('it is an external (resource map) entry of a group this build has not measured, so its data field could be an address or an index');
+    }
     if (group === 'scenario_structure_bsp') {
       // BSP structs live in BSP memory, not tag data (data pointer 0 in every sample map).
       if (dataPointer !== 0 && inTagData(dataPointer, 1)) fail('its BSP data pointer points into the tag data');
@@ -140,6 +165,8 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout): T
             if (pointer !== 0) addSite('reflexive', fieldAt + 4, e.index);
             continue;
           }
+          // Resource-backed base struct: blocks with a null pointer are loaded from the resource map.
+          if (resourceBacked && pointer === 0) continue;
           const childStruct = field.def.struct;
           if (!childStruct) return fail(`${fieldWhere} has no block definition`);
           const childSize = resolveStruct(childStruct).totalSize;

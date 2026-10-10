@@ -225,7 +225,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const blockedExternalTargets = [...plan.blockedOther].filter((b) => b.group === 'bitmap');
     expect(blockedExternalTargets.length).toBeGreaterThan(0);
     for (const b of blockedExternalTargets) {
-      expect(b.reasons.join(' ')).toMatch(/resource-map-indexed \(external\) entry/);
+      expect(b.reasons.join(' ')).toMatch(/is an external \(resource map\) entry; swapping into those isn't supported/);
       const li = container.tags.findIndex((t) => t.path === b.path && t.group === b.group);
       expect(plan.reusedByLocalIndex.has(li)).toBe(true); // untouched fallback
     }

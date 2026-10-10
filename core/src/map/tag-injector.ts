@@ -43,7 +43,7 @@
  * - Adding brand-new whole-tag-external (resource-map-indexed) entries: an 'external' dependency
  *   that doesn't already exist in the target map blocks the dependent tag (missing dependency),
  *   it is not auto-created. Swapping INTO an existing whole-tag-external entry is also refused
- *   (there is no struct-data pointer to repoint) - falls back to untouched, reported as blocked.
+ *   (supported for no external group yet) - falls back to untouched, reported as blocked.
  * - Conflict dialog (skip/replace/rename + "apply to all"): Step C, not built yet - for now the
  *   caller picks ADD or SWAP for the whole operation via the `mode` parameter.
  * - CRC32 / tag checksum recalculation: that is Milestone 6's job. This module leaves both
@@ -372,7 +372,7 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
     const t = container.tags[li];
     const reasons: string[] = [];
     if (existing.isExternal) {
-      reasons.push(`The existing "${t.path}" (${t.group}) in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.`);
+      reasons.push(`The existing "${t.path}" (${t.group}) in the target is an external (resource map) entry; swapping into those isn't supported. Left unchanged.`);
     }
     const structuralBlockMsg = structuralBlockReason(t);
     if (structuralBlockMsg) {
@@ -855,8 +855,9 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   targetBuffer.copy(out, insertPos + insertSize, insertPos, oldStructDataOffset); // rest of model data + sub-header + existing tag array, shifted by +insertSize ONLY (the tag-array growth insertion point is further along, handled next)
   targetBuffer.copy(out, oldStructDataOffset + insertSize + delta, oldStructDataOffset, oldFileLength); // existing struct/path-string data, shifted by +insertSize AND +delta
 
-  // File offsets in the target -> the output: +insertSize up to the old array end, +delta after it.
-  const outOffsetOf = (at: number): number => at + insertSize + (at >= oldStructDataOffset ? delta : 0);
+  // File offsets in the target -> the output: unmoved before the embedded insertion point,
+  // +insertSize up to the old array end, +insertSize+delta after it.
+  const outOffsetOf = (at: number): number => (at < insertPos ? at : at + insertSize + (at >= oldStructDataOffset ? delta : 0));
   const oldArrayEndAddress = (baseMemoryAddress + (oldStructDataOffset - subHeaderOffset)) >>> 0;
   const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: (baseMemoryAddress + targetHeader.tagDataSize) >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
 
