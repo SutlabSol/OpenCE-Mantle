@@ -150,6 +150,16 @@ needs re-verification / unverified / blocked)
   existing target dependencies instead of duplicating, normalize paths (backslashes,
   case-insensitive) for conflict detection while preserving original casing on write, flag
   header/CRC32 fix-ups rather than pulling M6 work into M5.
+- 2026-10: Halo Demo / HaloMD -> Custom Edition converter added as a side feature. Phase 1
+  (retail-layout maps, cache version 7, base 0x40440000: header patch + CRC) comes first; Phase 2
+  (true demo layout, version 6, base 0x4BF10000: schema-driven pointer rebase) only starts after
+  Phase 1 is confirmed in OpenCE. Research notes: `memory/demo-converter.md`. The converter is a
+  separate module and the CE-only parser/validators stay unchanged. Demo sample maps live in
+  `sample_maps/demo/` (separate from the CE maps, since both have a `bloodgulch.map`). Never
+  convert in place; refuse maps that are already 609. Open item: the tag-data-header field order
+  (checksum vs scenario ID at +0x4/+0x8) differs between the Halo Map Structure PDF and the
+  research notes, so confirm it from real bytes before relying on it. M5/M6 work is paused,
+  not cancelled.
 
 ## Status as of 2026-08 (this session)
 
