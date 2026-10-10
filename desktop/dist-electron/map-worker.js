@@ -34345,7 +34345,7 @@ function walkDependencies(buffer, header, tagIndex, rootIndices, options = {}) {
         path: entry.path,
         group,
         kind: "externalTag",
-        message: `"${entry.path}" (${group}) lives in a resource map (bitmaps.map/sounds.map/loc.map), not this map. Not walked further; sounds.map/loc.map resolution is a follow-up milestone.`
+        message: `"${entry.path}" (${group}) is an external tag: its data is in a resource map (bitmaps.map/sounds.map/loc.map; an external sound keeps only its base struct in this map). Not extracted; a tag that uses it is matched by path in the target map.`
       });
       continue;
     }
@@ -34541,9 +34541,14 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
 // ../core/src/map/tag-extractor.ts
 var NULL_TAG_ID2 = 4294967295;
 var AllTagsExcludedError = class extends Error {
-  constructor(notExtracted) {
-    super(`Nothing in this selection can be extracted yet: ${notExtracted.map((t) => `"${t.path}" (${t.group})`).join(", ")}.`);
+  constructor(notExtracted, externalRoots = []) {
+    const parts = [
+      ...notExtracted.map((t) => `"${t.path}" (${t.group})`),
+      ...externalRoots.map((t) => `"${t.path}" (${t.group}) is an external tag - its data is in a resource map (bitmaps.map/sounds.map/loc.map), so there is nothing to extract; a tag that uses it is matched by path in the target map`)
+    ];
+    super(`Nothing in this selection can be extracted yet: ${parts.join(", ")}.`);
     this.notExtracted = notExtracted;
+    this.externalRoots = externalRoots;
     this.name = "AllTagsExcludedError";
   }
 };
@@ -34692,7 +34697,8 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
     }
   }
   if (extractableWalked.length === 0) {
-    throw new AllTagsExcludedError(notExtracted);
+    const externalRoots = rootIndices.filter((i) => tagIndex.entries[i]?.isExternal).map((i) => ({ path: tagIndex.entries[i].path, group: tagIndex.entries[i].primaryClassName ?? "?" }));
+    throw new AllTagsExcludedError(notExtracted, externalRoots);
   }
   const localIndexByOriginal = /* @__PURE__ */ new Map();
   extractableWalked.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
@@ -34885,6 +34891,8 @@ function tagDataLayoutOf(header, tagIndex) {
     entries: tagIndex.entries
   };
 }
+var EXTERNAL_GROUPS_WITH_BASE_STRUCT = ["sound"];
+var EXTERNAL_GROUPS_WITH_RESOURCE_INDEX = ["bitmap", "font", "unicode_string_list", "hud_message_text"];
 var UnwalkableTagError = class extends Error {
   constructor(tagIndex, tagPath, group, reason) {
     super(`Tag "${tagPath}" (${group}) in the target map can't be read completely with this build's tag definitions (${reason}), so its pointers can't be moved safely.`);
@@ -34918,8 +34926,12 @@ function collectTagDataPointers(buffer, layout) {
     const entryAt = layout.tagArrayFileOffset + e.index * TAG_ENTRY_SIZE;
     if (!inTagData(buffer.readUInt32LE(entryAt + 16), 1)) fail("its path pointer is outside the tag data");
     addSite("tagPath", entryAt + 16, e.index);
-    if (e.isExternal) continue;
     const dataPointer = buffer.readUInt32LE(entryAt + 20);
+    const resourceBacked = e.isExternal && EXTERNAL_GROUPS_WITH_BASE_STRUCT.includes(group);
+    if (e.isExternal && !resourceBacked) {
+      if (EXTERNAL_GROUPS_WITH_RESOURCE_INDEX.includes(group)) continue;
+      fail("it is an external (resource map) entry of a group this build has not measured, so its data field could be an address or an index");
+    }
     if (group === "scenario_structure_bsp") {
       if (dataPointer !== 0 && inTagData(dataPointer, 1)) fail("its BSP data pointer points into the tag data");
       continue;
@@ -34951,6 +34963,7 @@ function collectTagDataPointers(buffer, layout) {
             if (pointer2 !== 0) addSite("reflexive", fieldAt + 4, e.index);
             continue;
           }
+          if (resourceBacked && pointer2 === 0) continue;
           const childStruct = field.def.struct;
           if (!childStruct) return fail(`${fieldWhere} has no block definition`);
           const childSize = resolveStruct(childStruct).totalSize;
@@ -34975,10 +34988,76 @@ function collectTagDataPointers(buffer, layout) {
     addSite("tagData", entryAt + 20, e.index);
     walk(rootStruct, dataPointer, e.path);
   }
+  collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite);
   return sites;
 }
+function basicNumber(decoded, name) {
+  const v = decoded.get(name);
+  return v?.kind === "basic" && typeof v.value === "number" ? v.value : void 0;
+}
+function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite) {
+  const scenarioStruct = getGroupStructName("scenario");
+  const bspStruct = getGroupStructName("scenario_structure_bsp");
+  if (!scenarioStruct || !bspStruct) return;
+  const bspsField = resolveStruct(scenarioStruct).fields.find((f) => f.name === "structure bsps");
+  const scenarioBspStruct = bspsField?.def.type === "TagReflexive" ? bspsField.def.struct : void 0;
+  for (const scenario of layout.entries) {
+    if (scenario.isExternal || scenario.primaryClassName !== "scenario") continue;
+    const scenarioPointer = buffer.readUInt32LE(layout.tagArrayFileOffset + scenario.index * TAG_ENTRY_SIZE + 20);
+    const bsps = decodeStruct(buffer, fileOf(scenarioPointer), scenarioStruct).get("structure bsps");
+    if (bsps?.kind !== "reflexive" || bsps.value.count === 0) continue;
+    if (!scenarioBspStruct) throw new UnwalkableTagError(scenario.index, scenario.path, "scenario", `"structure bsps" is not a block list in this build's definitions`);
+    const elementSize = resolveStruct(scenarioBspStruct).totalSize;
+    for (let b = 0; b < bsps.value.count; b++) {
+      const element = decodeStruct(buffer, fileOf(bsps.value.pointerLow + b * elementSize), scenarioBspStruct);
+      const ref = element.get("structure bsp");
+      const bspEntry = ref?.kind === "dependency" ? layout.entries[ref.value.tagId & 65535] : void 0;
+      const name = bspEntry ?? { index: scenario.index, path: `${scenario.path} structure bsps[${b}]` };
+      const fail = (reason) => {
+        throw new UnwalkableTagError(name.index, name.path, "scenario_structure_bsp", reason);
+      };
+      const bspStart = basicNumber(element, "bsp start");
+      const bspSize = basicNumber(element, "bsp size");
+      const bspAddress = basicNumber(element, "bsp address");
+      if (bspStart === void 0 || bspSize === void 0 || bspAddress === void 0) fail("its location in the scenario could not be read");
+      if (bspSize < 4 || bspStart + 4 > buffer.length) fail("its BSP header is outside the file");
+      const inBsp = (pointer, length) => {
+        const at = bspStart + (pointer - bspAddress | 0);
+        return at >= bspStart && at + length <= bspStart + bspSize && at + length <= buffer.length;
+      };
+      const visited = /* @__PURE__ */ new Set();
+      const walk = (structName, pointer, where) => {
+        const size = resolveStruct(structName).totalSize;
+        if (!inBsp(pointer, size)) fail(`${where} is outside the BSP data`);
+        const at = bspStart + (pointer - bspAddress | 0);
+        const key = `${structName}@${at}`;
+        if (visited.has(key)) return;
+        visited.add(key);
+        const decoded = decodeStruct(buffer, at, structName);
+        for (const field of resolveStruct(structName).fields) {
+          const value = decoded.get(field.name);
+          if (!value || field.def.nonCached) continue;
+          if (value.kind === "dependency") {
+            const pathPointer = value.value.pathPointer >>> 0;
+            if (pathPointer === 0) continue;
+            if (!inTagData(pathPointer, 1)) fail(`${where}.${field.name} has a path pointer outside the tag data`);
+            addSite("bspReferencePath", at + field.offset + 4, name.index);
+          } else if (value.kind === "reflexive" && field.def.type === "TagReflexive" && value.value.count > 0) {
+            const childStruct = field.def.struct;
+            if (!childStruct) return fail(`${where}.${field.name} has no block definition`);
+            const childSize = resolveStruct(childStruct).totalSize;
+            const childPointer = value.value.pointerLow >>> 0;
+            if (!inBsp(childPointer, value.value.count * childSize)) fail(`${where}.${field.name} (${value.value.count} blocks) is outside the BSP data`);
+            for (let i = 0; i < value.value.count; i++) walk(childStruct, childPointer + i * childSize >>> 0, `${where}.${field.name}[${i}]`);
+          }
+        }
+      };
+      walk(bspStruct, buffer.readUInt32LE(bspStart), name.path);
+    }
+  }
+}
 function zeroCounts() {
-  return { tagPath: 0, tagData: 0, reflexive: 0, dataBlock: 0, referencePath: 0 };
+  return { tagPath: 0, tagData: 0, reflexive: 0, dataBlock: 0, referencePath: 0, bspReferencePath: 0 };
 }
 function applyPointerShift(sites, shift, write) {
   const counts = { visited: zeroCounts(), rebased: zeroCounts(), totalVisited: 0, totalRebased: 0 };
@@ -35214,7 +35293,7 @@ function planInjection(mode, target, container, resourceMapConfig = {}, options 
     const t = container.tags[li];
     const reasons = [];
     if (existing.isExternal) {
-      reasons.push(`The existing "${t.path}" (${t.group}) in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.`);
+      reasons.push(`The existing "${t.path}" (${t.group}) in the target is an external (resource map) entry; swapping into those isn't supported. Left unchanged.`);
     }
     const structuralBlockMsg = structuralBlockReason(t);
     if (structuralBlockMsg) {
@@ -35550,7 +35629,7 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
   }
   targetBuffer.copy(out, insertPos + insertSize, insertPos, oldStructDataOffset);
   targetBuffer.copy(out, oldStructDataOffset + insertSize + delta, oldStructDataOffset, oldFileLength);
-  const outOffsetOf = (at) => at + insertSize + (at >= oldStructDataOffset ? delta : 0);
+  const outOffsetOf = (at) => at < insertPos ? at : at + insertSize + (at >= oldStructDataOffset ? delta : 0);
   const oldArrayEndAddress = baseMemoryAddress + (oldStructDataOffset - subHeaderOffset) >>> 0;
   const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: baseMemoryAddress + targetHeader.tagDataSize >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
   out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 12);
