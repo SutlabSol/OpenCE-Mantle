@@ -5,7 +5,7 @@ import type { OceContainer } from '../src/map/container';
 import { planInjection, applyInjection } from '../src/map/tag-injector';
 import type { InjectionMode, InjectionPlan } from '../src/map/tag-injector';
 import { readSampleMap, skippableTest } from './helpers/sample-maps';
-import { auditMap, tagBlocks, blocksOutsideTagData, treeDiff, findTag, entryPathPointer } from './helpers/tag-data-audit';
+import { auditMap, tagBlocks, blocksOutsideTagData, treeDiff, findTag, entryPathPointer, referencePathPointerIssues } from './helpers/tag-data-audit';
 import type { AuditMap, Block } from './helpers/tag-data-audit';
 
 const ALIGNMENT = 4; // every tag, reflexive and data pointer in all 5 CE sample maps (asserted per source map below)
@@ -76,6 +76,7 @@ function audit(src: AuditMap, out: AuditMap, written: Written[], appendStart: nu
     blocks, diffs, paddingBytes, nonZeroPadding,
     outside: blocksOutsideTagData(out, blocks).map((b) => `${b.where} (${b.kind}) -> file 0x${b.file.toString(16)}`),
     misaligned: misaligned(blocks),
+    referenceIssues: referencePathPointerIssues(out),
   };
 }
 
@@ -92,6 +93,15 @@ function wholeMapRoots(m: AuditMap): number[] {
   return m.ti.entries.filter((e) => !e.isExternal && e.primaryClassName !== 'scenario' && e.primaryClassName !== 'scenario_structure_bsp').map((e) => e.index);
 }
 
+describe('tag reference path pointers in real maps (condition for writing them)', () => {
+  for (const name of ['bloodgulch.map', 'ui.map', 'sidewinder.map', 'coldsnap.map', 'Yoyorast_Island.map']) {
+    const g = skippableTest([name]);
+    it.skipIf(g.skip)(`${name}: every non-null reference's path pointer is its target's tag-array path pointer (size 0); null references are 0/0${g.titleSuffix}`, () => {
+      expect(referencePathPointerIssues(auditMap(readSampleMap(name)))).toEqual([]);
+    }, 300_000);
+  }
+});
+
 describe('injected tag data matches its source (real maps, independent audit)', () => {
   const gate = skippableTest(['bloodgulch.map']);
   for (const version of [4, 1]) {
@@ -107,6 +117,7 @@ describe('injected tag data matches its source (real maps, independent audit)', 
       expect(r.misaligned).toEqual([]);
       expect(r.nonZeroPadding).toEqual([]);
       expect(r.diffs).toEqual([]);
+      expect(r.referenceIssues).toEqual([]);
       expect(r.blocks.filter((b) => b.kind === 'data').length).toBeGreaterThan(800); // the converted data pointers are exercised
       expect(r.paddingBytes).toBeGreaterThan(0); // odd-length blocks (2-byte animation arrays, odd strings) were padded
     }, 300_000);
@@ -124,6 +135,7 @@ describe('injected tag data matches its source (real maps, independent audit)', 
       expect(r.misaligned).toEqual([]);
       expect(r.nonZeroPadding).toEqual([]);
       expect(r.diffs).toEqual([]);
+      expect(r.referenceIssues).toEqual([]);
     }, 300_000);
   }
 
@@ -140,6 +152,7 @@ describe('injected tag data matches its source (real maps, independent audit)', 
     expect(r.misaligned).toEqual([]);
     expect(r.nonZeroPadding).toEqual([]);
     expect(r.diffs).toEqual([]);
+    expect(r.referenceIssues).toEqual([]);
     expect(r.blocks.filter((b) => b.kind === 'data').length).toBeGreaterThan(0);
   }, 300_000);
 });

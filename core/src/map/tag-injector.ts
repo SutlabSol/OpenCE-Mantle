@@ -862,7 +862,8 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   if (insertSize > 0) out.writeUInt32LE(newTagDataOffset, 0x10); // tagDataOffset
   out.writeUInt32LE(newFileLength - newTagDataOffset, 0x14); // tagDataSize
   // crc32 (0x64) and the sub-header's tagFileChecksums (subHeaderOffset+0x08) are left byte-for-byte
-  // as in the target map - both are stale after this write; recalculating them is Milestone 6.
+  // as in the target map. Callers that write a file run `finalizeForSave` (finalize-map.ts), which
+  // recomputes crc32 and sets the scenario name; the tag-file checksum stays as-is (unverified).
 
   return out;
 }

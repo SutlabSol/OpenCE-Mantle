@@ -164,3 +164,35 @@ export function treeDiff(src: AuditMap, srcIndex: number, out: AuditMap, outInde
 export function findTag(m: AuditMap, group: string, path: string): number {
   return m.ti.entries.findIndex((e) => !e.isExternal && e.primaryClassName === group && e.path.toLowerCase() === path.toLowerCase());
 }
+
+/**
+ * Every tag reference in the map's internal (non-BSP) tags, checked against what the injector
+ * writes: non-null -> path pointer equals the target tag-array entry's path pointer and path size
+ * 0; null -> path pointer 0 and path size 0. Returns the references that differ (empty = consistent).
+ */
+export function referencePathPointerIssues(m: AuditMap): string[] {
+  const issues: string[] = [];
+  const walk = (structName: string, off: number, fp: string) => {
+    const d = decodeStruct(m.buf, off, structName);
+    for (const f of resolveStruct(structName).fields) {
+      const v = d.get(f.name);
+      if (!v || f.def.nonCached) continue;
+      const p = `${fp}.${f.name}`;
+      if (v.kind === 'dependency') {
+        const isNull = (v.value.tagId >>> 0) === NULL_TAG_ID;
+        const want = isNull ? 0 : entryPathPointer(m, v.value.tagId) >>> 0;
+        if ((v.value.pathPointer >>> 0) !== want || v.value.pathSize !== 0) issues.push(`${p}: path pointer 0x${(v.value.pathPointer >>> 0).toString(16)} size ${v.value.pathSize}, expected 0x${want.toString(16)} size 0`);
+      } else if (v.kind === 'reflexive' && v.value.count > 0 && f.def.type === 'TagReflexive') {
+        const size = resolveStruct(f.def.struct).totalSize;
+        const base = resolvePointer(v.value.pointerLow >>> 0, m.header.tagDataOffset, m.ti.baseMemoryAddress);
+        if (base < m.header.tagDataOffset || base + v.value.count * size > m.header.tagDataOffset + m.header.tagDataSize) continue;
+        for (let i = 0; i < v.value.count; i++) walk(f.def.struct, base + i * size, `${p}[${i}]`);
+      }
+    }
+  };
+  for (const e of m.ti.entries) {
+    if (e.isExternal || e.primaryClassName === 'scenario_structure_bsp') continue;
+    walk(getGroupStructName(e.primaryClassName!)!, resolveTagDataPointer(e.tagDataPointerOrResourceIndex, m.header, m.ti.baseMemoryAddress), e.path);
+  }
+  return issues;
+}
