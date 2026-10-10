@@ -230,7 +230,7 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
   const embeddedCapturedByOriginal = embeddedCapturedCounts(container);
   const uncapturedDataByOriginal = warningMessagesOfKind(container, 'uncapturedData');
 
-  /** Unconditional - unlike embedded relocation, there is no opt-in for data the extractor structurally cannot carry at all (model geometry, an out-of-bounds pointer). Always blocks ADD and SWAP alike. */
+  /** Unconditional - unlike embedded relocation, there is no opt-in for data the extractor structurally cannot carry at all (model geometry, an out-of-bounds pointer). Applied to ADD candidates AND matched SWAP candidates alike. */
   function uncapturedDataBlockReason(t: OceContainerTag): string | null {
     const msgs = uncapturedDataByOriginal.get(t.originalIndex);
     if (!msgs || msgs.length === 0) return null;
@@ -320,6 +320,10 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
     const reasons: string[] = [];
     if (existing.isExternal) {
       reasons.push(`The existing "${t.path}" (${t.group}) in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.`);
+    }
+    const uncapturedBlockMsg = uncapturedDataBlockReason(t);
+    if (uncapturedBlockMsg) {
+      reasons.push(uncapturedBlockMsg);
     }
     const embeddedBlockMsg = embeddedBlockReason(t);
     if (embeddedBlockMsg) {
