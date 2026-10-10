@@ -98,7 +98,7 @@ describe.skipIf(!haveUi)(uiTitle, () => {
     const bgInspected = inspectCustomEditionMap(bgBuffer);
     if (bgInspected.status !== 'ok') throw new Error('bloodgulch.map did not parse');
     const container = deserializeContainer(serializeContainer(set, 'ui'));
-    const plan = planAddInjection(bgInspected.tagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgInspected.header, tagIndex: bgInspected.tagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     const blockedEntry = [...plan.blockedOther, ...plan.blockedEmbedded].find((b) => b.path === 'ui\\ticker');

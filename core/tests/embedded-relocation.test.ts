@@ -76,7 +76,7 @@ describe.skipIf(!haveColdsnap)(coldsnapTitle, () => {
     if (bgInspected.status !== 'ok') throw new Error('bloodgulch.map did not parse');
     const set = extractTagSet(coldsnapBuffer, coldsnapHeader, coldsnapTagIndex, [bitmapOriginalIndex]);
     const container = deserializeContainer(serializeContainer(set, 'coldsnap'));
-    const plan = planAddInjection(bgInspected.tagIndex, container); // no options -> default false
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgInspected.header, tagIndex: bgInspected.tagIndex }, container); // no options -> default false
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.blockedEmbedded.length).toBe(1);
@@ -89,7 +89,7 @@ describe.skipIf(!haveColdsnap)(coldsnapTitle, () => {
     const tag = container.tags.find((t) => t.originalIndex === bitmapOriginalIndex)!;
     expect(tag.embeddedRawDataAssets!.length).toBeGreaterThan(0);
 
-    const plan = planSwapInjection(coldsnapTagIndex, container, {}, { allowEmbeddedRelocation: true });
+    const plan = planSwapInjection({ buffer: coldsnapBuffer, header: coldsnapHeader, tagIndex: coldsnapTagIndex }, container, {}, { allowEmbeddedRelocation: true });
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.counts.swapped).toBe(1);
@@ -157,7 +157,7 @@ describe.skipIf(!haveColdsnap)(coldsnapTitle, () => {
     const set = extractTagSet(coldsnapBuffer, coldsnapHeader, coldsnapTagIndex, [bitmapOriginalIndex, soundOriginalIndex]);
     const container = deserializeContainer(serializeContainer(set, 'coldsnap'));
 
-    const plan = planAddInjection(bgTagIndex, container, {}, { allowEmbeddedRelocation: true });
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container, {}, { allowEmbeddedRelocation: true });
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.counts.added).toBe(2);
@@ -203,7 +203,7 @@ describe.skipIf(!haveColdsnap)(coldsnapTitle, () => {
     const beforeReport = verifyEmbeddedData(coldsnapBuffer, coldsnapHeader, coldsnapTagIndex);
     expect(beforeReport.counts.embedded).toBe(396);
 
-    const plan = planSwapInjection(coldsnapTagIndex, container, {}, { allowEmbeddedRelocation: true });
+    const plan = planSwapInjection({ buffer: coldsnapBuffer, header: coldsnapHeader, tagIndex: coldsnapTagIndex }, container, {}, { allowEmbeddedRelocation: true });
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.counts.swapped).toBe(2);

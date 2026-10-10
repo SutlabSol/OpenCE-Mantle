@@ -73,7 +73,7 @@ function wholeMapContainer(m: LoadedMap, name: string): OceContainer {
 
 function injectAndCompare(src: LoadedMap, srcName: string, tgt: LoadedMap, mode: InjectionMode) {
   const container = wholeMapContainer(src, srcName);
-  const plan = planInjection(mode, tgt.ti, container);
+  const plan = planInjection(mode, { buffer: tgt.buf, header: tgt.header, tagIndex: tgt.ti }, container);
   if (plan.kind !== 'ok') throw new Error(`plan refused: ${plan.reason}`);
   const depMapBlocked = [...plan.blockedOther, ...plan.blockedEmbedded].filter((b) => b.reasons.some((r) => DEP_MAP_BLOCK_TEXT.some((s) => r.includes(s))));
 

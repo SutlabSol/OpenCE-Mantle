@@ -137,8 +137,8 @@ describe.skipIf(!haveMaps)(title, () => {
       if (trailingPad <= 0) continue;
       const set = extractTagSet(src, header, tagIndex, [e.index]);
       const c = roundTrip(set);
-      if (outcome(planAddInjection(targetIndex, c), c, e.index).status !== 'added') continue;
-      if (outcome(planSwapInjection(tagIndex, c), c, e.index).status !== 'swapped') continue;
+      if (outcome(planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, c), c, e.index).status !== 'added') continue;
+      if (outcome(planSwapInjection({ buffer: src, header, tagIndex }, c), c, e.index).status !== 'swapped') continue;
       const v = decoded.get(field.name);
       if (v?.kind !== 'reflexive') continue;
       pick = { index: e.index, structName: def.name, fileOffset, field, childStruct: field.def.struct, childSize: child.totalSize, count: v.value.count, trailingPad };
@@ -157,8 +157,8 @@ describe.skipIf(!haveMaps)(title, () => {
     const c = roundTrip(set);
     expect(c.formatVersion).toBe(OCETAGS_FORMAT_VERSION);
     expect(c.tags.find((t) => t.originalIndex === pick.index)!.injectionBlockers).toEqual([]);
-    expect(outcome(planAddInjection(targetIndex, c), c, pick.index).status).toBe('added');
-    expect(outcome(planSwapInjection(tagIndex, c), c, pick.index).status).toBe('swapped');
+    expect(outcome(planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, c), c, pick.index).status).toBe('added');
+    expect(outcome(planSwapInjection({ buffer: src, header, tagIndex }, c), c, pick.index).status).toBe('swapped');
   });
 
   const cases: { label: string; childBase: (len: number, p: Pick) => number }[] = [
@@ -219,10 +219,10 @@ describe.skipIf(!haveMaps)(title, () => {
       // Container saved and reloaded (bytes only - no source map involved in planning).
       const container = roundTrip(set);
       expect(container.tags.find((t) => t.originalIndex === pick.index)!.injectionBlockers?.[0]?.kind).toBe('invalidReflexive');
-      const add = outcome(planAddInjection(targetIndex, container), container, pick.index);
+      const add = outcome(planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, container), container, pick.index);
       expect(add.status).toBe('blocked');
       expect(add.reasons).toContain('invalid/corrupt layout');
-      const swap = outcome(planSwapInjection(tagIndex, container), container, pick.index);
+      const swap = outcome(planSwapInjection({ buffer: src, header, tagIndex }, container), container, pick.index);
       expect(swap.status).toBe('blocked');
       expect(swap.reasons).toContain('invalid/corrupt layout');
     });
@@ -242,18 +242,18 @@ describe.skipIf(!haveMaps)(title, () => {
 
       // v4 flag alone: strip every warning, keep the per-tag blocker.
       const flagOnly = deserializeContainer(Buffer.from(JSON.stringify({ ...raw, warnings: [] })));
-      expect(outcome(planAddInjection(targetIndex, flagOnly), flagOnly, pick.index).status).toBe('blocked');
-      expect(outcome(planSwapInjection(tagIndex, flagOnly), flagOnly, pick.index).status).toBe('blocked');
+      expect(outcome(planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, flagOnly), flagOnly, pick.index).status).toBe('blocked');
+      expect(outcome(planSwapInjection({ buffer: src, header, tagIndex }, flagOnly), flagOnly, pick.index).status).toBe('blocked');
 
       // v3-style: no injectionBlockers field at all - falls back to the persisted walker warning.
       const v3 = { ...raw, formatVersion: 3, tags: raw.tags.map((t: Record<string, unknown>) => { const { injectionBlockers: _drop, ...rest } = t; return rest; }) };
       const legacy = deserializeContainer(Buffer.from(JSON.stringify(v3)));
       expect(legacy.formatVersion).toBe(3);
       expect(legacy.tags[0].injectionBlockers).toBeUndefined();
-      const add = outcome(planAddInjection(targetIndex, legacy), legacy, pick.index);
+      const add = outcome(planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, legacy), legacy, pick.index);
       expect(add.status).toBe('blocked');
       expect(add.reasons).toContain('invalid/corrupt layout');
-      expect(outcome(planSwapInjection(tagIndex, legacy), legacy, pick.index).status).toBe('blocked');
+      expect(outcome(planSwapInjection({ buffer: src, header, tagIndex }, legacy), legacy, pick.index).status).toBe('blocked');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -274,10 +274,10 @@ describe.skipIf(!haveMaps)(title, () => {
       expect(container.formatVersion).toBe(OCETAGS_FORMAT_VERSION);
       expect(container.tags.find((t) => t.originalIndex === pick.index)!.injectionBlockers?.map((b) => b.kind)).toEqual(['invalidReflexive']);
 
-      const add = outcome(planAddInjection(targetIndex, container), container, pick.index);
+      const add = outcome(planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, container), container, pick.index);
       expect(add.status).toBe('blocked');
       expect(add.reasons).toContain('invalid/corrupt layout');
-      const swap = outcome(planSwapInjection(tagIndex, container), container, pick.index);
+      const swap = outcome(planSwapInjection({ buffer: src, header, tagIndex }, container), container, pick.index);
       expect(swap.status).toBe('blocked');
       expect(swap.reasons).toContain('invalid/corrupt layout');
     } finally {
@@ -305,10 +305,10 @@ describe.skipIf(!haveMaps)(title, () => {
     expect(good.data.length).toBe(computeExpectedExtractedLength(src, getGroupDefinition(other.primaryClassName!).name, resolveTagDataPointer(other.tagDataPointerOrResourceIndex, header, base), anchor, base));
 
     const container = roundTrip(set);
-    const add = outcome(planAddInjection(targetIndex, container), container, pick.index);
+    const add = outcome(planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, container), container, pick.index);
     expect(add.status).toBe('blocked');
     expect(add.reasons).toContain('failed to extract');
-    expect(outcome(planSwapInjection(tagIndex, container), container, pick.index).status).toBe('blocked');
+    expect(outcome(planSwapInjection({ buffer: src, header, tagIndex }, container), container, pick.index).status).toBe('blocked');
   });
 
   it('(f) a tag of an unknown class (noDefinition) is blocked on its own; a good tag in the same selection still extracts', () => {
@@ -333,18 +333,18 @@ describe.skipIf(!haveMaps)(title, () => {
     expect(good.data.length).toBe(computeExpectedExtractedLength(src, getGroupDefinition(other.primaryClassName!).name, resolveTagDataPointer(other.tagDataPointerOrResourceIndex, header, base), anchor, base));
 
     const container = roundTrip(set);
-    const add = planAddInjection(targetIndex, container);
+    const add = planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, container);
     const addBad = outcome(add, container, pick.index);
     expect(addBad.status).toBe('blocked');
     expect(addBad.reasons).toContain('failed to extract');
     expect(outcome(add, container, other.index).status).toBe('added');
-    expect(outcome(planSwapInjection(tagIndex, container), container, pick.index).status).toBe('blocked');
+    expect(outcome(planSwapInjection({ buffer: src, header, tagIndex }, container), container, pick.index).status).toBe('blocked');
   });
 
   it('defense in depth: applyInjection refuses a tag carrying blockers even if a plan lets it through', () => {
     const set = extractTagSet(src, header, tagIndex, [pick.index]);
     const container = roundTrip(set);
-    const plan = planAddInjection(targetIndex, container);
+    const plan = planAddInjection({ buffer: target, header: targetHeader, tagIndex: targetIndex }, container);
     if (plan.kind !== 'ok') throw new Error('fixture: clean plan refused');
     const li = container.tags.findIndex((t) => t.originalIndex === pick.index);
     container.tags[li].injectionBlockers = [{ kind: 'invalidReflexive', fieldPath: 'x', message: 'x' }];

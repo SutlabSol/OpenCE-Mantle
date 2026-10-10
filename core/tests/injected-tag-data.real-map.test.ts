@@ -27,7 +27,7 @@ function container(m: AuditMap, roots: number[], name: string): OceContainer {
 }
 
 function inject(mode: InjectionMode, src: AuditMap, c: OceContainer, tgt: AuditMap): { plan: InjectionPlan; out: AuditMap; written: Written[]; appendStart: number } {
-  const plan = planInjection(mode, tgt.ti, c);
+  const plan = planInjection(mode, { buffer: tgt.buf, header: tgt.header, tagIndex: tgt.ti }, c);
   if (plan.kind !== 'ok') throw new Error(`plan refused: ${plan.reason}`);
   const out = auditMap(applyInjection(tgt.buf, tgt.header, tgt.ti, c, plan));
   const written: Written[] = mode === 'swap'

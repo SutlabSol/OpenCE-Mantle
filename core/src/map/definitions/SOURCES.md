@@ -282,16 +282,19 @@ against real bytes in the sample maps, not inferred.
   our own `validate-tag.ts` doesn't consume them for dependency validation and their exact runtime
   significance to the game engine wasn't independently confirmed either way - preserving them is
   harmless and byte-faithful regardless.
-- **Every pointer in the tag-data region resolves via ONE global anchor.** Confirmed against
-  Invader's actual MAP READER (not just the builder) - `invader/src/map/map.cpp` line 244:
-  `base_memory_address = tag_data_header->tag_array_address - sizeof(CacheFileTagDataHeaderPC)`
-  (0x28), algebraically identical to this project's pre-existing `tag-index.ts` derivation. This
-  means growing the tag array (M5 ADD mode) does NOT require rewriting any existing tag's internal
-  pointers: decrementing the single stored `tag_array_address` field by the array's growth in
-  bytes re-anchors every existing reflexive/path/tag-data pointer to the physically-shifted
-  positions automatically. Verified empirically, not just by citation: `tag-injector.test.ts`
-  re-parses an injected copy of bloodgulch.map with this project's own reader and runs
-  `validateStructInstance` over every old AND new tag (1500+ tags), zero errors.
+- **CORRECTED 2026-10-11: the base address is fixed, not inferred from the tag array pointer.**
+  The earlier entry here claimed every pointer resolves via `tag_array_address - 0x28`
+  (`invader/src/map/map.cpp` line 244), so ADD could grow the tag array by just lowering that one
+  field. That line is how a *reader* guesses the base. The engine loads CE tag data at the fixed
+  base 0x40440000 (`memory/demo-converter.md`; Invader `gbx-custom`), and the tag array always
+  sits right after the tag data header: array pointer 0x40440028 in all 5 CE sample maps and both
+  HaloMD retail-layout maps; path strings start exactly at the array end in all 5 CE maps. ADD
+  maps written that way blue-screened in OpenCE (`bg_add1`, PRD "ADD tag-array growth"). The
+  "verification" re-parsed with our own reader, which inferred the same wrong base (same-reader).
+  Now: `parseTagIndex` uses the fixed base and rejects any other array pointer; ADD grows the
+  array in place and moves every pointer at or past the old array end by the growth, found by the
+  schema (`pointer-rebase.ts`: tag path/data pointers, reflexive pointers, pointer-based
+  TagDataOffset, non-zero reference path pointers).
 - **New tag IDs use the same salt formula as tool.exe**: `invader/src/build/build_workload.cpp`
   line 1230, `full_id = ((tag_index + 0x6174) | 0x8000) << 16 | (uint16)tag_index`.
 - **Decision (not silently made - this is the record of it)**: `TagDependency.pathPointer`/

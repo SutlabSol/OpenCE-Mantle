@@ -288,7 +288,7 @@ export function runPlanInject(task: { requestId: string; containerPath: string; 
     }
 
     progress(task.requestId, 'Planning injection', 70);
-    const planResult = task.mode === 'swap' ? planSwapInjection(currentMap.tagIndex, container, resourceMapConfig) : planAddInjection(currentMap.tagIndex, container, resourceMapConfig);
+    const planResult = task.mode === 'swap' ? planSwapInjection(currentMap, container, resourceMapConfig) : planAddInjection(currentMap, container, resourceMapConfig);
     if (planResult.kind === 'refused') {
       currentInject = null;
       return sendError(task.requestId, 'PLAN_REFUSED', planResult.reason);

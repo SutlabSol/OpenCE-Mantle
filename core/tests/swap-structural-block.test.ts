@@ -38,7 +38,7 @@ describe.skipIf(!have)(have ? 'SWAP blocks uncapturedData tags (same as ADD)' : 
     const set = extractTagSet(buffer, header, tagIndex, [index]);
     expect(set.warnings.some((w) => w.kind === 'uncapturedData' && w.originalIndex === index)).toBe(true);
     const container = deserializeContainer(serializeContainer(set, 'src'));
-    const plan = planSwapInjection(tagIndex, container);
+    const plan = planSwapInjection({ buffer, header, tagIndex }, container);
     if (plan.kind !== 'ok') throw new Error(`plan refused: ${plan.reason}`);
     const li = container.tags.findIndex((t) => t.originalIndex === index);
     expect(plan.toSwap.some((s) => s.localIndex === li)).toBe(false);
@@ -82,7 +82,7 @@ describe.skipIf(!have)(have ? 'uncertainGroup is blocked in ADD and SWAP (synthe
   it('ADD: blocked (target has the path, but not as a spheroid, so it is an add candidate)', () => {
     const { container, li } = extractRelabelled();
     expect(li).toBeGreaterThanOrEqual(0);
-    const plan = planAddInjection(tagIndex, container);
+    const plan = planAddInjection({ buffer, header, tagIndex }, container);
     if (plan.kind !== 'ok') throw new Error(`plan refused: ${plan.reason}`);
     expect(plan.toAddLocalIndices).not.toContain(li);
     expect(plan.blockedOther.find((b) => b.localIndex === li)?.reasons.join(' ')).toContain('no reliable field layout');
@@ -90,7 +90,7 @@ describe.skipIf(!have)(have ? 'uncertainGroup is blocked in ADD and SWAP (synthe
 
   it('SWAP: blocked (target has the same path as a spheroid, so it is a swap candidate)', () => {
     const { container, li } = extractRelabelled();
-    const plan = planSwapInjection(relabelled, container);
+    const plan = planSwapInjection({ buffer, header, tagIndex: relabelled }, container);
     if (plan.kind !== 'ok') throw new Error(`plan refused: ${plan.reason}`);
     expect(plan.toSwap.some((s) => s.localIndex === li)).toBe(false);
     expect(plan.blockedOther.find((b) => b.localIndex === li)?.reasons.join(' ')).toContain('no reliable field layout');

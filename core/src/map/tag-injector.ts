@@ -18,21 +18,17 @@
  *   AND the relevant blocked list (why the swap you asked for didn't happen), which is
  *   intentionally not mutually exclusive.
  *
- * KEY STRUCTURAL FINDING (cited, verified against the real game-compatible map READER, not just
- * the builder): every pointer in the tag-data region resolves via ONE global anchor,
- * `base_memory_address = tag_array_address - 0x28` (invader/src/map/map.cpp line 244,
- * `Map::base_memory_address = tag_data_header->tag_array_address - sizeof(CacheFileTagDataHeaderPC)`,
- * confirmed identical to this project's own `tag-index.ts` `baseMemoryAddress` derivation after
- * algebraic simplification). Growing the tag array (to add new entries) necessarily shifts every
- * byte physically located after it by `delta = addedCount * TAG_ENTRY_SIZE` - but because
- * `base_memory_address` is derived from the SINGLE stored `tag_array_address` field, decrementing
- * that one field by `delta` re-anchors EVERY existing pointer (reflexive, tag-path, tag-data) to
- * the shifted positions automatically, with NO per-tag/per-pointer rewriting needed anywhere in
- * the untouched existing tag data. Verified empirically: `tag-injector.test.ts` re-parses the
- * injected output with this project's own reader and validates every old AND new tag's full
- * struct+reflexive closure resolves correctly. SWAP mode reuses this exact mechanism - only the
- * swapped entries' OWN `tagDataPointerOrResourceIndex`/secondary/tertiary class fields are patched
- * in place (tagId/path/primary class untouched), new struct data is appended the same way ADD's is.
+ * TAG ARRAY GROWTH (corrected 2026-10-11, PRD "ADD tag-array growth"): the engine loads CE tag
+ * data at the fixed base 0x40440000, and the tag array always sits right after the tag data header
+ * (array pointer 0x40440028 in every CE map). The base can NOT be inferred from the array pointer:
+ * that is only how some readers guess it (invader map.cpp:244, and this project's reader before
+ * this fix). Earlier builds lowered the array pointer by the growth instead of moving pointers.
+ * Our own reader accepted that; the engine did not (blue screen). ADD now grows the array in place,
+ * keeps the array pointer, and moves every existing pointer at or past the old array end by the
+ * growth (`pointer-rebase.ts`, schema-driven). A target with a tag that can't be walked completely
+ * is refused. SWAP never grows the array: only the swapped entries' own data pointer and
+ * secondary/tertiary class change (tagId/path/primary class untouched); their data is appended
+ * the same way ADD's is.
  * Because a matched tag's tagId NEVER changes in SWAP mode (whether the swap for that one tag
  * succeeds or falls back to untouched), nothing that depends on a matched tag by internal
  * reference can ever be blocked by that matched tag's own swap outcome - only true appends
@@ -57,6 +53,8 @@ import { TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file
 import { fourCCFromString, lookupTagClassByName } from '../constants/tag-classes';
 import type { CacheFileHeader } from './header';
 import type { TagIndex, TagIndexEntry } from './tag-index';
+import { collectTagDataPointers, applyPointerShift, tagDataLayoutOf, UnwalkableTagError } from './pointer-rebase';
+import type { RebaseCounts } from './pointer-rebase';
 import { resolveStruct, decodeStruct, resolvePointer, isRangeInBuffer } from './definitions/engine';
 import { decodeReflexive, decodeDependency, encodeDependency } from './definitions/codec';
 import type { OceContainer, OceContainerTag, ExternalResourceRef } from './container';
@@ -155,6 +153,13 @@ export interface InjectionPlan {
   counts: InjectionCounts;
 }
 
+/** The map being injected into: its bytes and parsed header/tag index. Never mutated. */
+export interface InjectionTarget {
+  buffer: Buffer;
+  header: CacheFileHeader;
+  tagIndex: TagIndex;
+}
+
 export interface InjectionRefusal {
   kind: 'refused';
   reason: string;
@@ -208,7 +213,8 @@ export interface InjectionOptions {
  * any bytes. Never mutates its inputs. `mode` applies to the whole operation (per-tag choice is
  * Step C, not built yet).
  */
-export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
+export function planInjection(mode: InjectionMode, target: InjectionTarget, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
+  const targetTagIndex = target.tagIndex;
   if (container.formatVersion > OCETAGS_SUPPORTED_MAX_VERSION) {
     return { kind: 'refused', reason: `This .ocetags container is format version ${container.formatVersion}, newer than this build supports (${OCETAGS_SUPPORTED_MAX_VERSION}). Update OpenCE.` };
   }
@@ -342,6 +348,17 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
 
   const toAddLocalIndices = Array.from(candidateAdd).filter((li) => !blocked.has(li)).sort((a, b) => a - b);
 
+  // Adding entries grows the tag array, so every existing pointer past it must move: every tag in
+  // the target has to be walkable. Refuse (naming the tag) rather than skip one.
+  if (toAddLocalIndices.length > 0) {
+    try {
+      collectTagDataPointers(target.buffer, tagDataLayoutOf(target.header, targetTagIndex));
+    } catch (err) {
+      if (!(err instanceof UnwalkableTagError)) throw err;
+      return { kind: 'refused', reason: `Adding tags moves every pointer in the target map, and one tag can't be handled. ${err.message} SWAP still works, because it doesn't move existing pointers.` };
+    }
+  }
+
   // SWAP mode only: decide, per matched tag, whether it can actually be swapped. Single pass
   // (no cascade needed - a matched tag's own block never propagates, per the finding above).
   const reusedByLocalIndex = new Map<number, number>();
@@ -449,12 +466,12 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
   };
 }
 
-export function planAddInjection(targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
-  return planInjection('add', targetTagIndex, container, resourceMapConfig, options);
+export function planAddInjection(target: InjectionTarget, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
+  return planInjection('add', target, container, resourceMapConfig, options);
 }
 
-export function planSwapInjection(targetTagIndex: TagIndex, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
-  return planInjection('swap', targetTagIndex, container, resourceMapConfig, options);
+export function planSwapInjection(target: InjectionTarget, container: OceContainer, resourceMapConfig: ResourceMapConfig = {}, options: InjectionOptions = {}): InjectionPlanResult {
+  return planInjection('swap', target, container, resourceMapConfig, options);
 }
 
 /** One TagDependency field found by walking a container tag's own (local-offset) `data`. */
@@ -685,13 +702,13 @@ function makeResolveDepTagId(t: OceContainerTag, plan: InjectionPlan, targetTagI
 }
 
 /**
- * Performs the structural rewrite: grows the tag array by `toAdd.length` (SWAP's `toSwap`
- * entries never change the tag count), re-anchors `tag_array_address` so every EXISTING tag's
- * pointers keep resolving correctly with zero per-pointer rewriting (see module doc), appends
- * every new/swapped tag's struct data (+ path strings for brand-new entries only - swapped
+ * Performs the structural rewrite: grows the tag array in place by `toAdd.length` (SWAP's
+ * `toSwap` entries never change the tag count), moves every EXISTING pointer at or past the old
+ * array end by the growth (`pointer-rebase.ts`; the array pointer and the base stay as they are),
+ * appends every new/swapped tag's struct data (+ path strings for brand-new entries only - swapped
  * entries keep their existing path pointer), and returns a brand-new Buffer. Never mutates
- * `targetBuffer`. Caller is responsible for writing the result via temp-file-then-rename and for
- * treating `crc32`/`tagFileChecksums` as stale (Milestone 6).
+ * `targetBuffer`. Callers that write a file run `finalizeForSave` (scenario name, crc32);
+ * `tagFileChecksums` stays as in the target.
  *
  * When `options.allowEmbeddedRelocation` is true (test-only until approved - see
  * `InjectionOptions`), also relocates every captured embedded (external=0) bitmap/sound asset
@@ -702,8 +719,8 @@ function makeResolveDepTagId(t: OceContainerTag, plan: InjectionPlan, targetTagI
  * exactly 4 stored header/sub-header fields need recomputing as a result - `modelDataFileOffset`,
  * `tagDataOffset`, `tagDataSize`, `decompressedFileSize` - everything else (every existing
  * TagReflexive/TagDependency pointer, `bsp_start`, model vertex/index pointers) resolves
- * correctly automatically via the SAME `tag_array_address`-anchored translation already used for
- * tag-array growth, because none of those are raw/absolute file offsets (confirmed against
+ * correctly automatically, because the whole tag data block moves as one and none of those are
+ * raw/absolute file offsets (confirmed against
  * invader/src/build/build_workload.cpp's generic pointer-fixup pass - every one of them is
  * written as a translated virtual address, not a literal file offset). The two true absolute
  * file offsets in the format - `bsp_start` and the embedded bitmap/sound offsets themselves -
@@ -712,9 +729,20 @@ function makeResolveDepTagId(t: OceContainerTag, plan: InjectionPlan, targetTagI
  * patched directly via each tag's `embeddedRawDataPatches`.
  */
 export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan, options: InjectionOptions = {}): Buffer {
+  return applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, container, plan, options).buffer;
+}
+
+export interface InjectionResult {
+  buffer: Buffer;
+  /** Existing pointers visited/moved for tag-array growth; null when the array didn't grow. */
+  rebase: RebaseCounts | null;
+}
+
+/** `applyInjection`, also returning how many existing pointers were moved. */
+export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan, options: InjectionOptions = {}): InjectionResult {
   const addedCount = plan.toAdd.length;
   const swappedCount = plan.toSwap.length;
-  if (addedCount === 0 && swappedCount === 0) return Buffer.from(targetBuffer);
+  if (addedCount === 0 && swappedCount === 0) return { buffer: Buffer.from(targetBuffer), rebase: null };
 
   // Combined append list: brand-new entries first, then swapped-in-place entries - order is
   // arbitrary, both just append struct data past the (shifted) existing data region.
@@ -752,9 +780,10 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
   const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + ((4 - (embeddedBlobSize % 4)) % 4);
 
-  const oldTagArrayAddress = targetBuffer.readUInt32LE(subHeaderOffset + 0x00);
-  const newTagArrayAddress = (oldTagArrayAddress - delta) >>> 0;
-  const newBaseMemoryAddress = (newTagArrayAddress - TAG_DATA_HEADER_PC_SIZE) >>> 0;
+  // The base and the array pointer never change (module doc). Existing pointers at or past the old
+  // array end move by `delta`; collected from the target before anything is copied.
+  const baseMemoryAddress = targetTagIndex.baseMemoryAddress;
+  const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex)) : [];
   const newTagDataOffset = subHeaderOffset + insertSize;
   const newArrayOffset = arrayOffset + insertSize;
 
@@ -799,7 +828,11 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   targetBuffer.copy(out, insertPos + insertSize, insertPos, oldStructDataOffset); // rest of model data + sub-header + existing tag array, shifted by +insertSize ONLY (the tag-array growth insertion point is further along, handled next)
   targetBuffer.copy(out, oldStructDataOffset + insertSize + delta, oldStructDataOffset, oldFileLength); // existing struct/path-string data, shifted by +insertSize AND +delta
 
-  out.writeUInt32LE(newTagArrayAddress, newTagDataOffset + 0x00);
+  // File offsets in the target -> the output: +insertSize up to the old array end, +delta after it.
+  const outOffsetOf = (at: number): number => at + insertSize + (at >= oldStructDataOffset ? delta : 0);
+  const oldArrayEndAddress = (baseMemoryAddress + (oldStructDataOffset - subHeaderOffset)) >>> 0;
+  const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: (baseMemoryAddress + targetHeader.tagDataSize) >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
+
   out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 0x0c);
   if (insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 0x14); // modelDataFileOffset
 
@@ -816,9 +849,9 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
     out.writeUInt32LE(tertiary === null ? 0xffffffff : tertiary, entryOffset + 0x08);
     const tagId = plan.resolvedTagIdByLocalIndex.get(plan.toAddLocalIndices[i])!;
     out.writeUInt32LE(tagId, entryOffset + 0x0c);
-    const pathPointer = newBaseMemoryAddress + (pathOffsets[i] - newTagDataOffset);
+    const pathPointer = baseMemoryAddress + (pathOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(pathPointer >>> 0, entryOffset + 0x10);
-    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
+    const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
     out.writeUInt32LE(0, entryOffset + 0x18); // isExternal = false, this module never adds resource-map-indexed entries
     pathBuffers[i].copy(out, pathOffsets[i]);
@@ -835,7 +868,7 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
     // INTENTIONALLY left unchanged - that's what makes this a swap, not a new tag.
     out.writeUInt32LE(secondary === null ? 0xffffffff : secondary, entryOffset + 0x04);
     out.writeUInt32LE(tertiary === null ? 0xffffffff : tertiary, entryOffset + 0x08);
-    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
+    const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
   }
 
@@ -845,7 +878,7 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   for (let i = 0; i < writeTags.length; i++) {
     const t = writeTags[i];
     dataBuffers[i].copy(out, structOffsets[i]);
-    const translation = (newBaseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
+    const translation = (baseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
     rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex), pathPointerOfTagId);
   }
 
@@ -865,7 +898,7 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
   // as in the target map. Callers that write a file run `finalizeForSave` (finalize-map.ts), which
   // recomputes crc32 and sets the scenario name; the tag-file checksum stays as-is (unverified).
 
-  return out;
+  return { buffer: out, rebase };
 }
 
 export function applyAddInjection(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan, options: InjectionOptions = {}): Buffer {

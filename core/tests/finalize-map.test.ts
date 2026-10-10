@@ -124,7 +124,7 @@ describe('finalizeForSave (real maps)', () => {
     const ti = parseTagIndex(src, h);
     const root = ti.entries.findIndex((e) => !e.isExternal && e.primaryClassName === 'globals');
     const container = deserializeContainer(serializeContainer(extractTagSet(src, h, ti, [root]), 'bloodgulch.map'));
-    const plan = planInjection('swap', ti, container);
+    const plan = planInjection('swap', { buffer: src, header: h, tagIndex: ti }, container);
     if (plan.kind !== 'ok') throw new Error(plan.reason);
     const injected = applyInjection(src, h, ti, container, plan);
     const before = parseCacheFileHeader(injected).crc32 >>> 0;

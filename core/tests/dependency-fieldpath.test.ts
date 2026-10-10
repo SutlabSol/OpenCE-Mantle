@@ -161,7 +161,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
   }
 
   function planOk(container: OceContainer): InjectionPlan {
-    const plan = planAddInjection(bgTagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     if (plan.kind !== 'ok') throw new Error(`plan refused: ${plan.reason}`);
     return plan;
   }

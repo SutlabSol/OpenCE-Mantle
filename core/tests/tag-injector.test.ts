@@ -50,7 +50,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const container = extractFromUi('ui\\ticker', 'font');
     expect(container.externalResourceRefs.length).toBe(0);
     expect(bgTagIndex.entries.some((e) => e.path === 'ui\\ticker')).toBe(false); // confirms this is a genuine new-to-target tag
-    const plan = planAddInjection(bgTagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.counts.added).toBe(container.tags.length);
@@ -63,7 +63,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const container = extractFromUi('sky\\space\\bitmaps\\star mask', 'bitmap');
     expect(container.externalResourceRefs.length).toBeGreaterThan(0);
     expect(container.externalResourceRefs[0].resourceMap).toBe('bitmaps.map');
-    const plan = planAddInjection(bgTagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.counts.externalReferenced).toBeGreaterThan(0);
@@ -72,7 +72,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
 
   it('reuses an existing (whole-tag-external) target entry by normalized path+class instead of duplicating it', () => {
     const container = extractFromUi('ui\\small_ui', 'font'); // bloodgulch already has this path as an external (loc.map) font entry
-    const plan = planAddInjection(bgTagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.counts.added).toBe(0);
@@ -83,7 +83,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const container = extractFromUi('ui\\ticker', 'font');
     const fakeOriginal = container.tags[0].originalIndex;
     container.warnings = [...container.warnings, { originalIndex: fakeOriginal, path: 'synthetic', group: 'font', kind: 'embeddedRawData', message: 'synthetic embedded warning for test' }];
-    const plan = planAddInjection(bgTagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.counts.blockedEmbedded).toBe(1);
@@ -101,7 +101,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const k = deps.findIndex((d) => d.kind === 'internal' || d.kind === 'external');
     expect(k).toBeGreaterThanOrEqual(0);
     deps[k] = { fieldPath: deps[k].fieldPath, group: 'bitmap', path: 'this\\path\\does\\not\\exist', kind: 'external' };
-    const plan = planAddInjection(bgTagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.toAddLocalIndices).not.toContain(root);
@@ -112,7 +112,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
   it('refuses a container newer than the supported format version', () => {
     const container = extractFromUi('ui\\ticker', 'font');
     container.formatVersion = OCETAGS_FORMAT_VERSION + 1;
-    const plan = planAddInjection(bgTagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('refused');
   });
 
@@ -128,15 +128,15 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const container = extractFromUi('sky\\space\\bitmaps\\star mask', 'bitmap');
     container.resourceMapIdentities = { bitmaps: identity };
 
-    const noConfigPlan = planAddInjection(bgTagIndex, container, {});
+    const noConfigPlan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container, {});
     expect(noConfigPlan.kind).toBe('ok');
     if (noConfigPlan.kind === 'ok') expect(noConfigPlan.externalRefStatuses[0].status).toBe('unconfigured-on-target');
 
-    const matchPlan = planAddInjection(bgTagIndex, container, { bitmaps: { identity } });
+    const matchPlan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container, { bitmaps: { identity } });
     expect(matchPlan.kind).toBe('ok');
     if (matchPlan.kind === 'ok') expect(matchPlan.externalRefStatuses[0].status).toBe('match');
 
-    const mismatchPlan = planAddInjection(bgTagIndex, container, { bitmaps: { identity: mismatchedIdentity } });
+    const mismatchPlan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container, { bitmaps: { identity: mismatchedIdentity } });
     expect(mismatchPlan.kind).toBe('ok');
     if (mismatchPlan.kind === 'ok') expect(mismatchPlan.externalRefStatuses[0].status).toBe('mismatch');
   });
@@ -155,7 +155,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const set = extractTagSet(uiBuffer, uiHeader, uiTagIndex, [tickerEntry.index, starMaskEntry.index]);
     const container = deserializeContainer(serializeContainer(set, 'ui'));
 
-    const plan = planAddInjection(bgTagIndex, container);
+    const plan = planAddInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') throw new Error('plan refused');
     expect(plan.counts.added).toBe(2);
@@ -211,7 +211,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     expect(targetRoot).toBeDefined();
     expect(targetRoot.isExternal).toBe(false); // confirms this is a genuine in-place-swappable match, not a resource-map entry
 
-    const plan = planSwapInjection(bgTagIndex, container);
+    const plan = planSwapInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
 
@@ -236,7 +236,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const container = deserializeContainer(serializeContainer(set, 'ui'));
 
     const targetRoot = bgTagIndex.entries.find((e) => e.path === 'weapons\\frag grenade\\shaders\\frag metal' && e.primaryClassName === 'shader_model')!;
-    const plan = planSwapInjection(bgTagIndex, container);
+    const plan = planSwapInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') throw new Error('plan refused');
     expect(plan.counts.added).toBe(0); // all 3 bitmap deps already matched (external) - this is a pure swap, no growth
@@ -280,7 +280,7 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     const container = extractFromUi('ui\\small_ui', 'font'); // matches an EXISTING bloodgulch entry (loc.map external font) - see the whole-tag-external test above for that path; here we force an embedded warning on it to exercise the other SWAP block reason
     const fakeOriginal = container.tags[0].originalIndex;
     container.warnings = [...container.warnings, { originalIndex: fakeOriginal, path: 'synthetic', group: 'font', kind: 'embeddedRawData', message: 'synthetic embedded warning for test' }];
-    const plan = planSwapInjection(bgTagIndex, container);
+    const plan = planSwapInjection({ buffer: bgBuffer, header: bgHeader, tagIndex: bgTagIndex }, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
     expect(plan.counts.swapped).toBe(0);
