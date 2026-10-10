@@ -57,11 +57,12 @@ import { TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file
 import { fourCCFromString, lookupTagClassByName } from '../constants/tag-classes';
 import type { CacheFileHeader } from './header';
 import type { TagIndex, TagIndexEntry } from './tag-index';
-import { resolveStruct, decodeStruct, resolvePointer } from './definitions/engine';
+import { resolveStruct, decodeStruct, resolvePointer, isRangeInBuffer } from './definitions/engine';
 import { decodeReflexive, decodeDependency, encodeDependency } from './definitions/codec';
 import type { OceContainer, OceContainerTag, ExternalResourceRef } from './container';
 import { OCETAGS_FORMAT_VERSION } from './container';
 import type { ExtractedDependencyRef } from './tag-extractor';
+import { childFieldPath, reflexiveElementPath } from './tag-extractor';
 import type { ResourceMapIdentity } from './resource-map';
 import { resourceMapIdentitiesMatch } from './resource-map';
 
@@ -234,6 +235,14 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
   const extractionFailedByOriginal = warningMessagesOfKind(container, 'extractionFailed');
   const uncertainGroupByOriginal = warningMessagesOfKind(container, 'uncertainGroup');
 
+  /** Per tag: dependency entries for skipped nonCached fields (old containers), left out of every dependency check below - see `checkDependencyMap`. */
+  const ignoredDependencyPaths = new Map<OceContainerTag, Set<string>>();
+  function effectiveDependencies(t: OceContainerTag): ExtractedDependencyRef[] {
+    const ignored = ignoredDependencyPaths.get(t);
+    const deps = t.dependencies as ExtractedDependencyRef[];
+    return ignored && ignored.size > 0 ? deps.filter((d) => !ignored.has(d.fieldPath)) : deps;
+  }
+
   /**
    * Unconditional - unlike embedded relocation, there is no opt-in for a tag the extractor
    * structurally could not carry: uncaptured data (model geometry, an unresolvable data pointer),
@@ -241,7 +250,8 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
    * an out-of-bounds TagReflexive (its pointer is left unrelocated in `data`), or an extraction
    * error. Applied to ADD candidates AND matched SWAP candidates alike. Reads only the container:
    * v4 per-tag `injectionBlockers`, plus the persisted walker `warnings` (the only source for
-   * v1-v3 containers). null = not blocked.
+   * v1-v3 containers). Otherwise-unblocked tags also get `checkDependencyMap` (every
+   * TagDependency field must match its `dependencies` entry by fieldPath). null = not blocked.
    */
   function structuralBlockReason(t: OceContainerTag): string | null {
     const reasons: string[] = [];
@@ -254,6 +264,11 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
     if (failed.length > 0) reasons.push(`This tag failed to extract and cannot be injected: ${failed.join('; ')}`);
     const uncertain = uncertainGroupByOriginal.get(t.originalIndex) ?? [];
     if (uncertain.length > 0) reasons.push(`This tag's group has no reliable field layout, so it cannot be safely relocated: ${uncertain.join('; ')}`);
+    if (reasons.length === 0) {
+      const depMap = checkDependencyMap(t);
+      ignoredDependencyPaths.set(t, depMap.ignoredPaths);
+      if (depMap.reason) reasons.push(depMap.reason);
+    }
     return reasons.length > 0 ? reasons.join(' ') : null;
   }
 
@@ -300,7 +315,7 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
     for (const li of candidateAdd) {
       if (blocked.has(li)) continue;
       const t = container.tags[li];
-      for (const dep of t.dependencies as ExtractedDependencyRef[]) {
+      for (const dep of effectiveDependencies(t)) {
         if (dep.kind === 'null') continue;
         if (dep.kind === 'internal' && dep.localTagIndex !== undefined) {
           if (matchedByLocalIndex.has(dep.localTagIndex)) continue;
@@ -349,7 +364,7 @@ export function planInjection(mode: InjectionMode, targetTagIndex: TagIndex, con
     if (embeddedBlockMsg) {
       reasons.push(embeddedBlockMsg);
     }
-    for (const dep of t.dependencies as ExtractedDependencyRef[]) {
+    for (const dep of effectiveDependencies(t)) {
       if (dep.kind === 'null') continue;
       if (dep.kind === 'internal' && dep.localTagIndex !== undefined) {
         if (matchedByLocalIndex.has(dep.localTagIndex)) continue;
@@ -442,13 +457,106 @@ export function planSwapInjection(targetTagIndex: TagIndex, container: OceContai
   return planInjection('swap', targetTagIndex, container, resourceMapConfig, options);
 }
 
-/** Recursively rewrites one newly-added tag's own buffer in place: TagDependency.tagId fields are remapped to the target map's resolved tagIds, and TagReflexive pointers (currently LOCAL byte offsets from extraction) become real virtual addresses for their final position in the target file. `tagBaseAbsolute` is the tag's own fixed absolute position in `data` (constant across the whole recursive call tree); `localOffset` is this struct instance's absolute position in `data`. */
+/** One TagDependency field found by walking a container tag's own (local-offset) `data`. */
+interface DependencyFieldSite {
+  fieldPath: string;
+  tagId: number;
+}
+
+/**
+ * Walks a container tag's flattened `data` exactly the way the extractor captured it: fields in
+ * physical order, `nonCached` fields skipped entirely (dependencies AND reflexives - the
+ * extractor neither records nor relocates them), TagReflexive pointers read as LOCAL offsets.
+ * Returns every TagDependency field with its fieldPath, plus the paths of skipped nonCached
+ * dependency fields (containers saved before the extractor skipped them still list those).
+ * Throws if the data doesn't fit the schema (truncated buffer, reflexive outside `data`).
+ */
+function collectDependencyFields(data: Buffer, structName: string, localOffset: number, fieldPath: string, sites: DependencyFieldSite[], nonCachedPaths: Set<string>): void {
+  const resolved = resolveStruct(structName);
+  const decoded = decodeStruct(data, localOffset, structName);
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value) continue;
+    const path = childFieldPath(fieldPath, field.name);
+    if (field.def.nonCached) {
+      if (value.kind === 'dependency') nonCachedPaths.add(path);
+      continue;
+    }
+    if (value.kind === 'dependency') {
+      sites.push({ fieldPath: path, tagId: value.value.tagId >>> 0 });
+    } else if (value.kind === 'reflexive' && value.value.count > 0) {
+      const childStructName = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
+      if (!childStructName) continue;
+      const childSize = resolveStruct(childStructName).totalSize;
+      const base = value.value.pointerLow;
+      if (!isRangeInBuffer(base, value.value.count * childSize, data.length)) {
+        throw new Error(`"${path}" (${value.value.count} x "${childStructName}") points outside the tag's own data`);
+      }
+      for (let i = 0; i < value.value.count; i++) {
+        collectDependencyFields(data, childStructName, base + i * childSize, reflexiveElementPath(fieldPath, field.name, i), sites, nonCachedPaths);
+      }
+    }
+  }
+}
+
+/**
+ * Plan-time check that every TagDependency field in `t.data` can be matched to its own
+ * `dependencies` entry by fieldPath (the only way `rewriteAddedTagData` looks entries up).
+ * Blocks the tag (null = OK) on: a non-null field with no entry, an entry whose fieldPath is not
+ * a dependency field in this build's definitions (unknown path, or a field renamed since the
+ * container was saved), duplicate entries, or an entry that disagrees with the field about being
+ * null. Entries for skipped nonCached fields (listed by containers saved before the extractor
+ * skipped them) are returned in `ignoredPaths` so the planner leaves them out of its dependency
+ * checks too. Works on every container version - `fieldPath` has been stored since v1.
+ */
+function checkDependencyMap(t: OceContainerTag): { reason: string | null; ignoredPaths: Set<string> } {
+  const sites: DependencyFieldSite[] = [];
+  const nonCachedPaths = new Set<string>();
+  try {
+    collectDependencyFields(Buffer.from(t.data, 'base64'), t.structName, 0, t.path, sites, nonCachedPaths);
+  } catch (err) {
+    return { reason: `This tag's saved data does not match this build's field layout (${err instanceof Error ? err.message : String(err)}), so its tag references cannot be matched safely. Re-extract it.`, ignoredPaths: nonCachedPaths };
+  }
+  const problems: string[] = [];
+  const entryByPath = new Map<string, ExtractedDependencyRef>();
+  for (const dep of t.dependencies as ExtractedDependencyRef[]) {
+    if (entryByPath.has(dep.fieldPath)) problems.push(`"${dep.fieldPath}" is listed more than once`);
+    entryByPath.set(dep.fieldPath, dep);
+  }
+  const sitePaths = new Set(sites.map((s) => s.fieldPath));
+  for (const dep of entryByPath.values()) {
+    if (!sitePaths.has(dep.fieldPath) && !nonCachedPaths.has(dep.fieldPath)) {
+      problems.push(`reference "${dep.fieldPath}" is not a tag reference field in this build (unknown, or renamed since the container was saved)`);
+    }
+  }
+  for (const site of sites) {
+    const dep = entryByPath.get(site.fieldPath);
+    const fieldIsNull = site.tagId === NULL_TAG_ID;
+    if (!fieldIsNull && !dep) problems.push(`"${site.fieldPath}" holds a tag reference but the container has no entry for it`);
+    else if (dep && (dep.kind === 'null') !== fieldIsNull) problems.push(`"${site.fieldPath}" ${fieldIsNull ? 'is empty but its entry names a tag' : 'holds a tag reference but its entry is empty'}`);
+  }
+  if (problems.length === 0) return { reason: null, ignoredPaths: nonCachedPaths };
+  const shown = problems.slice(0, 3).join('; ') + (problems.length > 3 ? `; and ${problems.length - 3} more` : '');
+  return { reason: `This tag's saved tag references don't match its fields, so they cannot be assigned safely: ${shown}. Re-extract it with this version of OpenCE.`, ignoredPaths: nonCachedPaths };
+}
+
+/**
+ * Recursively rewrites one newly-added tag's own buffer in place: TagDependency.tagId fields are
+ * remapped to the target map's resolved tagIds, and TagReflexive pointers (currently LOCAL byte
+ * offsets from extraction) become real virtual addresses for their final position in the target
+ * file. Each dependency field is matched to its entry by fieldPath (`depsByPath`), never by list
+ * position - the extractor's list order differs from this walk's order. `nonCached` fields are
+ * skipped exactly like the extractor skips them: their bytes stay as in the source.
+ * `planInjection` (`checkDependencyMap`) has already checked every lookup here succeeds.
+ * `tagBaseAbsolute` is the tag's own fixed absolute position in `data` (constant across the whole
+ * recursive call tree); `localOffset` is this struct instance's absolute position in `data`.
+ */
 function rewriteAddedTagData(
   data: Buffer,
   structName: string,
   localOffset: number,
-  dependencies: ExtractedDependencyRef[],
-  depCursor: { value: number },
+  fieldPath: string,
+  depsByPath: Map<string, ExtractedDependencyRef>,
   translation: number,
   tagBaseAbsolute: number,
   resolveDepTagId: (dep: ExtractedDependencyRef) => number,
@@ -458,10 +566,13 @@ function rewriteAddedTagData(
   for (const field of resolved.fields) {
     const value = decoded.get(field.name);
     if (!value) continue;
+    if (field.def.nonCached) continue;
     const absFieldOffset = localOffset + field.offset;
+    const path = childFieldPath(fieldPath, field.name);
     if (value.kind === 'dependency') {
-      const dep = dependencies[depCursor.value++];
       if (value.value.tagId !== NULL_TAG_ID) {
+        const dep = depsByPath.get(path);
+        if (!dep) throw new Error(`Internal error: no dependency entry for "${path}" - planInjection should have blocked this tag.`);
         const newTagId = resolveDepTagId(dep);
         const decodedDep = decodeDependency(data, absFieldOffset);
         encodeDependency(data, absFieldOffset, { ...decodedDep, pathPointer: 0, pathSize: 0, tagId: newTagId });
@@ -476,10 +587,14 @@ function rewriteAddedTagData(
       data.writeUInt32LE(0, absFieldOffset + 8);
       const childAbsoluteBase = tagBaseAbsolute + oldLocalChildBase;
       for (let i = 0; i < value.value.count; i++) {
-        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, dependencies, depCursor, translation, tagBaseAbsolute, resolveDepTagId);
+        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, reflexiveElementPath(fieldPath, field.name, i), depsByPath, translation, tagBaseAbsolute, resolveDepTagId);
       }
     }
   }
+}
+
+function dependenciesByPath(t: OceContainerTag): Map<string, ExtractedDependencyRef> {
+  return new Map((t.dependencies as ExtractedDependencyRef[]).map((d) => [d.fieldPath, d]));
 }
 
 function makeResolveDepTagId(t: OceContainerTag, plan: InjectionPlan, targetTagIndex: TagIndex): (dep: ExtractedDependencyRef) => number {
@@ -637,8 +752,7 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
     pathBuffers[i].copy(out, pathOffsets[i]);
 
     const translation = (newBaseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
-    const depCursor = { value: 0 };
-    rewriteAddedTagData(out, t.structName, structOffsets[i], t.dependencies as ExtractedDependencyRef[], depCursor, translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
+    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
 
   for (let j = 0; j < swappedCount; j++) {
@@ -658,8 +772,7 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
     dataBuffers[i].copy(out, structOffsets[i]);
 
     const translation = (newBaseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
-    const depCursor = { value: 0 };
-    rewriteAddedTagData(out, t.structName, structOffsets[i], t.dependencies as ExtractedDependencyRef[], depCursor, translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
+    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
 
   // Patch every relocated embedded asset's new absolute file offset into its tag's own struct

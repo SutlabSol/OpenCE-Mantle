@@ -65,6 +65,7 @@ export interface ExtractedTag {
    * `dependencies` is the side-table used to remap them at injection time (M5).
    */
   data: Buffer;
+  /** One entry per non-nonCached TagDependency field. List ORDER is not significant (it is two-phase per struct, see `flattenStruct`); the injector matches each field to its entry by `fieldPath`. */
   dependencies: ExtractedDependencyRef[];
   /** Embedded (external=0) bitmap/sound raw bytes captured from the source map, deduped by (fileOffset, size). Empty if this tag has none, or if any one of them failed validation (see `embeddedCaptureBlockedReasons` on the returned set's warnings - a mismatch blocks the WHOLE tag, never a partial relocation). */
   embeddedRawDataAssets: ExtractedEmbeddedAsset[];
@@ -98,6 +99,20 @@ export class AllTagsExcludedError extends Error {
     super(`Nothing in this selection can be extracted yet: ${notExtracted.map((t) => `"${t.path}" (${t.group})`).join(', ')}.`);
     this.name = 'AllTagsExcludedError';
   }
+}
+
+/**
+ * The `fieldPath` format stored with every `ExtractedDependencyRef` (unchanged since container
+ * v1): the tag path, then `.field name` per struct level and `.reflexive name[i]` per reflexive
+ * element. The injector resolves each TagDependency field by this exact string (never by list
+ * position), so both sides must build it with these two helpers.
+ */
+export function childFieldPath(parentPath: string, fieldName: string): string {
+  return `${parentPath}.${fieldName}`;
+}
+
+export function reflexiveElementPath(parentPath: string, fieldName: string, index: number): string {
+  return `${parentPath}.${fieldName}[${index}]`;
 }
 
 function classifyDependency(
@@ -220,7 +235,7 @@ function flattenStruct(
     const value = decoded.get(field.name);
     if (!value) continue;
     if (field.def.nonCached) continue; // garbage in cache format (e.g. bitmap's color-plate/processed-pixel TagDataOffset fields) - same exclusion as dependency-walker.ts's collectFromStruct and embedded-data-fields.ts's findEmbeddedDataFields, never treated as real pointer data.
-    const path = `${fieldPath}.${field.name}`;
+    const path = childFieldPath(fieldPath, field.name);
 
     if (value.kind === 'dependency') {
       dependencies.push(classifyDependency(value.value, path, tagIndex, localIndexByOriginal, notExtractedByOriginal));
@@ -291,7 +306,7 @@ function flattenStruct(
         dependencies,
         embeddedCapture,
         injectionBlockers,
-        `${fieldPath}.${work.fieldName}[${i}]`,
+        reflexiveElementPath(fieldPath, work.fieldName, i),
         tagIndex,
         localIndexByOriginal,
         notExtractedByOriginal,

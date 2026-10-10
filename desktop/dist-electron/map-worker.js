@@ -34527,6 +34527,12 @@ var AllTagsExcludedError = class extends Error {
     this.name = "AllTagsExcludedError";
   }
 };
+function childFieldPath(parentPath, fieldName) {
+  return `${parentPath}.${fieldName}`;
+}
+function reflexiveElementPath(parentPath, fieldName, index) {
+  return `${parentPath}.${fieldName}[${index}]`;
+}
 function classifyDependency(dep, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
   if (dep.tagId === NULL_TAG_ID2) return { fieldPath, group: "", path: "", kind: "null" };
   const idx = dep.tagId & 65535;
@@ -34578,7 +34584,7 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
     const value = decoded.get(field.name);
     if (!value) continue;
     if (field.def.nonCached) continue;
-    const path = `${fieldPath}.${field.name}`;
+    const path = childFieldPath(fieldPath, field.name);
     if (value.kind === "dependency") {
       dependencies.push(classifyDependency(value.value, path, tagIndex, localIndexByOriginal, notExtractedByOriginal));
     } else if (value.kind === "reflexive" && value.value.count > 0) {
@@ -34633,7 +34639,7 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
         dependencies,
         embeddedCapture,
         injectionBlockers,
-        `${fieldPath}.${work.fieldName}[${i}]`,
+        reflexiveElementPath(fieldPath, work.fieldName, i),
         tagIndex,
         localIndexByOriginal,
         notExtractedByOriginal
@@ -34904,6 +34910,12 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
   const invalidReflexiveByOriginal = warningMessagesOfKind(container, "invalidReflexive");
   const extractionFailedByOriginal = warningMessagesOfKind(container, "extractionFailed");
   const uncertainGroupByOriginal = warningMessagesOfKind(container, "uncertainGroup");
+  const ignoredDependencyPaths = /* @__PURE__ */ new Map();
+  function effectiveDependencies(t) {
+    const ignored = ignoredDependencyPaths.get(t);
+    const deps = t.dependencies;
+    return ignored && ignored.size > 0 ? deps.filter((d) => !ignored.has(d.fieldPath)) : deps;
+  }
   function structuralBlockReason(t) {
     const reasons = [];
     const uncaptured = uncapturedDataByOriginal.get(t.originalIndex) ?? [];
@@ -34915,6 +34927,11 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
     if (failed.length > 0) reasons.push(`This tag failed to extract and cannot be injected: ${failed.join("; ")}`);
     const uncertain = uncertainGroupByOriginal.get(t.originalIndex) ?? [];
     if (uncertain.length > 0) reasons.push(`This tag's group has no reliable field layout, so it cannot be safely relocated: ${uncertain.join("; ")}`);
+    if (reasons.length === 0) {
+      const depMap = checkDependencyMap(t);
+      ignoredDependencyPaths.set(t, depMap.ignoredPaths);
+      if (depMap.reason) reasons.push(depMap.reason);
+    }
     return reasons.length > 0 ? reasons.join(" ") : null;
   }
   function embeddedBlockReason(t) {
@@ -34954,7 +34971,7 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
     for (const li of candidateAdd) {
       if (blocked.has(li)) continue;
       const t = container.tags[li];
-      for (const dep of t.dependencies) {
+      for (const dep of effectiveDependencies(t)) {
         if (dep.kind === "null") continue;
         if (dep.kind === "internal" && dep.localTagIndex !== void 0) {
           if (matchedByLocalIndex.has(dep.localTagIndex)) continue;
@@ -34999,7 +35016,7 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
     if (embeddedBlockMsg) {
       reasons.push(embeddedBlockMsg);
     }
-    for (const dep of t.dependencies) {
+    for (const dep of effectiveDependencies(t)) {
       if (dep.kind === "null") continue;
       if (dep.kind === "internal" && dep.localTagIndex !== void 0) {
         if (matchedByLocalIndex.has(dep.localTagIndex)) continue;
@@ -35080,16 +35097,76 @@ function planAddInjection(targetTagIndex, container, resourceMapConfig = {}, opt
 function planSwapInjection(targetTagIndex, container, resourceMapConfig = {}, options = {}) {
   return planInjection("swap", targetTagIndex, container, resourceMapConfig, options);
 }
-function rewriteAddedTagData(data, structName, localOffset, dependencies, depCursor, translation, tagBaseAbsolute, resolveDepTagId) {
+function collectDependencyFields(data, structName, localOffset, fieldPath, sites, nonCachedPaths) {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(data, localOffset, structName);
   for (const field of resolved.fields) {
     const value = decoded.get(field.name);
     if (!value) continue;
-    const absFieldOffset = localOffset + field.offset;
+    const path = childFieldPath(fieldPath, field.name);
+    if (field.def.nonCached) {
+      if (value.kind === "dependency") nonCachedPaths.add(path);
+      continue;
+    }
     if (value.kind === "dependency") {
-      const dep = dependencies[depCursor.value++];
+      sites.push({ fieldPath: path, tagId: value.value.tagId >>> 0 });
+    } else if (value.kind === "reflexive" && value.value.count > 0) {
+      const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+      if (!childStructName) continue;
+      const childSize = resolveStruct(childStructName).totalSize;
+      const base = value.value.pointerLow;
+      if (!isRangeInBuffer(base, value.value.count * childSize, data.length)) {
+        throw new Error(`"${path}" (${value.value.count} x "${childStructName}") points outside the tag's own data`);
+      }
+      for (let i = 0; i < value.value.count; i++) {
+        collectDependencyFields(data, childStructName, base + i * childSize, reflexiveElementPath(fieldPath, field.name, i), sites, nonCachedPaths);
+      }
+    }
+  }
+}
+function checkDependencyMap(t) {
+  const sites = [];
+  const nonCachedPaths = /* @__PURE__ */ new Set();
+  try {
+    collectDependencyFields(Buffer.from(t.data, "base64"), t.structName, 0, t.path, sites, nonCachedPaths);
+  } catch (err) {
+    return { reason: `This tag's saved data does not match this build's field layout (${err instanceof Error ? err.message : String(err)}), so its tag references cannot be matched safely. Re-extract it.`, ignoredPaths: nonCachedPaths };
+  }
+  const problems = [];
+  const entryByPath = /* @__PURE__ */ new Map();
+  for (const dep of t.dependencies) {
+    if (entryByPath.has(dep.fieldPath)) problems.push(`"${dep.fieldPath}" is listed more than once`);
+    entryByPath.set(dep.fieldPath, dep);
+  }
+  const sitePaths = new Set(sites.map((s) => s.fieldPath));
+  for (const dep of entryByPath.values()) {
+    if (!sitePaths.has(dep.fieldPath) && !nonCachedPaths.has(dep.fieldPath)) {
+      problems.push(`reference "${dep.fieldPath}" is not a tag reference field in this build (unknown, or renamed since the container was saved)`);
+    }
+  }
+  for (const site of sites) {
+    const dep = entryByPath.get(site.fieldPath);
+    const fieldIsNull = site.tagId === NULL_TAG_ID3;
+    if (!fieldIsNull && !dep) problems.push(`"${site.fieldPath}" holds a tag reference but the container has no entry for it`);
+    else if (dep && dep.kind === "null" !== fieldIsNull) problems.push(`"${site.fieldPath}" ${fieldIsNull ? "is empty but its entry names a tag" : "holds a tag reference but its entry is empty"}`);
+  }
+  if (problems.length === 0) return { reason: null, ignoredPaths: nonCachedPaths };
+  const shown = problems.slice(0, 3).join("; ") + (problems.length > 3 ? `; and ${problems.length - 3} more` : "");
+  return { reason: `This tag's saved tag references don't match its fields, so they cannot be assigned safely: ${shown}. Re-extract it with this version of OpenCE.`, ignoredPaths: nonCachedPaths };
+}
+function rewriteAddedTagData(data, structName, localOffset, fieldPath, depsByPath, translation, tagBaseAbsolute, resolveDepTagId) {
+  const resolved = resolveStruct(structName);
+  const decoded = decodeStruct(data, localOffset, structName);
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value) continue;
+    if (field.def.nonCached) continue;
+    const absFieldOffset = localOffset + field.offset;
+    const path = childFieldPath(fieldPath, field.name);
+    if (value.kind === "dependency") {
       if (value.value.tagId !== NULL_TAG_ID3) {
+        const dep = depsByPath.get(path);
+        if (!dep) throw new Error(`Internal error: no dependency entry for "${path}" - planInjection should have blocked this tag.`);
         const newTagId = resolveDepTagId(dep);
         const decodedDep = decodeDependency(data, absFieldOffset);
         encodeDependency(data, absFieldOffset, { ...decodedDep, pathPointer: 0, pathSize: 0, tagId: newTagId });
@@ -35104,10 +35181,13 @@ function rewriteAddedTagData(data, structName, localOffset, dependencies, depCur
       data.writeUInt32LE(0, absFieldOffset + 8);
       const childAbsoluteBase = tagBaseAbsolute + oldLocalChildBase;
       for (let i = 0; i < value.value.count; i++) {
-        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, dependencies, depCursor, translation, tagBaseAbsolute, resolveDepTagId);
+        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, reflexiveElementPath(fieldPath, field.name, i), depsByPath, translation, tagBaseAbsolute, resolveDepTagId);
       }
     }
   }
+}
+function dependenciesByPath(t) {
+  return new Map(t.dependencies.map((d) => [d.fieldPath, d]));
 }
 function makeResolveDepTagId(t, plan, targetTagIndex) {
   return (dep) => {
@@ -35211,8 +35291,7 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
     dataBuffers[i].copy(out, structOffsets[i]);
     pathBuffers[i].copy(out, pathOffsets[i]);
     const translation = newBaseMemoryAddress - newTagDataOffset + structOffsets[i] >>> 0;
-    const depCursor = { value: 0 };
-    rewriteAddedTagData(out, t.structName, structOffsets[i], t.dependencies, depCursor, translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
+    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
   for (let j = 0; j < swappedCount; j++) {
     const s = plan.toSwap[j];
@@ -35227,8 +35306,7 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 20);
     dataBuffers[i].copy(out, structOffsets[i]);
     const translation = newBaseMemoryAddress - newTagDataOffset + structOffsets[i] >>> 0;
-    const depCursor = { value: 0 };
-    rewriteAddedTagData(out, t.structName, structOffsets[i], t.dependencies, depCursor, translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
+    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
   for (let i = 0; i < writeTags.length; i++) {
     for (const patch of writeTags[i].embeddedRawDataPatches ?? []) {
