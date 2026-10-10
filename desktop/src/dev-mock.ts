@@ -25,7 +25,7 @@ import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVeri
  * so production bundles never include this file or its fixtures.
  *
  * Scenario selectable via `?mock=<name>` (see MOCK_SCENARIOS in test-fixtures/dependency-fixtures.ts):
- * clean, scenario-bsp, external-data, spheroid, bsp-only, large-list, deps-error, extract-error, slow-progress.
+ * clean, scenario-bsp, external-data, spheroid, blocked-data, bsp-only, large-list, deps-error, extract-error, slow-progress.
  */
 const sampleTags = [
   { index: 0, tagId: 0xe1740000, primaryClassName: 'scenario', path: 'levels\\test\\bloodgulch\\bloodgulch', isExternal: false, estimatedSize: 215040 },

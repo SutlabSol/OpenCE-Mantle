@@ -9,6 +9,7 @@ export const MOCK_SCENARIOS = [
   'scenario-bsp',
   'external-data',
   'spheroid',
+  'blocked-data',
   'bsp-only',
   'large-list',
   'deps-error',
@@ -126,6 +127,39 @@ function spheroidSummary(): DependencyWalkSummary {
   return { requestedOriginalIndices: [20], extractableTags, notExtractedTags: [], externalTags: [], warnings, totalEstimatedSize: 9000, allExcluded: false };
 }
 
+/** One warning of each injection-blocking / invalid-layout kind, messages shaped like `dependency-walker.ts`'s. */
+function blockedDataSummary(): DependencyWalkSummary {
+  const extractableTags = [
+    tag({ originalIndex: 30, path: 'weapons\\assault rifle\\assault rifle', group: 'weapon', estimatedSize: 8200 }),
+    tag({ originalIndex: 31, path: 'weapons\\assault rifle\\fp\\fp', group: 'gbxmodel', estimatedSize: 48000, requiredBy: ['weapons\\assault rifle\\assault rifle'] }),
+    tag({ originalIndex: 32, path: 'weapons\\assault rifle\\bitmaps\\scope', group: 'bitmap', estimatedSize: 2048, requiredBy: ['weapons\\assault rifle\\assault rifle'] }),
+  ];
+  const warnings: DependencyWarningInfo[] = [
+    {
+      originalIndex: 31,
+      path: 'weapons\\assault rifle\\fp\\fp.geometries[0].parts',
+      group: '',
+      kind: 'uncapturedData',
+      message: '"weapons\\assault rifle\\fp\\fp.geometries[0].parts" has 4 model geometry part(s) (vertex/index data in the separate model-data region) that this tool cannot yet capture or relocate - the WHOLE tag is blocked from injection, not silently dropped.',
+    },
+    {
+      originalIndex: 32,
+      path: 'weapons\\assault rifle\\bitmaps\\scope.bitmap data[0]',
+      group: '',
+      kind: 'embeddedRawData',
+      message: '"weapons\\assault rifle\\bitmaps\\scope.bitmap data[0]" (2048 bytes) is embedded in this map\'s own raw-data region (file offset 1048576), outside this tag\'s own struct bytes - captured into the container for relocation if the extracting build supports it (see Verify Embedded Data for status); injection is blocked unless the container has the captured bytes.',
+    },
+    {
+      originalIndex: 30,
+      path: 'weapons\\assault rifle\\assault rifle.triggers',
+      group: '',
+      kind: 'invalidReflexive',
+      message: '"weapons\\assault rifle\\assault rifle.triggers" (2 x "WeaponTrigger") resolves outside this file (pointer base -4096) - unrecognized/corrupt layout, not walked further.',
+    },
+  ];
+  return { requestedOriginalIndices: [30], extractableTags, notExtractedTags: [], externalTags: [], warnings, totalEstimatedSize: 58248, allExcluded: false };
+}
+
 function bspOnlySummary(): DependencyWalkSummary {
   const notExtractedTags: DependencyNotExtractedInfo[] = [
     { originalIndex: 1, path: 'levels\\test\\bloodgulch\\bloodgulch', group: 'scenario_structure_bsp', reason: BSP_REASON, requiredBy: [] },
@@ -165,6 +199,8 @@ export function buildMockSummary(scenario: MockScenario): DependencyWalkSummary 
       return externalDataSummary();
     case 'spheroid':
       return spheroidSummary();
+    case 'blocked-data':
+      return blockedDataSummary();
     case 'bsp-only':
       return bspOnlySummary();
     case 'large-list':

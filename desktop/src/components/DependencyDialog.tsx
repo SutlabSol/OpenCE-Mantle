@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
-import type { DependencyWalkSummary, ExtractTagsResult } from '../../electron/shared-types';
+import type { DependencyWalkSummary, DependencyWarningKind, ExtractTagsResult } from '../../electron/shared-types';
 import { VirtualTagList } from './VirtualTagList';
 import { WarningGroup } from './WarningGroup';
 
@@ -16,6 +16,41 @@ function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+type WarningGroupId = 'uncaptured' | 'embedded' | 'invalidLayout' | 'external' | 'uncertain' | 'unresolved' | 'other';
+
+/**
+ * Display order + severity. Severity mirrors what core actually does with each kind (see
+ * `tag-injector.ts`): uncapturedData blocks ADD/SWAP unconditionally, embeddedRawData blocks
+ * ADD/SWAP while embedded relocation is disabled, invalidReflexive stops the walker (the injector
+ * doesn't consult it, so it is NOT labelled as an injection block).
+ */
+const WARNING_GROUPS: { id: WarningGroupId; title: string; severity: 'blocking' | 'info' }[] = [
+  { id: 'uncaptured', title: 'Cannot be captured / blocked for injection', severity: 'blocking' },
+  { id: 'embedded', title: 'Embedded data (injection blocked this build)', severity: 'blocking' },
+  { id: 'invalidLayout', title: 'Invalid / corrupt layout (not walked)', severity: 'blocking' },
+  { id: 'external', title: 'External data', severity: 'info' },
+  { id: 'uncertain', title: 'Undefined/uncertain groups', severity: 'info' },
+  { id: 'unresolved', title: 'Unresolved references', severity: 'info' },
+  { id: 'other', title: 'Other warnings', severity: 'info' },
+];
+
+/** Exhaustive over core's WARNING_KINDS - a new kind in core fails `yarn typecheck` until it's mapped here. */
+const GROUP_BY_KIND: Record<DependencyWarningKind, WarningGroupId> = {
+  uncapturedData: 'uncaptured',
+  embeddedRawData: 'embedded',
+  invalidReflexive: 'invalidLayout',
+  externalTag: 'external',
+  externalData: 'external',
+  uncertainGroup: 'uncertain',
+  noDefinition: 'uncertain',
+  bspTag: 'unresolved',
+};
+
+/** Unknown kinds (e.g. from a mismatched worker build) land in "Other warnings" rather than vanishing. */
+function warningGroupOf(kind: string): WarningGroupId {
+  return (GROUP_BY_KIND as Record<string, WarningGroupId>)[kind] ?? 'other';
 }
 
 function suggestedFileName(summary: DependencyWalkSummary, selectedIndices: number[]): string {
@@ -234,21 +269,14 @@ export default function DependencyDialog({ selectedIndices, onClose, log }: Prop
             severity="blocking"
             items={summary.notExtractedTags.map((t) => ({ key: `${t.originalIndex}`, text: `"${t.path}" (${t.group}) - ${t.reason}` }))}
           />
-          <WarningGroup
-            title="External data"
-            severity="info"
-            items={summary.warnings.filter((w) => w.kind === 'externalTag' || w.kind === 'externalData').map((w, i) => ({ key: `ext-${i}`, text: w.message }))}
-          />
-          <WarningGroup
-            title="Undefined/uncertain groups"
-            severity="info"
-            items={summary.warnings.filter((w) => w.kind === 'uncertainGroup' || w.kind === 'noDefinition').map((w, i) => ({ key: `unc-${i}`, text: w.message }))}
-          />
-          <WarningGroup
-            title="Unresolved references"
-            severity="info"
-            items={summary.warnings.filter((w) => w.kind === 'bspTag').map((w, i) => ({ key: `bsp-${i}`, text: w.message }))}
-          />
+          {WARNING_GROUPS.map((g) => (
+            <WarningGroup
+              key={g.id}
+              title={g.title}
+              severity={g.severity}
+              items={summary.warnings.filter((w) => warningGroupOf(w.kind) === g.id).map((w, i) => ({ key: `${g.id}-${i}`, text: w.message }))}
+            />
+          ))}
 
           <div style={{ display: 'flex', gap: 8, marginBottom: 8, marginTop: 10 }}>
             <input

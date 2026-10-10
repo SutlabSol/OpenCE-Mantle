@@ -3,7 +3,8 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import DependencyDialog from '../DependencyDialog';
 import { buildMockSummary, type MockScenario } from '../../test-fixtures/dependency-fixtures';
-import type { OpenceApi, ProgressEvent, GetDependenciesResult, ExtractTagsResult } from '../../../electron/shared-types';
+import type { OpenceApi, ProgressEvent, GetDependenciesResult, ExtractTagsResult, DependencyWarningInfo, DependencyWarningKind } from '../../../electron/shared-types';
+import { WARNING_KINDS } from '../../../../core/src/map/dependency-walker';
 
 function okDeps(scenario: MockScenario): () => Promise<GetDependenciesResult> {
   return () => Promise.resolve({ ok: true, summary: buildMockSummary(scenario) });
@@ -93,6 +94,47 @@ describe('DependencyDialog', () => {
     installMockOpence({ getDependencies: vi.fn(okDeps('spheroid')) });
     render(<DependencyDialog selectedIndices={[20]} onClose={vi.fn()} log={log} />);
     await waitFor(() => expect(screen.getByTestId('warning-group-undefined-uncertain-groups')).toBeInTheDocument());
+  });
+
+  it('uncaptured/embedded/invalid-layout warnings each get their own blocking group, and gate confirm on the checkbox', async () => {
+    installMockOpence({ getDependencies: vi.fn(okDeps('blocked-data')) });
+    render(<DependencyDialog selectedIndices={[30]} onClose={vi.fn()} log={log} />);
+
+    await waitFor(() => expect(screen.getByTestId('warning-group-cannot-be-captured-blocked-for-injection')).toBeInTheDocument());
+    for (const [slug, fragment] of [
+      ['cannot-be-captured-blocked-for-injection', 'model geometry part(s)'],
+      ['embedded-data-injection-blocked-this-build', 'embedded in this map'],
+      ['invalid-corrupt-layout-not-walked', 'resolves outside this file'],
+    ]) {
+      expect(screen.getByTestId(`warning-group-${slug}`).textContent).toContain('NEEDS ATTENTION');
+      await userEvent.click(screen.getByTestId(`warning-group-toggle-${slug}`));
+      expect(screen.getByTestId(`warning-group-items-${slug}`).textContent).toContain(fragment);
+    }
+    expect(screen.queryByTestId('warning-group-other-warnings')).not.toBeInTheDocument();
+
+    const confirm = screen.getByTestId('dependency-confirm-button');
+    expect(confirm).toBeDisabled();
+    await userEvent.click(screen.getByTestId('dependency-understand-checkbox'));
+    expect(confirm).not.toBeDisabled();
+  });
+
+  it('drift guard: every core WARNING_KINDS kind shows its message in a named (non-"Other") group; unknown kinds fall back to "Other warnings"', async () => {
+    const warnings: DependencyWarningInfo[] = WARNING_KINDS.map((kind, i) => ({ originalIndex: i, path: `p${i}`, group: '', kind, message: `drift-check message for ${kind}` }));
+    warnings.push({ originalIndex: 99, path: 'p99', group: '', kind: 'someFutureKind' as DependencyWarningKind, message: 'drift-check message for someFutureKind' });
+    const summary = { ...buildMockSummary('clean'), warnings };
+    installMockOpence({ getDependencies: vi.fn(() => Promise.resolve({ ok: true as const, summary })) });
+    render(<DependencyDialog selectedIndices={[4]} onClose={vi.fn()} log={log} />);
+
+    await waitFor(() => expect(screen.getByTestId('dependency-dialog-summary')).toBeInTheDocument());
+    for (const toggle of screen.getAllByTestId(/^warning-group-toggle-/)) await userEvent.click(toggle);
+
+    for (const kind of WARNING_KINDS) {
+      const item = screen.getByText(`drift-check message for ${kind}`);
+      const group = item.closest('[data-testid^="warning-group-items-"]');
+      expect(group, `kind "${kind}" has no visible message in any warning group`).not.toBeNull();
+      expect(group!.getAttribute('data-testid'), `kind "${kind}" fell through to "Other warnings" - map it in DependencyDialog's GROUP_BY_KIND`).not.toBe('warning-group-items-other-warnings');
+    }
+    expect(screen.getByTestId('warning-group-items-other-warnings').textContent).toContain('drift-check message for someFutureKind');
   });
 
   it('BSP-only selection: confirm is disabled with a stated reason and no checkbox is shown', async () => {

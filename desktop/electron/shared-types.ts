@@ -1,5 +1,7 @@
 /** Shared IPC contract between main, preload, and renderer. Kept dependency-free (no Electron types). */
 
+import type { WarningKind } from '../../core/src/map/dependency-walker';
+
 export interface MapHeaderSummary {
   scenarioName: string;
   buildString: string;
@@ -69,7 +71,8 @@ export interface DependencyNotExtractedInfo {
   requiredBy: string[];
 }
 
-export type DependencyWarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'embeddedRawData' | 'bspTag';
+/** Derived from core's `WARNING_KINDS` so the two lists can't drift. */
+export type DependencyWarningKind = WarningKind;
 
 export interface DependencyWarningInfo {
   originalIndex: number;

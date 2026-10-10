@@ -35,6 +35,17 @@ needs re-verification / unverified / blocked)
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: Dependency dialog warning groups follow how core actually treats each kind, display
+  only: `uncapturedData` -> "Cannot be captured / blocked for injection" (blocking; injector blocks
+  ADD/SWAP unconditionally); `embeddedRawData` -> own "Embedded data (injection blocked this
+  build)" group (blocking; blocked only while `allowEmbeddedRelocation` is off); `invalidReflexive`
+  -> own "Invalid / corrupt layout (not walked)" group (walker/verifier react to it, the injector
+  does NOT - so it is not labelled an injection block). Unknown kinds -> "Other warnings". Desktop
+  `DependencyWarningKind` is derived from core's `WARNING_KINDS`; a dialog test fails on drift.
+  **Flagged, not fixed:** `tag-extractor.ts` reflexive branch has no bounds check - an
+  out-of-bounds reflexive (the `invalidReflexive` case) yields short child buffers while
+  `runningOffset` still advances by the full `childSize`. No sample map hits it. Needs a decision
+  (block via injector like `uncapturedData`, or refuse at extraction) in a later task.
 - 2026-08 (this session): Fixed Issue 1 (P0, silently dropped data fields). Root cause: the
   `uncapturedData` guard logic and the plain-`TagDataOffset` pointer-capture branch in
   `tag-extractor.ts`'s `flattenStruct` were already present in this session's uncommitted work

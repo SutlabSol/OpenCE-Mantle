@@ -23,7 +23,7 @@ import {
   OperationCancelledError,
   ContainerFormatError,
 } from '../../core/src/index';
-import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig } from '../../core/src/index';
+import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning } from '../../core/src/index';
 import type {
   LoadMapResult,
   WorkerRequest,
@@ -103,8 +103,8 @@ function sizeByIndex(header: CacheFileHeader, tagIndex: TagIndex): Map<number, n
   return new Map(estimateTagFootprints(header, tagIndex).map((f) => [f.tagIndex, f.estimatedSize]));
 }
 
-function toWarningInfo(w: { originalIndex: number; path: string; group: string; kind: string; message: string }): DependencyWarningInfo {
-  return { originalIndex: w.originalIndex, path: w.path, group: w.group, kind: w.kind as DependencyWarningInfo['kind'], message: w.message };
+function toWarningInfo(w: WalkerWarning): DependencyWarningInfo {
+  return { originalIndex: w.originalIndex, path: w.path, group: w.group, kind: w.kind, message: w.message };
 }
 
 async function runInspect(task: { requestId: string; filePath: string }) {

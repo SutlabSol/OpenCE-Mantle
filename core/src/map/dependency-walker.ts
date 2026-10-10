@@ -36,7 +36,10 @@ export interface WalkedTag {
   requiredBy: string[];
 }
 
-export type WarningKind = 'uncertainGroup' | 'noDefinition' | 'externalTag' | 'externalData' | 'embeddedRawData' | 'bspTag' | 'invalidReflexive' | 'uncapturedData';
+/** Every warning kind the walker/extractor can emit. The desktop IPC type and Dependency dialog derive from this list - add new kinds here. */
+export const WARNING_KINDS = ['uncertainGroup', 'noDefinition', 'externalTag', 'externalData', 'embeddedRawData', 'bspTag', 'invalidReflexive', 'uncapturedData'] as const;
+
+export type WarningKind = (typeof WARNING_KINDS)[number];
 
 export interface WalkerWarning {
   originalIndex: number;
