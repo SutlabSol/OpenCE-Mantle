@@ -72,6 +72,27 @@ needs re-verification / unverified / blocked)
   `invalidReflexive` is now blocked. Tests: `reflexive-bounds.test.ts` (cases a-e, save/reload,
   v3 fallback), `swap-structural-block.test.ts`. Both are **same-reader**. Status: verified by
   tests (same-reader) only, not confirmed in OpenCE.
+- 2026-10-11 (same branch, user-approved follow-ups):
+  - **noDefinition** (commit 41100b1): the definition lookup ran before the per-tag try, so one
+    tag of an unknown class failed the WHOLE extraction with a raw `DefinitionLoadError`
+    (verified in memory). It now gets an `extractionFailed` blocker (empty data, empty
+    `structName`, no dependencies), and the rest of the selection still extracts.
+    `verifyExtractedTagSet` reports such tags instead of walking them. Test:
+    `reflexive-bounds.test.ts` case (f).
+  - **uncertainGroup** (commit ade2ca9): applies to `UNCERTAIN_GROUPS` = `spheroid` only (checked
+    before changing anything). It was extracted and never checked by the injector, so ADD/SWAP
+    let it through. `structuralBlockReason` now blocks it in both modes, via the persisted
+    walker warning, so every container version is covered. The dialog's shared
+    "Undefined/uncertain groups" group is now **blocking**, titled "Undefined/uncertain groups
+    (blocked for injection)". Tests: `swap-structural-block.test.ts` ADD + SWAP. They are
+    SYNTHETIC (a real tag relabelled as spheroid in an in-memory tag index, because no sample
+    map has a spheroid) and same-reader.
+  - **On-disk container test** (commit 2a2dbac): write the `.ocetags`, read back the exact
+    bytes (asserted identical), load them with no edits, and ADD and SWAP both block.
+  - `structuralBlockReason` (tag-injector.ts) now covers: uncapturedData, invalidReflexive,
+    extractionFailed, uncertainGroup. embeddedRawData has its own check in both modes. BSP
+    refuses the whole plan. Missing external/unresolved/notExtracted dependencies block in
+    both modes. externalData stays informational (fingerprint status only).
 - 2026-10-11: **TRACKED P0, NOT FIXED - dependency-order mismatch between extractor and
   injector.** `tag-extractor.ts` records each tag's `dependencies` in two-phase order: all of a
   struct's own fields first, then each reflexive's children. `tag-injector.ts`'s
