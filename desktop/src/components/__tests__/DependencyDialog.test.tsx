@@ -90,10 +90,14 @@ describe('DependencyDialog', () => {
     expect(screen.getByTestId('warning-group-items-external-data').textContent).toContain('cloud mask');
   });
 
-  it('spheroid/uncertain group: warning appears under "Undefined/uncertain groups"', async () => {
+  it('spheroid/uncertain group: warning appears under a BLOCKING "Undefined/uncertain groups (blocked for injection)" group', async () => {
     installMockOpence({ getDependencies: vi.fn(okDeps('spheroid')) });
     render(<DependencyDialog selectedIndices={[20]} onClose={vi.fn()} log={log} />);
-    await waitFor(() => expect(screen.getByTestId('warning-group-undefined-uncertain-groups')).toBeInTheDocument());
+    const slug = 'undefined-uncertain-groups-blocked-for-injection';
+    await waitFor(() => expect(screen.getByTestId(`warning-group-${slug}`)).toBeInTheDocument());
+    // uncertainGroup now blocks ADD/SWAP in core, so the group must be labelled and styled as blocking.
+    expect(screen.getByTestId(`warning-group-${slug}`).textContent).toContain('NEEDS ATTENTION');
+    expect(screen.getByTestId(`warning-group-toggle-${slug}`).textContent).toContain('blocked for injection');
   });
 
   it('uncaptured/embedded/invalid-layout warnings each get their own blocking group, and gate confirm on the checkbox', async () => {

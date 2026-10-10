@@ -25,14 +25,16 @@ type WarningGroupId = 'uncaptured' | 'embedded' | 'invalidLayout' | 'external' |
  * `tag-injector.ts`): uncapturedData and extractionFailed block ADD/SWAP unconditionally,
  * embeddedRawData blocks ADD/SWAP while embedded relocation is disabled, invalidReflexive stops
  * the walker AND blocks ADD/SWAP unconditionally (the extractor leaves that reflexive's pointer
- * unrelocated and records a per-tag blocker in the container).
+ * unrelocated and records a per-tag blocker in the container). uncertainGroup blocks ADD/SWAP
+ * unconditionally, and a noDefinition tag fails extraction for that tag alone (extractionFailed),
+ * so the shared "uncertain" group is blocking too.
  */
 const WARNING_GROUPS: { id: WarningGroupId; title: string; severity: 'blocking' | 'info' }[] = [
   { id: 'uncaptured', title: 'Cannot be captured / blocked for injection', severity: 'blocking' },
   { id: 'embedded', title: 'Embedded data (injection blocked while embedded relocation is disabled)', severity: 'blocking' },
   { id: 'invalidLayout', title: 'Invalid / corrupt layout (not walked, blocked for injection)', severity: 'blocking' },
   { id: 'external', title: 'External data', severity: 'info' },
-  { id: 'uncertain', title: 'Undefined/uncertain groups', severity: 'info' },
+  { id: 'uncertain', title: 'Undefined/uncertain groups (blocked for injection)', severity: 'blocking' },
   { id: 'unresolved', title: 'Unresolved references', severity: 'info' },
   { id: 'other', title: 'Other warnings', severity: 'info' },
 ];

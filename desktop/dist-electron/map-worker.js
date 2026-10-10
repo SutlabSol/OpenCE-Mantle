@@ -34903,6 +34903,7 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
   const uncapturedDataByOriginal = warningMessagesOfKind(container, "uncapturedData");
   const invalidReflexiveByOriginal = warningMessagesOfKind(container, "invalidReflexive");
   const extractionFailedByOriginal = warningMessagesOfKind(container, "extractionFailed");
+  const uncertainGroupByOriginal = warningMessagesOfKind(container, "uncertainGroup");
   function structuralBlockReason(t) {
     const reasons = [];
     const uncaptured = uncapturedDataByOriginal.get(t.originalIndex) ?? [];
@@ -34912,6 +34913,8 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, 
     if (invalid.length > 0) reasons.push(`This tag has an invalid/corrupt layout (a reflexive outside the source map) and cannot be relocated: ${invalid.join("; ")}`);
     const failed = [...blockers.filter((b) => b.kind === "extractionFailed").map((b) => b.message), ...blockers.length > 0 ? [] : extractionFailedByOriginal.get(t.originalIndex) ?? []];
     if (failed.length > 0) reasons.push(`This tag failed to extract and cannot be injected: ${failed.join("; ")}`);
+    const uncertain = uncertainGroupByOriginal.get(t.originalIndex) ?? [];
+    if (uncertain.length > 0) reasons.push(`This tag's group has no reliable field layout, so it cannot be safely relocated: ${uncertain.join("; ")}`);
     return reasons.length > 0 ? reasons.join(" ") : null;
   }
   function embeddedBlockReason(t) {
