@@ -16,8 +16,8 @@ needs re-verification / unverified / blocked)
 | Feature | Status | How |
 |---|---|---|
 | M4 extraction (general) | **needs re-verification** | Was "done" before the font/string_list/meter/etc data-dropping bug was found; the bug is now fixed and same-reader-verified (101/101 core Vitest), but no fix this session has been run by the user on Windows/OpenCE yet. See "Windows check" below to move this to verified without a full OpenCE session. |
-| M5 ADD / SWAP (tags with NO gbxmodel in their closure) | **needs re-verification** | Same reason as extraction - the data-dropping bug could have affected any injected tag with a font/string_list/meter/hud_message_text/input_device_defaults/model_animations/scenario field. Fixed + same-reader-verified this session; not yet confirmed in OpenCE. |
-| M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked** | `uncapturedData` warning unconditionally blocks these (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. |
+| M5 ADD / SWAP (tags with NO gbxmodel in their closure) | **needs re-verification** | Same reason as extraction - the data-dropping bug could have affected any injected tag with a font/string_list/meter/hud_message_text/input_device_defaults/model_animations/scenario field. Fixed + same-reader-verified this session; not yet confirmed in OpenCE. **Also affected by the open dependency-order P0 (2026-10-11, see Decisions):** ADD/SWAP can assign tag references to the wrong fields (e.g. 116 ui_widget_definition tags in bloodgulch); do not trust injected maps until that is fixed. |
+| M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked; needs re-verification once unblocked** | `uncapturedData` warning unconditionally blocks these in ADD, and since 2026-10-11 (commit 2ee3c9e) in SWAP too (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. Once unblocked, these tags are also hit by the dependency-order P0 (weapons/projectiles/vehicles/bipeds appear in its counts). |
 | Embedded (external=0) bitmap/sound relocation | **same-reader-verified, NOT approved for the real app** | `embedded-relocation.test.ts`, real coldsnap.map bytes. `allowEmbeddedRelocation` stays off in `map-worker.ts`. |
 | `gbxmodel` model geometry capture/relocation | **Stage 1 (capture) same-reader-verified; Stage 2 (injection) design-verified, NOT built/wired** | `gbxmodel-geometry.test.ts` (100% captured, 0 blocked, bloodgulch+coldsnap), `gbxmodel-combined-insertion-design.test.ts` (field table + 665-part no-patch proof) — see "gbxmodel geometry — Stage 1 capture" below |
 | Sound relocation | **same-reader-verified, bounds-only** | No deterministic size formula for compressed audio exists (stated, not guessed) - a corrupt/truncated embedded sound could still pass the bounds check. |
@@ -72,6 +72,27 @@ needs re-verification / unverified / blocked)
   `invalidReflexive` is now blocked. Tests: `reflexive-bounds.test.ts` (cases a-e, save/reload,
   v3 fallback), `swap-structural-block.test.ts`. Both are **same-reader**. Status: verified by
   tests (same-reader) only, not confirmed in OpenCE.
+- 2026-10-11: **TRACKED P0, NOT FIXED - dependency-order mismatch between extractor and
+  injector.** `tag-extractor.ts` records each tag's `dependencies` in two-phase order: all of a
+  struct's own fields first, then each reflexive's children. `tag-injector.ts`'s
+  `rewriteAddedTagData` consumes them with a single cursor in depth-first field order. Whenever a
+  struct has a TagDependency field AFTER a non-empty TagReflexive field, the cursor hands a field
+  another field's dependency, so ADD/SWAP write the wrong tagId (or throw). Found by comparing
+  the extractor's `fieldPath` order with a schema DFS over every extracted tag (whole-map
+  extraction, same-reader: both code paths are ours):
+  | map | tags | order mismatches | tags that would get a WRONG reference |
+  |---|---|---|---|
+  | bloodgulch | 1569 | 191 | 159 (ui_widget_definition 116, projectile 18, weapon 15, vehicle 6, biped 2, scenario 1, globals 1) |
+  | ui | 1411 | 340 | 277 (ui_widget_definition 274, projectile 2, scenario 1) |
+  | sidewinder | 1542 | 191 | 159 (same breakdown as bloodgulch) |
+  | coldsnap | 1957 | 213 | 179 (ui_widget_definition 117, projectile 24, weapon 19, vehicle 13, device_machine 2, biped 1, device_control 1, scenario 1, globals 1) |
+  End to end, in memory (nothing written): of the 524 ui_widget_definition tags from ui.map that
+  ADD into bloodgulch would add, apply **threw** "Internal error ... planInjection should have
+  blocked it" for 289, all references were correct for 235, and **0** were seen silently
+  wrong. Silent wrong references are still possible in principle whenever two misordered
+  dependencies are both resolvable. Gbxmodel closures are blocked today, which hides most
+  weapon/vehicle cases. Fix and plan: branch `fix/dependency-order`, research first, pending
+  user approval. Not started.
 - 2026-08 (this session): Fixed Issue 1 (P0, silently dropped data fields). Root cause: the
   `uncapturedData` guard logic and the plain-`TagDataOffset` pointer-capture branch in
   `tag-extractor.ts`'s `flattenStruct` were already present in this session's uncommitted work
