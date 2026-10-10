@@ -15,6 +15,7 @@ var api = {
   pickInjectContainer: () => import_electron.ipcRenderer.invoke("tags:pickInjectContainer"),
   planInject: (containerPath, mode) => import_electron.ipcRenderer.invoke("tags:planInject", containerPath, mode),
   applyInject: () => import_electron.ipcRenderer.invoke("tags:applyInject"),
+  saveMapAs: () => import_electron.ipcRenderer.invoke("map:saveAs"),
   verifyEmbeddedData: () => import_electron.ipcRenderer.invoke("tags:verifyEmbeddedData"),
   openContainingFolder: (filePath) => import_electron.ipcRenderer.invoke("app:openContainingFolder", filePath),
   getSettings: () => import_electron.ipcRenderer.invoke("app:getSettings"),

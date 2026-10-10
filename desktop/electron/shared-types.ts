@@ -218,6 +218,8 @@ export interface OpenceApi {
   pickInjectContainer(): Promise<{ path: string } | null>;
   planInject(containerPath: string, mode: InjectionMode): Promise<PlanInjectResult>;
   applyInject(): Promise<ApplyInjectResult>;
+  /** File > Save As: main shows the native dialog, refuses the open map's own path, and has the worker write the copy. */
+  saveMapAs(): Promise<SaveMapAsResult>;
   verifyEmbeddedData(): Promise<VerifyEmbeddedDataResult>;
   openContainingFolder(filePath: string): Promise<void>;
   getSettings(): Promise<AppSettings>;

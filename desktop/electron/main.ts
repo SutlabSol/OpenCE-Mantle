@@ -5,6 +5,7 @@ import { OCETAGS_EXTENSION, validateResourceMapFile, scenarioNameFromFileName } 
 import { getRecentMaps, addRecentMap } from './recent-maps';
 import { getSettings, setLastExtractDir, setResourceMapPath } from './settings';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
+import { saveMapAsFlow, registerSaveMapAsIpc, type SaveMapAsDeps } from './save-map-as';
 import type {
   LoadMapResult,
   CompressionResult,
@@ -84,6 +85,7 @@ async function loadMapAtPath(filePath: string): Promise<LoadMapResult> {
     } else if (result.status === 'unsupported') {
       currentMapPath = null;
       currentMapScenarioName = null;
+      buildMenu();
       sendLog('error', result.message);
     }
     return result;
@@ -399,60 +401,42 @@ async function applyInjectFlow(): Promise<ApplyInjectResult> {
   }
 }
 
-/**
- * File > Save As: writes the open map unchanged except for its scenario name (from the chosen
- * file name) and the recomputed header CRC32. Never overwrites the open map (refused here and
- * again in the worker); the worker writes a temp file then renames it.
- */
-async function saveMapAsFlow(): Promise<SaveMapAsResult> {
-  if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
-  if (!currentMapPath || currentMapCompressed) {
-    sendLog('warn', 'Open a decompressed map before using Save As.');
-    return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress a map before saving it.' };
-  }
-  const defaultPath = currentMapPath.replace(/(\.map)?$/i, '_copy.map');
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Save map as',
-    defaultPath,
-    filters: [{ name: 'Halo CE Map', extensions: ['map'] }],
-  });
-  if (canceled || !filePath) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
-
-  const resolvedTarget = path.resolve(filePath);
-  if (resolvedTarget.toLowerCase() === path.resolve(currentMapPath).toLowerCase()) {
-    await dialog.showMessageBox(mainWindow, { type: 'error', message: 'You cannot overwrite the open map.', detail: 'Choose a different file name.' });
-    return { ok: false, code: 'REFUSED_SOURCE_PATH', message: 'You cannot overwrite the open map. Choose a different file name.' };
-  }
-  if (fs.existsSync(resolvedTarget)) {
-    const { response } = await dialog.showMessageBox(mainWindow, {
+/** Main-process side of File > Save As (native menu and the renderer's `saveMapAs` IPC). Logic lives in save-map-as.ts. */
+const saveMapAsDeps: SaveMapAsDeps = {
+  getOpenMap: () => (mainWindow && currentMapPath ? { filePath: currentMapPath, compressed: currentMapCompressed } : null),
+  showSaveDialog: async (defaultPath) => {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow!, {
+      title: 'Save map as',
+      defaultPath,
+      filters: [{ name: 'Halo CE Map', extensions: ['map'] }],
+    });
+    return canceled || !filePath ? null : filePath;
+  },
+  confirmOverwrite: async (filePath) => {
+    const { response } = await dialog.showMessageBox(mainWindow!, {
       type: 'warning',
       buttons: ['Overwrite', 'Cancel'],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path.basename(resolvedTarget)}" already exists.`,
+      message: `"${path.basename(filePath)}" already exists.`,
       detail: 'Do you want to overwrite it?',
     });
-    if (response !== 0) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
-  }
-  if (!(await confirmScenarioName(resolvedTarget))) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+    return response === 0;
+  },
+  confirmScenarioName,
+  showError: async (message, detail) => {
+    await dialog.showMessageBox(mainWindow!, { type: 'error', message, detail });
+  },
+  runWorkerSave: (outputPath) =>
+    sendWorkerRequest<SaveMapAsResult>({ type: 'saveMapAs', outputPath }, sendLog, (stage, percent) =>
+      mainWindow?.webContents.send('map:progress', { taskId: 'saveMapAs', stage, percent }),
+    ).promise,
+  log: sendLog,
+};
 
-  sendLog('info', `Saving map as ${resolvedTarget}`);
-  const { promise } = sendWorkerRequest<SaveMapAsResult>({ type: 'saveMapAs', outputPath: resolvedTarget }, sendLog, (stage, percent) =>
-    mainWindow?.webContents.send('map:progress', { taskId: 'saveMapAs', stage, percent }),
-  );
-  try {
-    const result = await promise;
-    if (result.ok) {
-      sendLog('info', `Saved ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, '0')}`);
-      for (const w of result.warnings) sendLog('warn', w);
-      sendLog('info', result.staleChecksumWarning);
-    }
-    return result;
-  } catch (err) {
-    const e = err as Error & { code?: string };
-    sendLog('error', `Save As failed: ${e.message}`);
-    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
-  }
+/** Native File > Save As is enabled only while a decompressed map is open (same rule as the renderer menu). */
+function canSaveMapAs(): boolean {
+  return !!currentMapPath && !currentMapCompressed;
 }
 
 async function verifyEmbeddedDataFlow(): Promise<VerifyEmbeddedDataResult> {
@@ -493,7 +477,7 @@ function buildMenu() {
       label: 'File',
       submenu: [
         { label: 'Open Map...', accelerator: 'CmdOrCtrl+O', click: () => openMapFlow() },
-        { label: 'Save As...', accelerator: 'CmdOrCtrl+Shift+S', click: () => void saveMapAsFlow() },
+        { id: 'save-as', label: 'Save As...', accelerator: 'CmdOrCtrl+Shift+S', enabled: canSaveMapAs(), click: () => void saveMapAsFlow(saveMapAsDeps) },
         {
           label: 'Recent Maps',
           submenu:
@@ -564,6 +548,7 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:planInject', (_e, containerPath: string, mode: InjectionMode) => planInjectFlow(containerPath, mode));
   ipcMain.handle('tags:applyInject', () => applyInjectFlow());
   ipcMain.handle('tags:verifyEmbeddedData', () => verifyEmbeddedDataFlow());
+  registerSaveMapAsIpc(ipcMain, saveMapAsDeps);
   ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
   });

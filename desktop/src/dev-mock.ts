@@ -12,6 +12,7 @@ import type {
   ResourceMapPickResult,
   PlanInjectResult,
   ApplyInjectResult,
+  SaveMapAsResult,
   InjectionMode,
 } from '../electron/shared-types';
 import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult } from './test-fixtures/dependency-fixtures';
@@ -161,6 +162,12 @@ export function installDevMock() {
         staleChecksumWarning:
           'The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.',
       };
+    },
+    saveMapAs: async (): Promise<SaveMapAsResult> => {
+      await fakeProgress('saveMapAs');
+      const result = { ok: true as const, outputPath: 'C:\\HaloCE\\maps\\bloodgulch_copy.map', scenarioName: 'bloodgulch_copy', crc32: 0x1a2b3c4d, warnings: [], staleChecksumWarning: 'The separate tag-file checksum was not recalculated (mock).' };
+      logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) Saved ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, '0')}`, timestamp: Date.now() }));
+      return result;
     },
     verifyEmbeddedData: async () => {
       await fakeProgress('verifyEmbeddedData');

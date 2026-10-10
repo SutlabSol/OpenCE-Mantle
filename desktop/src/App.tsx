@@ -39,6 +39,7 @@ export default function App() {
   const canExtract = mapState?.status === 'ok';
   const canInject = mapState?.status === 'ok';
   const canVerifyEmbeddedData = mapState?.status === 'ok';
+  const canSaveAs = mapState?.status === 'ok';
   const isWalkOrExtractRunning = extractSelection !== null || largeSelectionConfirm !== null;
 
   const requestExtract = (indices: number[]) => {
@@ -129,6 +130,12 @@ export default function App() {
     if (result) log('info', `Saved recompressed map to ${result.outputPath}`);
   };
 
+  // Main logs the outcome (map name, CRC32, warnings); the renderer only triggers it.
+  const handleSaveAs = async () => {
+    if (!canSaveAs) return;
+    await window.opence.saveMapAs();
+  };
+
   const notImplemented = (feature: string) => {
     window.opence.notImplemented(feature);
     log('warn', `${feature} is coming in a later milestone.`);
@@ -152,7 +159,7 @@ export default function App() {
             label: 'File',
             items: [
               { label: 'Open Map...', onClick: handleOpen },
-              { label: 'Save As...', onClick: () => notImplemented('Save As / Export') },
+              { label: 'Save As...', onClick: handleSaveAs, disabled: !canSaveAs },
               { label: 'Exit', onClick: () => window.close() },
             ],
           },
