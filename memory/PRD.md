@@ -17,7 +17,7 @@ needs re-verification / unverified / blocked)
 |---|---|---|
 | M4 extraction (general) | **needs re-verification** | Was "done" before the font/string_list/meter/etc data-dropping bug was found; the bug is now fixed and same-reader-verified (101/101 core Vitest), but no fix this session has been run by the user on Windows/OpenCE yet. See "Windows check" below to move this to verified without a full OpenCE session. |
 | M5 SWAP (tags with NO gbxmodel in their closure) | **loads in OpenCE, user-confirmed (2026-10-11); gameplay check: partial, nothing wrong seen** | The map written by SWAP of `globals\globals` with dependencies into bloodgulch (branch `fix/swap-load-failure`), finalized with scenario name and CRC32, loads in OpenCE. Gameplay (user, on `bg_swap2`): Slayer; fired and reloaded the pistol and assault rifle; HUD shield and health meters drew; text appeared; a warthog spawned and drove. Nothing wrong seen. Not tested: CTF, King of the Hill, other weapons. Maps written by SWAP before this branch are still invalid - re-create them. |
-| M5 ADD (tags with NO gbxmodel in their closure) | **known broken when the tag array grows; fix in progress** (until the user loads a fixed ADD map in OpenCE) | `bg_add1.map` (ADD of `ui\shell\main_menu\halo_logo` into bloodgulch) blue-screened in OpenCE: ADD lowered the tag array pointer instead of moving the pointers after the array (see "ADD tag-array growth" in Decisions). Fix on branch `fix/add-tag-array-growth`: schema-driven pointer rebase, fixed-base reader, tag space limit; verified by tests (independent: fixed engine base, raw output, shares the schema engine), not yet loaded in OpenCE. The earlier claim "ADD of ui into bloodgulch passes" was wrong in effect: those tests re-parsed with a reader that inferred the base from the same broken pointer (same-reader). Every map ever written by ADD is invalid; this build refuses to open them. |
+| M5 ADD (tags with NO gbxmodel in their closure) | **fix built, needs user confirmation of tool output in OpenCE** | Root cause of the blue screen, confirmed by the user in OpenCE: the rebase skipped external entries, but an external sound's data field is the ADDRESS of its base struct in tag data (333 in bloodgulch), so after the array grew they pointed 64 bytes early. The user's hand-fixed maps (sound pointers shifted, with and without the 94 BSP reference path pointers) load in OpenCE; maps without the sound fix all blue-screened. Fix on branch `fix/add-tag-array-growth` (see "ADD tag-array growth" in Decisions): schema-driven rebase including external sounds and BSP reference paths, fixed-base reader, tag space limit; verified by tests (independent: fixed engine base, raw output, address-vs-index decided by value, shares the schema engine). Not yet confirmed: a map written by the tool itself, loaded in OpenCE. The earlier claims "ADD of ui into bloodgulch passes" and the first fix's "0 bad tags" were wrong in effect (see Decisions). Every map written by ADD before this fix is invalid; this build refuses to open those written before the fixed-base reader. |
 | M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked; needs re-verification once unblocked** | `uncapturedData` warning unconditionally blocks these in ADD, and since 2026-10-11 (commit 2ee3c9e) in SWAP too (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. The dependency-order P0 that also affected weapons/projectiles/vehicles/bipeds is fixed (see Decisions); re-check once unblocked. |
 | Embedded (external=0) bitmap/sound relocation | **same-reader-verified, NOT approved for the real app** | `embedded-relocation.test.ts`, real coldsnap.map bytes. `allowEmbeddedRelocation` stays off in `map-worker.ts`. |
 | `gbxmodel` model geometry capture/relocation | **Stage 1 (capture) same-reader-verified; Stage 2 (injection) design-verified, NOT built/wired** | `gbxmodel-geometry.test.ts` (100% captured, 0 blocked, bloodgulch+coldsnap), `gbxmodel-combined-insertion-design.test.ts` (field table + 665-part no-patch proof) — see "gbxmodel geometry — Stage 1 capture" below |
@@ -79,6 +79,57 @@ needs re-verification / unverified / blocked)
   - **Rejected:** fix (2), relocating the array to the end: no sample map has the array anywhere
     but base + 0x28, our own and Invader's readers assume that position, and it leaves a dead
     array per ADD; whether the engine follows a moved array pointer is unknown.
+  - **ROOT CAUSE, user-confirmed in OpenCE (2026-10-11): external does not mean resource index
+    for sounds.** The first fix still blue-screened. `pointer-rebase.ts` skipped every external
+    entry, but an external sound (class `snd!`) keeps its 164-byte base struct in tag data and
+    its tag-array data field is that struct's address; only the pitch ranges are in sounds.map
+    (reflexive count 1, pointer null). After the 64-byte insertion those pointers were 64 bytes
+    early. The user shifted them by hand: maps with the sound fix load (the hand-built hgv7 and
+    hgv8; between them, with and without shifting the 94 BSP reference path pointers), maps without it all blue-screened.
+    Measured on all 5 CE maps (data field of external entries):
+
+    | Map | sound (address) | bitmap (index) | unicode_string_list (index) | font (index) | hud_message_text (index) |
+    |---|---|---|---|---|---|
+    | bloodgulch | 333 | 448 (max 1415) | 100 (max 175) | 3 (max 56) | 1 (4) |
+    | sidewinder | 334 | 439 (max 1135) | 100 (max 175) | 3 (max 56) | 1 (4) |
+    | coldsnap | 327 | 406 (max 1611) | 95 (max 175) | 3 (max 56) | 1 (4) |
+    | Yoyorast_Island | 323 | 416 (max 1655) | 97 (max 175) | 3 (max 56) | 1 (4) |
+    | ui | 0 external entries (all its sounds, bitmaps, fonts, strings are internal) |||||
+
+    Every external sound held an address and every other external class a small index, no
+    exceptions. 11 of bloodgulch's external sound structs hold a reference whose path pointer
+    is in tag data (also moved now).
+  - **Fix:** the group decides, never the value: `EXTERNAL_GROUPS_WITH_BASE_STRUCT` (sound) gets
+    a data-field site and its base struct is walked (null-pointer blocks are in the resource
+    map); `EXTERNAL_GROUPS_WITH_RESOURCE_INDEX` (bitmap, font, unicode_string_list,
+    hud_message_text) are left alone; any other external group refuses ADD. bloodgulch now moves
+    17,523 pointers (17,085 + 333 sound data fields + 11 sound reference paths + 94 BSP
+    reference paths).
+  - **BSP reference path pointers: done** (not left as an inconsistency). Not read at load (a hand-built
+    map loaded without shifting them), moved anyway to match Tool. Found through the scenario's "structure
+    bsps" (bsp start, bsp address; the BSP header's first word is the BSP struct address) and
+    walked with the schema in BSP space; only dependency path pointers are sites. Counts:
+    bloodgulch 94, sidewinder 182, coldsnap 721, Yoyorast 150, ui 0; every one equals a tag-array
+    path pointer.
+  - **External tags in containers (checked, item 2):** a container never holds an external tag.
+    A reference to one stores `{fieldPath, group, path, kind: 'external'}` only (no data, flag or
+    resource index). ADD reuses the target's own entry by path + class (its flag, and its address
+    or index, belong to the target and its own resource maps, so nothing is carried across maps);
+    a missing one blocks the dependent tag. Per-field references inside internal bitmaps/sounds
+    (`externalResourceRefs`) keep the resource-map fingerprint check. The injector never writes
+    an external entry (new entries are always external=0); SWAP into an external entry is
+    refused with a reason. Selecting only an external tag for extraction now says why nothing
+    can be extracted (it said "Nothing in this selection can be extracted yet: ." before).
+  - **Why the tests missed it:** the same-reader ADD tests re-parsed with our own reader, and the
+    first independent audit (`add-preserves-existing-tags`) and pointer census both assumed
+    "external = resource index" and required the data field to stay byte-equal - the same
+    blind spot as the rebase. The new audit (`entry-data-addresses.real-map.test.ts`) decides
+    address-vs-index BY VALUE, independently of the injector's group rule; on the code before the
+    sound fix it fails (halo_logo: 333 external sounds point at different bytes, 128 of them
+    inside another tag's data).
+  - **Converter Phase 2 must treat entry data fields the same way:** rebase the data field of
+    external sound entries (and walk their base struct), leave resource indices alone, and move
+    the BSP reference path pointers. `pointer-rebase.ts` already does this for any base.
 - 2026-10-11: **Roadmap order (user-approved).** Replaces the older ordering in the 2026-10
   converter entry ("M5/M6 work is paused") and the "Upcoming" section.
   1. Fix the swap load failure, including real Save As, scenario-name setting and CRC32
