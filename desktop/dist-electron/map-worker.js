@@ -34182,6 +34182,112 @@ function decodeStruct(buffer, baseOffset, structName) {
   return out;
 }
 
+// ../core/src/map/embedded-data-fields.ts
+function resourceMapToKind(resourceMap) {
+  if (resourceMap === "bitmaps.map") return "bitmap";
+  if (resourceMap === "sounds.map") return "sound";
+  return "unknown";
+}
+function findEmbeddedDataFields(resolved, decoded) {
+  const out = [];
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value || field.def.nonCached) continue;
+    if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && field.def.externalFileOffset && value.value.size > 0) {
+      out.push({
+        fieldName: field.name,
+        kind: resourceMapToKind(field.def.externalFileOffset),
+        external: value.value.external !== 0,
+        resourceMap: field.def.externalFileOffset,
+        fileOffset: value.value.fileOffset,
+        size: value.value.size,
+        patchOffset: field.offset + 8,
+        // DecodedTagDataOffset layout: size(+0) external(+4) fileOffset(+8) - see codec.ts
+        patchWidth: 4
+      });
+      continue;
+    }
+    if (value.kind !== "bitfield") continue;
+    const sibling = field.def.externalDataSibling;
+    if (!sibling) continue;
+    const bitfieldDef = field.def.type ? getBitfieldDefinition(field.def.type) : void 0;
+    const externalBit = bitfieldDef?.fields.indexOf("external") ?? -1;
+    if (externalBit < 0) {
+      out.push({ fieldName: field.name, kind: "unknown", external: false, resourceMap: sibling.resourceMap, fileOffset: 0, size: 0, patchOffset: 0, patchWidth: 0 });
+      continue;
+    }
+    const sizeVal = decoded.get(sibling.sizeField);
+    const size = sizeVal && sizeVal.kind === "basic" ? sizeVal.value : 0;
+    if (size <= 0) continue;
+    const offsetField = resolved.fields.find((f) => f.name === sibling.offsetField);
+    const offsetVal = decoded.get(sibling.offsetField);
+    if (!offsetField || !offsetVal || offsetVal.kind !== "basic") {
+      out.push({ fieldName: field.name, kind: "unknown", external: false, resourceMap: sibling.resourceMap, fileOffset: 0, size, patchOffset: 0, patchWidth: 0 });
+      continue;
+    }
+    out.push({
+      fieldName: field.name,
+      kind: resourceMapToKind(sibling.resourceMap),
+      external: (value.value & 1 << externalBit) !== 0,
+      resourceMap: sibling.resourceMap,
+      fileOffset: offsetVal.value,
+      size,
+      patchOffset: offsetField.offset,
+      patchWidth: 4
+    });
+  }
+  return out;
+}
+var BITMAP_BPP = { a8: 1, y8: 1, ay8: 1, a8y8: 2, r5g6b5: 2, a1r5g5b5: 2, a4r4g4b4: 2, x8r8g8b8: 4, a8r8g8b8: 4, "p8 bump": 1 };
+var BITMAP_BLOCK_BYTES = { dxt1: 8, dxt3: 16, dxt5: 16, bc7: 16 };
+var BITMAP_TYPE_NAMES = ["2d texture", "3d texture", "cube map", "white"];
+var BITMAP_FORMAT_NAMES = ["a8", "y8", "ay8", "a8y8", "unused1", "unused2", "r5g6b5", "unused3", "a1r5g5b5", "a4r4g4b4", "x8r8g8b8", "a8r8g8b8", "unused4", "unused5", "dxt1", "dxt3", "dxt5", "p8 bump", "bc7"];
+function basicValue(decoded, name) {
+  const v = decoded.get(name);
+  if (!v) return void 0;
+  if (v.kind === "basic" || v.kind === "enum") return v.value;
+  return void 0;
+}
+function validateBitmapAssetSize(decoded, actualSize) {
+  const width = basicValue(decoded, "width");
+  const height = basicValue(decoded, "height");
+  const depth = basicValue(decoded, "depth");
+  const typeIndex = basicValue(decoded, "type");
+  const formatIndex = basicValue(decoded, "format");
+  const mipmapCount = basicValue(decoded, "mipmap count");
+  if (width === void 0 || height === void 0 || depth === void 0 || typeIndex === void 0 || formatIndex === void 0 || mipmapCount === void 0) {
+    return { ok: false, reason: "could not read width/height/depth/type/format/mipmap count from this BitmapData instance" };
+  }
+  const typeName = BITMAP_TYPE_NAMES[typeIndex];
+  const formatName = BITMAP_FORMAT_NAMES[formatIndex];
+  if (!typeName || !formatName) {
+    return { ok: false, reason: `unrecognized type index ${typeIndex} or format index ${formatIndex}` };
+  }
+  const expected = expectedBitmapPixelDataSize(width, height, depth, typeName, formatName, mipmapCount);
+  if (expected === null) {
+    return { ok: false, reason: `unsupported/"unused" bitmap format "${formatName}" - size cannot be validated` };
+  }
+  if (expected !== actualSize) {
+    return { ok: false, reason: `expected ${expected} bytes from ${width}x${height}x${depth} ${typeName}/${formatName}/${mipmapCount} mips, but the tag's stored pixel data size is ${actualSize}` };
+  }
+  return { ok: true };
+}
+function expectedBitmapPixelDataSize(width, height, depth, typeName, formatName, mipmapCount) {
+  const blockBytes = BITMAP_BLOCK_BYTES[formatName];
+  const bpp = BITMAP_BPP[formatName];
+  if (!blockBytes && !bpp) return null;
+  const faces = typeName === "cube map" ? 6 : 1;
+  let total = 0;
+  for (let mip = 0; mip <= mipmapCount; mip++) {
+    const w = Math.max(1, width >> mip);
+    const h = Math.max(1, height >> mip);
+    const d = typeName === "3d texture" ? Math.max(1, depth >> mip) : 1;
+    const levelBytes = blockBytes ? Math.max(1, Math.ceil(w / 4)) * Math.max(1, Math.ceil(h / 4)) * blockBytes : w * h * bpp;
+    total += levelBytes * d;
+  }
+  return total * faces;
+}
+
 // ../core/src/map/dependency-walker.ts
 var NULL_TAG_ID = 4294967295;
 var UNCERTAIN_GROUPS = ["spheroid"];
@@ -34346,61 +34452,65 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
         });
         continue;
       }
+      if (childStructName === "GBXModelGeometryPart") {
+        warn({
+          originalIndex: rootOriginalIndex,
+          path: `${contextPath}.${field.name}`,
+          group: "",
+          kind: "uncapturedData",
+          message: `"${contextPath}.${field.name}" has ${value.value.count} model geometry part(s) (vertex/index data in the separate model-data region) that this tool cannot yet capture or relocate - the WHOLE tag is blocked from injection, not silently dropped.`
+        });
+      }
       const n = Math.min(value.value.count, MAX_ELEMENTS_WALKED_PER_REFLEXIVE);
       for (let i = 0; i < n; i++) {
         collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, rootOriginalIndex, enqueue, warn);
       }
-    } else if (value.kind === "tagDataOffset" && value.value.size > 0) {
-      if (field.def.type === "TagDataOffset" && field.def.externalFileOffset) {
-        const fieldContext = `${contextPath}.${field.name}`;
-        if (value.value.external !== 0) {
-          warn({
-            originalIndex: rootOriginalIndex,
-            path: fieldContext,
-            group: "",
-            kind: "externalData",
-            message: `"${fieldContext}" (${value.value.size} bytes) lives in "${field.def.externalFileOffset}", not resolved this milestone (flagged only).`,
-            resourceMap: field.def.externalFileOffset,
-            fileOffset: value.value.fileOffset,
-            size: value.value.size
-          });
-        } else {
-          warn({
-            originalIndex: rootOriginalIndex,
-            path: fieldContext,
-            group: "",
-            kind: "embeddedRawData",
-            message: `"${fieldContext}" (${value.value.size} bytes) is embedded in this map's own raw-data region (file offset ${value.value.fileOffset}), outside this tag's own struct bytes - not carried by extraction/injection this milestone (flagged only).`,
-            resourceMap: field.def.externalFileOffset,
-            fileOffset: value.value.fileOffset,
-            size: value.value.size
-          });
-        }
+    } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size > 0) {
+      const resolved2 = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      if (resolved2 < 0 || resolved2 + value.value.size > buffer.length) {
+        warn({
+          originalIndex: rootOriginalIndex,
+          path: `${contextPath}.${field.name}`,
+          group: "",
+          kind: "uncapturedData",
+          message: `"${contextPath}.${field.name}" (${value.value.size} bytes) resolves outside this file (pointer base ${resolved2}) - cannot be captured, the WHOLE tag is blocked from injection, not silently dropped.`
+        });
       }
-    } else if (value.kind === "bitfield") {
-      const bitfieldDef = field.def.type ? getBitfieldDefinition(field.def.type) : void 0;
-      const externalBit = bitfieldDef?.fields.indexOf("external") ?? -1;
-      const sibling = field.def.externalDataSibling;
-      if (externalBit >= 0 && sibling) {
-        const offsetVal = decoded.get(sibling.offsetField);
-        const sizeVal = decoded.get(sibling.sizeField);
-        const size = offsetVal && sizeVal && offsetVal.kind === "basic" && sizeVal.kind === "basic" ? sizeVal.value : 0;
-        const fileOffsetValue = offsetVal && offsetVal.kind === "basic" ? offsetVal.value : 0;
-        if (size > 0) {
-          const fieldContext = `${contextPath}.${field.name}`;
-          const bitSet = (value.value & 1 << externalBit) !== 0;
-          warn({
-            originalIndex: rootOriginalIndex,
-            path: fieldContext,
-            group: "",
-            kind: bitSet ? "externalData" : "embeddedRawData",
-            message: bitSet ? `"${fieldContext}" has its "external" flag set (${size} bytes in "${sibling.resourceMap}") - not resolved this milestone (flagged only).` : `"${fieldContext}" (${size} bytes) is embedded in this map's own raw-data region (file offset ${fileOffsetValue}), outside this tag's own struct bytes - not carried by extraction/injection this milestone (flagged only).`,
-            resourceMap: sibling.resourceMap,
-            fileOffset: fileOffsetValue,
-            size
-          });
-        }
-      }
+    }
+  }
+  for (const match of findEmbeddedDataFields(resolved, decoded)) {
+    const fieldContext = `${contextPath}.${match.fieldName}`;
+    if (match.kind === "unknown") {
+      warn({
+        originalIndex: rootOriginalIndex,
+        path: fieldContext,
+        group: "",
+        kind: "embeddedRawData",
+        message: `"${fieldContext}" is annotated as carrying embedded/external raw data but its layout could not be read - unrecognized, blocked, not guessed.`,
+        resourceMap: match.resourceMap
+      });
+    } else if (match.external) {
+      warn({
+        originalIndex: rootOriginalIndex,
+        path: fieldContext,
+        group: "",
+        kind: "externalData",
+        message: `"${fieldContext}" (${match.size} bytes) lives in "${match.resourceMap}", not resolved this milestone (flagged only).`,
+        resourceMap: match.resourceMap,
+        fileOffset: match.fileOffset,
+        size: match.size
+      });
+    } else {
+      warn({
+        originalIndex: rootOriginalIndex,
+        path: fieldContext,
+        group: "",
+        kind: "embeddedRawData",
+        message: `"${fieldContext}" (${match.size} bytes) is embedded in this map's own raw-data region (file offset ${match.fileOffset}), outside this tag's own struct bytes - captured into the container for relocation if the extracting build supports it (see Verify Embedded Data for status); injection is blocked unless the container has the captured bytes.`,
+        resourceMap: match.resourceMap,
+        fileOffset: match.fileOffset,
+        size: match.size
+      });
     }
   }
 }
@@ -34427,13 +34537,44 @@ function classifyDependency(dep, fieldPath, tagIndex, localIndexByOriginal, notE
   if (localTagIndex !== void 0) return { fieldPath, group, path, kind: "internal", localTagIndex };
   return { fieldPath, group, path, kind: "unresolved" };
 }
-function flattenStruct(buffer, structName, fileOffset, myBytes, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
+function captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fieldPath, capture) {
+  for (const match of findEmbeddedDataFields(resolved, decoded)) {
+    const context = `${fieldPath}.${match.fieldName}`;
+    if (match.external) continue;
+    if (match.kind === "unknown") {
+      capture.blockedReasons.push(`${context}: unrecognized embedded-data layout, not captured.`);
+      continue;
+    }
+    if (match.fileOffset < 0 || match.size <= 0 || match.fileOffset + match.size > buffer.length) {
+      capture.blockedReasons.push(`${context}: file offset ${match.fileOffset} + size ${match.size} is out of bounds of the source map.`);
+      continue;
+    }
+    if (match.kind === "bitmap") {
+      const validation = validateBitmapAssetSize(decoded, match.size);
+      if (!validation.ok) {
+        capture.blockedReasons.push(`${context}: ${validation.reason}.`);
+        continue;
+      }
+    }
+    const dedupeKey = `${match.fileOffset}:${match.size}`;
+    let assetIndex = capture.dedupeKeyToAssetIndex.get(dedupeKey);
+    if (assetIndex === void 0) {
+      assetIndex = capture.assets.length;
+      capture.assets.push({ kind: match.kind, data: Buffer.from(buffer.subarray(match.fileOffset, match.fileOffset + match.size)) });
+      capture.dedupeKeyToAssetIndex.set(dedupeKey, assetIndex);
+    }
+    capture.patches.push({ assetIndex, patchOffset: myAbsoluteOffset + match.patchOffset, patchWidth: match.patchWidth });
+  }
+}
+function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, embeddedCapture, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(buffer, fileOffset, structName);
+  captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fieldPath, embeddedCapture);
   const reflexiveWork = [];
   for (const field of resolved.fields) {
     const value = decoded.get(field.name);
     if (!value) continue;
+    if (field.def.nonCached) continue;
     const path = `${fieldPath}.${field.name}`;
     if (value.kind === "dependency") {
       dependencies.push(classifyDependency(value.value, path, tagIndex, localIndexByOriginal, notExtractedByOriginal));
@@ -34453,7 +34594,17 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, fileOffsetAnchor
         childBytesList.push(childBytes);
         runningOffset.value += childSize;
       }
-      reflexiveWork.push({ fieldName: field.name, childStructName, childSize, srcChildBase, count: value.value.count, childBytesList });
+      reflexiveWork.push({ fieldName: field.name, childStructName, childSize, srcChildBase, localArrayStart, count: value.value.count, childBytesList });
+    } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size > 0) {
+      const srcBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      if (srcBase >= 0 && srcBase + value.value.size <= buffer.length) {
+        const localOffset = runningOffset.value;
+        const bytes = Buffer.from(buffer.subarray(srcBase, srcBase + value.value.size));
+        outChunks.push(bytes);
+        runningOffset.value += bytes.length;
+        myBytes.writeUInt32LE(localOffset, field.offset + 12);
+        myBytes.writeUInt32LE(0, field.offset + 16);
+      }
     }
   }
   for (const work of reflexiveWork) {
@@ -34463,11 +34614,13 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, fileOffsetAnchor
         work.childStructName,
         work.srcChildBase + i * work.childSize,
         work.childBytesList[i],
+        work.localArrayStart + i * work.childSize,
         fileOffsetAnchor,
         baseMemoryAddress,
         outChunks,
         runningOffset,
         dependencies,
+        embeddedCapture,
         `${fieldPath}.${work.fieldName}[${i}]`,
         tagIndex,
         localIndexByOriginal,
@@ -34501,6 +34654,7 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
   }
   const localIndexByOriginal = /* @__PURE__ */ new Map();
   extractableWalked.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
+  const extraWarnings = [];
   const tags = extractableWalked.map((t, i) => {
     if (options.signal?.aborted) throw new OperationCancelledError();
     options.onProgress?.(i, extractableWalked.length);
@@ -34511,6 +34665,7 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
     const dependencies = [];
     const outChunks = [];
     const runningOffset = { value: 0 };
+    const embeddedCapture = { dedupeKeyToAssetIndex: /* @__PURE__ */ new Map(), assets: [], patches: [], blockedReasons: [] };
     const rootResolved = resolveStruct(structName);
     const rootBytes = Buffer.from(buffer.subarray(fileOffset, fileOffset + rootResolved.totalSize));
     outChunks.push(rootBytes);
@@ -34520,16 +34675,27 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
       structName,
       fileOffset,
       rootBytes,
+      0,
       fileOffsetAnchor,
       baseMemoryAddress,
       outChunks,
       runningOffset,
       dependencies,
+      embeddedCapture,
       t.path,
       tagIndex,
       localIndexByOriginal,
       notExtractedByOriginal
     );
+    if (embeddedCapture.blockedReasons.length > 0) {
+      extraWarnings.push({
+        originalIndex: t.originalIndex,
+        path: t.path,
+        group: t.group,
+        kind: "embeddedRawData",
+        message: `"${t.path}" has embedded raw data that could not be safely captured, so NONE of it was captured (never a partial relocation): ${embeddedCapture.blockedReasons.join(" ")}`
+      });
+    }
     return {
       originalIndex: t.originalIndex,
       group: t.group,
@@ -34538,16 +34704,18 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
       data: Buffer.concat(outChunks),
       dependencies,
       secondaryClassFourCC: tagIndex.entries[t.originalIndex].secondaryClassFourCC,
-      tertiaryClassFourCC: tagIndex.entries[t.originalIndex].tertiaryClassFourCC
+      tertiaryClassFourCC: tagIndex.entries[t.originalIndex].tertiaryClassFourCC,
+      embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
+      embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches
     };
   });
   options.onProgress?.(extractableWalked.length, extractableWalked.length);
-  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: walk.warnings };
+  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...walk.warnings, ...extraWarnings] };
 }
 
 // ../core/src/map/container.ts
 var OCETAGS_MAGIC = "OCETAGS";
-var OCETAGS_FORMAT_VERSION = 2;
+var OCETAGS_FORMAT_VERSION = 3;
 var OCETAGS_MIN_SUPPORTED_VERSION = 1;
 var ContainerFormatError = class extends Error {
   constructor(message) {
@@ -34600,7 +34768,9 @@ function serializeContainer(set, sourceMapName, resourceMapIdentities = {}) {
       data: t.data.toString("base64"),
       dependencies: t.dependencies,
       secondaryClassFourCC: t.secondaryClassFourCC,
-      tertiaryClassFourCC: t.tertiaryClassFourCC
+      tertiaryClassFourCC: t.tertiaryClassFourCC,
+      embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
+      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p }))
     })),
     notExtracted: set.notExtracted,
     warnings: set.warnings,
@@ -34652,17 +34822,25 @@ var RESOURCE_MAP_KEY = {
   "sounds.map": "sounds",
   "loc.map": "loc"
 };
-var OCETAGS_SUPPORTED_MAX_VERSION = 2;
-function embeddedWarningMessages(container) {
+var OCETAGS_SUPPORTED_MAX_VERSION = 3;
+function warningMessagesOfKind(container, kind) {
   const byOriginal = /* @__PURE__ */ new Map();
   for (const w of container.warnings) {
-    if (w.kind !== "embeddedRawData") continue;
+    if (w.kind !== kind) continue;
     if (!byOriginal.has(w.originalIndex)) byOriginal.set(w.originalIndex, []);
     byOriginal.get(w.originalIndex).push(w.message);
   }
   return byOriginal;
 }
-function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}) {
+function embeddedWarningMessages(container) {
+  return warningMessagesOfKind(container, "embeddedRawData");
+}
+function embeddedCapturedCounts(container) {
+  const byOriginal = /* @__PURE__ */ new Map();
+  for (const t of container.tags) byOriginal.set(t.originalIndex, t.embeddedRawDataPatches?.length ?? 0);
+  return byOriginal;
+}
+function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}, options = {}) {
   if (container.formatVersion > OCETAGS_SUPPORTED_MAX_VERSION) {
     return { kind: "refused", reason: `This .ocetags container is format version ${container.formatVersion}, newer than this build supports (${OCETAGS_SUPPORTED_MAX_VERSION}). Update OpenCE.` };
   }
@@ -34680,17 +34858,44 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}) 
     else candidateAdd.add(li);
   }
   const embeddedWarningsByOriginal = embeddedWarningMessages(container);
+  const embeddedCapturedByOriginal = embeddedCapturedCounts(container);
+  const uncapturedDataByOriginal = warningMessagesOfKind(container, "uncapturedData");
+  function uncapturedDataBlockReason(t) {
+    const msgs = uncapturedDataByOriginal.get(t.originalIndex);
+    if (!msgs || msgs.length === 0) return null;
+    return `This tag has data that cannot be captured or relocated: ${msgs.join("; ")}`;
+  }
+  function embeddedBlockReason(t) {
+    const msgs = embeddedWarningsByOriginal.get(t.originalIndex);
+    if (!msgs || msgs.length === 0) return null;
+    if (!options.allowEmbeddedRelocation) {
+      return `Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone: ${msgs.join("; ")}`;
+    }
+    const captured = embeddedCapturedByOriginal.get(t.originalIndex) ?? 0;
+    if (captured < msgs.length) {
+      return `This container doesn't have the embedded bitmap/sound bytes captured for relocation (extracted by a build without this feature, or a capture mismatch at extraction time) - re-extract to enable relocation: ${msgs.join("; ")}`;
+    }
+    return null;
+  }
   const blockedReasons = /* @__PURE__ */ new Map();
   const blockedEmbeddedSet = /* @__PURE__ */ new Set();
+  const blockedUncapturedSet = /* @__PURE__ */ new Set();
   for (const li of candidateAdd) {
     const t = container.tags[li];
-    const msgs = embeddedWarningsByOriginal.get(t.originalIndex);
-    if (msgs && msgs.length > 0) {
-      blockedEmbeddedSet.add(li);
-      blockedReasons.set(li, [`Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone: ${msgs.join("; ")}`]);
+    const reasons = [];
+    const uncaptured = uncapturedDataBlockReason(t);
+    if (uncaptured) {
+      blockedUncapturedSet.add(li);
+      reasons.push(uncaptured);
     }
+    const embedded = embeddedBlockReason(t);
+    if (embedded) {
+      blockedEmbeddedSet.add(li);
+      reasons.push(embedded);
+    }
+    if (reasons.length > 0) blockedReasons.set(li, reasons);
   }
-  const blocked = new Set(blockedEmbeddedSet);
+  const blocked = /* @__PURE__ */ new Set([...blockedEmbeddedSet, ...blockedUncapturedSet]);
   let changed = true;
   while (changed) {
     changed = false;
@@ -34734,9 +34939,9 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}) 
     if (existing.isExternal) {
       reasons.push(`The existing "${t.path}" (${t.group}) in the target is a resource-map-indexed (external) entry - there is no struct-data pointer to swap into. Left unchanged.`);
     }
-    const embeddedMsgs = embeddedWarningsByOriginal.get(t.originalIndex);
-    if (embeddedMsgs && embeddedMsgs.length > 0) {
-      reasons.push(`Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone: ${embeddedMsgs.join("; ")}`);
+    const embeddedBlockMsg = embeddedBlockReason(t);
+    if (embeddedBlockMsg) {
+      reasons.push(embeddedBlockMsg);
     }
     for (const dep of t.dependencies) {
       if (dep.kind === "null") continue;
@@ -34754,7 +34959,7 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}) 
     if (reasons.length > 0) {
       blockedReasons.set(li, reasons);
       blocked.add(li);
-      if (embeddedMsgs && embeddedMsgs.length > 0) blockedEmbeddedSet.add(li);
+      if (embeddedBlockMsg) blockedEmbeddedSet.add(li);
       reusedByLocalIndex.set(li, existing.tagId);
     } else {
       toSwap.push({ localIndex: li, path: t.path, group: t.group, targetTagId: existing.tagId, targetOriginalIndex: existing.index });
@@ -34813,11 +35018,11 @@ function planInjection(mode, targetTagIndex, container, resourceMapConfig = {}) 
     }
   };
 }
-function planAddInjection(targetTagIndex, container, resourceMapConfig = {}) {
-  return planInjection("add", targetTagIndex, container, resourceMapConfig);
+function planAddInjection(targetTagIndex, container, resourceMapConfig = {}, options = {}) {
+  return planInjection("add", targetTagIndex, container, resourceMapConfig, options);
 }
-function planSwapInjection(targetTagIndex, container, resourceMapConfig = {}) {
-  return planInjection("swap", targetTagIndex, container, resourceMapConfig);
+function planSwapInjection(targetTagIndex, container, resourceMapConfig = {}, options = {}) {
+  return planInjection("swap", targetTagIndex, container, resourceMapConfig, options);
 }
 function rewriteAddedTagData(data, structName, localOffset, dependencies, depCursor, translation, tagBaseAbsolute, resolveDepTagId) {
   const resolved = resolveStruct(structName);
@@ -34863,22 +35068,35 @@ function makeResolveDepTagId(t, plan, targetTagIndex) {
     throw new Error(`Internal error: tag "${t.path}" reached applyInjection with an unresolved/notExtracted dependency - planInjection should have blocked it.`);
   };
 }
-function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan) {
+function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan, options = {}) {
   const addedCount = plan.toAdd.length;
   const swappedCount = plan.toSwap.length;
   if (addedCount === 0 && swappedCount === 0) return Buffer.from(targetBuffer);
+  const writeTags = [...plan.toAdd, ...plan.toSwap.map((s) => container.tags[s.localIndex])];
+  if (!options.allowEmbeddedRelocation) {
+    for (const t of writeTags) {
+      if (t.embeddedRawDataPatches && t.embeddedRawDataPatches.length > 0) {
+        throw new Error(`Internal error: "${t.path}" reached applyInjection() with embedded raw data to relocate, but allowEmbeddedRelocation is false - planInjection() should have blocked it.`);
+      }
+    }
+  }
   const subHeaderOffset = targetHeader.tagDataOffset;
   const arrayOffset = subHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
   const oldTagCount = targetTagIndex.entries.length;
   const oldStructDataOffset = arrayOffset + oldTagCount * TAG_ENTRY_SIZE;
   const oldFileLength = targetBuffer.length;
   const delta = addedCount * TAG_ENTRY_SIZE;
+  const insertPos = targetTagIndex.modelDataFileOffset;
+  const embeddedAssetBuffers = options.allowEmbeddedRelocation ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).map((a) => Buffer.from(a.data, "base64"))) : [];
+  const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
+  const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + (4 - embeddedBlobSize % 4) % 4;
   const oldTagArrayAddress = targetBuffer.readUInt32LE(subHeaderOffset + 0);
   const newTagArrayAddress = oldTagArrayAddress - delta >>> 0;
   const newBaseMemoryAddress = newTagArrayAddress - TAG_DATA_HEADER_PC_SIZE >>> 0;
-  const writeTags = [...plan.toAdd, ...plan.toSwap.map((s) => container.tags[s.localIndex])];
+  const newTagDataOffset = subHeaderOffset + insertSize;
+  const newArrayOffset = arrayOffset + insertSize;
   const dataBuffers = writeTags.map((t) => Buffer.from(t.data, "base64"));
-  const structDataStart = oldFileLength + delta;
+  const structDataStart = oldFileLength + insertSize + delta;
   const structOffsets = [];
   let running = structDataStart;
   for (const b of dataBuffers) {
@@ -34893,14 +35111,27 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
   }
   const newFileLength = running;
   const out = Buffer.alloc(newFileLength);
-  targetBuffer.copy(out, 0, 0, arrayOffset);
-  out.writeUInt32LE(newTagArrayAddress, subHeaderOffset + 0);
-  out.writeUInt32LE(oldTagCount + addedCount, subHeaderOffset + 12);
-  targetBuffer.copy(out, arrayOffset, arrayOffset, oldStructDataOffset);
-  targetBuffer.copy(out, oldStructDataOffset + delta, oldStructDataOffset, oldFileLength);
+  targetBuffer.copy(out, 0, 0, insertPos);
+  const assetAbsoluteOffsets = writeTags.map(() => []);
+  if (insertSize > 0) {
+    let cursor = insertPos;
+    for (let i = 0; i < writeTags.length; i++) {
+      for (const asset of writeTags[i].embeddedRawDataAssets ?? []) {
+        const bytes = Buffer.from(asset.data, "base64");
+        bytes.copy(out, cursor);
+        assetAbsoluteOffsets[i].push(cursor);
+        cursor += bytes.length;
+      }
+    }
+  }
+  targetBuffer.copy(out, insertPos + insertSize, insertPos, oldStructDataOffset);
+  targetBuffer.copy(out, oldStructDataOffset + insertSize + delta, oldStructDataOffset, oldFileLength);
+  out.writeUInt32LE(newTagArrayAddress, newTagDataOffset + 0);
+  out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 12);
+  if (insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 20);
   for (let i = 0; i < addedCount; i++) {
     const t = plan.toAdd[i];
-    const entryOffset = oldStructDataOffset + i * TAG_ENTRY_SIZE;
+    const entryOffset = oldStructDataOffset + insertSize + i * TAG_ENTRY_SIZE;
     const classInfo = lookupTagClassByName(t.group);
     if (!classInfo) throw new Error(`Unknown tag group "${t.group}" - cannot write a tag index entry for it.`);
     const primaryFourCC = fourCCFromString(classInfo.groupId);
@@ -34911,14 +35142,14 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
     out.writeUInt32LE(tertiary === null ? 4294967295 : tertiary, entryOffset + 8);
     const tagId = plan.resolvedTagIdByLocalIndex.get(plan.toAddLocalIndices[i]);
     out.writeUInt32LE(tagId, entryOffset + 12);
-    const pathPointer = newBaseMemoryAddress + (pathOffsets[i] - subHeaderOffset);
+    const pathPointer = newBaseMemoryAddress + (pathOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(pathPointer >>> 0, entryOffset + 16);
-    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - subHeaderOffset);
+    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 20);
     out.writeUInt32LE(0, entryOffset + 24);
     dataBuffers[i].copy(out, structOffsets[i]);
     pathBuffers[i].copy(out, pathOffsets[i]);
-    const translation = newBaseMemoryAddress - subHeaderOffset + structOffsets[i] >>> 0;
+    const translation = newBaseMemoryAddress - newTagDataOffset + structOffsets[i] >>> 0;
     const depCursor = { value: 0 };
     rewriteAddedTagData(out, t.structName, structOffsets[i], t.dependencies, depCursor, translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
@@ -34926,27 +35157,33 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
     const s = plan.toSwap[j];
     const t = container.tags[s.localIndex];
     const i = addedCount + j;
-    const entryOffset = arrayOffset + s.targetOriginalIndex * TAG_ENTRY_SIZE;
+    const entryOffset = newArrayOffset + s.targetOriginalIndex * TAG_ENTRY_SIZE;
     const secondary = t.secondaryClassFourCC ?? 4294967295;
     const tertiary = t.tertiaryClassFourCC ?? 4294967295;
     out.writeUInt32LE(secondary === null ? 4294967295 : secondary, entryOffset + 4);
     out.writeUInt32LE(tertiary === null ? 4294967295 : tertiary, entryOffset + 8);
-    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - subHeaderOffset);
+    const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 20);
     dataBuffers[i].copy(out, structOffsets[i]);
-    const translation = newBaseMemoryAddress - subHeaderOffset + structOffsets[i] >>> 0;
+    const translation = newBaseMemoryAddress - newTagDataOffset + structOffsets[i] >>> 0;
     const depCursor = { value: 0 };
     rewriteAddedTagData(out, t.structName, structOffsets[i], t.dependencies, depCursor, translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
+  for (let i = 0; i < writeTags.length; i++) {
+    for (const patch of writeTags[i].embeddedRawDataPatches ?? []) {
+      out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + patch.patchOffset);
+    }
+  }
   out.writeUInt32LE(newFileLength, 8);
-  out.writeUInt32LE(newFileLength - subHeaderOffset, 20);
+  if (insertSize > 0) out.writeUInt32LE(newTagDataOffset, 16);
+  out.writeUInt32LE(newFileLength - newTagDataOffset, 20);
   return out;
 }
-function applyAddInjection(targetBuffer, targetHeader, targetTagIndex, container, plan) {
-  return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan);
+function applyAddInjection(targetBuffer, targetHeader, targetTagIndex, container, plan, options = {}) {
+  return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan, options);
 }
-function applySwapInjection(targetBuffer, targetHeader, targetTagIndex, container, plan) {
-  return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan);
+function applySwapInjection(targetBuffer, targetHeader, targetTagIndex, container, plan, options = {}) {
+  return applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan, options);
 }
 
 // ../core/src/map/embedded-data-verifier.ts
@@ -35314,7 +35551,7 @@ function runApplyInject(task) {
       addedCount: currentInject.plan.counts.added,
       reusedCount: currentInject.plan.counts.reused,
       swappedCount: currentInject.plan.counts.swapped,
-      staleChecksumWarning: "This map's CRC32 and tag checksum are now stale (recalculating them is Milestone 6) - some tools/servers that verify them may reject it until then."
+      staleChecksumWarning: "Checksums were not updated. This map may be rejected by some loaders until M6 (export + CRC) is done."
     });
   } catch (err) {
     try {
