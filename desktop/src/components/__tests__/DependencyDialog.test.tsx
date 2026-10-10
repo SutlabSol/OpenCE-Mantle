@@ -103,7 +103,7 @@ describe('DependencyDialog', () => {
     await waitFor(() => expect(screen.getByTestId('warning-group-cannot-be-captured-blocked-for-injection')).toBeInTheDocument());
     for (const [slug, fragment] of [
       ['cannot-be-captured-blocked-for-injection', 'model geometry part(s)'],
-      ['embedded-data-injection-blocked-this-build', 'embedded in this map'],
+      ['embedded-data-injection-blocked-while-embedded-relocation-is-disabled', 'embedded in this map'],
       ['invalid-corrupt-layout-not-walked', 'resolves outside this file'],
     ]) {
       expect(screen.getByTestId(`warning-group-${slug}`).textContent).toContain('NEEDS ATTENTION');
@@ -116,6 +116,30 @@ describe('DependencyDialog', () => {
     expect(confirm).toBeDisabled();
     await userEvent.click(screen.getByTestId('dependency-understand-checkbox'));
     expect(confirm).not.toBeDisabled();
+  });
+
+  it('embeddedRawData as the only warning group: confirm works after "I understand" and extractTags is called', async () => {
+    const base = buildMockSummary('blocked-data');
+    const summary = { ...base, warnings: base.warnings.filter((w) => w.kind === 'embeddedRawData') };
+    expect(summary.warnings).toHaveLength(1);
+    const extractTags = vi.fn(
+      (): Promise<ExtractTagsResult> => Promise.resolve({ ok: true, outputPath: 'C:\\out\\scope.ocetags', tagCount: 3, fileSizeBytes: 100, carriedOverWarnings: summary.warnings }),
+    );
+    installMockOpence({ getDependencies: vi.fn(() => Promise.resolve({ ok: true as const, summary })), extractTags });
+    render(<DependencyDialog selectedIndices={[30]} onClose={vi.fn()} log={log} />);
+
+    await waitFor(() => expect(screen.getByTestId('warning-group-embedded-data-injection-blocked-while-embedded-relocation-is-disabled')).toBeInTheDocument());
+    expect(screen.getAllByTestId(/^warning-group-toggle-/)).toHaveLength(1);
+
+    const confirm = screen.getByTestId('dependency-confirm-button');
+    expect(confirm).toBeDisabled();
+    await userEvent.click(screen.getByTestId('dependency-understand-checkbox'));
+    expect(confirm).not.toBeDisabled();
+    await userEvent.click(confirm);
+
+    await waitFor(() => expect(screen.getByTestId('dependency-result')).toBeInTheDocument());
+    expect(extractTags).toHaveBeenCalledTimes(1);
+    expect(extractTags).toHaveBeenCalledWith(expect.objectContaining({ originalIndices: [30] }));
   });
 
   it('drift guard: every core WARNING_KINDS kind shows its message in a named (non-"Other") group; unknown kinds fall back to "Other warnings"', async () => {
