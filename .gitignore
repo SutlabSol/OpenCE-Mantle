@@ -92,3 +92,5 @@ credentials.json
 .credentials
 desktop/node_modules/electron/dist/electron
 desktop/release/linux-arm64-unpacked/opence-desktop
+
+sample_maps/
