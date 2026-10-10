@@ -62,7 +62,7 @@ import { decodeReflexive, decodeDependency, encodeDependency } from './definitio
 import type { OceContainer, OceContainerTag, ExternalResourceRef } from './container';
 import { OCETAGS_FORMAT_VERSION } from './container';
 import type { ExtractedDependencyRef } from './tag-extractor';
-import { childFieldPath, reflexiveElementPath } from './tag-extractor';
+import { childFieldPath, reflexiveElementPath, isRelocatedTagDataField } from './tag-extractor';
 import type { ResourceMapIdentity } from './resource-map';
 import { resourceMapIdentitiesMatch } from './resource-map';
 
@@ -495,6 +495,10 @@ function collectDependencyFields(data: Buffer, structName: string, localOffset: 
       for (let i = 0; i < value.value.count; i++) {
         collectDependencyFields(data, childStructName, base + i * childSize, reflexiveElementPath(fieldPath, field.name, i), sites, nonCachedPaths);
       }
+    } else if (isRelocatedTagDataField(field, value)) {
+      if (!isRangeInBuffer(value.value.pointerLow, value.value.size, data.length)) {
+        throw new Error(`"${path}" (${value.value.size} data bytes) points outside the tag's own data`);
+      }
     }
   }
 }
@@ -542,9 +546,10 @@ function checkDependencyMap(t: OceContainerTag): { reason: string | null; ignore
 
 /**
  * Recursively rewrites one newly-added tag's own buffer in place: TagDependency.tagId fields are
- * remapped to the target map's resolved tagIds, and TagReflexive pointers (currently LOCAL byte
- * offsets from extraction) become real virtual addresses for their final position in the target
- * file. Each dependency field is matched to its entry by fieldPath (`depsByPath`), never by list
+ * remapped to the target map's resolved tagIds (and their path pointer set to that tag's own path
+ * string, pathSize 0 - what every real CE map checked holds), and TagReflexive pointers plus
+ * relocated TagDataOffset pointers (`isRelocatedTagDataField`; both currently LOCAL byte offsets
+ * from extraction) become real virtual addresses for their final position in the target file. Each dependency field is matched to its entry by fieldPath (`depsByPath`), never by list
  * position - the extractor's list order differs from this walk's order. `nonCached` fields are
  * skipped exactly like the extractor skips them: their bytes stay as in the source.
  * `planInjection` (`checkDependencyMap`) has already checked every lookup here succeeds.
@@ -560,6 +565,7 @@ function rewriteAddedTagData(
   translation: number,
   tagBaseAbsolute: number,
   resolveDepTagId: (dep: ExtractedDependencyRef) => number,
+  pathPointerOfTagId: (tagId: number) => number,
 ): void {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(data, localOffset, structName);
@@ -575,7 +581,7 @@ function rewriteAddedTagData(
         if (!dep) throw new Error(`Internal error: no dependency entry for "${path}" - planInjection should have blocked this tag.`);
         const newTagId = resolveDepTagId(dep);
         const decodedDep = decodeDependency(data, absFieldOffset);
-        encodeDependency(data, absFieldOffset, { ...decodedDep, pathPointer: 0, pathSize: 0, tagId: newTagId });
+        encodeDependency(data, absFieldOffset, { ...decodedDep, pathPointer: pathPointerOfTagId(newTagId), pathSize: 0, tagId: newTagId });
       }
     } else if (value.kind === 'reflexive' && value.value.count > 0) {
       const childStructName = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
@@ -587,8 +593,11 @@ function rewriteAddedTagData(
       data.writeUInt32LE(0, absFieldOffset + 8);
       const childAbsoluteBase = tagBaseAbsolute + oldLocalChildBase;
       for (let i = 0; i < value.value.count; i++) {
-        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, reflexiveElementPath(fieldPath, field.name, i), depsByPath, translation, tagBaseAbsolute, resolveDepTagId);
+        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, reflexiveElementPath(fieldPath, field.name, i), depsByPath, translation, tagBaseAbsolute, resolveDepTagId, pathPointerOfTagId);
       }
+    } else if (isRelocatedTagDataField(field, value)) {
+      data.writeUInt32LE((value.value.pointerLow + translation) >>> 0, absFieldOffset + 12); // DecodedTagDataOffset.pointerLow
+      data.writeUInt32LE(0, absFieldOffset + 16); // pointerHigh
     }
   }
 }
@@ -747,12 +756,7 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
     const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
     out.writeUInt32LE(0, entryOffset + 0x18); // isExternal = false, this module never adds resource-map-indexed entries
-
-    dataBuffers[i].copy(out, structOffsets[i]);
     pathBuffers[i].copy(out, pathOffsets[i]);
-
-    const translation = (newBaseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
-    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
 
   for (let j = 0; j < swappedCount; j++) {
@@ -768,11 +772,16 @@ export function applyInjection(targetBuffer: Buffer, targetHeader: CacheFileHead
     out.writeUInt32LE(tertiary === null ? 0xffffffff : tertiary, entryOffset + 0x08);
     const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
+  }
 
+  // Tag data is written only after EVERY tag array entry above is final, so a dependency on any
+  // tag (existing, swapped or newly added) can take its path pointer from the output's own array.
+  const pathPointerOfTagId = (tagId: number): number => out.readUInt32LE(newArrayOffset + (tagId & 0xffff) * TAG_ENTRY_SIZE + 0x10);
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
     dataBuffers[i].copy(out, structOffsets[i]);
-
     const translation = (newBaseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
-    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
+    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex), pathPointerOfTagId);
   }
 
   // Patch every relocated embedded asset's new absolute file offset into its tag's own struct

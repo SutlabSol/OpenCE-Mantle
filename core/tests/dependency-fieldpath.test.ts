@@ -244,6 +244,18 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
     expect(bytes.subarray(m.sourceAt, m.sourceAt + 16)).toEqual(m.data.subarray(m.sourceAt, m.sourceAt + 16));
   });
 
+  it('saved data block (TagDataOffset) pointing outside the tag data blocks the tag at plan time instead of being written', () => {
+    const m = meterTag();
+    const stencil = fieldOffset(m.structName, 'encoded stencil');
+    m.data.writeUInt32LE(64, stencil); // size
+    m.data.writeUInt32LE(m.data.length - 8, stencil + 12); // local pointer: runs past the end
+    const container = buildContainer(4, [containerTag(4, { originalIndex: 0, group: 'meter', path: METER_PATH, structName: m.structName, data: m.data, dependencies: [] })]);
+    const plan = planOk(container);
+    expect(plan.toAddLocalIndices).toEqual([]);
+    expect(plan.blockedOther.find((b) => b.localIndex === 0)!.reasons.join(' ')).toContain("saved data does not match this build's field layout");
+    expect(() => applyAddInjection(bgBuffer, bgHeader, bgTagIndex, container, plan)).not.toThrow();
+  });
+
   for (const version of [1, 4]) {
     it(`old container v${version} with extra entries for nonCached fields (saved before the extractor skipped them): entries ignored, tag added, bytes unchanged`, () => {
       const m = meterTag();

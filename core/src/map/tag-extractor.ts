@@ -1,6 +1,8 @@
 import { fourCCToString } from '../constants/tag-classes';
 import { resolveTagDataPointer } from './tag-index';
 import { resolveStruct, decodeStruct, getGroupDefinition, getAllTagGroupNames, resolvePointer, isRangeInBuffer } from './definitions/engine';
+import type { DecodedFieldValue, ResolvedField } from './definitions/engine';
+import type { DecodedTagDataOffset } from './definitions/codec';
 import { walkDependencies } from './dependency-walker';
 import type { WalkerWarning, WalkOptions } from './dependency-walker';
 import { findEmbeddedDataFields, validateBitmapAssetSize } from './embedded-data-fields';
@@ -113,6 +115,17 @@ export function childFieldPath(parentPath: string, fieldName: string): string {
 
 export function reflexiveElementPath(parentPath: string, fieldName: string, index: number): string {
   return `${parentPath}.${fieldName}[${index}]`;
+}
+
+/**
+ * The one rule for which TagDataOffset fields the extractor relocates: their bytes are appended to
+ * the tag's own data and the pointer is rewritten to a LOCAL offset. The injector must turn exactly
+ * these back into virtual addresses, so both sides use this check. The `external` word is not
+ * consulted (string_list strings carry a non-zero value there in real maps and are still
+ * pointer-based). Callers skip `nonCached` fields before calling this.
+ */
+export function isRelocatedTagDataField(field: ResolvedField, value: DecodedFieldValue): value is { kind: 'tagDataOffset'; value: DecodedTagDataOffset } {
+  return value.kind === 'tagDataOffset' && field.def.type === 'TagDataOffset' && !field.def.externalFileOffset && value.value.size > 0;
 }
 
 function classifyDependency(
@@ -269,7 +282,7 @@ function flattenStruct(
         runningOffset.value += childSize;
       }
       reflexiveWork.push({ fieldName: field.name, childStructName, childSize, srcChildBase, localArrayStart, count: value.value.count, childBytesList });
-    } else if (value.kind === 'tagDataOffset' && field.def.type === 'TagDataOffset' && !field.def.externalFileOffset && value.value.size > 0) {
+    } else if (isRelocatedTagDataField(field, value)) {
       // Pointer-based "in tag data" raw bytes (font pixels, string_list/unicode_string_list
       // strings, meter stencil, hud_message_text, input_device_defaults, model_animations frame
       // data, scenario script/comment data) - same virtual-address mechanism as TagReflexive, so
