@@ -356,7 +356,7 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
       collectTagDataPointers(target.buffer, tagDataLayoutOf(target.header, targetTagIndex));
     } catch (err) {
       if (!(err instanceof UnwalkableTagError)) throw err;
-      return { kind: 'refused', reason: `Adding tags moves every pointer in the target map, and one tag can't be handled. ${err.message} SWAP still works, because it doesn't move existing pointers.` };
+      return { kind: 'refused', reason: `Adding tags moves every pointer in the target map, and one tag can't be handled. ${err.message} Only a SWAP that adds no new tags (every tag already in the map) can be done on this map.` };
     }
   }
 

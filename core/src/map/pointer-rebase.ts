@@ -40,7 +40,8 @@ export interface TagDataLayout {
   tagDataSize: number;
   baseMemoryAddress: number;
   tagArrayFileOffset: number;
-  entries: readonly Pick<TagIndexEntry, 'index' | 'path' | 'primaryClassName' | 'isExternal' | 'tagDataPointerOrResourceIndex'>[];
+  /** Names and flags only: every pointer is read from the buffer itself, so the layout stays valid after an in-place rebase. */
+  entries: readonly Pick<TagIndexEntry, 'index' | 'path' | 'primaryClassName' | 'isExternal'>[];
 }
 
 /** The layout of an already-parsed Custom Edition map (its tag array always follows the tag data header - `parseTagIndex` requires it). */
@@ -105,7 +106,7 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout): T
     addSite('tagPath', entryAt + 0x10, e.index);
     if (e.isExternal) continue;
 
-    const dataPointer = e.tagDataPointerOrResourceIndex >>> 0;
+    const dataPointer = buffer.readUInt32LE(entryAt + 0x14);
     if (group === 'scenario_structure_bsp') {
       // BSP structs live in BSP memory, not tag data (data pointer 0 in every sample map).
       if (dataPointer !== 0 && inTagData(dataPointer, 1)) fail('its BSP data pointer points into the tag data');
