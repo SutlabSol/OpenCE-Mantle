@@ -42,10 +42,36 @@ needs re-verification / unverified / blocked)
   -> own "Invalid / corrupt layout (not walked)" group (walker/verifier react to it, the injector
   does NOT - so it is not labelled an injection block). Unknown kinds -> "Other warnings". Desktop
   `DependencyWarningKind` is derived from core's `WARNING_KINDS`; a dialog test fails on drift.
-  **Flagged, not fixed:** `tag-extractor.ts` reflexive branch has no bounds check - an
-  out-of-bounds reflexive (the `invalidReflexive` case) yields short child buffers while
-  `runningOffset` still advances by the full `childSize`. No sample map hits it. Needs a decision
-  (block via injector like `uncapturedData`, or refuse at extraction) in a later task.
+  **Superseded 2026-10-11 by the next entry:** `invalidReflexive` now blocks ADD/SWAP, and its
+  group is labelled "Invalid / corrupt layout (not walked, blocked for injection)". The
+  extractor bounds bug flagged here is fixed. Also, "injector blocks ADD/SWAP unconditionally"
+  for `uncapturedData` was not true for SWAP until commit 2ee3c9e.
+- 2026-10-11 (branch `fix/extractor-reflexive-bounds`, user-approved): **extractor reflexive
+  bounds fix.** Research (in-memory corrupted copies of bloodgulch.map) showed that the earlier
+  description was incomplete. An out-of-bounds reflexive whose overrun reached decoded fields
+  crashed the WHOLE extraction with a raw RangeError (cases (a) partly past EOF and (b) entirely
+  past EOF). If only the last element's trailing padding was past EOF (case (c)), extraction
+  silently produced EOF garbage as the array, short by the padding. Every later reflexive was
+  then shifted (−8 bytes for a model_collision_geometry; `verifyExtractedTagSet` reported 0
+  errors), and ADD and SWAP both accepted the tag. A negative resolved base (case (d)) reached
+  `Buffer.subarray`, which reads from the END of the file.
+  Fix: shared `isRangeInBuffer` (engine.ts) for walker + extractor, negative bases rejected.
+  An out-of-bounds reflexive is skipped (nothing copied, `runningOffset` not advanced, its
+  12 bytes left as in the source) and the extractor records a per-tag `injectionBlockers`
+  entry. Any unexpected per-tag exception now blocks only that tag (`extractionFailed` blocker +
+  warning; root bytes kept unmodified if in bounds, no dependencies) and the rest of the
+  selection still extracts. `.ocetags` is now **v4** (adds per-tag `injectionBlockers`); v1-v3
+  still read. The injector blocks from the container alone: v4 uses the per-tag flag, v1-v3 use
+  the persisted walker warnings. ADD and SWAP both block; `applyInjection` throws if a blocked
+  tag reaches it. Also fixed (separate commit 2ee3c9e, user-approved): SWAP ignored
+  `uncapturedData`, e.g. bloodgulch's sky gbxmodel was planned as SWAPPED.
+  Walker side effect, recorded on purpose: when an invalid reflexive is skipped, nothing below
+  it is walked. With the scenario's `skies` reflexive corrupted, bloodgulch's closure drops 16
+  tags (1575 -> 1559, including the sky, its gbxmodel, lens flare and shaders). Harmless for
+  injection only because the scenario is refused anyway (BSP) and any tag with
+  `invalidReflexive` is now blocked. Tests: `reflexive-bounds.test.ts` (cases a-e, save/reload,
+  v3 fallback), `swap-structural-block.test.ts`. Both are **same-reader**. Status: verified by
+  tests (same-reader) only, not confirmed in OpenCE.
 - 2026-08 (this session): Fixed Issue 1 (P0, silently dropped data fields). Root cause: the
   `uncapturedData` guard logic and the plain-`TagDataOffset` pointer-capture branch in
   `tag-extractor.ts`'s `flattenStruct` were already present in this session's uncommitted work
