@@ -92,13 +92,21 @@ describe.skipIf(!haveSamples)(suiteTitle, () => {
   });
 
   it('blocks a tag whose "external" (resource-map) dependency does not exist in the target map', () => {
-    const container = extractFromUi('ui\\ticker', 'font');
-    container.tags[0].dependencies = [...container.tags[0].dependencies, { fieldPath: '.synthetic', group: 'bitmap', path: 'this\\path\\does\\not\\exist', kind: 'external' }];
+    // Redirect a REAL non-null reference field's entry (a made-up fieldPath would now be blocked
+    // earlier, as an unknown field, before this check is reached).
+    const widget = uiTagIndex.entries.find((e) => e.primaryClassName === 'ui_widget_definition' && !bgTagIndex.entries.some((b) => b.path === e.path))!;
+    const container = extractFromUi(widget.path, 'ui_widget_definition');
+    const root = container.tags.findIndex((t) => t.originalIndex === widget.index);
+    const deps = container.tags[root].dependencies;
+    const k = deps.findIndex((d) => d.kind === 'internal' || d.kind === 'external');
+    expect(k).toBeGreaterThanOrEqual(0);
+    deps[k] = { fieldPath: deps[k].fieldPath, group: 'bitmap', path: 'this\\path\\does\\not\\exist', kind: 'external' };
     const plan = planAddInjection(bgTagIndex, container);
     expect(plan.kind).toBe('ok');
     if (plan.kind !== 'ok') return;
-    expect(plan.counts.blockedOther).toBe(1);
-    expect(plan.counts.added).toBe(0);
+    expect(plan.toAddLocalIndices).not.toContain(root);
+    const reasons = plan.blockedOther.find((b) => b.localIndex === root)!.reasons.join(' ');
+    expect(reasons).toContain('a resource-map tag not present in the target map');
   });
 
   it('refuses a container newer than the supported format version', () => {
