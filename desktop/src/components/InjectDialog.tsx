@@ -172,6 +172,14 @@ export default function InjectDialog({ onClose, log }: Props) {
               Injected {applyResult.addedCount} tag(s), swapped {applyResult.swappedCount} ({applyResult.reusedCount} reused, not duplicated).
             </div>
             <div style={{ fontSize: 12, fontFamily: 'var(--mono-font)', color: 'var(--text-secondary)', wordBreak: 'break-all', marginBottom: 14 }}>{applyResult.outputPath}</div>
+            <div data-testid="inject-result-map-name" style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>
+              Map name set to "{applyResult.scenarioName}", header CRC32 0x{applyResult.crc32.toString(16).padStart(8, '0')}.
+            </div>
+            {applyResult.warnings.map((w) => (
+              <div key={w} data-testid="inject-result-name-warning" style={{ fontSize: 11.5, color: 'var(--warn-text)', marginBottom: 10 }}>
+                {w}
+              </div>
+            ))}
             <div data-testid="inject-result-crc-warning" style={{ fontSize: 11.5, color: 'var(--warn-text)', marginBottom: 14 }}>
               {applyResult.staleChecksumWarning}
             </div>

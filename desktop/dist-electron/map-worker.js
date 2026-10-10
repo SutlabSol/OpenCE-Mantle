@@ -30,6 +30,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // electron/map-worker.ts
 var map_worker_exports = {};
 __export(map_worker_exports, {
+  TAG_FILE_CHECKSUM_WARNING: () => TAG_FILE_CHECKSUM_WARNING,
   __cancelForTest: () => __cancelForTest,
   __setCurrentMapForTest: () => __setCurrentMapForTest,
   __setSinkForTest: () => __setSinkForTest,
@@ -37,11 +38,13 @@ __export(map_worker_exports, {
   runExtractTags: () => runExtractTags,
   runGetDependencies: () => runGetDependencies,
   runPlanInject: () => runPlanInject,
+  runSaveMapAs: () => runSaveMapAs,
   runVerifyEmbeddedData: () => runVerifyEmbeddedData
 });
 module.exports = __toCommonJS(map_worker_exports);
 var import_worker_threads = require("worker_threads");
 var fs = __toESM(require("fs"));
+var path = __toESM(require("path"));
 var import_crypto2 = require("crypto");
 
 // ../core/src/constants/cache-file.ts
@@ -288,7 +291,7 @@ function parseTagIndex(buffer, header) {
     if (pathFileOffset < 0 || pathFileOffset >= buffer.length) {
       throw new CorruptMapError(`Tag #${i}: path pointer resolves outside of the file; map may be corrupt or protected.`);
     }
-    const path = readCString(buffer, pathFileOffset);
+    const path2 = readCString(buffer, pathFileOffset);
     entries.push({
       index: i,
       tagId,
@@ -296,7 +299,7 @@ function parseTagIndex(buffer, header) {
       secondaryClassFourCC: secondaryClassFourCC === TAG_CLASS_NONE ? null : secondaryClassFourCC,
       tertiaryClassFourCC: tertiaryClassFourCC === TAG_CLASS_NONE ? null : tertiaryClassFourCC,
       primaryClassName: lookupTagClass(primaryClassFourCC)?.name ?? fourCCToString(primaryClassFourCC),
-      path,
+      path: path2,
       isExternal,
       tagDataPointerOrResourceIndex
     });
@@ -34132,6 +34135,9 @@ function getAllTagGroupNames() {
 function getBitfieldDefinition(name) {
   return bitfields.get(name);
 }
+function getGroupStructName(tagGroupName) {
+  return tagGroupNameToStructName.get(tagGroupName) ?? null;
+}
 function getGroupDefinition(tagGroupName) {
   const structName = tagGroupNameToStructName.get(tagGroupName);
   if (!structName) {
@@ -34533,18 +34539,21 @@ function childFieldPath(parentPath, fieldName) {
 function reflexiveElementPath(parentPath, fieldName, index) {
   return `${parentPath}.${fieldName}[${index}]`;
 }
+function isRelocatedTagDataField(field, value) {
+  return value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size > 0;
+}
 function classifyDependency(dep, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
   if (dep.tagId === NULL_TAG_ID2) return { fieldPath, group: "", path: "", kind: "null" };
   const idx = dep.tagId & 65535;
   const referenced = idx < tagIndex.entries.length ? tagIndex.entries[idx] : void 0;
   const group = referenced?.primaryClassName ?? fourCCToString(dep.fourcc);
-  const path = referenced?.path ?? "(unknown)";
-  if (referenced?.isExternal) return { fieldPath, group, path, kind: "external" };
+  const path2 = referenced?.path ?? "(unknown)";
+  if (referenced?.isExternal) return { fieldPath, group, path: path2, kind: "external" };
   const notExtracted = notExtractedByOriginal.get(idx);
   if (notExtracted) return { fieldPath, group: notExtracted.group, path: notExtracted.path, kind: "notExtracted" };
   const localTagIndex = localIndexByOriginal.get(idx);
-  if (localTagIndex !== void 0) return { fieldPath, group, path, kind: "internal", localTagIndex };
-  return { fieldPath, group, path, kind: "unresolved" };
+  if (localTagIndex !== void 0) return { fieldPath, group, path: path2, kind: "internal", localTagIndex };
+  return { fieldPath, group, path: path2, kind: "unresolved" };
 }
 function captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fieldPath, capture) {
   for (const match of findEmbeddedDataFields(resolved, decoded)) {
@@ -34584,9 +34593,9 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
     const value = decoded.get(field.name);
     if (!value) continue;
     if (field.def.nonCached) continue;
-    const path = childFieldPath(fieldPath, field.name);
+    const path2 = childFieldPath(fieldPath, field.name);
     if (value.kind === "dependency") {
-      dependencies.push(classifyDependency(value.value, path, tagIndex, localIndexByOriginal, notExtractedByOriginal));
+      dependencies.push(classifyDependency(value.value, path2, tagIndex, localIndexByOriginal, notExtractedByOriginal));
     } else if (value.kind === "reflexive" && value.value.count > 0) {
       const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
       if (!childStructName) continue;
@@ -34595,8 +34604,8 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
       if (!isRangeInBuffer(srcChildBase, value.value.count * childSize, buffer.length)) {
         injectionBlockers.push({
           kind: "invalidReflexive",
-          fieldPath: path,
-          message: `"${path}" (${value.value.count} x "${childStructName}") resolves outside the source map (file offset ${srcChildBase}, map is ${buffer.length} bytes) - not captured, the WHOLE tag is blocked from injection.`
+          fieldPath: path2,
+          message: `"${path2}" (${value.value.count} x "${childStructName}") resolves outside the source map (file offset ${srcChildBase}, map is ${buffer.length} bytes) - not captured, the WHOLE tag is blocked from injection.`
         });
         continue;
       }
@@ -34612,7 +34621,7 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
         runningOffset.value += childSize;
       }
       reflexiveWork.push({ fieldName: field.name, childStructName, childSize, srcChildBase, localArrayStart, count: value.value.count, childBytesList });
-    } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size > 0) {
+    } else if (isRelocatedTagDataField(field, value)) {
       const srcBase = resolvePointer(value.value.pointerLow, fileOffsetAnchor, baseMemoryAddress);
       if (isRangeInBuffer(srcBase, value.value.size, buffer.length)) {
         const localOffset = runningOffset.value;
@@ -34854,11 +34863,11 @@ function deserializeContainer(buffer) {
 
 // ../core/src/map/tag-injector.ts
 var NULL_TAG_ID3 = 4294967295;
-function normalizeTagPath(path) {
-  return path.toLowerCase().replace(/\//g, "\\");
+function normalizeTagPath(path2) {
+  return path2.toLowerCase().replace(/\//g, "\\");
 }
-function tagKey(path, group) {
-  return `${normalizeTagPath(path)}|${group}`;
+function tagKey(path2, group) {
+  return `${normalizeTagPath(path2)}|${group}`;
 }
 function computeNewTagId(index) {
   const salt = (index + 24948 | 32768) & 65535;
@@ -35103,23 +35112,27 @@ function collectDependencyFields(data, structName, localOffset, fieldPath, sites
   for (const field of resolved.fields) {
     const value = decoded.get(field.name);
     if (!value) continue;
-    const path = childFieldPath(fieldPath, field.name);
+    const path2 = childFieldPath(fieldPath, field.name);
     if (field.def.nonCached) {
-      if (value.kind === "dependency") nonCachedPaths.add(path);
+      if (value.kind === "dependency") nonCachedPaths.add(path2);
       continue;
     }
     if (value.kind === "dependency") {
-      sites.push({ fieldPath: path, tagId: value.value.tagId >>> 0 });
+      sites.push({ fieldPath: path2, tagId: value.value.tagId >>> 0 });
     } else if (value.kind === "reflexive" && value.value.count > 0) {
       const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const base = value.value.pointerLow;
       if (!isRangeInBuffer(base, value.value.count * childSize, data.length)) {
-        throw new Error(`"${path}" (${value.value.count} x "${childStructName}") points outside the tag's own data`);
+        throw new Error(`"${path2}" (${value.value.count} x "${childStructName}") points outside the tag's own data`);
       }
       for (let i = 0; i < value.value.count; i++) {
         collectDependencyFields(data, childStructName, base + i * childSize, reflexiveElementPath(fieldPath, field.name, i), sites, nonCachedPaths);
+      }
+    } else if (isRelocatedTagDataField(field, value)) {
+      if (!isRangeInBuffer(value.value.pointerLow, value.value.size, data.length)) {
+        throw new Error(`"${path2}" (${value.value.size} data bytes) points outside the tag's own data`);
       }
     }
   }
@@ -35154,7 +35167,7 @@ function checkDependencyMap(t) {
   const shown = problems.slice(0, 3).join("; ") + (problems.length > 3 ? `; and ${problems.length - 3} more` : "");
   return { reason: `This tag's saved tag references don't match its fields, so they cannot be assigned safely: ${shown}. Re-extract it with this version of OpenCE.`, ignoredPaths: nonCachedPaths };
 }
-function rewriteAddedTagData(data, structName, localOffset, fieldPath, depsByPath, translation, tagBaseAbsolute, resolveDepTagId) {
+function rewriteAddedTagData(data, structName, localOffset, fieldPath, depsByPath, translation, tagBaseAbsolute, resolveDepTagId, pathPointerOfTagId) {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(data, localOffset, structName);
   for (const field of resolved.fields) {
@@ -35162,14 +35175,14 @@ function rewriteAddedTagData(data, structName, localOffset, fieldPath, depsByPat
     if (!value) continue;
     if (field.def.nonCached) continue;
     const absFieldOffset = localOffset + field.offset;
-    const path = childFieldPath(fieldPath, field.name);
+    const path2 = childFieldPath(fieldPath, field.name);
     if (value.kind === "dependency") {
       if (value.value.tagId !== NULL_TAG_ID3) {
-        const dep = depsByPath.get(path);
-        if (!dep) throw new Error(`Internal error: no dependency entry for "${path}" - planInjection should have blocked this tag.`);
+        const dep = depsByPath.get(path2);
+        if (!dep) throw new Error(`Internal error: no dependency entry for "${path2}" - planInjection should have blocked this tag.`);
         const newTagId = resolveDepTagId(dep);
         const decodedDep = decodeDependency(data, absFieldOffset);
-        encodeDependency(data, absFieldOffset, { ...decodedDep, pathPointer: 0, pathSize: 0, tagId: newTagId });
+        encodeDependency(data, absFieldOffset, { ...decodedDep, pathPointer: pathPointerOfTagId(newTagId), pathSize: 0, tagId: newTagId });
       }
     } else if (value.kind === "reflexive" && value.value.count > 0) {
       const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
@@ -35181,10 +35194,60 @@ function rewriteAddedTagData(data, structName, localOffset, fieldPath, depsByPat
       data.writeUInt32LE(0, absFieldOffset + 8);
       const childAbsoluteBase = tagBaseAbsolute + oldLocalChildBase;
       for (let i = 0; i < value.value.count; i++) {
-        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, reflexiveElementPath(fieldPath, field.name, i), depsByPath, translation, tagBaseAbsolute, resolveDepTagId);
+        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, reflexiveElementPath(fieldPath, field.name, i), depsByPath, translation, tagBaseAbsolute, resolveDepTagId, pathPointerOfTagId);
       }
+    } else if (isRelocatedTagDataField(field, value)) {
+      data.writeUInt32LE(value.value.pointerLow + translation >>> 0, absFieldOffset + 12);
+      data.writeUInt32LE(0, absFieldOffset + 16);
     }
   }
+}
+var TAG_DATA_BLOCK_ALIGNMENT = 4;
+function padToAlignment(length) {
+  return (TAG_DATA_BLOCK_ALIGNMENT - length % TAG_DATA_BLOCK_ALIGNMENT) % TAG_DATA_BLOCK_ALIGNMENT;
+}
+function alignTagData(data, structName) {
+  const copies = [];
+  const pointerWrites = [];
+  let length = 0;
+  const place = (from, size) => {
+    length += padToAlignment(length);
+    const to = length;
+    copies.push({ from, to, length: size });
+    length += size;
+    return to;
+  };
+  const visit = (name, oldAt, newAt) => {
+    const decoded = decodeStruct(data, oldAt, name);
+    const children = [];
+    for (const field of resolveStruct(name).fields) {
+      const value = decoded.get(field.name);
+      if (!value || field.def.nonCached) continue;
+      const childStruct = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+      if (value.kind === "reflexive" && value.value.count > 0 && childStruct) {
+        const size = resolveStruct(childStruct).totalSize;
+        const newBase = place(value.value.pointerLow, value.value.count * size);
+        pointerWrites.push({ at: newAt + field.offset + 4, value: newBase });
+        children.push({ struct: childStruct, size, count: value.value.count, oldBase: value.value.pointerLow, newBase });
+      } else if (isRelocatedTagDataField(field, value)) {
+        pointerWrites.push({ at: newAt + field.offset + 12, value: place(value.value.pointerLow, value.value.size) });
+      }
+    }
+    for (const c of children) {
+      for (let i = 0; i < c.count; i++) visit(c.struct, c.oldBase + i * c.size, c.newBase + i * c.size);
+    }
+  };
+  place(0, resolveStruct(structName).totalSize);
+  visit(structName, 0, 0);
+  const out = Buffer.alloc(length);
+  for (const c of copies) data.copy(out, c.to, c.from, c.from + c.length);
+  for (const w of pointerWrites) out.writeUInt32LE(w.value, w.at);
+  const mapOffset = (oldOffset) => {
+    const c = copies.find((x) => oldOffset >= x.from && oldOffset < x.from + x.length);
+    if (!c) throw new Error(`Internal error: offset ${oldOffset} is not inside any block of the tag's data.`);
+    return c.to + (oldOffset - c.from);
+  };
+  return { data: out, mapOffset };
 }
 function dependenciesByPath(t) {
   return new Map(t.dependencies.map((d) => [d.fieldPath, d]));
@@ -35236,11 +35299,13 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
   const newBaseMemoryAddress = newTagArrayAddress - TAG_DATA_HEADER_PC_SIZE >>> 0;
   const newTagDataOffset = subHeaderOffset + insertSize;
   const newArrayOffset = arrayOffset + insertSize;
-  const dataBuffers = writeTags.map((t) => Buffer.from(t.data, "base64"));
+  const laidOut = writeTags.map((t) => alignTagData(Buffer.from(t.data, "base64"), t.structName));
+  const dataBuffers = laidOut.map((l) => l.data);
   const structDataStart = oldFileLength + insertSize + delta;
   const structOffsets = [];
   let running = structDataStart;
   for (const b of dataBuffers) {
+    running += padToAlignment(running - newTagDataOffset);
     structOffsets.push(running);
     running += b.length;
   }
@@ -35288,10 +35353,7 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
     const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 20);
     out.writeUInt32LE(0, entryOffset + 24);
-    dataBuffers[i].copy(out, structOffsets[i]);
     pathBuffers[i].copy(out, pathOffsets[i]);
-    const translation = newBaseMemoryAddress - newTagDataOffset + structOffsets[i] >>> 0;
-    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
   }
   for (let j = 0; j < swappedCount; j++) {
     const s = plan.toSwap[j];
@@ -35304,13 +35366,17 @@ function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, p
     out.writeUInt32LE(tertiary === null ? 4294967295 : tertiary, entryOffset + 8);
     const dataPointer = newBaseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 20);
+  }
+  const pathPointerOfTagId = (tagId) => out.readUInt32LE(newArrayOffset + (tagId & 65535) * TAG_ENTRY_SIZE + 16);
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
     dataBuffers[i].copy(out, structOffsets[i]);
     const translation = newBaseMemoryAddress - newTagDataOffset + structOffsets[i] >>> 0;
-    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex));
+    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex), pathPointerOfTagId);
   }
   for (let i = 0; i < writeTags.length; i++) {
     for (const patch of writeTags[i].embeddedRawDataPatches ?? []) {
-      out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + patch.patchOffset);
+      out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + laidOut[i].mapOffset(patch.patchOffset));
     }
   }
   out.writeUInt32LE(newFileLength, 8);
@@ -35453,6 +35519,103 @@ function formatEmbeddedDataReport(report, mapLabel) {
     lines.push("No embedded (external=0) bitmap/sound data in this map - everything routes through bitmaps.map/sounds.map.");
   }
   return lines.join("\n");
+}
+
+// ../core/src/map/cache-crc.ts
+var CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+function computeCacheCrc32(buffer, regions) {
+  let crc = 4294967295;
+  for (const r of regions) {
+    if (!isRangeInBuffer(r.offset, r.size, buffer.length)) {
+      throw new CorruptMapError(`Cannot compute the map checksum: ${r.label} (file offset ${r.offset}, ${r.size} bytes) is outside the file.`);
+    }
+    for (let i = r.offset, end = r.offset + r.size; i < end; i++) crc = CRC_TABLE[(crc ^ buffer[i]) & 255] ^ crc >>> 8;
+  }
+  return crc >>> 0;
+}
+function ceCrcRegions(buffer, header, tagIndex) {
+  const regions = [];
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenario || scenario.tagId !== tagIndex.scenarioTagId >>> 0 || scenario.isExternal) {
+    throw new CorruptMapError("Cannot compute the map checksum: the scenario tag ID in the tag data header does not name a scenario tag in this map.");
+  }
+  const scenarioStruct = getGroupStructName("scenario");
+  const scenarioAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(scenarioAt, resolveStruct(scenarioStruct).totalSize, buffer.length)) {
+    throw new CorruptMapError("Cannot compute the map checksum: the scenario tag data is outside the file.");
+  }
+  const bsps = decodeStruct(buffer, scenarioAt, scenarioStruct).get("structure bsps");
+  if (bsps?.kind === "reflexive" && bsps.value.count > 0) {
+    const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === "structure bsps");
+    const bspStruct = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+    if (!bspStruct) throw new CorruptMapError(`Cannot compute the map checksum: "structure bsps" is not a block list in this build's definitions.`);
+    const size = resolveStruct(bspStruct).totalSize;
+    const base = resolvePointer(bsps.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(base, bsps.value.count * size, buffer.length)) {
+      throw new CorruptMapError("Cannot compute the map checksum: the scenario's structure BSP list is outside the file.");
+    }
+    for (let i = 0; i < bsps.value.count; i++) {
+      const d = decodeStruct(buffer, base + i * size, bspStruct);
+      const start = d.get("bsp start");
+      const length = d.get("bsp size");
+      if (start?.kind !== "basic" || length?.kind !== "basic") throw new CorruptMapError("Cannot compute the map checksum: unexpected structure BSP layout.");
+      regions.push({ offset: Number(start.value), size: Number(length.value), label: `structure bsp ${i}` });
+    }
+  }
+  regions.push({ offset: tagIndex.modelDataFileOffset, size: tagIndex.modelDataSize, label: "model data" });
+  regions.push({ offset: header.tagDataOffset, size: header.tagDataSize, label: "tag data" });
+  return regions;
+}
+
+// ../core/src/map/finalize-map.ts
+var SCENARIO_NAME_OFFSET = 32;
+var CRC32_OFFSET = 100;
+var MAX_SCENARIO_NAME_LENGTH = TAG_STRING_SIZE - 1;
+function scenarioNameFromFileName(fileName) {
+  const base = fileName.split(/[\\/]/).pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  const stem = dot >= 0 ? base.slice(0, dot) : base;
+  const warnings = [];
+  let name = "";
+  const replaced = /* @__PURE__ */ new Set();
+  for (const ch of stem) {
+    const code = ch.codePointAt(0);
+    if (code >= 32 && code <= 126) name += ch;
+    else {
+      name += "_";
+      replaced.add(ch);
+    }
+  }
+  if (replaced.size > 0) {
+    warnings.push(`The file name contains characters the map header can't store (${[...replaced].map((c) => `"${c}"`).join(", ")}); they were replaced with "_" in the map's internal name.`);
+  }
+  if (name.length > MAX_SCENARIO_NAME_LENGTH) {
+    warnings.push(`The file name is longer than ${MAX_SCENARIO_NAME_LENGTH} characters; the map's internal name was shortened to "${name.slice(0, MAX_SCENARIO_NAME_LENGTH)}". The game may not load a map whose internal name differs from its file name - choose a shorter name.`);
+    name = name.slice(0, MAX_SCENARIO_NAME_LENGTH);
+  }
+  if (name.length === 0) throw new Error('The chosen file name gives an empty map name. Choose a file name with at least one character before ".map".');
+  return { name, warnings };
+}
+function finalizeForSave(map, options) {
+  const header = parseCacheFileHeader(map);
+  const tagIndex = parseTagIndex(map, header);
+  const { name, warnings } = scenarioNameFromFileName(options.fileName);
+  const out = Buffer.from(map);
+  if (header.scenarioName !== name) {
+    out.fill(0, SCENARIO_NAME_OFFSET, SCENARIO_NAME_OFFSET + TAG_STRING_SIZE);
+    out.write(name, SCENARIO_NAME_OFFSET, "ascii");
+  }
+  const crc32 = computeCacheCrc32(out, ceCrcRegions(out, header, tagIndex));
+  out.writeUInt32LE(crc32, CRC32_OFFSET);
+  return { buffer: out, scenarioName: name, previousScenarioName: header.scenarioName, crc32, previousCrc32: header.crc32 >>> 0, warnings };
 }
 
 // electron/map-worker.ts
@@ -35673,16 +35836,53 @@ function runPlanInject(task) {
     handleTaskError(task.requestId, err);
   }
 }
+var TAG_FILE_CHECKSUM_WARNING = "The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.";
+function writeFinalizedMap(map, outputPath, tempPath) {
+  const finalized = finalizeForSave(map, { fileName: path.basename(outputPath) });
+  fs.writeFileSync(tempPath, finalized.buffer);
+  fs.renameSync(tempPath, outputPath);
+  return finalized;
+}
+function isOpenMapPath(outputPath) {
+  return !!currentMap && path.resolve(outputPath).toLowerCase() === path.resolve(currentMap.filePath).toLowerCase();
+}
+function removeTempFile(tempPath) {
+  try {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  } catch {
+  }
+}
+function runSaveMapAs(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "You cannot overwrite the open map. Choose a different file name.");
+  const tempPath = `${task.outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
+  try {
+    progress(task.requestId, "Writing map", 40);
+    const finalized = writeFinalizedMap(currentMap.buffer, task.outputPath, tempPath);
+    progress(task.requestId, "Done", 100);
+    sendResult(task.requestId, {
+      ok: true,
+      outputPath: task.outputPath,
+      scenarioName: finalized.scenarioName,
+      crc32: finalized.crc32,
+      warnings: finalized.warnings,
+      staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING
+    });
+  } catch (err) {
+    removeTempFile(tempPath);
+    handleTaskError(task.requestId, err);
+  }
+}
 function runApplyInject(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   if (!currentInject) return sendError(task.requestId, "NO_PLAN", 'Run "Inject Tags..." and review the plan before applying it.');
+  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "You cannot overwrite the map you are injecting into. Choose a different location.");
   const tempPath = `${task.outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
   try {
     progress(task.requestId, "Writing tag data", 30);
     const injected = currentInject.plan.mode === "swap" ? applySwapInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan) : applyAddInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan);
     progress(task.requestId, "Writing output file", 80);
-    fs.writeFileSync(tempPath, injected);
-    fs.renameSync(tempPath, task.outputPath);
+    const finalized = writeFinalizedMap(injected, task.outputPath, tempPath);
     progress(task.requestId, "Done", 100);
     sendResult(task.requestId, {
       ok: true,
@@ -35690,13 +35890,13 @@ function runApplyInject(task) {
       addedCount: currentInject.plan.counts.added,
       reusedCount: currentInject.plan.counts.reused,
       swappedCount: currentInject.plan.counts.swapped,
-      staleChecksumWarning: "Checksums were not updated. This map may be rejected by some loaders until M6 (export + CRC) is done."
+      scenarioName: finalized.scenarioName,
+      crc32: finalized.crc32,
+      warnings: finalized.warnings,
+      staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING
     });
   } catch (err) {
-    try {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-    } catch {
-    }
+    removeTempFile(tempPath);
     handleTaskError(task.requestId, err);
   } finally {
     currentInject = null;
@@ -35727,6 +35927,7 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "extractTags") runExtractTags(task);
     else if (task.type === "planInject") runPlanInject(task);
     else if (task.type === "applyInject") runApplyInject(task);
+    else if (task.type === "saveMapAs") runSaveMapAs(task);
     else if (task.type === "verifyEmbeddedData") runVerifyEmbeddedData(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
@@ -35740,6 +35941,7 @@ try {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  TAG_FILE_CHECKSUM_WARNING,
   __cancelForTest,
   __setCurrentMapForTest,
   __setSinkForTest,
@@ -35747,6 +35949,7 @@ try {
   runExtractTags,
   runGetDependencies,
   runPlanInject,
+  runSaveMapAs,
   runVerifyEmbeddedData
 });
 //# sourceMappingURL=map-worker.js.map

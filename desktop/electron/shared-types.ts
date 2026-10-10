@@ -161,8 +161,13 @@ export interface InjectPlanSummary {
 export type PlanInjectResult = { ok: true; plan: InjectPlanSummary } | { ok: false; code: string; message: string };
 
 export type ApplyInjectResult =
-  | { ok: true; outputPath: string; addedCount: number; reusedCount: number; swappedCount: number; staleChecksumWarning: string }
+  | { ok: true; outputPath: string; addedCount: number; reusedCount: number; swappedCount: number; scenarioName: string; crc32: number; warnings: string[]; staleChecksumWarning: string }
   | { ok: false; code: 'CANCELLED'; message: string }
+  | { ok: false; code: string; message: string };
+
+/** File > Save As: the open map written to a new file with its scenario name set from the file name and the header CRC32 recomputed. */
+export type SaveMapAsResult =
+  | { ok: true; outputPath: string; scenarioName: string; crc32: number; warnings: string[]; staleChecksumWarning: string }
   | { ok: false; code: string; message: string };
 
 export interface VerifyEmbeddedDataCounts {
@@ -188,6 +193,7 @@ export type WorkerRequest =
   | { type: 'extractTags'; requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }
   | { type: 'planInject'; requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
   | { type: 'applyInject'; requestId: string; outputPath: string }
+  | { type: 'saveMapAs'; requestId: string; outputPath: string }
   | { type: 'verifyEmbeddedData'; requestId: string }
   | { type: 'cancel'; requestId: string };
 

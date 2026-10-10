@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { inspectCustomEditionMap } from '../../../core/src/index';
-import { __setCurrentMapForTest, __setSinkForTest, __cancelForTest, runExtractTags, type LoadedMap } from '../map-worker';
+import { __setCurrentMapForTest, __setSinkForTest, __cancelForTest, runExtractTags, runSaveMapAs, type LoadedMap } from '../map-worker';
 
 /**
  * Not sharing `core/tests/helpers/sample-maps.ts` here: that helper uses `import.meta.url`
@@ -86,5 +86,63 @@ describe.skipIf(!haveBloodgulch)(title, () => {
     expect(fs.existsSync(outputPath)).toBe(true);
     const leftoverTempFiles = fs.readdirSync(outDir).filter((f) => f.includes('.tmp-'));
     expect(leftoverTempFiles).toEqual([]);
+  });
+});
+
+const saveTitle = haveBloodgulch
+  ? 'map-worker File > Save As (finalize + temp file then rename)'
+  : `map-worker File > Save As [missing bloodgulch.map in "${SAMPLE_MAPS_DIR}" - set SAMPLE_MAPS_DIR or see core/README.md]`;
+
+describe.skipIf(!haveBloodgulch)(saveTitle, () => {
+  let source: Buffer;
+  let outDir: string;
+  let loadedMap: LoadedMap;
+
+  beforeAll(() => {
+    source = fs.readFileSync(sampleMapPath('bloodgulch.map'));
+    const inspected = inspectCustomEditionMap(source);
+    if (inspected.status !== 'ok') throw new Error('sample map did not parse');
+    outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opence-saveas-test-'));
+    // The "open map" path is a temp location, so a broken guard could never touch sample_maps.
+    loadedMap = { filePath: path.join(outDir, 'open.map'), buffer: source, header: inspected.header, tagIndex: inspected.tagIndex };
+  });
+
+  afterEach(() => {
+    __setCurrentMapForTest(null);
+  });
+
+  function save(outputPath: string) {
+    __setCurrentMapForTest(loadedMap);
+    const messages: { type: string; [key: string]: unknown }[] = [];
+    __setSinkForTest((msg) => messages.push(msg));
+    runSaveMapAs({ requestId: randomUUID(), outputPath });
+    return messages;
+  }
+
+  it('saved under its own scenario name: byte-identical to the source, no temp file left', () => {
+    const outputPath = path.join(outDir, 'bloodgulch.map');
+    const result = save(outputPath).find((m) => m.type === 'result') as { payload: { ok: boolean; scenarioName: string } } | undefined;
+    expect(result?.payload.ok).toBe(true);
+    expect(result?.payload.scenarioName).toBe('bloodgulch');
+    expect(fs.readFileSync(outputPath).equals(source)).toBe(true);
+    expect(fs.readdirSync(outDir).filter((f) => f.includes('.tmp-'))).toEqual([]);
+  });
+
+  it('saved under another name: only the scenario name (0x20-0x3F) and CRC32 (0x64-0x67) may differ', () => {
+    const outputPath = path.join(outDir, 'my test copy.map');
+    const result = save(outputPath).find((m) => m.type === 'result') as { payload: { ok: boolean; scenarioName: string } } | undefined;
+    expect(result?.payload.scenarioName).toBe('my test copy');
+    const written = fs.readFileSync(outputPath);
+    expect(written.length).toBe(source.length);
+    const diffs: number[] = [];
+    for (let i = 0; i < source.length; i++) if (written[i] !== source[i]) diffs.push(i);
+    expect(diffs.filter((i) => !((i >= 0x20 && i <= 0x3f) || (i >= 0x64 && i <= 0x67)))).toEqual([]);
+    expect(written.toString('ascii', 0x20, 0x2c)).toBe('my test copy');
+  });
+
+  it('refuses to overwrite the open map and writes nothing', () => {
+    const messages = save(loadedMap.filePath.toUpperCase());
+    expect(messages.find((m) => m.type === 'error')?.code).toBe('REFUSED_SOURCE_PATH');
+    expect(fs.existsSync(loadedMap.filePath)).toBe(false);
   });
 });

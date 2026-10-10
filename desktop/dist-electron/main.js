@@ -29,6 +29,7 @@ var fs3 = __toESM(require("fs"));
 
 // ../core/src/constants/cache-file.ts
 var CHIMERA_COMPRESSED_ENGINE_MASK = 2249850880;
+var TAG_STRING_SIZE = 32;
 
 // ../core/src/constants/tag-classes.ts
 function fourCCFromString(code) {
@@ -33673,6 +33674,45 @@ for (const file of ALL_DEFINITION_FILES) {
 // ../core/src/map/container.ts
 var OCETAGS_EXTENSION = ".ocetags";
 
+// ../core/src/map/cache-crc.ts
+var CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+// ../core/src/map/finalize-map.ts
+var MAX_SCENARIO_NAME_LENGTH = TAG_STRING_SIZE - 1;
+function scenarioNameFromFileName(fileName) {
+  const base = fileName.split(/[\\/]/).pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  const stem = dot >= 0 ? base.slice(0, dot) : base;
+  const warnings = [];
+  let name = "";
+  const replaced = /* @__PURE__ */ new Set();
+  for (const ch of stem) {
+    const code = ch.codePointAt(0);
+    if (code >= 32 && code <= 126) name += ch;
+    else {
+      name += "_";
+      replaced.add(ch);
+    }
+  }
+  if (replaced.size > 0) {
+    warnings.push(`The file name contains characters the map header can't store (${[...replaced].map((c) => `"${c}"`).join(", ")}); they were replaced with "_" in the map's internal name.`);
+  }
+  if (name.length > MAX_SCENARIO_NAME_LENGTH) {
+    warnings.push(`The file name is longer than ${MAX_SCENARIO_NAME_LENGTH} characters; the map's internal name was shortened to "${name.slice(0, MAX_SCENARIO_NAME_LENGTH)}". The game may not load a map whose internal name differs from its file name - choose a shorter name.`);
+    name = name.slice(0, MAX_SCENARIO_NAME_LENGTH);
+  }
+  if (name.length === 0) throw new Error('The chosen file name gives an empty map name. Choose a file name with at least one character before ".map".');
+  return { name, warnings };
+}
+
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
@@ -34068,6 +34108,25 @@ async function planInjectFlow(containerPath, mode) {
     return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   }
 }
+async function confirmScenarioName(filePath) {
+  let warnings;
+  try {
+    warnings = scenarioNameFromFileName(path4.basename(filePath)).warnings;
+  } catch (err) {
+    await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message: "This file name cannot be used for a map.", detail: err.message });
+    return false;
+  }
+  if (warnings.length === 0) return true;
+  const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    buttons: ["Save anyway", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    message: "The map's internal name will not match this file name.",
+    detail: warnings.join("\n\n")
+  });
+  return response === 0;
+}
 async function applyInjectFlow() {
   if (!mainWindow) return { ok: false, code: "NO_WINDOW", message: "Application window is not available." };
   if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
@@ -34094,6 +34153,7 @@ async function applyInjectFlow() {
     });
     if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   }
+  if (!await confirmScenarioName(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   sendLog("info", `Writing injected map to ${resolvedTarget}`);
   const { promise } = sendWorkerRequest(
     { type: "applyInject", outputPath: resolvedTarget },
@@ -34102,7 +34162,10 @@ async function applyInjectFlow() {
   );
   try {
     const result = await promise;
-    if (result.ok) sendLog("info", `Injected ${result.addedCount} tag(s), swapped ${result.swappedCount} (${result.reusedCount} reused) into ${result.outputPath}`);
+    if (result.ok) {
+      sendLog("info", `Injected ${result.addedCount} tag(s), swapped ${result.swappedCount} (${result.reusedCount} reused) into ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, "0")}`);
+      for (const w of result.warnings) sendLog("warn", w);
+    }
     return result;
   } catch (err) {
     const e = err;
@@ -34110,6 +34173,56 @@ async function applyInjectFlow() {
     return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   } finally {
     currentInjectContainerPath = null;
+  }
+}
+async function saveMapAsFlow() {
+  if (!mainWindow) return { ok: false, code: "NO_WINDOW", message: "Application window is not available." };
+  if (!currentMapPath || currentMapCompressed) {
+    sendLog("warn", "Open a decompressed map before using Save As.");
+    return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before saving it." };
+  }
+  const defaultPath = currentMapPath.replace(/(\.map)?$/i, "_copy.map");
+  const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    title: "Save map as",
+    defaultPath,
+    filters: [{ name: "Halo CE Map", extensions: ["map"] }]
+  });
+  if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
+  const resolvedTarget = path4.resolve(filePath);
+  if (resolvedTarget.toLowerCase() === path4.resolve(currentMapPath).toLowerCase()) {
+    await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message: "You cannot overwrite the open map.", detail: "Choose a different file name." });
+    return { ok: false, code: "REFUSED_SOURCE_PATH", message: "You cannot overwrite the open map. Choose a different file name." };
+  }
+  if (fs3.existsSync(resolvedTarget)) {
+    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: ["Overwrite", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      message: `"${path4.basename(resolvedTarget)}" already exists.`,
+      detail: "Do you want to overwrite it?"
+    });
+    if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
+  }
+  if (!await confirmScenarioName(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
+  sendLog("info", `Saving map as ${resolvedTarget}`);
+  const { promise } = sendWorkerRequest(
+    { type: "saveMapAs", outputPath: resolvedTarget },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "saveMapAs", stage, percent })
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      sendLog("info", `Saved ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, "0")}`);
+      for (const w of result.warnings) sendLog("warn", w);
+      sendLog("info", result.staleChecksumWarning);
+    }
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Save As failed: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   }
 }
 async function verifyEmbeddedDataFlow() {
@@ -34146,7 +34259,7 @@ function buildMenu() {
       label: "File",
       submenu: [
         { label: "Open Map...", accelerator: "CmdOrCtrl+O", click: () => openMapFlow() },
-        { label: "Save As...", click: () => mainWindow?.webContents.send("menu:action", "save-as-stub") },
+        { label: "Save As...", accelerator: "CmdOrCtrl+Shift+S", click: () => void saveMapAsFlow() },
         {
           label: "Recent Maps",
           submenu: recents.length > 0 ? recents.map((p) => ({ label: p, click: () => loadMapAtPath(p).then((r) => mainWindow?.webContents.send("map:loaded", r)) })) : [{ label: "(none yet)", enabled: false }]

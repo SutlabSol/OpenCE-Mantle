@@ -1,7 +1,7 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { OCETAGS_EXTENSION, validateResourceMapFile } from '../../core/src/index';
+import { OCETAGS_EXTENSION, validateResourceMapFile, scenarioNameFromFileName } from '../../core/src/index';
 import { getRecentMaps, addRecentMap } from './recent-maps';
 import { getSettings, setLastExtractDir, setResourceMapPath } from './settings';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
@@ -17,6 +17,7 @@ import type {
   ResourceMapPickResult,
   PlanInjectResult,
   ApplyInjectResult,
+  SaveMapAsResult,
   InjectionMode,
   VerifyEmbeddedDataResult,
 } from './shared-types';
@@ -323,6 +324,31 @@ async function planInjectFlow(containerPath: string, mode: InjectionMode): Promi
   }
 }
 
+/**
+ * Before any map is written: the map's internal (scenario) name will be set from the chosen file
+ * name. If the file name can't be stored as-is (over 31 characters, or characters outside
+ * printable ASCII), say what the name will be and let the user cancel. Returns false to cancel.
+ */
+async function confirmScenarioName(filePath: string): Promise<boolean> {
+  let warnings: string[];
+  try {
+    warnings = scenarioNameFromFileName(path.basename(filePath)).warnings;
+  } catch (err) {
+    await dialog.showMessageBox(mainWindow!, { type: 'error', message: 'This file name cannot be used for a map.', detail: (err as Error).message });
+    return false;
+  }
+  if (warnings.length === 0) return true;
+  const { response } = await dialog.showMessageBox(mainWindow!, {
+    type: 'warning',
+    buttons: ['Save anyway', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    message: "The map's internal name will not match this file name.",
+    detail: warnings.join('\n\n'),
+  });
+  return response === 0;
+}
+
 async function applyInjectFlow(): Promise<ApplyInjectResult> {
   if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
   if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
@@ -351,6 +377,7 @@ async function applyInjectFlow(): Promise<ApplyInjectResult> {
     });
     if (response !== 0) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
   }
+  if (!(await confirmScenarioName(resolvedTarget))) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
 
   sendLog('info', `Writing injected map to ${resolvedTarget}`);
   const { promise } = sendWorkerRequest<ApplyInjectResult>({ type: 'applyInject', outputPath: resolvedTarget }, sendLog, (stage, percent) =>
@@ -358,7 +385,10 @@ async function applyInjectFlow(): Promise<ApplyInjectResult> {
   );
   try {
     const result = await promise;
-    if (result.ok) sendLog('info', `Injected ${result.addedCount} tag(s), swapped ${result.swappedCount} (${result.reusedCount} reused) into ${result.outputPath}`);
+    if (result.ok) {
+      sendLog('info', `Injected ${result.addedCount} tag(s), swapped ${result.swappedCount} (${result.reusedCount} reused) into ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, '0')}`);
+      for (const w of result.warnings) sendLog('warn', w);
+    }
     return result;
   } catch (err) {
     const e = err as Error & { code?: string };
@@ -366,6 +396,62 @@ async function applyInjectFlow(): Promise<ApplyInjectResult> {
     return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
   } finally {
     currentInjectContainerPath = null;
+  }
+}
+
+/**
+ * File > Save As: writes the open map unchanged except for its scenario name (from the chosen
+ * file name) and the recomputed header CRC32. Never overwrites the open map (refused here and
+ * again in the worker); the worker writes a temp file then renames it.
+ */
+async function saveMapAsFlow(): Promise<SaveMapAsResult> {
+  if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
+  if (!currentMapPath || currentMapCompressed) {
+    sendLog('warn', 'Open a decompressed map before using Save As.');
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress a map before saving it.' };
+  }
+  const defaultPath = currentMapPath.replace(/(\.map)?$/i, '_copy.map');
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save map as',
+    defaultPath,
+    filters: [{ name: 'Halo CE Map', extensions: ['map'] }],
+  });
+  if (canceled || !filePath) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+
+  const resolvedTarget = path.resolve(filePath);
+  if (resolvedTarget.toLowerCase() === path.resolve(currentMapPath).toLowerCase()) {
+    await dialog.showMessageBox(mainWindow, { type: 'error', message: 'You cannot overwrite the open map.', detail: 'Choose a different file name.' });
+    return { ok: false, code: 'REFUSED_SOURCE_PATH', message: 'You cannot overwrite the open map. Choose a different file name.' };
+  }
+  if (fs.existsSync(resolvedTarget)) {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Overwrite', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      message: `"${path.basename(resolvedTarget)}" already exists.`,
+      detail: 'Do you want to overwrite it?',
+    });
+    if (response !== 0) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+  }
+  if (!(await confirmScenarioName(resolvedTarget))) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+
+  sendLog('info', `Saving map as ${resolvedTarget}`);
+  const { promise } = sendWorkerRequest<SaveMapAsResult>({ type: 'saveMapAs', outputPath: resolvedTarget }, sendLog, (stage, percent) =>
+    mainWindow?.webContents.send('map:progress', { taskId: 'saveMapAs', stage, percent }),
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      sendLog('info', `Saved ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, '0')}`);
+      for (const w of result.warnings) sendLog('warn', w);
+      sendLog('info', result.staleChecksumWarning);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Save As failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
   }
 }
 
@@ -407,7 +493,7 @@ function buildMenu() {
       label: 'File',
       submenu: [
         { label: 'Open Map...', accelerator: 'CmdOrCtrl+O', click: () => openMapFlow() },
-        { label: 'Save As...', click: () => mainWindow?.webContents.send('menu:action', 'save-as-stub') },
+        { label: 'Save As...', accelerator: 'CmdOrCtrl+Shift+S', click: () => void saveMapAsFlow() },
         {
           label: 'Recent Maps',
           submenu:

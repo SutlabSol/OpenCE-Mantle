@@ -155,7 +155,11 @@ export function installDevMock() {
         addedCount: plan.counts.added,
         reusedCount: plan.counts.reused,
         swappedCount: plan.counts.swapped,
-        staleChecksumWarning: 'Checksums were not updated. This map may be rejected by some loaders until M6 (export + CRC) is done.',
+        scenarioName: 'bloodgulch_injected',
+        crc32: 0x43d032f3,
+        warnings: [],
+        staleChecksumWarning:
+          'The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.',
       };
     },
     verifyEmbeddedData: async () => {

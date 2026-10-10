@@ -1,5 +1,6 @@
 import { parentPort } from 'worker_threads';
 import * as fs from 'fs';
+import * as path from 'path';
 import { randomUUID } from 'crypto';
 import {
   inspectCustomEditionMap,
@@ -19,11 +20,12 @@ import {
   validateAllDefinitions,
   verifyEmbeddedData,
   formatEmbeddedDataReport,
+  finalizeForSave,
   AllTagsExcludedError,
   OperationCancelledError,
   ContainerFormatError,
 } from '../../core/src/index';
-import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning } from '../../core/src/index';
+import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult } from '../../core/src/index';
 import type {
   LoadMapResult,
   WorkerRequest,
@@ -35,6 +37,7 @@ import type {
   ExtractTagsResult,
   PlanInjectResult,
   ApplyInjectResult,
+  SaveMapAsResult,
   InjectPlanSummary,
   InjectionMode,
   ResourceMapKind,
@@ -300,9 +303,60 @@ export function runPlanInject(task: { requestId: string; containerPath: string; 
   }
 }
 
+/** Shown after every map save: CRC32 and name are now written; the sub-header's tag-file checksum is not. */
+export const TAG_FILE_CHECKSUM_WARNING =
+  'The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.';
+
+/**
+ * The one way a map leaves this worker: `finalizeForSave` (scenario name from the file name,
+ * header CRC32 recomputed), then temp file + rename so a failure never leaves a partial file at
+ * `outputPath`. Used by Inject and File > Save As.
+ */
+function writeFinalizedMap(map: Buffer, outputPath: string, tempPath: string): FinalizeResult {
+  const finalized = finalizeForSave(map, { fileName: path.basename(outputPath) });
+  fs.writeFileSync(tempPath, finalized.buffer);
+  fs.renameSync(tempPath, outputPath);
+  return finalized;
+}
+
+function isOpenMapPath(outputPath: string): boolean {
+  return !!currentMap && path.resolve(outputPath).toLowerCase() === path.resolve(currentMap.filePath).toLowerCase();
+}
+
+function removeTempFile(tempPath: string): void {
+  try {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  } catch {
+    /* best-effort cleanup only */
+  }
+}
+
+export function runSaveMapAs(task: { requestId: string; outputPath: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, 'REFUSED_SOURCE_PATH', 'You cannot overwrite the open map. Choose a different file name.');
+  const tempPath = `${task.outputPath}.tmp-${randomUUID()}`;
+  try {
+    progress(task.requestId, 'Writing map', 40);
+    const finalized = writeFinalizedMap(currentMap.buffer, task.outputPath, tempPath);
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      outputPath: task.outputPath,
+      scenarioName: finalized.scenarioName,
+      crc32: finalized.crc32,
+      warnings: finalized.warnings,
+      staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING,
+    } satisfies SaveMapAsResult);
+  } catch (err) {
+    removeTempFile(tempPath);
+    handleTaskError(task.requestId, err);
+  }
+}
+
 export function runApplyInject(task: { requestId: string; outputPath: string }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   if (!currentInject) return sendError(task.requestId, 'NO_PLAN', 'Run "Inject Tags..." and review the plan before applying it.');
+  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, 'REFUSED_SOURCE_PATH', 'You cannot overwrite the map you are injecting into. Choose a different location.');
   const tempPath = `${task.outputPath}.tmp-${randomUUID()}`;
   try {
     progress(task.requestId, 'Writing tag data', 30);
@@ -310,8 +364,7 @@ export function runApplyInject(task: { requestId: string; outputPath: string }) 
       ? applySwapInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan)
       : applyAddInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan);
     progress(task.requestId, 'Writing output file', 80);
-    fs.writeFileSync(tempPath, injected);
-    fs.renameSync(tempPath, task.outputPath);
+    const finalized = writeFinalizedMap(injected, task.outputPath, tempPath);
     progress(task.requestId, 'Done', 100);
     sendResult(task.requestId, {
       ok: true,
@@ -319,14 +372,13 @@ export function runApplyInject(task: { requestId: string; outputPath: string }) 
       addedCount: currentInject.plan.counts.added,
       reusedCount: currentInject.plan.counts.reused,
       swappedCount: currentInject.plan.counts.swapped,
-      staleChecksumWarning: 'Checksums were not updated. This map may be rejected by some loaders until M6 (export + CRC) is done.',
+      scenarioName: finalized.scenarioName,
+      crc32: finalized.crc32,
+      warnings: finalized.warnings,
+      staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING,
     } satisfies ApplyInjectResult);
   } catch (err) {
-    try {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-    } catch {
-      /* best-effort cleanup only */
-    }
+    removeTempFile(tempPath);
     handleTaskError(task.requestId, err);
   } finally {
     currentInject = null;
@@ -359,6 +411,7 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'extractTags') runExtractTags(task);
     else if (task.type === 'planInject') runPlanInject(task);
     else if (task.type === 'applyInject') runApplyInject(task);
+    else if (task.type === 'saveMapAs') runSaveMapAs(task);
     else if (task.type === 'verifyEmbeddedData') runVerifyEmbeddedData(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
