@@ -17,7 +17,7 @@ needs re-verification / unverified / blocked)
 |---|---|---|
 | M4 extraction (general) | **needs re-verification** | Was "done" before the font/string_list/meter/etc data-dropping bug was found; the bug is now fixed and same-reader-verified (101/101 core Vitest), but no fix this session has been run by the user on Windows/OpenCE yet. See "Windows check" below to move this to verified without a full OpenCE session. |
 | M5 SWAP (tags with NO gbxmodel in their closure) | **loads in OpenCE, user-confirmed (2026-10-11); gameplay check: partial, nothing wrong seen** | The map written by SWAP of `globals\globals` with dependencies into bloodgulch (branch `fix/swap-load-failure`), finalized with scenario name and CRC32, loads in OpenCE. Gameplay (user, on `bg_swap2`): Slayer; fired and reloaded the pistol and assault rifle; HUD shield and health meters drew; text appeared; a warthog spawned and drove. Nothing wrong seen. Not tested: CTF, King of the Hill, other weapons. Maps written by SWAP before this branch are still invalid - re-create them. |
-| M5 ADD (tags with NO gbxmodel in their closure) | **needs re-verification** (until the user loads an ADD map in OpenCE) | Same fixes as SWAP (data-block pointer conversion, alignment, reference path pointers, finalize on save), verified by tests (ADD of ui into bloodgulch: independent tree diff + pointer/alignment audit), not yet loaded in OpenCE. The earlier "data-dropping fixed" covered extraction only (see "Swap load failure" in Decisions). Every map previously written by ADD is invalid - re-create it with the fixed build. |
+| M5 ADD (tags with NO gbxmodel in their closure) | **known broken when the tag array grows; fix in progress** (until the user loads a fixed ADD map in OpenCE) | `bg_add1.map` (ADD of `ui\shell\main_menu\halo_logo` into bloodgulch) blue-screened in OpenCE: ADD lowered the tag array pointer instead of moving the pointers after the array (see "ADD tag-array growth" in Decisions). Fix on branch `fix/add-tag-array-growth`: schema-driven pointer rebase, fixed-base reader, tag space limit; verified by tests (independent: fixed engine base, raw output, shares the schema engine), not yet loaded in OpenCE. The earlier claim "ADD of ui into bloodgulch passes" was wrong in effect: those tests re-parsed with a reader that inferred the base from the same broken pointer (same-reader). Every map ever written by ADD is invalid; this build refuses to open them. |
 | M5 ADD / SWAP (any tag whose closure includes a `gbxmodel`) | **blocked; needs re-verification once unblocked** | `uncapturedData` warning unconditionally blocks these in ADD, and since 2026-10-11 (commit 2ee3c9e) in SWAP too (model geometry not captured at all - see Issue 2/gbxmodel plan below) until that's built and approved. This is intentional, not a regression. The dependency-order P0 that also affected weapons/projectiles/vehicles/bipeds is fixed (see Decisions); re-check once unblocked. |
 | Embedded (external=0) bitmap/sound relocation | **same-reader-verified, NOT approved for the real app** | `embedded-relocation.test.ts`, real coldsnap.map bytes. `allowEmbeddedRelocation` stays off in `map-worker.ts`. |
 | `gbxmodel` model geometry capture/relocation | **Stage 1 (capture) same-reader-verified; Stage 2 (injection) design-verified, NOT built/wired** | `gbxmodel-geometry.test.ts` (100% captured, 0 blocked, bloodgulch+coldsnap), `gbxmodel-combined-insertion-design.test.ts` (field table + 665-part no-patch proof) — see "gbxmodel geometry — Stage 1 capture" below |
@@ -37,6 +37,48 @@ needs re-verification / unverified / blocked)
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: **ADD tag-array growth (branch `fix/add-tag-array-growth`, user-approved fix (1)
+  with conditions).**
+  - **Evidence (user, `bg_add1.map` vs bloodgulch.map):** header correct (scenario name bg_add1,
+    CRC32 0xbcf008cc matches an independent computation); tag count 2455 -> 2457; file +1346
+    bytes, 64 of them the two new entries; path strings start right after the array, so
+    everything after it shifted by 64; original tag data intact and shifted by 64; NO pointer
+    adjusted (2455 path pointers, 1570 internal data pointers unchanged), so every path and
+    every internal pointer was off by 64; the new tags' own pointers also landed 64 bytes early.
+    Reproduced in memory (same 2 tags, same +1346 bytes). One more change the injector made:
+    the tag data header's array pointer was lowered 0x40440028 -> 0x4043FFE8, which the engine
+    reads with its fixed base (64 bytes before the tag data header).
+  - **Cause:** the injector assumed the base is inferred from the array pointer (invader
+    map.cpp:244, a reader's guess) and "re-anchored" by lowering it. The engine's CE base is
+    the fixed 0x40440000. Our own reader inferred the base the same way, so every ADD test
+    passed (same-reader). The PRD claim "ADD ui into bloodgulch passes" was wrong in effect.
+  - **Measured:** array pointer 0x40440028 in all 5 CE maps and both HaloMD retail-layout maps
+    (true demo: 0x4BF10028); path strings start exactly at the array end in all 5 CE maps.
+    Pointers a growth must move in bloodgulch: 2455 tag path + 1569 tag data + 5019 reflexive +
+    1088 data block + 6954 reference path = 17,085. None in `Pointer` fields (model vertex
+    offsets, bitmap 0xFFFFFFFF), none in `nonCached` fields, none in BSP space (`bsp address` is
+    a plain uint32 in BSP memory; sbsp entries' data pointer is 0).
+  - **Non-pointers checked (condition 2):** the 2 coldsnap int32 values that look like tag-data
+    addresses are `GBXModel.node list checksum` 0x409ef03c (plasma rifle and its fp model, same
+    value). All other struct words in the tag-data range are float/Point3D/Plane/Angle/Vector
+    fields, BSP2D/3D child/plane indices (0x408000xx), bitmap pixel offsets, an `unknown_ffffffff`
+    and a node transform flag; none equals a real pointer target except coldsnap floats. Blobs:
+    script syntax data - the 0x64407440 "d@t@" header magic and real-number constants (node
+    type 6, e.g. 5.0 = 0x40a00000); animation frame/default data/frame info and meter stencils -
+    float/RLE data at mostly unaligned offsets; strings, fonts, input defaults - none in range.
+    No blob holds addresses; blobs are copied unchanged.
+  - **Fix:** `core/src/map/pointer-rebase.ts` collects every pointer by walking the tag array and
+    each tag's struct tree (schema-driven, never by scanning) and shifts those in a range;
+    throws `UnwalkableTagError` naming the tag (ADD is then refused). Shared with the
+    converter's Phase 2. ADD grows the array in place, keeps base and array pointer, moves the
+    17,085 pointers by the growth. Reader: fixed base 0x40440000, array pointer must be
+    0x40440028, else `UnexpectedTagArrayAddressError` ("written by an earlier broken ADD,
+    re-create it"); `inferBaseMemoryAddressForClassifier` keeps the guess for the converter only.
+    Tag space: `planInjection` refuses when new tag data (padding included) + largest BSP >
+    23 MiB. Whole-map SWAP of coldsnap into itself needs 29.34 MiB and is now refused.
+  - **Rejected:** fix (2), relocating the array to the end: no sample map has the array anywhere
+    but base + 0x28, our own and Invader's readers assume that position, and it leaves a dead
+    array per ADD; whether the engine follows a moved array pointer is unknown.
 - 2026-10-11: **Roadmap order (user-approved).** Replaces the older ordering in the 2026-10
   converter entry ("M5/M6 work is paused") and the "Upcoming" section.
   1. Fix the swap load failure, including real Save As, scenario-name setting and CRC32
