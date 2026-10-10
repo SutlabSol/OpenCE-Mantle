@@ -97,8 +97,16 @@ export interface ExtractedTagSet {
  * in its group definition (e.g. a BSP-only selection) - there is nothing left to write.
  */
 export class AllTagsExcludedError extends Error {
-  constructor(public readonly notExtracted: NotExtractedTag[]) {
-    super(`Nothing in this selection can be extracted yet: ${notExtracted.map((t) => `"${t.path}" (${t.group})`).join(', ')}.`);
+  constructor(
+    public readonly notExtracted: NotExtractedTag[],
+    /** Selected tags that are external (resource map) entries: never extracted, matched by path in the target instead. */
+    public readonly externalRoots: { path: string; group: string }[] = [],
+  ) {
+    const parts = [
+      ...notExtracted.map((t) => `"${t.path}" (${t.group})`),
+      ...externalRoots.map((t) => `"${t.path}" (${t.group}) is an external tag - its data is in a resource map (bitmaps.map/sounds.map/loc.map), so there is nothing to extract; a tag that uses it is matched by path in the target map`),
+    ];
+    super(`Nothing in this selection can be extracted yet: ${parts.join(', ')}.`);
     this.name = 'AllTagsExcludedError';
   }
 }
@@ -367,7 +375,8 @@ export function extractTagSet(
   }
 
   if (extractableWalked.length === 0) {
-    throw new AllTagsExcludedError(notExtracted);
+    const externalRoots = rootIndices.filter((i) => tagIndex.entries[i]?.isExternal).map((i) => ({ path: tagIndex.entries[i].path, group: tagIndex.entries[i].primaryClassName ?? '?' }));
+    throw new AllTagsExcludedError(notExtracted, externalRoots);
   }
 
   const localIndexByOriginal = new Map<number, number>();
