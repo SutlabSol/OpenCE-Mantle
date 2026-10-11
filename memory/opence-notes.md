@@ -118,6 +118,22 @@ required repairs:
 | barrier_ce (overlap repair) | **loads and plays** |
 | theisland_3_ce | refused at the model part check (unchanged); decided: a blocking checklist row |
 
+Update (user, 2026-10-12, build 185), maps from the current code (Phase 1c alignment + required repairs):
+
+| Map | Result |
+| --- | --- |
+| heh_2_ce | **loads and plays** |
+| crossing_ce | **loads and plays**; logs "64 sound permutations converted", 32 HUD elements, 2 HUD meters, "local machine is loaded & ready to play" |
+| barrier_ce | **loads and plays**; logs "60 sound permutations converted", 42 HUD elements, 2 HUD meters, "local machine is loaded & ready to play" |
+| bg_pc_ce, bg_md_ce (stock control maps) | the same |
+| theisland_3_ce | still refused at the model part check; opt-in repair of the 35 strip indices is a later decision. Its scenery palette entries 14 and 15 name the wrong kinds of tags (a sound, a device_machine); OpenCE blanks them |
+
+- The sound and HUD lines that were missing before Phase 1c are logged now (barrier's 42 HUD elements is
+  the simulated count; crossing's 64 = 60 stock Ogg permutations + 4 energy-sword sounds).
+- **Map sharing:** OpenCE now renames maps in `custom_maps` to hash names, and it loaded a map whose
+  header name differs from its file name. So a converted map's header name need not equal its file name
+  for OpenCE (the tool still sets it from the file name).
+
 ## Known problems on converted maps (user, 2026-10-12; same in debug and release)
 
 Attributions are the user's best judgement without timing each sound: likely, not certain.
