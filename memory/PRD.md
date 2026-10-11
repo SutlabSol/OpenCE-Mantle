@@ -38,8 +38,59 @@ needs re-verification / unverified / blocked)
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
 | Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. **Blue-screens in OpenCE (user, 2026-10-11): heh_2_ce and crossing_ce.** Cause: their bitmap and sound data is external (per asset) in the retail resource files, which CE does not have. A header-only conversion is valid only for maps whose data is all internal. Fix planned as Phase 1b (see "Converter: per-asset external data" in Decisions). |
+| Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: **Converter Phase 1b, Stage 2 (core only, no GUI; user-approved plan and decisions).**
+  - **Built:** `core/src/map/raw-data-region.ts` (`appendToRawDataRegion`: adds bytes at the end of the
+    raw-data region = the model data offset; moves model data + tag data; updates header 0x8 file size,
+    0x10 tag data offset and tag data header +0x14 model data offset). Written to be reused by Inject for
+    embedded relocation. `convert/resource-files.ts` (resource table read by offset through a
+    `RandomAccessFile`; core has no fs). `convert/externalize-in.ts` (schema walk of every tag incl. BSPs
+    for annotated bitmap/sound data fields; range check; packing; patches). `write-map.ts`: the atomic
+    writer moved from the worker into core with injected fs operations, shared by the worker and the
+    developer script.
+  - **Rules as decided:** the range check decides (every external (offset, size) must equal an entry of
+    the supplied file; name and size never trusted; fingerprints in Stage 3 cannot override it). New
+    data at the end of the existing raw region (or the BSP end), no padding, bitmaps then sounds in
+    tag-index order, one copy per reference (CE-built maps never share internal ranges). Patches:
+    BitmapData +0x18 and flags +0x0E (clear 0x100); samples +0x48 and the +0x44 word (bit 0 only). Tag
+    data size, tag data pointers, BSP start and model-data-relative offsets unchanged. Mismatched bitmap
+    sizes are copied by stored size with a warning naming the tags (crossing 1, barrier 2). Names that
+    differ from the resource entry only warn (barrier: `detail metal scratches fix` uses
+    `detail metal sratches_0`).
+  - **New checklist rows:** "Bitmap and sound data is inside the map" (refuse without the files),
+    "The resource files match this map" (range check), "Resource names match the tags", "Bitmap sizes
+    match their format", "Estimated output size", and "Tag data pointer outside the tag data" (warning
+    with explicit acknowledgement; measured: 0 on all 5 CE maps, HaloMD heh_2 / theisland_3 / barrier /
+    bloodgulch / ui / b30 and PC bloodgulch 0, crossing 1 = #2404 `sound\sound environments\arena`).
+    "No tag is marked external" was renamed "No tag entry is marked external (whole tags)".
+  - **Outputs (developer script, HaloMD resource files):** heh_2 70,827,478 bytes, CRC32 0x90103670;
+    theisland_3 105,348,484, 0xC990AADF; crossing 75,214,196, 0x9B38092C (needs
+    --acknowledge-tag-data-outside); barrier 77,338,350, 0x6A0F30B7. Sizes equal the estimates.
+  - **Tests:** `convert-external.real-map.test.ts` (independent: raw offsets + node:zlib, packing computed
+    by the test; mutation-checked), `raw-data-region.test.ts` (synthetic). Changed on purpose: the
+    header-only heh_2 / theisland_3 tests (CRC 0xD1C331E9 / 0x0A5AFEA5) now expect a refusal without
+    resource files; the header-only path is tested with ui.map as v7 with its assets marked internal
+    (core and worker tests).
+  - **Stage 3 (GUI), planned, NOT started (items 10-13 of the user's addition):**
+    10. Source files step in the Convert dialog: lists the resource files the map needs and asks for the
+        folder that contains them (fallback: pick each file). Only that folder is inspected, non-recursive.
+    11. Identify files by content: a data file of fingerprints (file name, size, hash of header + table,
+        optional full hash for a "Verify" button with progress) for PC retail, HaloMD, Mac demo, CE and the
+        xbox/ copies (= CE), built from sample_maps; no game data. The dialog states what it recognised and
+        which sources are compatible; a wrong set says what it is and what the map needs. An unrecognised
+        file is accepted with a warning only if the range check passes. The range check decides when the
+        two disagree. PC and HaloMD bitmaps.map share their table (only the 16 thumbnails differ).
+    12. Settings and privacy: remember a folder per source family in settings.json (main process only;
+        the renderer gets status, never paths), re-validate on use, handle moved or deleted files; Convert
+        blocked while a required file is missing, naming it and the sources that would supply it.
+    13. No bundled game files (recorded in "Converter: per-asset external data" below).
+    Plus: checklist rows in the dialog, estimated size and free disk space, progress and Cancel,
+    dev-mock scenarios, component tests, and the acknowledgement checkbox for the new row.
+  - **Note for later (user, 2026-10-11):** extracting the Yoyorast_Island mongoose is blocked by 3 model
+    geometry blocks and 7 embedded items, so a custom vehicle needs gbxmodel geometry Stage 2 and
+    embedded relocation. The raw-data region writer above is meant to be reused for that relocation.
 - 2026-10-11: **Converter: per-asset external data (finding) and Phase 1b plan. PLANNED, NOT STARTED.**
   - **Finding (user, OpenCE):** heh_2_ce.map and crossing_ce.map blue-screen. Measured with
     `verifyEmbeddedData` (counting only bit 0 of the sound word as external, see the open issue below):
