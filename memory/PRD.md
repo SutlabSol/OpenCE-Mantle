@@ -38,9 +38,38 @@ needs re-verification / unverified / blocked)
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
 | Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. **Blue-screens in OpenCE (user, 2026-10-11): heh_2_ce and crossing_ce.** Cause: their bitmap and sound data is external (per asset) in the retail resource files, which CE does not have. A header-only conversion is valid only for maps whose data is all internal. Fix planned as Phase 1b (see "Converter: per-asset external data" in Decisions). |
-| Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. **Tag data repairs** (see "OpenCE findings and tag data repairs" in Decisions): built, verified by tests (independent byte checks; the output re-check is same-reader); repair rows in the Convert dialog verified in component tests and `?mock=convert-repairs` only; **In progress.** OpenCE build 185 (user, 2026-10-11): **barrier_ce loads and plays** (first converted map confirmed). heh_2 and crossing stopped at the script-data message (unaligned script data, fatal in OpenCE); the repair is now required for them too (sizes and CRCs below), awaiting the user's test. theisland_3 is refused at OpenCE's model part check (one HaloMD model with bad strip indices; open, see "OpenCE results" in Decisions). The converter stays in progress until heh_2, crossing and theisland_3 are confirmed. |
+| Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. **Tag data repairs** (see "OpenCE findings and tag data repairs" in Decisions): built, verified by tests (independent byte checks; the output re-check is same-reader); repair rows in the Convert dialog verified in component tests and `?mock=convert-repairs` only; **In progress.** OpenCE build 185, debug and release (user, 2026-10-12): **heh_2_ce, crossing_ce and barrier_ce load and play.** Known problems on all three: some one-off player/announcer sounds garbled, pixelated HUD ammo icons and a distorted plasma pistol overheat meter (research pending, see 2026-10-12 in Decisions). theisland_3 is refused at OpenCE's model part check (one HaloMD model with bad strip indices); decided: a blocking checklist row (option 1). |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-12: **OpenCE results: heh_2, crossing, barrier play; glitches; theisland_3 model check; roadmap.**
+  Details: `memory/opence-notes.md` ("Results in OpenCE", "Known problems on converted maps").
+  - **User's tests (OpenCE build 185, debug and release builds):** heh_2_ce, crossing_ce and barrier_ce
+    (developer script, HaloMD resource files, required repairs) **load and play**. bgali loads; bgmis
+    blue-screens (unaligned script data is fatal). The overlap repair, the script-data alignment repair
+    and the #2404 struct repair work in game.
+  - **Known problems (same in debug and release; attributions likely, not certain):**
+    1. Sounds: only some one-off player and announcer sounds are garbled (player death; the gametype
+       call-out at match start in heh_2; in barrier probably the game-over announcer; in crossing one
+       sound while firing the plasma pistol, possibly an announcer). Weapon, grenade, ammo and ambient
+       sounds are fine.
+    2. HUD: every weapon's ammo icons are very pixelated and depleted rounds draw wrong; the plasma
+       pistol overheat meter icon is distorted. Total ammo and grenade counts are fine.
+    3. heh_2 logged "build_sprite failed to allocate dynamic vertices" once during play.
+  - **Leads, not conclusions:** bgali's log has "60 sound permutations converted to 1712772 bytes of
+    Xbox ADPCM", "32 HUD elements ... half their scale" and "2 HUD meters"; the converted maps log no
+    sound conversion, 12 HUD elements and 1 meter. Research is Task 2; a control test (stock PC and
+    HaloMD bloodgulch converted) separates conversion effects from the modded maps.
+  - **Decision (user): theisland_3 model, option 1 now.** A checklist row that blocks Convert, naming
+    the model, part and bad indices, using OpenCE's `custom_edition_model_part_verify` rules; it must
+    find 0 on the 5 CE maps and on heh_2, crossing and barrier (they load). Option 2 (an opt-in repair
+    of the 35 indices) stays a later, separate decision.
+  - **Roadmap change (user):** Xbox and MCC conversion are off the active roadmap. Xbox: OpenCE plays
+    Xbox maps natively. MCC: reportedly an OpenCE fork plays Halo CE MCC maps (unverified; OpenCE PR #241
+    adds version 13). Mac full-version maps: optional, later, same path as Phase 1b. **The goal is now
+    Mac Demo conversion (Phase 2, sample_maps/MacDemo).** The Stage 3 fingerprint table needs only PC
+    retail, HaloMD, Mac demo and CE. After Task 2 and the control test: a research-only Phase 2 task that
+    applies Phase 1b's lessons (entry data fields of external sounds, BSP path pointers, script data
+    alignment and overlap, strip index checks, OpenCE's extent validator).
 - 2026-10-11: **OpenCE results, script-data repair for every unaligned map, theisland_3 model problem.**
   Details and citations: `memory/opence-notes.md` (OpenCE build 185 = commit 6399ed9).
   - **User's tests (build 185, debug build):** bgali (CE bloodgulch, script data moved to an aligned
@@ -156,8 +185,8 @@ needs re-verification / unverified / blocked)
     10. Source files step in the Convert dialog: lists the resource files the map needs and asks for the
         folder that contains them (fallback: pick each file). Only that folder is inspected, non-recursive.
     11. Identify files by content: a data file of fingerprints (file name, size, hash of header + table,
-        optional full hash for a "Verify" button with progress) for PC retail, HaloMD, Mac demo, CE and the
-        xbox/ copies (= CE), built from sample_maps; no game data. The dialog states what it recognised and
+        optional full hash for a "Verify" button with progress) for PC retail, HaloMD, Mac demo and CE
+        only (user, 2026-10-12: xbox/ dropped), built from sample_maps; no game data. The dialog states what it recognised and
         which sources are compatible; a wrong set says what it is and what the map needs. An unrecognised
         file is accepted with a warning only if the range check passes. The range check decides when the
         two disagree. PC and HaloMD bitmaps.map share their table (only the 16 thumbnails differ).
@@ -199,9 +228,10 @@ needs re-verification / unverified / blocked)
     b. Phase 2: true demo layout (v6, base 0x4BF10000), e.g. MacDemo/bloodgulch.map, with the MacDemo
        resource files.
     c. Mac full-version maps (folder added later): same path as 1b if resource identity matches.
-    d. Xbox (v5): compressed after the header (header file size is the decompressed size), tag data base
-       0x803A6000, model data inside tag data, Xbox tag formats. Much larger; not planned in detail.
-    e. MCC (CEA, versions 7/13, ipak/FSB, compressed chunks): no maps; OpenCE may load MCC natively. Hold.
+    d. Xbox (v5): REMOVED from the roadmap 2026-10-12 (OpenCE plays Xbox maps natively). Notes kept:
+       compressed after the header, tag data base 0x803A6000, model data inside tag data.
+    e. MCC (CEA, versions 7/13): REMOVED from the roadmap 2026-10-12 (reportedly an OpenCE fork plays
+       them; PR #241 adds version 13; unverified).
     f. barrier and crossing (HaloMD-only): both v7 retail layout with some internal data; part of 1b.
   - **Distribution (user decision 2026-10-11):** the tool never bundles game resource files. Bundling the
     Mac demo (about 162 MB) and HaloMD (about 535 MB) bitmaps/sounds.map was considered and rejected

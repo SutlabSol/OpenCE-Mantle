@@ -108,6 +108,34 @@ found again. Everything below was read at the pinned commit unless marked otherw
 Converter consequence: the script data repair is required for every map whose script data is not
 4-aligned (base + offset), with or without used nodes (converter commit a346a97).
 
+Update (user, 2026-10-12, build 185, **debug and release builds**), maps from commit a346a97 with the
+required repairs:
+
+| Map | Result |
+| --- | --- |
+| heh_2_ce (script data alignment repair) | **loads and plays** |
+| crossing_ce (#2404 struct repair + script data alignment repair) | **loads and plays** |
+| barrier_ce (overlap repair) | **loads and plays** |
+| theisland_3_ce | refused at the model part check (unchanged); decided: a blocking checklist row |
+
+## Known problems on converted maps (user, 2026-10-12; same in debug and release)
+
+Attributions are the user's best judgement without timing each sound: likely, not certain.
+
+1. **Sounds:** only some one-off player and announcer sounds are garbled: the player death sound; the
+   announcer's gametype call-out at match start (heh_2); in barrier something on the first weapon
+   switch or at game end (probably the game-over announcer); in crossing one sound while firing the
+   plasma pistol (possibly an announcer or another one-off event). Weapon, grenade, ammo and ambient
+   sounds are fine.
+2. **HUD:** the ammo icons of every weapon are very pixelated and depleted rounds do not draw
+   correctly; the plasma pistol overheat meter icon is distorted. Total ammo and grenade counts are fine.
+3. **heh_2:** "build_sprite failed to allocate dynamic vertices" logged once (20:29:27) during play.
+
+**Leads, not conclusions:** bgali's log (CE bloodgulch) has "60 sound permutations converted to
+1712772 bytes of Xbox ADPCM", "32 HUD elements ... half their scale" and "2 HUD meters". The converted
+maps log no sound conversion line, 12 HUD elements and 1 meter. To be researched in the code (Task 2),
+then a control test: stock PC/bloodgulch and HaloMD/bloodgulch converted the same way.
+
 ## theisland_3: model part check (code read at 6399ed9; bytes measured read-only)
 
 - `custom_edition_models_convert` (custom_edition_geometry.c): first `model_local_nodes_make` (models of
@@ -132,3 +160,7 @@ Converter consequence: the script data repair is required for every map whose sc
     (garbage triangles, no crash), which is why HaloMD runs the map.
   - Used by: #2573 the same-named garbage object (its model), spawned by
     `vehicles\pelican\effects\pelican explosion` (4 effect parts).
+- **Decision (user, 2026-10-12):** option 1: a checklist row blocks Convert and names the model, part
+  and bad indices, using the same rules as `custom_edition_model_part_verify`; it must find 0 on the 5 CE
+  maps and on heh_2, crossing and barrier. Option 2 (opt-in repair of the 35 indices) is a later,
+  separate decision.
