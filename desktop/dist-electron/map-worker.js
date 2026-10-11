@@ -36732,6 +36732,194 @@ function checkTagDataExtents(buffer, header, tagIndex) {
   };
 }
 
+// ../core/src/map/convert/model-part-check.ts
+var PART = {
+  shaderIndex: 4,
+  previousPart: 6,
+  nextPart: 7,
+  centroidPrimaryNode: 8,
+  centroidSecondaryNode: 10,
+  stripType: 68,
+  stripTriangleCount: 72,
+  stripOffset: 76,
+  vertexType: 84,
+  vertexCount: 88,
+  vertexOffset: 100,
+  localNodeCount: 107,
+  localNodeIndices: 108
+};
+var VERTEX_BYTES = 68;
+var VERTEX_VECTORS = [12, 24, 36];
+var VERTEX_NODES = 56;
+var STRIP_INDEX_BYTES = 2;
+var STRIP_TYPE_PRECOMPILED = 1;
+var VERTEX_TYPE_UNCOMPRESSED = 4;
+var MAXIMUM_LOCAL_NODES = 22;
+var MAXIMUM_VERTICES_PER_BUFFER = 65535;
+var MAXIMUM_NODES_PER_MODEL = 64;
+var RASTERIZER_MAXIMUM_NODES_PER_MODEL = 44;
+var PARTS_HAVE_LOCAL_NODES = 1 << 1;
+var MAXIMUM_COMPRESSIBLE_COMPONENT = Math.fround(1.005);
+var MAX_LISTED_INDICES = 40;
+function blockOf(value) {
+  if (!value || value.kind !== "reflexive") return { count: 0, pointer: 0 };
+  return { count: value.value.count, pointer: value.value.pointerLow };
+}
+var signed8 = (b, at) => b.readInt8(at);
+function checkModelParts(buffer, header, tagIndex) {
+  const geometrySize = resolveStruct("GBXModelGeometry").totalSize;
+  const base = tagIndex.baseMemoryAddress;
+  const modelDataAt = tagIndex.modelDataFileOffset;
+  const indexDataOffset = tagIndex.vertexSize;
+  const indexDataBytes = tagIndex.modelDataSize - indexDataOffset;
+  const problems = [];
+  let modelsChecked = 0;
+  let partsChecked = 0;
+  for (const entry of tagIndex.entries) {
+    if (entry.isExternal || entry.primaryClassName !== "gbxmodel") continue;
+    modelsChecked++;
+    const modelAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, base);
+    const model = decodeStruct(buffer, modelAt, "GBXModel");
+    const flags = buffer.readUInt32LE(modelAt);
+    const nodeCount = blockOf(model.get("nodes")).count;
+    const shaderCount = blockOf(model.get("shaders")).count;
+    const geometries = blockOf(model.get("geometries"));
+    const label = `#${entry.index} ${entry.path}`;
+    const parts = [];
+    const geometriesAt = geometries.count > 0 ? resolvePointer(geometries.pointer, header.tagDataOffset, base) : 0;
+    for (let g = 0; g < geometries.count; g++) {
+      const geometry = decodeStruct(buffer, geometriesAt + g * geometrySize, "GBXModelGeometry");
+      const block = blockOf(geometry.get("parts"));
+      const partsAt = block.count > 0 ? resolvePointer(block.pointer, header.tagDataOffset, base) : 0;
+      for (let p = 0; p < block.count; p++) {
+        const at = partsAt + p * 132;
+        const triangleCount = buffer.readInt32LE(at + PART.stripTriangleCount);
+        const stripOffset = buffer.readUInt32LE(at + PART.stripOffset);
+        const vertexCount = buffer.readInt32LE(at + PART.vertexCount);
+        const vertexOffset = buffer.readUInt32LE(at + PART.vertexOffset);
+        const stripIndexCount = triangleCount + 2;
+        const reasons = [];
+        if (buffer.readInt16LE(at + PART.stripType) !== STRIP_TYPE_PRECOMPILED) reasons.push(`strip type ${buffer.readInt16LE(at + PART.stripType)} (only 1, precompiled strip, loads)`);
+        if (buffer.readInt16LE(at + PART.vertexType) !== VERTEX_TYPE_UNCOMPRESSED) reasons.push(`vertex type ${buffer.readInt16LE(at + PART.vertexType)} (only 4, uncompressed, loads)`);
+        if (buffer[at + PART.localNodeCount] > MAXIMUM_LOCAL_NODES) reasons.push(`${buffer[at + PART.localNodeCount]} local nodes (at most ${MAXIMUM_LOCAL_NODES})`);
+        if (triangleCount < 1 || stripIndexCount * STRIP_INDEX_BYTES > indexDataBytes || stripOffset + stripIndexCount * STRIP_INDEX_BYTES > indexDataBytes) {
+          reasons.push(`strip of ${triangleCount} triangles at index offset ${stripOffset} is not inside the model index data`);
+        } else if ((indexDataOffset + stripOffset) % STRIP_INDEX_BYTES !== 0) reasons.push("strip is not 2-aligned");
+        if (vertexCount < 1 || vertexCount > MAXIMUM_VERTICES_PER_BUFFER || vertexOffset + vertexCount * VERTEX_BYTES > indexDataOffset) {
+          reasons.push(`${vertexCount} vertices at vertex offset ${vertexOffset} are not inside the model vertex data`);
+        } else if (vertexOffset % 4 !== 0) reasons.push("vertices are not 4-aligned");
+        parts.push({
+          geometryIndex: g,
+          partIndex: p,
+          partCount: block.count,
+          at,
+          layoutOk: reasons.length === 0,
+          layoutReasons: reasons,
+          vertexCount,
+          stripIndexCount,
+          vertexAt: modelDataAt + vertexOffset,
+          stripAt: modelDataAt + indexDataOffset + stripOffset
+        });
+      }
+    }
+    partsChecked += parts.length;
+    const partProblem = (part, reasons, bad) => {
+      const shown = bad.slice(0, MAX_LISTED_INDICES).map((b) => `${b.value}@${b.position}`).join(", ");
+      const strip = bad.length > 0 ? [`${bad.length} of ${part.stripIndexCount} strip indices are past its ${part.vertexCount} vertices (value@position: ${shown}${bad.length > MAX_LISTED_INDICES ? ", ..." : ""})`] : [];
+      problems.push({
+        tagIndex: entry.index,
+        tagPath: entry.path,
+        geometryIndex: part.geometryIndex,
+        partIndex: part.partIndex,
+        vertexCount: part.vertexCount,
+        stripIndexCount: part.stripIndexCount,
+        badStripIndices: bad,
+        reasons,
+        text: `${label}: geometry ${part.geometryIndex} part ${part.partIndex}: ${[...reasons, ...strip].join("; ")}`
+      });
+    };
+    const modelProblem = (reason) => {
+      problems.push({ tagIndex: entry.index, tagPath: entry.path, geometryIndex: null, partIndex: null, vertexCount: null, stripIndexCount: null, badStripIndices: [], reasons: [reason], text: `${label}: ${reason}` });
+    };
+    const badLayout = parts.filter((p) => !p.layoutOk);
+    if (badLayout.length > 0) {
+      for (const part of badLayout) partProblem(part, part.layoutReasons, []);
+      continue;
+    }
+    let localNodes = (flags & PARTS_HAVE_LOCAL_NODES) !== 0;
+    let localNodesMade = false;
+    if (nodeCount >= RASTERIZER_MAXIMUM_NODES_PER_MODEL && !localNodes && nodeCount <= MAXIMUM_NODES_PER_MODEL) {
+      localNodesMade = parts.every((part) => {
+        const used = /* @__PURE__ */ new Set();
+        for (let v = 0; v < part.vertexCount; v++) {
+          for (const slot of [0, 1]) {
+            const node = buffer.readInt16LE(part.vertexAt + v * VERTEX_BYTES + VERTEX_NODES + slot * 2);
+            if (node < 0 || node >= nodeCount) return false;
+            used.add(node);
+            if (used.size > MAXIMUM_LOCAL_NODES) return false;
+          }
+        }
+        return true;
+      });
+      localNodes = localNodesMade;
+    }
+    if (nodeCount < 1 || nodeCount > MAXIMUM_NODES_PER_MODEL || nodeCount >= RASTERIZER_MAXIMUM_NODES_PER_MODEL && !localNodes) {
+      modelProblem(`${nodeCount} nodes; OpenCE draws models of 1 to ${RASTERIZER_MAXIMUM_NODES_PER_MODEL - 1} nodes, or up to ${MAXIMUM_NODES_PER_MODEL} whose parts have (or can be given) at most ${MAXIMUM_LOCAL_NODES} local nodes each`);
+      continue;
+    }
+    for (const part of parts) {
+      const at = part.at;
+      const reasons = [];
+      if (shaderCount < 1) reasons.push("the model has no shaders");
+      const primary = buffer.readInt16LE(at + PART.centroidPrimaryNode);
+      const secondary = buffer.readInt16LE(at + PART.centroidSecondaryNode);
+      if (primary < 0 || primary >= nodeCount) reasons.push(`centroid primary node ${primary} (model has ${nodeCount})`);
+      if (secondary < 0 || secondary >= nodeCount) reasons.push(`centroid secondary node ${secondary} (model has ${nodeCount})`);
+      const previous = signed8(buffer, at + PART.previousPart);
+      const next = signed8(buffer, at + PART.nextPart);
+      if (previous < -1 || previous >= part.partCount) reasons.push(`previous part ${previous} (geometry has ${part.partCount})`);
+      if (next < -1 || next >= part.partCount) reasons.push(`next part ${next} (geometry has ${part.partCount})`);
+      const localCount = buffer[at + PART.localNodeCount];
+      let nodeLimit = nodeCount;
+      if (localNodes && !localNodesMade) {
+        nodeLimit = localCount;
+        if (localCount === 0) reasons.push("the model has local nodes but this part has none");
+        for (let n = 0; n < localCount; n++) {
+          const node = buffer[at + PART.localNodeIndices + n];
+          if (node >= nodeCount) reasons.push(`local node ${n} names node ${node} (model has ${nodeCount})`);
+        }
+      }
+      const bad = [];
+      for (let k = 0; k < part.stripIndexCount; k++) {
+        const value = buffer.readUInt16LE(part.stripAt + k * STRIP_INDEX_BYTES);
+        if (value >= part.vertexCount) bad.push({ position: k, value });
+      }
+      let badNodes = 0;
+      let badVectors = 0;
+      for (let v = 0; v < part.vertexCount; v++) {
+        const vertexAt = part.vertexAt + v * VERTEX_BYTES;
+        if (!localNodesMade) {
+          const n0 = buffer.readInt16LE(vertexAt + VERTEX_NODES);
+          const n1 = buffer.readInt16LE(vertexAt + VERTEX_NODES + 2);
+          if (n0 < 0 || n0 >= nodeLimit || n1 < 0 || n1 >= nodeLimit) badNodes++;
+        }
+        let vectorOk = true;
+        for (const vector of VERTEX_VECTORS) {
+          for (let c = 0; c < 3; c++) {
+            const x = buffer.readFloatLE(vertexAt + vector + c * 4);
+            if (!(Math.abs(x) <= MAXIMUM_COMPRESSIBLE_COMPONENT)) vectorOk = false;
+          }
+        }
+        if (!vectorOk) badVectors++;
+      }
+      if (badNodes > 0) reasons.push(`${badNodes} vertices name a node outside [0, ${nodeLimit})`);
+      if (badVectors > 0) reasons.push(`${badVectors} vertices have a normal, binormal or tangent component past ${1.005} (or NaN)`);
+      if (reasons.length > 0 || bad.length > 0) partProblem(part, reasons, bad);
+    }
+  }
+  return { problems, modelsChecked, partsChecked };
+}
+
 // ../core/src/map/convert/tag-data-repairs.ts
 var TagDataRepairError = class extends Error {
   constructor(message) {
@@ -37057,6 +37245,7 @@ function runChecks(buffer, full, resources = {}) {
     if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", "The new CRC32 is computed after the bitmap and sound data is copied in."));
     parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + requiredRepairBytes(header, parsed.repairPlan), report);
   }
+  checks.push(modelPartsCheck(view, header, tagIndex));
   checks.push(scriptCheck(view, header, tagIndex));
   if (full) {
     checks.push(validationCheck(view, header, tagIndex));
@@ -37255,6 +37444,25 @@ function requiredTagsCheck(header, tagIndex) {
 var SCRIPT_NODE_TABLE_HEADER_SIZE = 56;
 var SCRIPT_NODE_FLAG_PRIMITIVE = 1;
 var SCRIPT_NODE_FLAG_SCRIPT_CALL = 2;
+function modelPartsCheck(view, header, tagIndex) {
+  const label = "Models pass OpenCE's part check";
+  let report;
+  try {
+    report = checkModelParts(view, header, tagIndex);
+  } catch (err) {
+    return check("modelParts", label, "refuse", `The models can't be read: ${err.message}`);
+  }
+  const scope = `${report.modelsChecked} models, ${report.partsChecked} parts`;
+  if (report.problems.length === 0) return check("modelParts", label, "pass", `${scope}: every part passes.`);
+  const models = new Set(report.problems.map((p) => p.tagIndex)).size;
+  return check(
+    "modelParts",
+    label,
+    "refuse",
+    `${scope}: ${report.problems.length} part${report.problems.length === 1 ? "" : "s"} of ${models} model${models === 1 ? "" : "s"} fail. OpenCE stops loading a map with such a part ("names a node, vertex, shader or part that does not exist"), so the map is not converted. Repairing them is not supported yet.`,
+    report.problems.map((p) => p.text)
+  );
+}
 function scriptCheck(view, header, tagIndex) {
   const label = "Scripts that may call the wrong function in Custom Edition";
   const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];

@@ -33723,6 +33723,10 @@ var MAX_PATHS_BLOCK = 64 * 1024 * 1024;
 // ../core/src/map/convert/externalize-in.ts
 var MAX_BLOCKS_PER_LIST = 1 << 20;
 
+// ../core/src/map/convert/model-part-check.ts
+var PARTS_HAVE_LOCAL_NODES = 1 << 1;
+var MAXIMUM_COMPRESSIBLE_COMPONENT = Math.fround(1.005);
+
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
