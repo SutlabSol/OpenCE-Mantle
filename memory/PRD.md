@@ -54,7 +54,7 @@ needs re-verification / unverified / blocked)
     reuses `detail metal sratches_0` for `detail metal scratches fix`). MacDemo/ matches 349-355 per map;
     CE's own files about 1. heh_2's 1627 (offset, size) pairs equal stock bloodgulch's for the same tag.
     HaloMD/ and PC/ have identical tables; sounds.map is byte-identical, bitmaps.map differs only in the
-    16 entries `ui\shellitmaps\mp_map_grafix_3..18` (MP map thumbnails), so the table cannot tell them
+    16 entries `ui\shell\bitmaps\mp_map_grafix_3..18` (MP map thumbnails), so the table cannot tell them
     apart and either gives the same game data apart from those thumbnails.
   - **Raw region layout (measured on crossing, barrier, coldsnap, Yoyorast):** internal ranges tile
     `[last BSP end, model data offset)` exactly, back to back, no padding or alignment, absolute file offsets.
