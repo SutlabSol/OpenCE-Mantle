@@ -39,7 +39,10 @@ import type { ExtentReport } from './extent-check';
  * appended bytes. The tag data header is unchanged (nothing in it depends on the tag data size).
  */
 
-export type TagDataRepairId = 'scriptSyntaxData' | 'tagRootOutside';
+/** `alignTagData` is planned and applied by `align-tag-data.ts` (Phase 1c), before the others. */
+export type TagDataRepairId = 'alignTagData' | 'scriptSyntaxData' | 'tagRootOutside';
+/** Every repair id, for code that must accept exactly these (the main process's sanitizer). */
+export const TAG_DATA_REPAIR_IDS: readonly TagDataRepairId[] = ['alignTagData', 'scriptSyntaxData', 'tagRootOutside'];
 
 export interface PlannedTagDataRepair {
   id: TagDataRepairId;
@@ -108,7 +111,7 @@ const padTo = (offset: number) => (ALIGNMENT - (offset % ALIGNMENT)) % ALIGNMENT
 const fmt = (n: number) => n.toLocaleString('en-US');
 
 /** The scenario's structure BSP addresses, lowest first (empty when it has none). */
-function bspAddresses(view: Buffer, header: Pick<CacheFileHeader, 'tagDataOffset'>, tagIndex: TagIndex, scenarioAt: number): number[] {
+export function bspAddresses(view: Buffer, header: Pick<CacheFileHeader, 'tagDataOffset'>, tagIndex: TagIndex, scenarioAt: number): number[] {
   const scenarioStruct = getGroupStructName('scenario')!;
   const bsps = decodeStruct(view, scenarioAt, scenarioStruct).get('structure bsps');
   const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === 'structure bsps');

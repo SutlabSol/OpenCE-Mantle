@@ -337,3 +337,30 @@ against real bytes in the sample maps, not inferred.
   heh_2, crossing, barrier, theisland_3.
 - **Untested path:** no model in those 9 maps has 44 or more nodes, so the local-nodes branch (44-64
   nodes) has no real-data or synthetic test. It follows the code read above, but is unverified.
+
+## Converter Phase 1c: align the tag data (2026-10-12, user-approved plan)
+
+- Cause (OpenCE 6399ed9): `loaded_block_get` (port/linux/game/cache_file_formats.c) reads a block whose
+  offset from the loaded memory (tag cache 0x40440000, or a BSP's address) is not a multiple of 4 as
+  missing; `custom_edition_cache_block_element` uses it. Research and control test: memory/opence-notes.md.
+- `core/src/map/convert/align-tag-data.ts`: `measureBlockAlignment` mirrors that rule (blocks with count
+  > 0, tag data and BSPs; roots and data blocks reported too). `planTagDataAlignment` /
+  `applyTagDataAlignment`: insert (4 - remainder) mod 4 zero bytes at the end of the tag path strings
+  and move every pointer in [insertion point, old tag data end) with `applyPointerShift` (Inject ADD's
+  mechanism). Refused: another unwalkable pointer, mixed remainders, structs before the insertion point,
+  unaligned BSP blocks, tag data not last in the file, past the lowest BSP.
+- **Decision: the stale-pointer tolerance.** `collectTagDataPointers` tolerant mode skips (never moves)
+  exactly two kinds: a reference path pointer outside the tag data, and a tag root outside the tag data
+  (only when a tagRootOutside repair replaces it; the converter checks). The first rule was planned as
+  "non-null tag ID" but theisland_3's second stale pointer is `vehicles\banshee\banshee_mp`
+  weapons[0].weapon, tag ID NONE (stock bloodgulch has a real ID there), path pointer 0x4BF2D0A9 (the
+  demo range); `reference-identity.ts` skips null references, so it was not listed before. The rule is
+  therefore "path pointer outside the tag data", whatever the tag ID: the game follows references by
+  tag ID only. Measured counts (pinned in tests): heh_2 1, theisland_3 2, crossing 1 root, the 5 CE
+  maps, PC / HaloMD bloodgulch, HaloMD b30 / ui and barrier 0.
+- Shift range is end-exclusive (as ADD): crossing #2404's root pointer (= the old tag data end) is not
+  moved; the tagRootOutside repair then replaces it (planned on the aligned layout).
+- Order: import external data, version, alignment, then the other repairs, planned on a privately
+  aligned copy in the pre-flight. After the alignment the script data of heh_2 and crossing is 4-aligned
+  and doesn't overlap, so their script data repair is no longer planned (barrier / theisland_3 still
+  need it: overlap).

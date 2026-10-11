@@ -33,6 +33,20 @@
  * A tag that cannot be walked completely (no definition, an uncertain layout, a pointer outside
  * tag data, a BSP tag whose struct sits in tag data) throws `UnwalkableTagError` naming it.
  * Nothing is skipped silently: a pointer that is missed would point at the wrong bytes.
+ *
+ * Tolerant mode (`CollectOptions.tolerate`, converter Phase 1c only; PRD 2026-10-12): two kinds of
+ * known-bad pointer in HaloMD maps are recorded in `tolerated` instead of throwing, and are not
+ * sites (never moved):
+ *   - `staleReferencePath`: a reference whose path pointer lies outside the tag data (so it names no
+ *     path string): demo-era leftovers, path pointers in the demo's 0x4BF10000 range. Measured:
+ *     heh_2 1 (BSP sound environment palette[0], stale tag ID), theisland_3 2 (scenery palette[14],
+ *     stale tag ID; vehicles\banshee\banshee_mp weapons[0].weapon, tag ID NONE), every other sample
+ *     map 0. The game follows a reference by its tag ID (OpenCE corrects a stale one to NONE), never
+ *     by its path pointer.
+ *   - `rootOutsideTagData`: a tag whose root struct lies (partly) outside the tag data (crossing
+ *     #2404): its entry's path and data pointers are sites, the tag is not walked. The caller must
+ *     check that a tagRootOutside repair replaces it.
+ * Every other unwalkable pointer still throws.
  */
 import { TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file';
 import type { CacheFileHeader } from './header';
@@ -90,6 +104,23 @@ export const EXTERNAL_GROUPS_WITH_BASE_STRUCT: readonly string[] = ['sound'];
  */
 export const EXTERNAL_GROUPS_WITH_RESOURCE_INDEX: readonly string[] = ['bitmap', 'font', 'unicode_string_list', 'hud_message_text'];
 
+/** A pointer the tolerant walk recorded instead of refusing (see the header comment). */
+export interface ToleratedPointer {
+  kind: 'staleReferencePath' | 'rootOutsideTagData';
+  tagIndex: number;
+  /** File offset of the 32-bit pointer. */
+  at: number;
+  value: number;
+  /** Where it is, for the dialog. */
+  where: string;
+}
+
+export interface CollectOptions {
+  tolerate?: { staleReferencePaths?: boolean; rootsOutsideTagData?: boolean };
+  /** Receives every tolerated pointer. */
+  tolerated?: ToleratedPointer[];
+}
+
 export class UnwalkableTagError extends Error {
   constructor(
     public readonly tagIndex: number,
@@ -106,7 +137,7 @@ export class UnwalkableTagError extends Error {
  * Every pointer site in the tag data, in tag order. Reads only; throws `UnwalkableTagError` for
  * the first tag that can't be walked. Sites are unique by `at` (a struct reached twice is walked once).
  */
-export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout): TagDataPointerSite[] {
+export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout, options: CollectOptions = {}): TagDataPointerSite[] {
   const { tagDataOffset, tagDataSize, baseMemoryAddress } = layout;
   const tagDataEnd = tagDataOffset + tagDataSize;
   const fileOf = (pointer: number) => tagDataOffset + ((pointer - baseMemoryAddress) | 0);
@@ -122,6 +153,13 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout): T
     seenSites.add(at);
     sites.push({ kind, at, value: buffer.readUInt32LE(at), tagIndex });
   };
+  const tolerate = (pointer: ToleratedPointer) => {
+    if (seenSites.has(pointer.at)) return;
+    seenSites.add(pointer.at);
+    options.tolerated?.push(pointer);
+  };
+  /** A non-null reference whose path pointer is outside the tag data: stale (tolerated) or unwalkable. */
+  const stalePath = (pathPointer: number) => options.tolerate?.staleReferencePaths === true && !inTagData(pathPointer, 1);
 
   for (const e of layout.entries) {
     const group = e.primaryClassName ?? '(unknown)';
@@ -147,6 +185,12 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout): T
     if (UNCERTAIN_GROUPS.includes(group)) fail('this group has no reliable field layout');
     const rootStruct = e.primaryClassName ? getGroupStructName(e.primaryClassName) : null;
     if (!rootStruct) fail('there is no definition for this group');
+    if (options.tolerate?.rootsOutsideTagData && !inTagData(dataPointer, resolveStruct(rootStruct!).totalSize)) {
+      // Not walked: a tagRootOutside repair replaces the root (the caller checks).
+      options.tolerated?.push({ kind: 'rootOutsideTagData', tagIndex: e.index, at: entryAt + 0x14, value: dataPointer, where: `${e.path} root` });
+      addSite('tagData', entryAt + 0x14, e.index);
+      continue;
+    }
 
     const walk = (structName: string, pointer: number, where: string): void => {
       const size = resolveStruct(structName).totalSize;
@@ -164,6 +208,10 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout): T
         if (value.kind === 'dependency') {
           const pathPointer = value.value.pathPointer >>> 0;
           if (pathPointer === 0) continue;
+          if (stalePath(pathPointer)) {
+            tolerate({ kind: 'staleReferencePath', tagIndex: e.index, at: fieldAt + 4, value: pathPointer, where: fieldWhere });
+            continue;
+          }
           if (!inTagData(pathPointer, 1)) fail(`${fieldWhere} has a path pointer outside the tag data`);
           addSite('referencePath', fieldAt + 4, e.index);
         } else if (value.kind === 'reflexive' && field.def.type === 'TagReflexive') {
@@ -198,7 +246,7 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout): T
     addSite('tagData', entryAt + 0x14, e.index);
     walk(rootStruct!, dataPointer, e.path);
   }
-  collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite);
+  collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, (pathPointer) => stalePath(pathPointer), tolerate);
   return sites;
 }
 
@@ -218,6 +266,8 @@ function collectBspReferencePaths(
   inTagData: (pointer: number, length: number) => boolean,
   fileOf: (pointer: number) => number,
   addSite: (kind: TagDataPointerKind, at: number, tagIndex: number) => void,
+  stalePath: (pathPointer: number) => boolean = () => false,
+  tolerate: (pointer: ToleratedPointer) => void = () => undefined,
 ): void {
   const scenarioStruct = getGroupStructName('scenario');
   const bspStruct = getGroupStructName('scenario_structure_bsp');
@@ -264,6 +314,10 @@ function collectBspReferencePaths(
           if (value.kind === 'dependency') {
             const pathPointer = value.value.pathPointer >>> 0;
             if (pathPointer === 0) continue;
+            if (stalePath(pathPointer)) {
+              tolerate({ kind: 'staleReferencePath', tagIndex: name.index, at: at + field.offset + 4, value: pathPointer, where: `${where}.${field.name}` });
+              continue;
+            }
             if (!inTagData(pathPointer, 1)) fail(`${where}.${field.name} has a path pointer outside the tag data`);
             addSite('bspReferencePath', at + field.offset + 4, name.index);
           } else if (value.kind === 'reflexive' && field.def.type === 'TagReflexive' && value.value.count > 0) {

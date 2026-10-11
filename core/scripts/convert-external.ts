@@ -144,6 +144,8 @@ try {
   console.log(`  Ranges copied:      ${converted.imported?.rangesCopied ?? 0}`);
   console.log(`  Bytes added:        ${(converted.imported?.bytesAdded ?? 0).toLocaleString('en-US')}`);
   console.log(`  Tag data size:      ${out.readUInt32LE(0x14).toLocaleString('en-US')}`);
+  const a = converted.alignment;
+  console.log(`  Tag data aligned:   ${a ? `${a.bytes} byte(s) inserted at tag data +0x${a.insertAt.toString(16).toUpperCase()} (end of the tag names); ${a.pointersMoved.toLocaleString('en-US')} pointers moved; ${a.tolerated} stale pointer(s) left as they were` : 'no (already 4-aligned)'}`);
   console.log(`  Tag data repairs:   ${converted.repairs.length}`);
   for (const r of converted.repairs) {
     const what =

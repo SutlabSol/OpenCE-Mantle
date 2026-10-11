@@ -17,6 +17,8 @@ import type { RandomAccessFile, ResourceKind, ResourceTable } from './resource-f
 import { RawDataAppendCancelledError } from '../raw-data-region';
 import { checkTagDataExtents } from './extent-check';
 import { checkModelParts } from './model-part-check';
+import { applyTagDataAlignment, measureBlockAlignment, planTagDataAlignment } from './align-tag-data';
+import type { TagDataAlignmentPlan } from './align-tag-data';
 import { applyTagDataRepairs, planTagDataRepairs, repairBytesAdded } from './tag-data-repairs';
 import type { AppliedTagDataRepair, TagDataRepairId, TagDataRepairPlan } from './tag-data-repairs';
 
@@ -88,8 +90,10 @@ export type ConversionCheckId =
   | 'injectAfterwards'
   | 'scenarioName'
   | 'tagFileChecksum'
+  | 'tagBlockAlignment'
   | 'tagDataExtents'
   | 'modelParts'
+  | 'repairAlignTagData'
   | 'repairScriptSyntaxData'
   | 'repairTagRootOutside'
   | 'externalData'
@@ -175,6 +179,10 @@ interface ParsedView {
   /** Set when the map has per-asset external data that can be copied in (files supplied and matching). */
   importPlan: ExternalImportPlan | null;
   repairPlan: TagDataRepairPlan | null;
+  /** Phase 1c: set when the map's blocks need aligning (and can be). The other repairs are planned on the aligned layout. */
+  alignment: TagDataAlignmentPlan | null;
+  /** Bytes the required repairs (the alignment included) add. */
+  requiredRepairBytes: number;
 }
 
 /**
@@ -257,7 +265,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     view.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
     const header = parseCacheFileHeader(view);
     const tagIndex = parseTagIndex(view, header);
-    parsed = { header, tagIndex, view, importPlan: null, repairPlan: null };
+    parsed = { header, tagIndex, view, importPlan: null, repairPlan: null, alignment: null, requiredRepairBytes: 0 };
   } catch (err) {
     checks.push(check('regions', 'Tag index can be read', 'refuse', `The tag index can't be read: ${(err as Error).message}`));
     return done(null);
@@ -288,20 +296,23 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     checks.push(check('regions', regionsLabel, 'refuse', (err as Error).message));
   }
 
-  parsed.repairPlan = tagDataChecks(checks, view, header, tagIndex, report);
+  const tagData = tagDataChecks(checks, view, header, tagIndex, report);
+  parsed.repairPlan = tagData.plan;
+  parsed.alignment = tagData.alignment;
+  parsed.requiredRepairBytes = tagData.requiredBytes;
 
   const scan = scanPerAssetData(view, header, tagIndex);
   const counts = countExternal(scan);
   report.externalData = { bitmaps: counts.bitmap, sounds: counts.sound };
   if (counts.bitmap.count + counts.sound.count === 0 && scan.blocked.length === 0) {
-    report.newCrc32 = parsed.repairPlan?.repairs.length ? null : headerOnlyCrc;
-    report.estimatedOutputSize = buffer.length + requiredRepairBytes(header, parsed.repairPlan);
+    report.newCrc32 = parsed.repairPlan?.repairs.length || parsed.alignment ? null : headerOnlyCrc;
+    report.estimatedOutputSize = buffer.length + parsed.requiredRepairBytes;
     if (headerOnlyCrc !== null && report.newCrc32 !== null) checks.push(check('regions', regionsLabel, 'pass', `New CRC32 ${hex(headerOnlyCrc)} (was ${hex(report.previousCrc32)}).`));
     else if (headerOnlyCrc !== null) checks.push(check('regions', regionsLabel, 'pass', 'The new CRC32 is computed after the tag data repairs.'));
     checks.push(check('externalData', 'Bitmap and sound data is inside the map', 'pass', 'No bitmap image or sound permutation keeps its data in a resource file.'));
   } else {
     if (headerOnlyCrc !== null) checks.push(check('regions', regionsLabel, 'pass', 'The new CRC32 is computed after the bitmap and sound data is copied in.'));
-    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + requiredRepairBytes(header, parsed.repairPlan), report);
+    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + parsed.requiredRepairBytes, report);
   }
 
   checks.push(modelPartsCheck(view, header, tagIndex));
@@ -418,12 +429,14 @@ function externalDataChecks(
   return plan;
 }
 
-/** Bytes the required repairs add (the estimate assumes optional repairs stay unticked). */
-function requiredRepairBytes(header: CacheFileHeader, plan: TagDataRepairPlan | null): number {
-  return plan ? repairBytesAdded(header.tagDataSize, plan.repairs.filter((r) => r.required)) : 0;
-}
-
 const REPAIR_ROWS: Record<TagDataRepairId, { id: ConversionCheckId; label: string; required: string; optional: string }> = {
+  alignTagData: {
+    id: 'repairAlignTagData',
+    label: 'Repair: align the tag data',
+    required:
+      "OpenCE needs this repair: it skips every block that is not 4-aligned without a message, so this map's Ogg Vorbis sounds (player deaths, the announcer, the plasma overheat) play as noise and its weapon HUD is drawn twice too large with the wrong meter channels. The repair inserts zero bytes after the tag names and moves every pointer past them, so every tag and block starts 4-aligned, as in Custom Edition maps. Path strings, BSPs and model data don't move. Convert stays off while this is unticked.",
+    optional: '',
+  },
   scriptSyntaxData: {
     id: 'repairScriptSyntaxData',
     label: 'Repair: move the script data to its own block',
@@ -440,36 +453,101 @@ const REPAIR_ROWS: Record<TagDataRepairId, { id: ConversionCheckId; label: strin
   },
 };
 
+const ALIGNMENT_LABEL = 'Tag blocks are 4-aligned (OpenCE skips unaligned blocks)';
+const fmtCounts = (unaligned: number, checked: number) => `${unaligned.toLocaleString('en-US')} of ${checked.toLocaleString('en-US')}`;
+
 /**
- * The tag data block check (what OpenCE's validator refuses: `extent-check.ts`) and a row per
- * repair that fixes a problem (`tag-data-repairs.ts`). A problem no repair covers refuses the map.
- * Measured: 0 problems on all 5 CE sample maps and HaloMD heh_2; theisland_3 / barrier: the
- * script syntax data overlaps other tags; crossing: #2404 sound_environment starts at the tag data end.
- * Every HaloMD map's script data is also 2 mod 4 (a required repair on its own, `tag-data-repairs.ts`).
+ * Phase 1c (`align-tag-data.ts`): the block alignment OpenCE's `loaded_block_get` needs, then the tag
+ * data block check (what OpenCE's validator refuses: `extent-check.ts`) and a row per repair
+ * (`tag-data-repairs.ts`). When the blocks need aligning, the extent check and the other repairs run
+ * on the aligned layout (a private copy), so their addresses are the ones the output will have. A
+ * problem no repair covers refuses the map. Measured: 0 problems and 0 unaligned blocks on all 5 CE
+ * sample maps and stock PC / HaloMD bloodgulch; every HaloMD map's blocks are 2 or 1 mod 4 (one
+ * remainder per map); theisland_3 / barrier: the script syntax data overlaps other tags; crossing:
+ * #2404 sound_environment starts at the tag data end.
  */
-function tagDataChecks(checks: ConversionCheck[], view: Buffer, header: CacheFileHeader, tagIndex: TagIndex, report: RetailConversionReport): TagDataRepairPlan {
-  const extents = checkTagDataExtents(view, header, tagIndex);
-  const plan = planTagDataRepairs(view, header, tagIndex, extents);
+function tagDataChecks(
+  checks: ConversionCheck[],
+  view: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  report: RetailConversionReport,
+): { plan: TagDataRepairPlan; alignment: TagDataAlignmentPlan | null; requiredBytes: number } {
+  const alignment = planTagDataAlignment(view, header, tagIndex);
+  const canAlign = alignment.needed && alignment.problems.length === 0;
+  let laid = { view, header, tagIndex };
+  if (canAlign) {
+    const alignedView = applyTagDataAlignment(view, alignment).buffer;
+    const alignedHeader = parseCacheFileHeader(alignedView);
+    laid = { view: alignedView, header: alignedHeader, tagIndex: parseTagIndex(alignedView, alignedHeader) };
+  }
+  const extents = checkTagDataExtents(laid.view, laid.header, laid.tagIndex);
+  const plan = planTagDataRepairs(laid.view, laid.header, laid.tagIndex, extents);
+
+  // --- alignment row ---
+  const { blocks, bspBlocks, roots, dataBlocks } = alignment.report;
+  // A root the alignment walk skipped (outside the tag data) must be replaced by a tagRootOutside repair.
+  const uncovered = alignment.tolerated
+    .filter((t) => t.kind === 'rootOutsideTagData' && !plan.repairs.some((r) => r.id === 'tagRootOutside' && r.tagIndex === t.tagIndex))
+    .map((t) => `#${t.tagIndex} ${t.where} lies outside the tag data and no repair replaces it, so its blocks can't be aligned.`);
+  const tolerated = alignment.tolerated.map((t) =>
+    t.kind === 'staleReferencePath'
+      ? `${t.where}: path pointer ${hex(t.value)} is outside the tag data (a stale leftover; the game never follows it), left as it is.`
+      : `${t.where}: outside the tag data; replaced by the repair below, not moved.`,
+  );
+  const scope = `${blocks.checked.toLocaleString('en-US')} blocks in the tag data and ${bspBlocks.checked.toLocaleString('en-US')} in the structure BSP(s) checked the way OpenCE reads them`;
+  if (alignment.problems.length > 0 || uncovered.length > 0) {
+    checks.push(check('tagBlockAlignment', ALIGNMENT_LABEL, 'refuse', `${scope}. OpenCE skips unaligned blocks, and this map's can't be aligned here, so the map is not converted.`, [...alignment.problems, ...uncovered]));
+  } else if (!alignment.needed) {
+    checks.push(check('tagBlockAlignment', ALIGNMENT_LABEL, 'pass', `${scope}: every block, tag and data block starts 4-aligned.`));
+  } else {
+    checks.push(
+      check(
+        'tagBlockAlignment',
+        ALIGNMENT_LABEL,
+        'warn',
+        `${scope}: ${fmtCounts(blocks.unaligned, blocks.checked)} tag data blocks (and ${fmtCounts(roots.unaligned, roots.checked)} tags, ${fmtCounts(dataBlocks.unaligned, dataBlocks.checked)} data blocks) start ${alignment.remainder} mod 4. OpenCE skips such blocks without a message (its sound conversion and HUD passes don't run on them). Fixed by the required repair below.`,
+        [...alignment.report.examples.slice(0, 5), ...tolerated],
+      ),
+    );
+    report.repairs.push({ id: 'alignTagData', required: true, tagPath: '(all tags)', bytesAdded: alignment.bytes });
+    const row = REPAIR_ROWS.alignTagData;
+    const moved = Object.values(alignment.pointersToMove).reduce((a, b) => a + b, 0);
+    checks.push(
+      check(
+        'repairAlignTagData',
+        row.label,
+        'warn',
+        `${row.required} Adds ${fmtBytes(alignment.bytes)}.`,
+        [`Inserts ${alignment.bytes} zero byte(s) at ${hex(tagIndex.baseMemoryAddress + alignment.insertAt)} (the end of the tag names) and moves ${moved.toLocaleString('en-US')} pointers past it by ${alignment.bytes}.`],
+        false,
+        { id: 'alignTagData', required: true },
+      ),
+    );
+  }
+
+  // --- block check and the other repairs (on the aligned layout) ---
   const label = "Tag blocks are inside the tag data and don't overlap";
-  const scope = `${extents.blocksChecked.toLocaleString('en-US')} blocks in ${extents.tagsChecked} tags and ${extents.bspsChecked} structure BSP(s) checked the way OpenCE checks them`;
+  const extentScope = `${extents.blocksChecked.toLocaleString('en-US')} blocks in ${extents.tagsChecked} tags and ${extents.bspsChecked} structure BSP(s) checked the way OpenCE checks them`;
   const problems = extents.violations.length;
   if (plan.unrepairable.length > 0) {
     checks.push(
-      check('tagDataExtents', label, 'refuse', `${scope}: ${problems} problem(s). OpenCE refuses this map, and ${plan.unrepairable.length} problem(s) can't be repaired here, so the map is not converted.`, plan.unrepairable),
+      check('tagDataExtents', label, 'refuse', `${extentScope}: ${problems} problem(s). OpenCE refuses this map, and ${plan.unrepairable.length} problem(s) can't be repaired here, so the map is not converted.`, plan.unrepairable),
     );
   } else if (problems === 0) {
-    checks.push(check('tagDataExtents', label, 'pass', `${scope}: no problems.`));
+    checks.push(check('tagDataExtents', label, 'pass', `${extentScope}: no problems.`));
   } else {
-    checks.push(check('tagDataExtents', label, 'warn', `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
+    checks.push(check('tagDataExtents', label, 'warn', `${extentScope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
   }
   plan.repairs.forEach((r, i) => {
     const row = REPAIR_ROWS[r.id];
     // (with the repairs before it applied: each block's padding depends on where the last one ended)
-    const bytes = repairBytesAdded(header.tagDataSize, plan.repairs.slice(0, i + 1)) - repairBytesAdded(header.tagDataSize, plan.repairs.slice(0, i));
+    const bytes = repairBytesAdded(laid.header.tagDataSize, plan.repairs.slice(0, i + 1)) - repairBytesAdded(laid.header.tagDataSize, plan.repairs.slice(0, i));
     report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
     checks.push(check(row.id, row.label, r.required ? 'warn' : 'info', `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
   });
-  return plan;
+  const requiredBytes = (canAlign ? alignment.bytes : 0) + repairBytesAdded(laid.header.tagDataSize, plan.repairs.filter((r) => r.required));
+  return { plan, alignment: canAlign ? alignment : null, requiredBytes };
 }
 
 function validationCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
@@ -665,6 +743,8 @@ export interface RetailConversionResult {
   report: RetailConversionReport;
   /** Set when external bitmap and sound data was copied in. */
   imported: { rangesCopied: number; bytesAdded: number; insertAt: number; warnings: string[] } | null;
+  /** Phase 1c: the bytes inserted after the tag names (offset from the tag data start) and the pointers moved. Applied before `repairs`. */
+  alignment: { insertAt: number; bytes: number; pointersMoved: number; tolerated: number } | null;
   /** Tag data repairs applied, in order. */
   repairs: AppliedTagDataRepair[];
 }
@@ -688,7 +768,11 @@ export function convertRetailToCustomEdition(source: Buffer, options: RetailConv
     throw new ConversionRefusedError(`This map has ${unacknowledged.map((a) => a.text).join(' and ')}. Confirm that you understand this before converting.`, 'ACKNOWLEDGEMENT_REQUIRED');
   }
   const repairPlan = parsed?.repairPlan ?? null;
-  const missingRepairs = (repairPlan?.repairs ?? []).filter((r) => r.required && !options.repairs?.[r.id]);
+  const alignment = parsed?.alignment ?? null;
+  const missingRepairs = [
+    ...(alignment && !options.repairs?.alignTagData ? [{ id: 'alignTagData' as const, tagPath: 'all tags' }] : []),
+    ...(repairPlan?.repairs ?? []).filter((r) => r.required && !options.repairs?.[r.id]),
+  ];
   if (missingRepairs.length > 0) {
     throw new ConversionRefusedError(
       `OpenCE refuses this map without these repairs: ${missingRepairs.map((r) => `${REPAIR_ROWS[r.id].label} (${r.tagPath})`).join('; ')}. Tick them to convert.`,
@@ -712,6 +796,12 @@ export function convertRetailToCustomEdition(source: Buffer, options: RetailConv
   }
   out.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
+  let aligned: RetailConversionResult['alignment'] = null;
+  if (alignment) {
+    const result = applyTagDataAlignment(out, alignment);
+    out = result.buffer;
+    aligned = { insertAt: alignment.insertAt, bytes: alignment.bytes, pointersMoved: result.moved, tolerated: alignment.tolerated.length };
+  }
   let repairs: AppliedTagDataRepair[] = [];
   const chosen = (repairPlan?.repairs ?? []).filter((r) => options.repairs?.[r.id]);
   if (repairPlan && chosen.length > 0) {
@@ -720,7 +810,8 @@ export function convertRetailToCustomEdition(source: Buffer, options: RetailConv
     repairs = applied.applied;
   }
   verifyOutputExtents(out);
-  return { buffer: out, report, imported, repairs };
+  verifyOutputAlignment(out);
+  return { buffer: out, report, imported, alignment: aligned, repairs };
 }
 
 /**
@@ -741,4 +832,21 @@ function verifyOutputExtents(out: Buffer): void {
       `The converted map still has tag data problems OpenCE would refuse, so nothing was written: ${violations.slice(0, 5).join('; ')}${violations.length > 5 ? ` (and ${violations.length - 5} more)` : ''}.`,
     );
   }
+}
+
+/**
+ * OpenCE's `loaded_block_get` alignment rule, run again on the converted map before anything is
+ * written: any unaligned block, tag or data block refuses the conversion. Same-reader (the schema walk).
+ */
+function verifyOutputAlignment(out: Buffer): void {
+  let problem: string | null = null;
+  try {
+    const header = parseCacheFileHeader(out);
+    const r = measureBlockAlignment(out, header, parseTagIndex(out, header));
+    const unaligned = r.blocks.unaligned + r.bspBlocks.unaligned + r.roots.unaligned + r.dataBlocks.unaligned;
+    if (unaligned > 0) problem = `${unaligned} block(s) are not 4-aligned (${r.examples.slice(0, 3).join('; ')})`;
+  } catch (err) {
+    problem = `its blocks can't be walked: ${(err as Error).message}`;
+  }
+  if (problem) throw new ConversionRefusedError(`The converted map would still have blocks OpenCE skips, so nothing was written: ${problem}.`);
 }
