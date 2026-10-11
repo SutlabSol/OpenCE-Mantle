@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { LoadMapResult, TagEntrySummary } from '../electron/shared-types';
+import { isBackupFilePath } from '../electron/map-file-rules';
 import { useOpenceEvents } from './hooks/useOpenceEvents';
 import MenuBar from './components/MenuBar';
 import Toolbar from './components/Toolbar';
@@ -40,6 +41,9 @@ export default function App() {
   const canInject = mapState?.status === 'ok';
   const canVerifyEmbeddedData = mapState?.status === 'ok';
   const canSaveAs = mapState?.status === 'ok';
+  const isModified = mapState?.status === 'ok' && !!mapState.modified;
+  // Save only with unsaved changes, and never for a map opened from a .bak (Save As only).
+  const canSave = isModified && mapState?.status === 'ok' && !isBackupFilePath(mapState.filePath);
   const isWalkOrExtractRunning = extractSelection !== null || largeSelectionConfirm !== null;
 
   const requestExtract = (indices: number[]) => {
@@ -71,9 +75,12 @@ export default function App() {
       setMapState(result);
       resetSelectionState();
     });
+    // Same map, changed in place (Inject applied, saved): refresh the tag list and info panel, keep the selection.
+    const offUpdated = window.opence.onMapUpdated((result) => setMapState(result));
     return () => {
       offMenu();
       offLoaded();
+      offUpdated();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTagIndices, canExtract, isWalkOrExtractRunning]);
@@ -84,11 +91,16 @@ export default function App() {
         e.preventDefault();
         requestExtract(Array.from(selectedTagIndices));
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (e.shiftKey) void handleSaveAs();
+        else void handleSave();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTagIndices, canExtract, isWalkOrExtractRunning]);
+  }, [selectedTagIndices, canExtract, isWalkOrExtractRunning, canSave, canSaveAs]);
 
   useEffect(() => {
     const onDragOver = (e: DragEvent) => e.preventDefault();
@@ -99,6 +111,7 @@ export default function App() {
       const path = window.opence.getPathForFile(file);
       log('info', `Dropped: ${path}`);
       const result = await window.opence.loadMap(path);
+      if (!result) return; // cancelled in the unsaved-changes prompt
       setMapState(result);
       resetSelectionState();
     };
@@ -130,10 +143,24 @@ export default function App() {
     if (result) log('info', `Saved recompressed map to ${result.outputPath}`);
   };
 
-  // Main logs the outcome (map name, CRC32, warnings); the renderer only triggers it.
+  // Main logs the outcome (map name, CRC32, warnings) and sends the updated map; the renderer only triggers it.
+  const handleSave = async () => {
+    if (!canSave) return;
+    await window.opence.saveMap();
+  };
+
   const handleSaveAs = async () => {
     if (!canSaveAs) return;
     await window.opence.saveMapAs();
+  };
+
+  const handleDiscard = async () => {
+    if (!isModified) return;
+    const result = await window.opence.discardChanges();
+    if (result?.ok) {
+      setMapState(result.map);
+      resetSelectionState();
+    }
   };
 
   const notImplemented = (feature: string) => {
@@ -159,7 +186,9 @@ export default function App() {
             label: 'File',
             items: [
               { label: 'Open Map...', onClick: handleOpen },
+              { label: 'Save', onClick: handleSave, disabled: !canSave },
               { label: 'Save As...', onClick: handleSaveAs, disabled: !canSaveAs },
+              { label: 'Discard Changes...', onClick: handleDiscard, disabled: !isModified },
               { label: 'Exit', onClick: () => window.close() },
             ],
           },

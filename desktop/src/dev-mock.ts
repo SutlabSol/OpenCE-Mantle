@@ -1,4 +1,6 @@
 import type {
+  OpenMapSummary,
+  SaveMapResult,
   LoadMapResult,
   OpenceApi,
   ProgressEvent,
@@ -69,6 +71,9 @@ export function installDevMock() {
   const logListeners = new Set<(e: LogEvent) => void>();
   let extractCancelled = false;
   let lastInjectMode: InjectionMode = 'add';
+  /** The mock's "open map", so Inject -> modified -> Save behaves like the real app. */
+  let currentMock: OpenMapSummary | null = null;
+  const updatedListeners = new Set<(m: OpenMapSummary) => void>();
   const mockResourceMapStatuses: Record<ResourceMapKind, ResourceMapStatus> = {
     bitmaps: { state: 'not-configured' },
     sounds: { state: 'not-configured' },
@@ -83,8 +88,16 @@ export function installDevMock() {
   };
 
   const mock: OpenceApi = {
-    openMapDialog: async () => mockLoadResult('C:/HaloCE/maps/bloodgulch.map'),
-    loadMap: async (filePath) => mockLoadResult(filePath),
+    openMapDialog: async () => {
+      const r = mockLoadResult('C:/HaloCE/maps/bloodgulch.map');
+      currentMock = r.status === 'ok' ? r : null;
+      return r;
+    },
+    loadMap: async (filePath) => {
+      const r = mockLoadResult(filePath);
+      currentMock = r.status === 'ok' ? r : null;
+      return r;
+    },
     decompressMap: async (filePath) => {
       await fakeProgress('decompress');
       return { outputPath: filePath.replace('.map', '_decompressed.map'), originalSize: 4_100_000, newSize: 13_936_092 };
@@ -150,24 +163,36 @@ export function installDevMock() {
     applyInject: async (): Promise<ApplyInjectResult> => {
       await fakeProgress('applyInject');
       const plan = buildMockInjectPlan(scenario, 'mock.ocetags', lastInjectMode);
-      return {
-        ok: true,
-        outputPath: 'C:\\HaloCE\\maps\\bloodgulch_injected.map',
-        addedCount: plan.counts.added,
-        reusedCount: plan.counts.reused,
-        swappedCount: plan.counts.swapped,
-        scenarioName: 'bloodgulch_injected',
-        crc32: 0x43d032f3,
-        warnings: [],
-        staleChecksumWarning:
-          'The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.',
-      };
+      const base = currentMock ?? (mockLoadResult('C:/HaloCE/maps/bloodgulch.map') as OpenMapSummary);
+      const added = plan.toAdd.map((t, i) => ({ index: base.tags.length + i, tagId: 0xe000 + base.tags.length + i, primaryClassName: t.group, path: t.path, isExternal: false, estimatedSize: null }));
+      currentMock = { ...base, modified: true, tags: [...base.tags, ...added], header: { ...base.header, tagCount: base.header.tagCount + added.length } };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) Injected in memory: ${plan.counts.added} added, ${plan.counts.swapped} swapped, ${plan.counts.reused} reused. Not saved yet.`, timestamp: Date.now() }));
+      return { ok: true, addedCount: plan.counts.added, reusedCount: plan.counts.reused, swappedCount: plan.counts.swapped, map: currentMock };
+    },
+    saveMap: async (): Promise<SaveMapResult> => {
+      if (!currentMock?.modified) return { ok: false, code: 'NOT_MODIFIED', message: 'There are no unsaved changes.' };
+      await fakeProgress('saveMap');
+      currentMock = { ...currentMock, modified: false };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      const result = { ok: true as const, outputPath: currentMock.filePath, scenarioName: 'bloodgulch', previousScenarioName: 'bloodgulch', crc32: 0x1a2b3c4d, warnings: [], staleChecksumWarning: 'The separate tag-file checksum was not recalculated (mock).', map: currentMock };
+      logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) Saved ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x1a2b3c4d`, timestamp: Date.now() }));
+      return result;
     },
     saveMapAs: async (): Promise<SaveMapAsResult> => {
       await fakeProgress('saveMapAs');
-      const result = { ok: true as const, outputPath: 'C:\\HaloCE\\maps\\bloodgulch_copy.map', scenarioName: 'bloodgulch_copy', crc32: 0x1a2b3c4d, warnings: [], staleChecksumWarning: 'The separate tag-file checksum was not recalculated (mock).' };
-      logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) Saved ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, '0')}`, timestamp: Date.now() }));
+      const map: OpenMapSummary = { ...(currentMock ?? (mockLoadResult('C:/HaloCE/maps/bloodgulch.map') as OpenMapSummary)), filePath: 'C:\\HaloCE\\maps\\bloodgulch_copy.map', modified: false };
+      currentMock = map;
+      updatedListeners.forEach((cb) => cb(map));
+      const result = { ok: true as const, outputPath: map.filePath, scenarioName: 'bloodgulch_copy', previousScenarioName: 'bloodgulch', crc32: 0x1a2b3c4d, warnings: [], staleChecksumWarning: 'The separate tag-file checksum was not recalculated (mock).', map };
+      logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) Saved ${result.outputPath} - map name "${result.scenarioName}" (changed from "bloodgulch" to match the file name), CRC32 0x1a2b3c4d`, timestamp: Date.now() }));
       return result;
+    },
+    discardChanges: async () => {
+      if (!currentMock?.modified) return null;
+      currentMock = mockLoadResult(currentMock.filePath) as OpenMapSummary;
+      logListeners.forEach((cb) => cb({ level: 'info', message: '(mock) Discarded unsaved changes; reopened from disk.', timestamp: Date.now() }));
+      return { ok: true as const, map: currentMock };
     },
     verifyEmbeddedData: async () => {
       await fakeProgress('verifyEmbeddedData');
@@ -183,6 +208,10 @@ export function installDevMock() {
     },
     onMenuAction: () => () => {},
     onMapLoaded: () => () => {},
+    onMapUpdated: (cb) => {
+      updatedListeners.add(cb);
+      return () => updatedListeners.delete(cb);
+    },
     getPathForFile: (file) => (file as unknown as { path?: string }).path ?? file.name,
   };
 

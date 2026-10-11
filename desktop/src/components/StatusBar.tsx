@@ -1,4 +1,5 @@
 import type { LoadMapResult } from '../../electron/shared-types';
+import { isBackupFilePath } from '../../electron/map-file-rules';
 
 export default function StatusBar({ mapState }: { mapState: LoadMapResult | null }) {
   const ok = mapState?.status === 'ok';
@@ -21,6 +22,16 @@ export default function StatusBar({ mapState }: { mapState: LoadMapResult | null
       }}
     >
       <span data-testid="status-bar-path">{path || 'No map open'}</span>
+      {ok && mapState.modified && (
+        <span data-testid="status-bar-modified" title="Injected changes are in memory only. Use File > Save or Save As." style={{ color: 'var(--warn-text)', fontWeight: 600 }}>
+          Modified (not saved)
+        </span>
+      )}
+      {ok && isBackupFilePath(path) && (
+        <span data-testid="status-bar-backup-file" title="Opened from a backup file: File > Save is disabled, use Save As.">
+          Backup file
+        </span>
+      )}
       {ok && (
         <>
           <span data-testid="status-bar-compression">{'Decompressed'}</span>

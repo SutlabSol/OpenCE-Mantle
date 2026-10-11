@@ -15,9 +15,9 @@ interface Props {
  * Milestone 5, Step A + B: ADD and SWAP mode tag injection. User first picks the mode for the
  * whole operation (per-tag choice is Step C's conflict dialog, not built yet), then a `.ocetags`
  * container (never a path typed in, always the native file dialog, in main.ts); this dialog shows
- * the dry-run plan (reused/swapped/added/blocked/external-reference warnings) and only writes
- * anything once confirmed - the actual write goes through the native Save As dialog too (main.ts,
- * never overwrites the open map).
+ * the dry-run plan (reused/swapped/added/blocked/external-reference warnings). Confirming applies
+ * it to the open map IN MEMORY only (the map is then marked modified); nothing is written to disk
+ * until File > Save or File > Save As.
  */
 export default function InjectDialog({ onClose, log }: Props) {
   const [phase, setPhase] = useState<Phase>('choose-mode');
@@ -72,10 +72,8 @@ export default function InjectDialog({ onClose, log }: Props) {
     const res = await window.opence.applyInject();
     setApplyResult(res);
     if (res.ok) {
-      log('info', `Injected ${res.addedCount} tag(s), swapped ${res.swappedCount} (${res.reusedCount} reused) into ${res.outputPath}`);
+      log('info', `Injected ${res.addedCount} tag(s), swapped ${res.swappedCount} (${res.reusedCount} reused) into the open map (in memory, not saved yet).`);
       setPhase('result');
-    } else if (res.code === 'CANCELLED') {
-      setPhase('review');
     } else {
       setErrorMessage(res.message);
       setPhase('apply-error');
@@ -156,7 +154,7 @@ export default function InjectDialog({ onClose, log }: Props) {
       <Overlay>
         <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
           <div data-testid="inject-progress" style={{ padding: 24, textAlign: 'center', color: 'var(--text-secondary)' }}>
-            Writing injected map...
+            Applying to the open map (in memory)...
           </div>
         </DialogShell>
       </Overlay>
@@ -171,22 +169,11 @@ export default function InjectDialog({ onClose, log }: Props) {
             <div style={{ color: 'var(--success-text)', marginBottom: 10, fontSize: 13 }}>
               Injected {applyResult.addedCount} tag(s), swapped {applyResult.swappedCount} ({applyResult.reusedCount} reused, not duplicated).
             </div>
-            <div style={{ fontSize: 12, fontFamily: 'var(--mono-font)', color: 'var(--text-secondary)', wordBreak: 'break-all', marginBottom: 14 }}>{applyResult.outputPath}</div>
-            <div data-testid="inject-result-map-name" style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>
-              Map name set to "{applyResult.scenarioName}", header CRC32 0x{applyResult.crc32.toString(16).padStart(8, '0')}.
-            </div>
-            {applyResult.warnings.map((w) => (
-              <div key={w} data-testid="inject-result-name-warning" style={{ fontSize: 11.5, color: 'var(--warn-text)', marginBottom: 10 }}>
-                {w}
-              </div>
-            ))}
-            <div data-testid="inject-result-crc-warning" style={{ fontSize: 11.5, color: 'var(--warn-text)', marginBottom: 14 }}>
-              {applyResult.staleChecksumWarning}
+            <div data-testid="inject-result-in-memory" style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
+              The open map now has {applyResult.map.header.tagCount.toLocaleString()} tags. Changes are in memory - nothing has been written to disk yet. Use File &gt; Save or File &gt;
+              Save As to write the map.
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button data-testid="inject-result-open-folder" onClick={() => window.opence.openContainingFolder(applyResult.outputPath)} style={buttonStyle()}>
-                Open containing folder
-              </button>
               <button data-testid="inject-result-close" onClick={onClose} style={buttonStyle(true)}>
                 Close
               </button>
@@ -202,7 +189,7 @@ export default function InjectDialog({ onClose, log }: Props) {
       <Overlay>
         <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
           <div data-testid="inject-apply-error" style={{ padding: 20 }}>
-            <div style={{ color: 'var(--error-text)', marginBottom: 10 }}>Injection failed - nothing was written.</div>
+            <div style={{ color: 'var(--error-text)', marginBottom: 10 }}>Injection failed - the open map is unchanged.</div>
             <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', marginBottom: 16 }}>{errorMessage}</div>
             <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
               <button data-testid="inject-apply-error-back" onClick={() => setPhase('review')} style={buttonStyle()}>
@@ -290,7 +277,7 @@ export default function InjectDialog({ onClose, log }: Props) {
               onClick={handleConfirm}
               style={buttonStyle(!confirmDisabledReason)}
             >
-              Choose location and inject
+              Inject into open map
             </button>
           </div>
           {confirmDisabledReason && (
