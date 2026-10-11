@@ -246,3 +246,21 @@ the HaloMD maps' unaligned tag data is the problem. Fix: Phase 1c (PRD), align t
 Expected in OpenCE's log: "60 sound permutations converted ..." (heh_2; crossing and barrier have
 their own counts), "32 HUD elements ... half their scale" (barrier: 42), "2 HUD meters"; clean death,
 announcer and plasma overheat sounds; normal ammo icons and meters.
+
+## Converter Phase 2 findings (code read at 6399ed9, 2026-10-12)
+
+- **Tag entry +0x1C is never read.** The loader defines tag instance offsets 0x00-0x18 only
+  (`TAG_INSTANCE_*_OFFSET`, port/linux/game/cache_file_formats.c l.85-91; +0x18 = in resource map). The
+  C structs (`cache_file_tag_instance`, source/cache/cache_files.c l.163 and menu_tags.c l.140;
+  `tag_validate_instance`, tag_validate.c l.100) call +0x18/+0x1C `unused[2]`; nothing reads `unused`.
+  So the MacDemo protection's dummy tag (+0x1C nonzero) needs no change (PRD decision A).
+- **Scripts are renumbered by name.** `custom_edition_scripts_convert` (port/linux/game/
+  custom_edition_scripts.c), called for every CE map from the load (custom_edition_cache.c l.465-469),
+  looks each call up by its first child's name (`function_call_convert`: the child must be a function
+  name node, `_hs_function_name`, with a readable string) and each engine global by its name
+  (`engine_global_convert`), with the game's own `hs_find_function_by_name` / `hs_find_global_by_name`.
+  A node that names nothing fails the conversion, and with it the load; a name OpenCE lacks is made
+  inert. So a demo map's own function numbers don't matter to OpenCE (the Mac demo numbers 37 of b30's
+  122 functions differently from CE). The node count is `data_array.count` at +0x2E (source/memory/data.h).
+- **Map protection is handled by OpenCE**: it gives a protected scenario's renamed group back
+  (cache_file_formats.c, "Map protection can rename the scenario's group").

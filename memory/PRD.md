@@ -39,8 +39,58 @@ needs re-verification / unverified / blocked)
 
 | Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. **Blue-screens in OpenCE (user, 2026-10-11): heh_2_ce and crossing_ce.** Cause: their bitmap and sound data is external (per asset) in the retail resource files, which CE does not have. A header-only conversion is valid only for maps whose data is all internal. Fix planned as Phase 1b (see "Converter: per-asset external data" in Decisions). |
 | Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. **Tag data repairs** (see "OpenCE findings and tag data repairs" in Decisions): built, verified by tests (independent byte checks; the output re-check is same-reader); repair rows in the Convert dialog verified in component tests and `?mock=convert-repairs` only; **In progress.** OpenCE build 185, debug and release (user, 2026-10-12): **heh_2_ce, crossing_ce and barrier_ce load and play.** The glitches seen before Phase 1c (garbled one-off sounds, HUD) had one cause, unaligned tag blocks; **with Phase 1c (current code) all three load and play and OpenCE's sound conversion and HUD passes run** (user, 2026-10-12; see "Phase 1c confirmed in OpenCE" in Decisions). theisland_3 is refused at OpenCE's model part check (one HaloMD model with bad strip indices); decided: a blocking checklist row (option 1). |
+| Converter Phase 2: Mac demo maps (v6) -> CE 609 | **stage 1 (stock demo bloodgulch) built, verified by tests; unverified in OpenCE; no GUI** | Branch `feat/demo-converter-phase2` (see "Converter Phase 2" in Decisions). Developer script only. Stage 2 (mods) and stage 3 (GUI) not started. |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-12: **Converter Phase 2: Mac demo maps (true demo layout, v6) (user-approved plan, in stages).**
+  Research: `memory/demo-converter.md` "Phase 2 research"; offsets: SOURCES.md "Converter Phase 2".
+  - **Decisions.** A: a tag entry's +0x1C word is not rewritten; OpenCE reads nothing there (cited in
+    SOURCES.md), so +0x1C is an info row naming the tag and only +0x18 stays strict. B: MGM's two
+    alignment remainders (1 and 3 mod 4) are refused for now, with the reason. C: Paranoia's BSP count
+    0xFFFFFFFF is refused, with the reason. D: references whose tag ID matches but whose path pointer
+    differs (map protection) are one grouped line, not a list. E: the demo ui.map is allowed, not targeted.
+    Protected maps get only what loading needs; nothing strips or hides protection.
+  - **Conditions.** 1: the internal name is read from 0x58C up to the first 0 and written zero-padded
+    (tested on the four mods). 2: memory below. 3: the table below. 4: GUI name default (item 14 above).
+  - **Design.** `convert/demo-to-ce.ts` makes a retail-layout copy in memory (standard header from the
+    demo fields; every tag-space pointer moved by -0x0BAD0000 by schema: `collectTagDataPointers` plus the
+    new `collectBspSpacePointers`), then Phase 1 runs unchanged on it. Script row replaced (all maps):
+    it checks what OpenCE needs (every call and engine global names what it uses; OpenCE looks them up by
+    name), no acknowledgement.
+  - **Results** (computed in memory, nothing written; MacDemo's bitmaps.map / sounds.map unless noted):
+
+    | Map | Result | Reason / notes | Output (bytes, CRC32) | External ranges vs MacDemo's files |
+    | --- | --- | --- | --- | --- |
+    | bloodgulch (stock) | converts | every row passes | 70,828,894, 0x981B3317 (as bloodgulch_demo) | 676 + 951, all entries |
+    | bloodgulch-Zombiemod | converts | script data repair (overlap); +0x1C info; 12 junk references (warn) | 118,787,881, 0x9C98E7D0 (as Zombiemod) | 856 + 5,252, all entries |
+    | bloodgulch-TrueInfectionV2 | converts | script data repair (overlap); +0x1C info; 8 junk references | 162,786,612, 0x45689D04 (as TrueInfectionV2) | none (all data internal) |
+    | bloodgulch-MGMWeaponCollab | refused | B: blocks 1 mod 4, its last 12 tags 3 mod 4; and needs files I don't have | - | bitmaps: 2,306 all entries; sounds: 3 of 2,894 are past the end of MacDemo's sounds.map (needs the mod's own sounds.map) |
+    | bloodgulch-ParanoiaV2 | refused | C: BSP `collision bsp[0].bsp2d references` count 0xFFFFFFFF | - | not reached |
+    | ui | converts (measure only) | 1 script, 23 calls, all named | 29,146,822, 0xCBABF9E8 | 450 + 125, all entries |
+    | b30 | converts (measure only) | 85 scripts, 1,451 calls of 122 functions + 1 engine global, all named | 170,964,588, 0x27DD7F80 | 744 + 6,971, all entries |
+
+    CRCs are for the output names shown (the name is not part of the CRC). HaloMD's files fail the range
+    check for every MacDemo map except ui.
+  - **Memory (condition 2), peak RSS of one process, pre-flight + convert + finalize, resource files read by
+    offset:** stock bloodgulch 305 MiB; Zombiemod 494; TrueInfectionV2 (155 MiB source) 765 MiB (its
+    pre-flight alone 611); b30 (largest output, 171 MB) 628 MiB. The retail-layout copy is a **second
+    copy** (the source is never changed); the conversion then works on that copy in place (no third copy)
+    until the copy-in, alignment or repair steps make their new buffers; the pre-flight adds its own
+    read-only copy. Buffers live outside the V8 heap, so the heap limit does not apply; about 5 times the
+    map size is safe on an 8 GB PC but should be reduced (stream the copy-in) before very large maps.
+  - **Stages.** 1 (built, below): core for the stock demo bloodgulch, BSP sites, the script row, the
+    developer script. 2: the mods one by one (Zombiemod, TrueInfection; MGM and Paranoia refuse), ui and
+    b30 measure-only (b30 not in the normal suite). 3: the GUI for retail-layout and demo maps (name prompt,
+    Source files step), after the user confirms stages 1 and 2.
+  - **Stage 1 built (verified by tests; unverified in OpenCE):** `convert/demo-to-ce.ts`,
+    `collectBspSpacePointers`, the script row, the +0x1C info row, the grouped reference line,
+    `core/scripts/convert-external.ts` accepts a demo map. Tests `convert-demo.real-map.test.ts`: raw
+    word-by-word check of the rebase (every changed word moved by exactly -0x0BAD0000; 20,773 in the tag
+    data, 562 in the BSP), every BSP-space word equals PC bloodgulch's, model data equals PC's, the old
+    prototype CRC 0x46B6B108 reproduced, output 70,828,894 B / 0x981B3317 by rawCrc (node:zlib);
+    same-reader: per-kind counts, pre-flight rows, CE reader read-back. Mutation check: skipping the BSP
+    data blocks fails 6 tests. Phase 1 tests changed on purpose: +0x1C is no longer refused; the ui.map
+    script row passes without acknowledgement.
 - 2026-10-12: **Phase 1c confirmed in OpenCE (user, OpenCE build 185).** Details: `memory/opence-notes.md`
   "Results in OpenCE".
   - heh_2, crossing and barrier converted with the current code (Phase 1c alignment plus the required
@@ -253,9 +303,10 @@ needs re-verification / unverified / blocked)
     13. No bundled game files (recorded in "Converter: per-asset external data" below).
     **Additions (user, 2026-10-12; recorded, not built; for retail-layout and Mac Demo maps alike):**
     14. The Convert dialog asks for the converted map's name. Default: the part of the file name after
-        "bloodgulch-" (Mac demo mods are all renamed bloodgulch-<mod>.map with header name bloodgulch),
-        else the file name; at most 31 characters; warn when the name is "bloodgulch" and when it
-        duplicates a map the user already has.
+        "bloodgulch-" (Mac demo mods are all renamed bloodgulch-<mod>.map with header name bloodgulch);
+        for the stock demo bloodgulch.map suggest "bloodgulch_demo" (so it doesn't clash with CE's
+        bloodgulch); else the file name; at most 31 characters; warn when the name is "bloodgulch" and
+        when it duplicates a map the user already has.
     15. Source files step: takes a folder or individual files; defaults to the map's own folder;
         remembers folders per source family; recognises files by content; says which maps each file is
         compatible with; accepts a mod's own bitmaps.map / sounds.map in place of the stock ones when

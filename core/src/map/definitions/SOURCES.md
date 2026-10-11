@@ -364,3 +364,28 @@ against real bytes in the sample maps, not inferred.
   aligned copy in the pre-flight. After the alignment the script data of heh_2 and crossing is 4-aligned
   and doesn't overlap, so their script data repair is no longer planned (barrier / theisland_3 still
   need it: overlap).
+
+## Converter Phase 2: true demo layout (2026-10-12, user-approved plan, stage 1)
+
+- Demo header (measured on all 7 MacDemo maps; memory/demo-converter.md): scenario type u16 0x2, 'Ehed'
+  0x2C0, tag data size 0x2C4, build string 0x2C8, version 0x588 (6), scenario name 0x58C, crc 0x5B0,
+  file size 0x5E8, tag data offset 0x5EC, 'Gfot' 0x5F0. Name and build are read up to the first 0 byte
+  (the MacDemo mods have garbage after it) and written zero-padded. Every other header byte is filler and
+  is not copied. Tag array pointer must be 0x4BF10028; delta to CE -0x0BAD0000.
+- BSP header (all 5 CE maps, PC bloodgulch / b30, HaloMD heh_2 and every MacDemo map): +0x0 the BSP
+  struct's address, +0x4..+0x13 zero, +0x14 'sbsp'. `collectBspSpacePointers` moves +0x0 and refuses a
+  nonzero +0x4..+0x13. Zero-size BSP data blocks whose pointer is outside the BSP (lightmap material
+  "compressed vertices", e.g. 0x0883FA00) are not pointers and stay.
+- **Script node table count: OpenCE's offset, not the schema's.** OpenCE `struct data_array`
+  (source/memory/data.h): maximum count +0x20, size +0x22, valid +0x24, signature +0x28, first free
+  +0x2C, **count +0x2E**. The generated ScenarioScriptNodeTable (Invader) names +0x2E "size" and +0x30
+  "count". The script row and `tag-data-repairs.ts` (DATA_ARRAY_COUNT) use +0x2E. CE ui.map: +0x2E = 83
+  nodes in use (the last used slot is 82); +0x30 = 79. The old script row read +0x30 (it only gated
+  "any calls", so its result did not change).
+- Script node (OpenCE source/hs/hs_scenario_definitions.h, 20 bytes): +0 salt, +2 function index,
+  +4 type (2 = function name), +6 flags (bit 0 primitive, 1 script, 2 global), +8 next, +12 string
+  offset, +16 data (an engine global's designator has bit 15 set in its low 16 bits).
+- Tag entry +0x1C: OpenCE defines tag instance offsets up to +0x18 only (cache_file_formats.c
+  l.85-91); its structs call +0x18/+0x1C `unused[2]` (source/cache/cache_files.c l.163, tag_validate.c
+  l.100, menu_tags.c l.140) and nothing reads `unused`. Decision A: +0x1C is an info row, never refused
+  or rewritten; +0x18 stays strict.
