@@ -5,21 +5,21 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { inspectCustomEditionMap } from '../../../core/src/index';
+import { sampleIn, sampleMapPath, skippableTest } from '../../../core/tests/helpers/sample-maps';
 import { __setCurrentMapForTest, __getCurrentMapForTest, __setSinkForTest, __setMapFsForTest, runInspect, runConvertPreflight, runConvertMap } from '../map-worker';
 
 /**
  * Convert to Custom Edition in the worker, on COPIES of the sample maps in a temp folder (never
- * sample_maps itself). The HaloMD maps are in sample_maps/demo. Byte checks compare the written
+ * sample_maps itself). Sample paths and folders come from the core sample-maps helper. Byte checks compare the written
  * file against the source bytes directly.
  */
-const SAMPLE_MAPS_DIR = process.env.SAMPLE_MAPS_DIR ? path.resolve(process.env.SAMPLE_MAPS_DIR) : path.resolve(__dirname, '../../../sample_maps');
 const gate = (names: string[]) => {
-  const missing = names.filter((n) => !fs.existsSync(path.join(SAMPLE_MAPS_DIR, n)));
-  return { skip: missing.length > 0, suffix: missing.length ? ` [SKIPPED: missing ${missing.join(', ')} in "${SAMPLE_MAPS_DIR}" - set SAMPLE_MAPS_DIR]` : '' };
+  const g = skippableTest(names);
+  return { skip: g.skip, suffix: g.titleSuffix };
 };
-const HEH = gate(['demo/heh_2.map']);
-const ISLAND = gate(['demo/theisland_3.map']);
-const DEMO = gate(['demo/bloodgulch.map']);
+const HEH = gate([sampleIn('haloMD', 'heh_2.map')]);
+const ISLAND = gate([sampleIn('haloMD', 'theisland_3.map')]);
+const DEMO = gate([sampleIn('macDemo', 'bloodgulch.map')]);
 const CE = gate(['bloodgulch.map']);
 
 type Msg = { type: string; requestId?: string; payload?: any; code?: string; message?: string };
@@ -66,7 +66,7 @@ let outDir: string;
 /** Copies a sample map into the temp source folder; returns its path. */
 function copyIn(name: string): string {
   const p = path.join(srcDir, path.basename(name));
-  fs.copyFileSync(path.join(SAMPLE_MAPS_DIR, name), p);
+  fs.copyFileSync(sampleMapPath(name), p);
   return p;
 }
 const statOf = (p: string) => {
@@ -95,14 +95,14 @@ afterEach(() => {
 
 describe('map-worker: opening maps the converter knows', () => {
   it.skipIf(HEH.skip)(`a retail-layout map opens as unsupported with Convert offered; nothing is held${HEH.suffix}`, async () => {
-    const result = await call(runInspect, { filePath: copyIn('demo/heh_2.map') });
+    const result = await call(runInspect, { filePath: copyIn(sampleIn('haloMD', 'heh_2.map')) });
     expect(result).toMatchObject({ status: 'unsupported', layout: 'retail', convertible: true });
     expect(result.message).toMatch(/Convert to Custom Edition/);
     expect(__getCurrentMapForTest()).toBeNull();
   });
 
   it.skipIf(DEMO.skip)(`the original demo layout opens as unsupported (Phase 2), not as "not a Halo map"${DEMO.suffix}`, async () => {
-    const result = await call(runInspect, { filePath: copyIn('demo/bloodgulch.map') });
+    const result = await call(runInspect, { filePath: copyIn(sampleIn('macDemo', 'bloodgulch.map')) });
     expect(result).toMatchObject({ status: 'unsupported', layout: 'demo', convertible: false });
     expect(result.message).toMatch(/not supported yet/);
   });
@@ -110,7 +110,7 @@ describe('map-worker: opening maps the converter knows', () => {
 
 describe('map-worker: Convert to Custom Edition', () => {
   it.skipIf(HEH.skip)(`heh_2: pre-flight, then convert to a new file that becomes the open map; the source is untouched${HEH.suffix}`, async () => {
-    const source = copyIn('demo/heh_2.map');
+    const source = copyIn(sampleIn('haloMD', 'heh_2.map'));
     const sourceBytes = fs.readFileSync(source);
     const sourceStat = statOf(source);
 
@@ -140,7 +140,7 @@ describe('map-worker: Convert to Custom Edition', () => {
   });
 
   it.skipIf(ISLAND.skip)(`theisland_3 under another name: CRC32 0x0A5AFEA5, the name bytes change too${ISLAND.suffix}`, async () => {
-    const source = copyIn('demo/theisland_3.map');
+    const source = copyIn(sampleIn('haloMD', 'theisland_3.map'));
     const sourceBytes = fs.readFileSync(source);
     const output = path.join(outDir, 'island_ce.map');
     const result = await call(runConvertMap, { sourcePath: source, outputPath: output, acknowledgeScripts: false });
@@ -150,7 +150,7 @@ describe('map-worker: Convert to Custom Edition', () => {
   });
 
   it.skipIf(HEH.skip)(`refuses to write over the source map${HEH.suffix}`, async () => {
-    const source = copyIn('demo/heh_2.map');
+    const source = copyIn(sampleIn('haloMD', 'heh_2.map'));
     const before = statOf(source);
     const err = await callError(runConvertMap, { sourcePath: source, outputPath: source.toUpperCase(), acknowledgeScripts: false });
     expect(err.code).toBe('REFUSED_SOURCE_PATH');
@@ -167,7 +167,7 @@ describe('map-worker: Convert to Custom Edition', () => {
   });
 
   it.skipIf(HEH.skip)(`a failed write leaves no output and no temp file, and says the source was not changed${HEH.suffix}`, async () => {
-    const source = copyIn('demo/heh_2.map');
+    const source = copyIn(sampleIn('haloMD', 'heh_2.map'));
     __setMapFsForTest({
       renameSync: () => {
         throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });

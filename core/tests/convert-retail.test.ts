@@ -6,7 +6,7 @@ import { convertRetailToCustomEdition, preflightRetailConversion, ConversionRefu
 import { finalizeForSave } from '../src/map/finalize-map';
 import { inspectCustomEditionMap } from '../src/map/open-map';
 import { resolveStruct } from '../src/map/definitions/engine';
-import { readSampleMap, skippableTest } from './helpers/sample-maps';
+import { readSampleMap, sampleIn, skippableTest } from './helpers/sample-maps';
 
 /**
  * Converter Phase 1 (retail layout, version 7 -> Custom Edition 609).
@@ -14,13 +14,14 @@ import { readSampleMap, skippableTest } from './helpers/sample-maps';
  * Independent checks (`rawCrc`, `differingRanges`, the raw header reads) use only node:zlib and raw
  * byte offsets - none of the converter, finalize, CRC or tag-index code. The only shared piece is a
  * cross-check that the Scenario "structure bsps" offset (0x5A4) agrees with the schema.
- * The HaloMD maps live in sample_maps/demo (never mixed with the CE maps of the same name).
+ * The HaloMD maps and the original Mac demo map live in their own sample folders (see the helper), never
+ * mixed with the CE maps of the same name.
  */
 
 const CE_MAPS = ['bloodgulch.map', 'sidewinder.map', 'coldsnap.map', 'ui.map', 'Yoyorast_Island.map'];
-const HEH = 'demo/heh_2.map';
-const ISLAND = 'demo/theisland_3.map';
-const DEMO_BG = 'demo/bloodgulch.map';
+const HEH = sampleIn('haloMD', 'heh_2.map');
+const ISLAND = sampleIn('haloMD', 'theisland_3.map');
+const DEMO_BG = sampleIn('macDemo', 'bloodgulch.map');
 
 const SCENARIO_STRUCTURE_BSPS = 0x5a4;
 const CE_BASE = 0x40440000;
