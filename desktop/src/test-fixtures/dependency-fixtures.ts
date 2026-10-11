@@ -367,5 +367,5 @@ export function buildMockConvertReport(withScripts: boolean): RetailConversionRe
     check('scenarioName', 'Internal map name', 'info', 'The internal name is "heh_2". It is set from the output file name when the converted map is saved, so the two always match.'),
     check('tagFileChecksum', 'Tag-file checksum left unchanged', 'info', "The tag data header's tag-file checksum (0x5E2AF81E) is kept, as File > Save does."),
   ];
-  return { canConvert: true, requiresAcknowledgement: withScripts, checks, scenarioName: 'heh_2', buildString: '01.00.00.0576', mapType: 1, tagCount: 2410, previousCrc32: 0, newCrc32: 0xd1c331e9 };
+  return { canConvert: true, requiresAcknowledgement: withScripts, checks, scenarioName: 'heh_2', buildString: '01.00.00.0576', mapType: 1, tagCount: 2410, previousCrc32: 0, newCrc32: 0xd1c331e9, externalData: null, estimatedOutputSize: null };
 }

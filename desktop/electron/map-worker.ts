@@ -32,6 +32,8 @@ import {
   ContainerFormatError,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult } from '../../core/src/index';
+import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
+export { describeMapWriteError } from '../../core/src/map/write-map';
 import type {
   LoadMapResult,
   WorkerRequest,
@@ -370,37 +372,13 @@ export const TAG_FILE_CHECKSUM_WARNING =
   'The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.';
 
 /**
- * Plain-language reason a map write failed (no stack trace). Nothing at `targetPath` changed:
- * the temp file is removed by the caller and the rename is the only step that touches it.
- */
-export function describeMapWriteError(err: unknown, targetPath: string, stillOpenNote = 'your changes are still open in the app'): string {
-  const code = (err as NodeJS.ErrnoException)?.code;
-  const name = path.basename(targetPath);
-  const unchanged = `${name} on disk was not changed, and ${stillOpenNote}.`;
-  if (code === 'ENOSPC') return `There is not enough free disk space to save ${name}. ${unchanged} Free some space, or use File > Save As to save to another drive.`;
-  if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES' || code === 'EROFS')
-    return `${name} could not be written: the file is in use by another program (for example OpenCE or Halo), or the file or its folder is read-only. ${unchanged} Close the other program and try again, or use File > Save As.`;
-  if (code === 'ENOENT') return `The folder for ${name} no longer exists. ${unchanged}`;
-  return `Could not save ${name}: ${err instanceof Error ? err.message : String(err)}. ${unchanged}`;
-}
-
-/**
- * The one way a map leaves this worker: `finalizeForSave` (scenario name from the file name,
- * header CRC32 recomputed), then a temp file in the same folder + rename, so a failure never
- * leaves a partial file at `outputPath` and never touches an existing one. Throws a
- * `WRITE_FAILED` error with a plain message (temp file already removed) when writing fails.
+ * The one way a map leaves this worker: core's `writeFinalizedMap` (scenario name from the file
+ * name, header CRC32, temp file in the same folder + rename; shared with the developer convert
+ * script) with this worker's file operations. Throws a `WRITE_FAILED` error with a plain message
+ * (temp file already removed) when writing fails.
  */
 function writeFinalizedMap(map: Buffer, outputPath: string, stillOpenNote?: string): FinalizeResult {
-  const finalized = finalizeForSave(map, { fileName: path.basename(outputPath) });
-  const tempPath = `${outputPath}.tmp-${randomUUID()}`;
-  try {
-    mapFs.writeFileSync(tempPath, finalized.buffer);
-    mapFs.renameSync(tempPath, outputPath);
-  } catch (err) {
-    removeTempFile(tempPath);
-    throw Object.assign(new Error(describeMapWriteError(err, outputPath, stillOpenNote)), { code: 'WRITE_FAILED' });
-  }
-  return finalized;
+  return writeFinalizedMapWith(map, outputPath, { writeFileSync: mapFs.writeFileSync, renameSync: mapFs.renameSync, removeIfExists: removeTempFile }, stillOpenNote);
 }
 
 function isOpenMapPath(outputPath: string): boolean {

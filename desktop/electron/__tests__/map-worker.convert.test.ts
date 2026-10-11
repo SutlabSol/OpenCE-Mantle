@@ -6,6 +6,7 @@ import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { inspectCustomEditionMap } from '../../../core/src/index';
 import { sampleIn, sampleMapPath, skippableTest } from '../../../core/tests/helpers/sample-maps';
+import { rawAssets, rawCrc } from '../../../core/tests/helpers/raw-map';
 import { __setCurrentMapForTest, __getCurrentMapForTest, __setSinkForTest, __setMapFsForTest, runInspect, runConvertPreflight, runConvertMap } from '../map-worker';
 
 /**
@@ -108,46 +109,79 @@ describe('map-worker: opening maps the converter knows', () => {
   });
 });
 
+/**
+ * A retail-layout (v7) map with all bitmap and sound data internal, written into the temp source
+ * folder: ui.map with version 7, the HaloMD build string, and every asset's external bit cleared
+ * (raw bytes, `core/tests/helpers/raw-map.ts`). No real v7 sample map is fully internal, and until
+ * the Source files step (Stage 3) the worker cannot pass resource files, so this is the map the
+ * worker's header-only success and failed-write paths are tested with.
+ */
+function writeInternalRetailUi(name: string): string {
+  const out = Buffer.from(fs.readFileSync(sampleMapPath('ui.map')));
+  for (const a of rawAssets(out)) {
+    if (a.flagWidth === 2) out.writeUInt16LE(a.flagValue & ~0x100, a.flagAt);
+    else out.writeUInt32LE((a.flagValue & ~1) >>> 0, a.flagAt);
+  }
+  out.writeUInt32LE(7, 0x4);
+  out.fill(0, 0x40, 0x60);
+  out.write('01.00.00.0576', 0x40, 'ascii');
+  const p = path.join(srcDir, name);
+  fs.writeFileSync(p, out);
+  return p;
+}
+const UI = gate(['ui.map']);
+
 describe('map-worker: Convert to Custom Edition', () => {
-  it.skipIf(HEH.skip)(`heh_2: pre-flight, then convert to a new file that becomes the open map; the source is untouched${HEH.suffix}`, async () => {
-    const source = copyIn(sampleIn('haloMD', 'heh_2.map'));
+  it.skipIf(UI.skip)(`a v7 map with all data internal: pre-flight, then convert to a new file that becomes the open map; the source is untouched${UI.suffix}`, async () => {
+    const source = writeInternalRetailUi('ui_retail.map');
     const sourceBytes = fs.readFileSync(source);
     const sourceStat = statOf(source);
 
     const pre = await call(runConvertPreflight, { filePath: source });
-    expect(pre).toMatchObject({ ok: true, sourceFileName: 'heh_2.map', report: { canConvert: true, requiresAcknowledgement: false, newCrc32: 0xd1c331e9 } });
+    expect(pre).toMatchObject({ ok: true, sourceFileName: 'ui_retail.map', report: { canConvert: true, externalData: { bitmaps: { count: 0 }, sounds: { count: 0 } } } });
+    const crc = pre.report.newCrc32;
+    expect(crc).toBe(rawCrc(sourceBytes));
 
-    const output = path.join(outDir, 'heh_2.map');
-    const result = await call(runConvertMap, { sourcePath: source, outputPath: output, acknowledgeScripts: false });
-    expect(result).toMatchObject({ ok: true, outputPath: output, scenarioName: 'heh_2', crc32: 0xd1c331e9, previousCrc32: 0 });
+    const output = path.join(outDir, 'ui_retail.map');
+    const result = await call(runConvertMap, { sourcePath: source, outputPath: output, acknowledgeScripts: true });
+    expect(result).toMatchObject({ ok: true, outputPath: output, scenarioName: 'ui_retail', previousScenarioName: 'ui', crc32: crc });
 
     const written = fs.readFileSync(output);
-    expect(differingRanges(sourceBytes, written)).toEqual(['0x4-0x5', '0x4A-0x4C', '0x64-0x67']);
-    expect(written.readUInt32LE(0x64)).toBe(0xd1c331e9);
+    expect(differingRanges(sourceBytes, written)).toEqual(['0x4-0x5', '0x22-0x28', '0x4A-0x4C', '0x64-0x67']);
+    expect(written.readUInt32LE(0x64)).toBe(rawCrc(written));
     expect(inspectCustomEditionMap(written).status).toBe('ok');
 
     // Source never written; no temp files or backups anywhere.
     expect(fs.readFileSync(source).equals(sourceBytes)).toBe(true);
     expect(statOf(source)).toBe(sourceStat);
-    expect(fs.readdirSync(srcDir)).toEqual(['heh_2.map']);
-    expect(fs.readdirSync(outDir)).toEqual(['heh_2.map']);
+    expect(fs.readdirSync(srcDir)).toEqual(['ui_retail.map']);
+    expect(fs.readdirSync(outDir)).toEqual(['ui_retail.map']);
 
     const held = __getCurrentMapForTest()!;
     expect(held.filePath).toBe(output);
     expect(held.modified).toBe(false);
     expect(held.buffer.equals(written)).toBe(true);
-    expect(result.map).toMatchObject({ status: 'ok', filePath: output, modified: false, header: { scenarioName: 'heh_2', buildString: '01.00.00.0609' } });
+    expect(result.map).toMatchObject({ status: 'ok', filePath: output, modified: false, header: { scenarioName: 'ui_retail', buildString: '01.00.00.0609' } });
   });
 
-  it.skipIf(ISLAND.skip)(`theisland_3 under another name: CRC32 0x0A5AFEA5, the name bytes change too${ISLAND.suffix}`, async () => {
-    const source = copyIn(sampleIn('haloMD', 'theisland_3.map'));
-    const sourceBytes = fs.readFileSync(source);
-    const output = path.join(outDir, 'island_ce.map');
-    const result = await call(runConvertMap, { sourcePath: source, outputPath: output, acknowledgeScripts: false });
-    expect(result).toMatchObject({ ok: true, scenarioName: 'island_ce', previousScenarioName: 'theisland_3', crc32: 0x0a5afea5 });
-    expect(differingRanges(sourceBytes, fs.readFileSync(output))).toEqual(['0x4-0x5', '0x20-0x2A', '0x4A-0x4C', '0x64-0x67']);
-    expect(fs.readFileSync(source).equals(sourceBytes)).toBe(true);
-  });
+  for (const [g, file] of [
+    [HEH, 'heh_2.map'],
+    [ISLAND, 'theisland_3.map'],
+  ] as const) {
+    it.skipIf(g.skip)(`${file}: its bitmap and sound data is external, so without resource files it is refused and nothing is written${g.suffix}`, async () => {
+      const source = copyIn(sampleIn('haloMD', file));
+      const before = statOf(source);
+      const pre = await call(runConvertPreflight, { filePath: source });
+      expect(pre.report.canConvert).toBe(false);
+      expect(pre.report.checks.find((k: { id: string }) => k.id === 'externalData')).toMatchObject({ status: 'refuse' });
+      const err = await callError(runConvertMap, { sourcePath: source, outputPath: path.join(outDir, file), acknowledgeScripts: true });
+      expect(err.code).toBe('REFUSED');
+      expect(err.message).toMatch(/source game's bitmaps\.map and sounds\.map/);
+      expect(fs.readdirSync(outDir)).toEqual([]);
+      expect(statOf(source)).toBe(before);
+      expect(__getCurrentMapForTest()).toBeNull();
+    });
+  }
 
   it.skipIf(HEH.skip)(`refuses to write over the source map${HEH.suffix}`, async () => {
     const source = copyIn(sampleIn('haloMD', 'heh_2.map'));
@@ -166,14 +200,14 @@ describe('map-worker: Convert to Custom Edition', () => {
     expect(fs.readdirSync(outDir)).toEqual([]);
   });
 
-  it.skipIf(HEH.skip)(`a failed write leaves no output and no temp file, and says the source was not changed${HEH.suffix}`, async () => {
-    const source = copyIn(sampleIn('haloMD', 'heh_2.map'));
+  it.skipIf(UI.skip)(`a failed write leaves no output and no temp file, and says the source was not changed${UI.suffix}`, async () => {
+    const source = writeInternalRetailUi('ui_retail.map');
     __setMapFsForTest({
       renameSync: () => {
         throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
       },
     });
-    const err = await callError(runConvertMap, { sourcePath: source, outputPath: path.join(outDir, 'heh_2.map'), acknowledgeScripts: false });
+    const err = await callError(runConvertMap, { sourcePath: source, outputPath: path.join(outDir, 'ui_retail.map'), acknowledgeScripts: true });
     expect(err.code).toBe('WRITE_FAILED');
     expect(err.message).toMatch(/source map was not changed/);
     expect(fs.readdirSync(outDir)).toEqual([]);
