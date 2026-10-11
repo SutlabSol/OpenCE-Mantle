@@ -35293,11 +35293,13 @@ function collectTagDataPointers(buffer, layout, options = {}) {
   collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, (pathPointer) => stalePath(pathPointer), tolerate);
   return sites;
 }
+var BSP_HEADER_SIZE = 24;
+var BSP_HEADER_SIGNATURE_OFFSET = 20;
 function basicNumber(decoded, name) {
   const v = decoded.get(name);
   return v?.kind === "basic" && typeof v.value === "number" ? v.value : void 0;
 }
-function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, stalePath = () => false, tolerate = () => void 0) {
+function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, stalePath = () => false, tolerate = () => void 0, bspSpace) {
   const scenarioStruct = getGroupStructName("scenario");
   const bspStruct = getGroupStructName("scenario_structure_bsp");
   if (!scenarioStruct || !bspStruct) return;
@@ -35310,8 +35312,10 @@ function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, st
     if (bsps?.kind !== "reflexive" || bsps.value.count === 0) continue;
     if (!scenarioBspStruct) throw new UnwalkableTagError(scenario.index, scenario.path, "scenario", `"structure bsps" is not a block list in this build's definitions`);
     const elementSize = resolveStruct(scenarioBspStruct).totalSize;
+    const addressField = resolveStruct(scenarioBspStruct).fields.find((f) => f.name === "bsp address");
     for (let b = 0; b < bsps.value.count; b++) {
-      const element = decodeStruct(buffer, fileOf(bsps.value.pointerLow + b * elementSize), scenarioBspStruct);
+      const elementAt = fileOf(bsps.value.pointerLow + b * elementSize);
+      const element = decodeStruct(buffer, elementAt, scenarioBspStruct);
       const ref = element.get("structure bsp");
       const bspEntry = ref?.kind === "dependency" ? layout.entries[ref.value.tagId & 65535] : void 0;
       const name = bspEntry ?? { index: scenario.index, path: `${scenario.path} structure bsps[${b}]` };
@@ -35327,6 +35331,15 @@ function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, st
         const at = bspStart + (pointer - bspAddress | 0);
         return at >= bspStart && at + length <= bspStart + bspSize && at + length <= buffer.length;
       };
+      if (bspSpace) {
+        if (!addressField) fail(`"bsp address" is not in this build's definitions`);
+        bspSpace("bspAddress", elementAt + addressField.offset, name.index);
+        if (bspStart + BSP_HEADER_SIZE > buffer.length) fail("its BSP header is outside the file");
+        for (let w = 4; w < BSP_HEADER_SIGNATURE_OFFSET; w += 4) {
+          if (buffer.readUInt32LE(bspStart + w) !== 0) fail(`its BSP header word at +0x${w.toString(16)} is not 0, and how to move it is not known`);
+        }
+        bspSpace("bspHeader", bspStart, name.index);
+      }
       const visited = /* @__PURE__ */ new Set();
       const walk2 = (structName, pointer, where) => {
         const size = resolveStruct(structName).totalSize;
@@ -35339,6 +35352,23 @@ function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, st
         for (const field of resolveStruct(structName).fields) {
           const value = decoded.get(field.name);
           if (!value || field.def.nonCached) continue;
+          if (bspSpace) {
+            if (value.kind === "reflexive" && field.def.type === "TagReflexive") {
+              const pointer2 = value.value.pointerLow >>> 0;
+              if (pointer2 !== 0 && (value.value.count > 0 || inBsp(pointer2, 1))) bspSpace("bspReflexive", at + field.offset + 4, name.index);
+            } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset) {
+              const pointer2 = value.value.pointerLow >>> 0;
+              if (value.value.size > 0) {
+                if (!inBsp(pointer2, value.value.size)) fail(`${where}.${field.name} (${value.value.size} bytes) is outside the BSP data`);
+                bspSpace("bspDataBlock", at + field.offset + 12, name.index);
+              } else if (pointer2 !== 0 && inBsp(pointer2, 1)) {
+                bspSpace("bspDataBlock", at + field.offset + 12, name.index);
+              }
+            } else if (field.def.type === "Pointer") {
+              const raw = buffer.readUInt32LE(at + field.offset);
+              if (raw !== 0 && raw !== 4294967295 && inBsp(raw, 1)) fail(`${where}.${field.name} is a runtime pointer into the BSP data, which this build doesn't know how to move`);
+            }
+          }
           if (value.kind === "dependency") {
             const pathPointer = value.value.pathPointer >>> 0;
             if (pathPointer === 0) continue;
@@ -36579,7 +36609,7 @@ function importExternalData(source, plan, files, hooks = {}) {
 
 // ../core/src/map/convert/extent-check.ts
 var hex = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
-var BSP_HEADER_SIZE = 24;
+var BSP_HEADER_SIZE2 = 24;
 var NULL_TAG_ID6 = 4294967295;
 var Claims = class {
   constructor(base, size) {
@@ -36728,13 +36758,13 @@ function checkTagDataExtents(buffer, header, tagIndex) {
         const start = num("bsp start");
         const size = num("bsp size");
         const address = num("bsp address");
-        if (start + size > buffer.length || size < BSP_HEADER_SIZE) {
+        if (start + size > buffer.length || size < BSP_HEADER_SIZE2) {
           violations.push({ kind: "outside", region: "bsp", tagIndex: bspTag, tagPath: tagIndex.entries[bspTag]?.path ?? "", group: "scenario_structure_bsp", isRoot: true, field: "structure bsp", fieldName: null, address, size, overlaps: null, text: `${entryName(bspTag)}: the structure BSP (${size} bytes at file offset ${start}) is not inside the file` });
           continue;
         }
         bspsChecked++;
         const bspRegion = { claims: new Claims(address, size), kind: "bsp", fileStart: start };
-        checkBlock(bspRegion, bspTag, "structure bsp header", null, false, address, BSP_HEADER_SIZE);
+        checkBlock(bspRegion, bspTag, "structure bsp header", null, false, address, BSP_HEADER_SIZE2);
         const rootAddress = buffer.readUInt32LE(start);
         if (checkBlock(bspRegion, bspTag, "root", null, true, rootAddress, resolveStruct(bspStruct).totalSize)) walkElement(bspRegion, bspTag, bspStruct, rootAddress, "");
       }
@@ -37335,7 +37365,7 @@ function check(id, label, status, message, details = [], requiresAcknowledgement
   return { id, label, status, message, details: details.slice(0, MAX_DETAILS), requiresAcknowledgement, ...repair ? { repair } : {} };
 }
 var hex4 = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
-function runChecks(buffer, full, resources = {}) {
+function runChecks(buffer, full, resources = {}, origin) {
   const checks = [];
   const report = {
     canConvert: false,
@@ -37367,14 +37397,15 @@ function runChecks(buffer, full, resources = {}) {
     return done(null);
   }
   if (layout.kind === "demo") {
-    checks.push(check("layout", layoutLabel, "refuse", "This is an original Halo demo map (true demo layout, version 6). Converting this layout is not supported yet (Phase 2)."));
+    checks.push(check("layout", layoutLabel, "refuse", "This is an original Halo demo map (true demo layout, version 6). It is converted by the demo converter (Phase 2, `demo-to-ce.ts`), not as a retail-layout map."));
     return done(null);
   }
   if (layout.kind !== "retail") {
     checks.push(check("layout", layoutLabel, "refuse", layout.kind === "otherVersion" ? `Cache version ${layout.version} can't be converted; only version 7 (retail layout) can.` : "This does not look like a Halo map file."));
     return done(null);
   }
-  checks.push(check("layout", layoutLabel, "pass", "Standard header, cache version 7."));
+  if (origin) checks.push(...origin.rows);
+  else checks.push(check("layout", layoutLabel, "pass", "Standard header, cache version 7."));
   report.scenarioName = readFixedString(buffer, 32, TAG_STRING_SIZE);
   report.buildString = readFixedString(buffer, BUILD_STRING_OFFSET, TAG_STRING_SIZE);
   report.mapType = buffer.readUInt16LE(96);
@@ -37410,15 +37441,28 @@ function runChecks(buffer, full, resources = {}) {
   report.tagCount = tagIndex.tagCount;
   const arrayAt = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
   const flagged = [];
+  const unusedWord = [];
   for (const e of tagIndex.entries) {
     const at = arrayAt + e.index * TAG_ENTRY_SIZE;
     const w18 = buffer.readUInt32LE(at + 24);
     const w1c = buffer.readUInt32LE(at + 28);
-    if (w18 !== 0 || w1c !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex4(w18)}, +0x1C = ${hex4(w1c)}`);
+    if (w18 !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex4(w18)}`);
+    if (w1c !== 0) unusedWord.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x1C = ${hex4(w1c)}`);
   }
   checks.push(
-    flagged.length === 0 ? check("entryFlags", "No tag entry is marked external (whole tags)", "pass", `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`) : check("entryFlags", "No tag entry is marked external (whole tags)", "refuse", `${flagged.length} tag entr${flagged.length === 1 ? "y has" : "ies have"} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged)
+    flagged.length === 0 ? check("entryFlags", "No tag entry is marked external (whole tags)", "pass", `All ${tagIndex.tagCount} tag entries have 0 at +0x18, so every tag is inside the map.`) : check("entryFlags", "No tag entry is marked external (whole tags)", "refuse", `${flagged.length} tag entr${flagged.length === 1 ? "y has" : "ies have"} a nonzero word at +0x18. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged)
   );
+  if (unusedWord.length > 0) {
+    checks.push(
+      check(
+        "entryUnusedWord",
+        "Tag entries with a value in their unused word (+0x1C)",
+        "info",
+        `${unusedWord.length} tag entr${unusedWord.length === 1 ? "y has" : "ies have"} a nonzero word at +0x1C, which Custom Edition maps leave 0. OpenCE never reads this word, so it is left as it is.`,
+        unusedWord
+      )
+    );
+  }
   const regionsLabel = "BSP, model data and tag data are inside the file";
   let headerOnlyCrc = null;
   try {
@@ -37670,12 +37714,16 @@ function referenceIdentityCheck(view, header, tagIndex) {
   const issues = findReferenceIdentityIssues(view, header, tagIndex);
   const label = "Tag references carry their tag's exact ID and path pointer";
   if (issues.length === 0) return check("referenceIdentity", label, "pass", "Every non-null reference matches its tag entry.");
+  const wrongId = issues.filter((i) => i.tagId !== i.entryTagId);
+  const pathOnly = issues.length - wrongId.length;
+  const pathOnlyLine = `${pathOnly.toLocaleString("en-US")} reference${pathOnly === 1 ? "" : "s"} name${pathOnly === 1 ? "s" : ""} the right tag ID but keep${pathOnly === 1 ? "s" : ""} another path pointer than the tag's entry (for example after map protection renamed the tags). The game follows tag IDs, never these path pointers; they are left as they are.`;
+  if (wrongId.length === 0) return check("referenceIdentity", label, "info", pathOnlyLine);
   return check(
     "referenceIdentity",
     label,
     "warn",
-    `${issues.length} reference${issues.length === 1 ? "" : "s"} point${issues.length === 1 ? "s" : ""} at a tag with an outdated tag ID or path pointer, most likely left over from the demo version of this map. The Custom Edition sample maps have none of these. They are converted unchanged. If the converted map crashes, or scenery or sounds are missing in OpenCE, check these first.`,
-    issues.map((i) => `${i.context}: tag ID ${hex4(i.tagId)} (tag entry ${i.entryTagId === null ? "missing" : hex4(i.entryTagId)}), path pointer ${hex4(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? "missing" : hex4(i.entryPathPointer)})`)
+    `${wrongId.length} reference${wrongId.length === 1 ? "" : "s"} point${wrongId.length === 1 ? "s" : ""} at a tag with an outdated tag ID, most likely left over from the demo version of this map. The Custom Edition sample maps have none of these. They are converted unchanged (OpenCE sets such a reference to none). If the converted map crashes, or scenery or sounds are missing in OpenCE, check these first.` + (pathOnly > 0 ? ` Also: ${pathOnlyLine}` : ""),
+    wrongId.map((i) => `${i.context}: tag ID ${hex4(i.tagId)} (tag entry ${i.entryTagId === null ? "missing" : hex4(i.entryTagId)}), path pointer ${hex4(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? "missing" : hex4(i.entryPathPointer)})`)
   );
 }
 function requiredTagsCheck(header, tagIndex) {
@@ -37688,9 +37736,6 @@ function requiredTagsCheck(header, tagIndex) {
   if (missing.length === 0) return check("requiredTags", label, "pass", `All ${CE_REQUIRED_TAGS.length + 1} required tags are in the map.`);
   return check("requiredTags", label, "warn", `${missing.length} required tag${missing.length === 1 ? " is" : "s are"} missing. The game may refuse to load the map. Nothing is added.`, missing);
 }
-var SCRIPT_NODE_TABLE_HEADER_SIZE = 56;
-var SCRIPT_NODE_FLAG_PRIMITIVE = 1;
-var SCRIPT_NODE_FLAG_SCRIPT_CALL = 2;
 function modelPartsCheck(view, header, tagIndex) {
   const label = "Models pass OpenCE's part check";
   let report;
@@ -37710,16 +37755,22 @@ function modelPartsCheck(view, header, tagIndex) {
     report.problems.map((p) => p.text)
   );
 }
+var SCRIPT_NODE_TABLE_HEADER_SIZE = DATA_ARRAY_HEADER_SIZE;
+var SCRIPT_NODE_FLAG_PRIMITIVE = 1;
+var SCRIPT_NODE_FLAG_SCRIPT_CALL = 2;
+var SCRIPT_NODE_FLAG_GLOBAL = 4;
+var SCRIPT_NODE_TYPE_FUNCTION_NAME = 2;
+var SCRIPT_ENGINE_GLOBAL_BIT = 32768;
 function scriptCheck(view, header, tagIndex) {
-  const label = "Scripts that may call the wrong function in Custom Edition";
+  const label = "Script calls name their functions (OpenCE looks them up by name)";
   const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
   const scenarioStruct = getGroupStructName("scenario");
   if (!scenario || scenario.isExternal || scenario.primaryClassName !== "scenario") {
-    return check("scripts", label, "warn", "The scenario tag could not be found, so its scripts were not checked. Function numbering differs between demo and Custom Edition for some functions.", [], true);
+    return check("scripts", label, "refuse", "The scenario tag could not be found, so its scripts can't be checked.");
   }
   const at = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
   if (!isRangeInBuffer(at, resolveStruct(scenarioStruct).totalSize, view.length)) {
-    return check("scripts", label, "warn", "The scenario tag is outside the file, so its scripts were not checked.", [], true);
+    return check("scripts", label, "refuse", "The scenario tag is outside the file, so its scripts can't be checked.");
   }
   const decoded = decodeStruct(view, at, scenarioStruct);
   const count2 = (name) => {
@@ -37728,40 +37779,72 @@ function scriptCheck(view, header, tagIndex) {
   };
   const scripts = count2("scripts");
   const globals = count2("globals");
-  if (scripts === 0 && globals === 0) return check("scripts", label, "pass", "The scenario has no scripts and no script globals, so no script function numbers are involved.");
   const syntax = decoded.get("script syntax data");
-  const unreadable = () => check("scripts", label, "warn", `The scenario has ${scripts} script(s) and ${globals} global(s), but its script node table could not be read. Some script functions are numbered differently in demo and Custom Edition; nothing is remapped.`, [], true);
-  if (syntax?.kind !== "tagDataOffset" || syntax.value.size < SCRIPT_NODE_TABLE_HEADER_SIZE) return unreadable();
+  if (syntax?.kind !== "tagDataOffset" || syntax.value.size === 0) {
+    return check("scripts", label, "pass", `The scenario has no script data (${scripts} script(s), ${globals} global(s)), so there is nothing to look up.`);
+  }
+  const unreadable = (why) => check("scripts", label, "refuse", `The scenario's script data can't be read the way OpenCE reads it (${why}). OpenCE refuses to load a map whose scripts it can't convert, so the map is not converted.`);
   const tableAt = resolvePointer(syntax.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
-  if (!isRangeInBuffer(tableAt, syntax.value.size, view.length)) return unreadable();
-  const table = decodeStruct(view, tableAt, "ScenarioScriptNodeTable");
-  const num = (name) => {
-    const v = table.get(name);
-    return v?.kind === "basic" ? Number(v.value) : -1;
+  if (syntax.value.size < SCRIPT_NODE_TABLE_HEADER_SIZE || !isRangeInBuffer(tableAt, syntax.value.size, view.length)) return unreadable("the node table is outside the file");
+  const maximum = view.readInt16LE(tableAt + DATA_ARRAY_MAXIMUM_COUNT);
+  const elementSize = view.readInt16LE(tableAt + DATA_ARRAY_ELEMENT_SIZE);
+  const used = view.readInt16LE(tableAt + DATA_ARRAY_COUNT);
+  if (elementSize !== SCRIPT_NODE_SIZE) return unreadable(`its node size is ${elementSize}, not ${SCRIPT_NODE_SIZE}`);
+  if (used < 0 || maximum < 0 || used > maximum) return unreadable(`${used} nodes in use of ${maximum}`);
+  if (SCRIPT_NODE_TABLE_HEADER_SIZE + maximum * SCRIPT_NODE_SIZE > syntax.value.size) return unreadable(`${maximum} nodes don't fit in its ${syntax.value.size} bytes`);
+  const strings = decoded.get("script string data");
+  let stringsAt = -1;
+  let stringBytes = 0;
+  if (strings?.kind === "tagDataOffset" && strings.value.size > 0) {
+    stringsAt = resolvePointer(strings.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    stringBytes = isRangeInBuffer(stringsAt, strings.value.size, view.length) ? strings.value.size : 0;
+  }
+  const nameAt = (offset) => {
+    if (offset < 0 || offset >= stringBytes) return null;
+    const end = view.indexOf(0, stringsAt + offset);
+    return end >= 0 && end < stringsAt + stringBytes ? view.toString("latin1", stringsAt + offset, end) : null;
   };
-  const maximum = num("maximum count");
-  const elementSize = num("element size");
-  if (maximum < 0 || elementSize < 8 || SCRIPT_NODE_TABLE_HEADER_SIZE + maximum * elementSize > syntax.value.size) return unreadable();
-  const functionIndices = /* @__PURE__ */ new Map();
-  if (num("count") > 0) {
-    for (let i = 0; i < maximum; i++) {
-      const node = tableAt + SCRIPT_NODE_TABLE_HEADER_SIZE + i * elementSize;
-      if (view.readUInt16LE(node) === 0) continue;
-      const flags = view.readUInt16LE(node + 6);
-      if (flags & (SCRIPT_NODE_FLAG_PRIMITIVE | SCRIPT_NODE_FLAG_SCRIPT_CALL)) continue;
-      const index = view.readUInt16LE(node + 2);
-      functionIndices.set(index, (functionIndices.get(index) ?? 0) + 1);
+  const node = (i) => tableAt + SCRIPT_NODE_TABLE_HEADER_SIZE + i * SCRIPT_NODE_SIZE;
+  const functions = /* @__PURE__ */ new Map();
+  let calls = 0;
+  let engineGlobals = 0;
+  const problems = [];
+  for (let i = 0; i < used; i++) {
+    const n = node(i);
+    if (view.readUInt16LE(n) === 0) continue;
+    const flags = view.readUInt16LE(n + 6);
+    if (!(flags & (SCRIPT_NODE_FLAG_PRIMITIVE | SCRIPT_NODE_FLAG_SCRIPT_CALL))) {
+      const child = view.readUInt32LE(n + 16) & 65535;
+      const called = child < used && view.readInt16LE(node(child) + 4) === SCRIPT_NODE_TYPE_FUNCTION_NAME ? nameAt(view.readInt32LE(node(child) + 12)) : null;
+      if (called === null) {
+        problems.push(`script node ${i}: a function call whose first child (node ${child}) is not a function name with a readable name`);
+      } else {
+        calls++;
+        functions.set(called, (functions.get(called) ?? 0) + 1);
+      }
+    } else if (flags & SCRIPT_NODE_FLAG_PRIMITIVE && flags & SCRIPT_NODE_FLAG_GLOBAL && view.readUInt16LE(n + 16) & SCRIPT_ENGINE_GLOBAL_BIT) {
+      if (nameAt(view.readInt32LE(n + 12)) === null) problems.push(`script node ${i}: an engine global reference without a readable name`);
+      else engineGlobals++;
     }
   }
-  const calls = [...functionIndices.values()].reduce((a, b) => a + b, 0);
-  if (calls === 0) return check("scripts", label, "pass", `The scenario has ${scripts} script(s) and ${globals} global(s), with no function calls.`);
+  if (problems.length > 0) {
+    return check(
+      "scripts",
+      label,
+      "refuse",
+      `${problems.length} script node(s) don't name what they use. OpenCE looks every call and engine global up by its name and refuses to load the map when one has none, so the map is not converted.`,
+      problems
+    );
+  }
+  if (calls === 0 && engineGlobals === 0) {
+    return check("scripts", label, "pass", `The scenario's scripts (${scripts} script(s), ${globals} global(s)) make no function calls and use no engine globals.`);
+  }
   return check(
     "scripts",
     label,
-    "warn",
-    `The scenario's ${scripts} script(s) and ${globals} global(s) make ${calls} function call(s) (${functionIndices.size} different functions). Halo demo and Custom Edition number some script functions differently (at least 19 console/server functions, for example sv_map), and this tool does not check or remap which ones the scripts use. In Custom Edition a script may call the wrong function.`,
-    [...functionIndices.entries()].sort((a, b) => a[0] - b[0]).map(([index, n]) => `function #${index}: ${n} call(s)`),
-    true
+    "pass",
+    `${calls} function call(s) of ${functions.size} function(s) and ${engineGlobals} engine global reference(s), each naming what it uses in the script strings. OpenCE looks every one up again by name when it loads the map, so the function numbers stored by the source game (which differ between Halo versions) don't matter.`,
+    [...functions.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([n, c]) => `${n}: ${c} call(s)`)
   );
 }
 function injectAfterwardsCheck(view, header, tagIndex) {
@@ -37787,7 +37870,10 @@ var ACKNOWLEDGEMENTS = [
   { id: "scripts", option: "acknowledgeScripts", text: "scripts that may call the wrong function in Custom Edition" }
 ];
 function convertRetailToCustomEdition(source, options) {
-  const { report, parsed } = runChecks(source, false, options.resources);
+  return convertRetailLayout(source, options);
+}
+function convertRetailLayout(source, options, origin) {
+  const { report, parsed } = runChecks(source, false, options.resources, origin);
   if (!report.canConvert) {
     const reasons = report.checks.filter((c) => c.status === "refuse").map((c) => c.message);
     throw new ConversionRefusedError(`This map can't be converted. ${reasons.join(" ")}`);
@@ -37821,7 +37907,7 @@ function convertRetailToCustomEdition(source, options) {
       throw err;
     }
   } else {
-    out = Buffer.from(source);
+    out = origin ? source : Buffer.from(source);
   }
   out.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
@@ -37868,6 +37954,10 @@ function verifyOutputAlignment(out) {
   }
   if (problem) throw new ConversionRefusedError(`The converted map would still have blocks OpenCE skips, so nothing was written: ${problem}.`);
 }
+
+// ../core/src/map/convert/demo-to-ce.ts
+var DEMO_BASE_MEMORY_ADDRESS = 1274085376;
+var DEMO_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - DEMO_BASE_MEMORY_ADDRESS;
 
 // ../core/src/map/write-map.ts
 var import_crypto2 = require("crypto");

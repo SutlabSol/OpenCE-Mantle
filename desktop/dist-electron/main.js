@@ -33730,6 +33730,10 @@ var MAXIMUM_COMPRESSIBLE_COMPONENT = Math.fround(1.005);
 // ../core/src/map/convert/tag-data-repairs.ts
 var TAG_DATA_REPAIR_IDS = ["alignTagData", "scriptSyntaxData", "tagRootOutside"];
 
+// ../core/src/map/convert/demo-to-ce.ts
+var DEMO_BASE_MEMORY_ADDRESS = 1274085376;
+var DEMO_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - DEMO_BASE_MEMORY_ADDRESS;
+
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
