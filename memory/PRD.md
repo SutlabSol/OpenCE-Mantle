@@ -22,7 +22,8 @@ needs re-verification / unverified / blocked)
 | Embedded (external=0) bitmap/sound relocation | **same-reader-verified, NOT approved for the real app** | `embedded-relocation.test.ts`, real coldsnap.map bytes. `allowEmbeddedRelocation` stays off in `map-worker.ts`. |
 | `gbxmodel` model geometry capture/relocation | **Stage 1 (capture) same-reader-verified; Stage 2 (injection) design-verified, NOT built/wired** | `gbxmodel-geometry.test.ts` (100% captured, 0 blocked, bloodgulch+coldsnap), `gbxmodel-combined-insertion-design.test.ts` (field table + 665-part no-patch proof) — see "gbxmodel geometry — Stage 1 capture" below |
 | Sound relocation | **same-reader-verified, bounds-only** | No deterministic size formula for compressed audio exists (stated, not guessed) - a corrupt/truncated embedded sound could still pass the bounds check. |
-| Header `crc32` on save (Inject, File > Save As) | **verified by tests; a finalized SWAP map loads in OpenCE (user-confirmed 2026-10-11)** | Recomputed by `finalizeForSave` on every save (branch `fix/swap-load-failure`); reproduces the stored crc32 of all 5 CE sample maps. |
+| Header `crc32` on save (File > Save, File > Save As) | **verified by tests; a finalized SWAP map loads in OpenCE (user-confirmed 2026-10-11)** | Recomputed by `finalizeForSave` on every save (branch `fix/swap-load-failure`); reproduces the stored crc32 of all 5 CE sample maps. |
+| In-memory Inject, File > Save / Save As / Discard Changes, backup prompt on open | **verified by tests; Electron UI and OpenCE unverified** | Branch `feat/inject-in-memory-save` (see "In-memory inject and File > Save" in Decisions). Inject writes nothing; Save overwrites the opened file atomically; Save As writes a new file that becomes the open map. Independent ADD audits pass on the in-memory buffer and on the saved file (`map-worker.inject-save.test.ts`). Needs the user's click-through on Windows and an OpenCE load of a map written by File > Save. |
 | Sub-header `tagFileChecksums` (tag data +0x8) after injection | **not recalculated; map still loads in OpenCE (user-confirmed 2026-10-11)** | Left unchanged on purpose. The SWAP map above kept the source's stale value and loads in OpenCE, so OpenCE does not reject it at load. Whether anything else (other loaders, netgame checks) validates it is unverified. The save result still says so. |
 
 ### Windows check to move "M4 extraction" to verified (no OpenCE needed)
@@ -37,6 +38,36 @@ needs re-verification / unverified / blocked)
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: **In-memory inject and File > Save (branch `feat/inject-in-memory-save`, user-approved
+  plan with changes).**
+  - **Inject** applies ADD/SWAP to the worker's held map (buffer replaced, header and tag index
+    re-parsed), marks it modified, writes nothing. Later plans run against that buffer, so
+    injections stack and reuse is detected against tags added earlier. Not finalized in memory;
+    `finalizeForSave` runs only when saving. Extraction also reads the in-memory map.
+  - **File > Save** (Ctrl+S): the one permitted overwrite of the opened map (RULES.md,
+    CLAUDE.md). Only while modified; disabled for a map opened from a `.bak` (Save As only).
+    Refused when the file on disk changed since open / last save (size or mtime). Temp file in
+    the same folder + rename after `finalizeForSave` (name from the file name, CRC32). A failed
+    write (disk full, locked or read-only file) deletes the temp file, leaves the original
+    intact and shows a plain message; the changes stay in memory. Never touches the `.bak`.
+    The log says when the header name was changed to match a renamed file.
+  - **File > Save As**: refuses the open path ("use Save"), writes a new file; that file
+    becomes the open, unmodified map. An unmodified map saved under a new name still differs
+    only at 0x20-0x3F and 0x64-0x67.
+  - **Backup prompt on open** (.map only, once per open): Create backup / Skip; copy to a temp
+    file, size check, rename to `<name>.map.bak`. Existing `.bak`: byte-identical -> no
+    prompt, log "Backup already up to date"; otherwise Keep existing (default) / Replace /
+    Skip. Failures: plain message. Skipped or failed -> File > Save asks before its first
+    overwrite. Not asked for `.bak` files, nor on Discard.
+  - **Unsaved changes**: Save / Don't save / Cancel before opening another map (dialog,
+    recent, drop, open-file) or closing the window; Save runs the normal Save (including the
+    no-backup confirmation). **Discard Changes** asks, then reopens the file from disk.
+  - **Compressed maps**: nothing is held in memory for editing (the worker keeps no buffer);
+    Inject, Save and Save As are refused with a message pointing to Tools > Decompress Map.
+    Save and Save As therefore only ever write uncompressed maps. Recompress (reads the file on
+    disk) is refused while there are unsaved changes.
+  - Status: verified by tests (worker on real map copies in a temp folder; flows with injected
+    deps; component tests). Not run by me: the Electron UI, OpenCE.
 - 2026-10-11: **ADD tag-array growth (branch `fix/add-tag-array-growth`, user-approved fix (1)
   with conditions).**
   - **Evidence (user, `bg_add1.map` vs bloodgulch.map):** header correct (scenario name bg_add1,
