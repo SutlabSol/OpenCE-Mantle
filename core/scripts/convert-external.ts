@@ -5,6 +5,10 @@
  * checks and conversion of `convertRetailToCustomEdition`, then `writeFinalizedMap` (scenario name
  * from the output file name, CRC32, temp file + rename).
  *
+ * An original demo map (true demo layout, version 6: the Mac demo) is detected from its header and
+ * converted with `convertDemoToCustomEdition` (converter Phase 2): the tag data is moved to the Custom
+ * Edition address first, then the same steps run. Pass the demo's own resource folder.
+ *
  * Usage (from core/):
  *   npx tsx scripts/convert-external.ts <source.map> <folder with bitmaps.map and sounds.map> <output.map>
  *     [--acknowledge-scripts]
@@ -19,6 +23,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { convertRetailToCustomEdition, preflightRetailConversion, ConversionRefusedError } from '../src/map/convert/retail-to-ce';
+import { convertDemoToCustomEdition, preflightDemoConversion } from '../src/map/convert/demo-to-ce';
+import { classifyMapLayout } from '../src/map/convert/classify';
 import type { ConversionCheck, ConversionResourceFiles } from '../src/map/convert/retail-to-ce';
 import type { RandomAccessFile } from '../src/map/convert/resource-files';
 import { writeFinalizedMap } from '../src/map/write-map';
@@ -96,12 +102,16 @@ try {
   console.log(`Resources: ${resourceDir} (bitmaps.map ${bitmaps ? 'found' : 'MISSING'}, sounds.map ${sounds ? 'found' : 'MISSING'})`);
   console.log(`Output:    ${output}\n`);
   const sourceBytes = fs.readFileSync(source);
-  const report = preflightRetailConversion(sourceBytes, resources);
+  const demo = classifyMapLayout(sourceBytes).kind === 'demo';
+  console.log(`Layout:    ${demo ? 'original demo map (version 6): the tag data is moved to the Custom Edition address first' : 'retail layout (version 7) or other'}
+`);
+  const report = demo ? preflightDemoConversion(sourceBytes, resources) : preflightRetailConversion(sourceBytes, resources);
   printChecks(report.checks);
   if (!report.canConvert) fail('\nThis map is not converted (see the REFUSE rows above).');
 
   let lastPercent = -1;
-  const converted = convertRetailToCustomEdition(sourceBytes, {
+  const convert = demo ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+  const converted = convert(sourceBytes, {
     acknowledgeScripts: flags.has('--acknowledge-scripts'),
     repairs: Object.fromEntries(report.repairs.filter((r) => r.required).map((r) => [r.id, true])),
     resources,
@@ -146,6 +156,11 @@ try {
   console.log(`  Tag data size:      ${out.readUInt32LE(0x14).toLocaleString('en-US')}`);
   const a = converted.alignment;
   console.log(`  Tag data aligned:   ${a ? `${a.bytes} byte(s) inserted at tag data +0x${a.insertAt.toString(16).toUpperCase()} (end of the tag names); ${a.pointersMoved.toLocaleString('en-US')} pointers moved; ${a.tolerated} stale pointer(s) left as they were` : 'no (already 4-aligned)'}`);
+  if ('moved' in converted) {
+    const moved = converted.moved as Record<string, number>;
+    const total = Object.values(moved).reduce((a, b) => a + b, 0);
+    console.log(`  Pointers moved:     ${total.toLocaleString('en-US')} from 0x4BF10000 to 0x40440000 (${Object.entries(moved).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(', ')})`);
+  }
   console.log(`  Tag data repairs:   ${converted.repairs.length}`);
   for (const r of converted.repairs) {
     const what =

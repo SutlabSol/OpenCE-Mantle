@@ -143,11 +143,22 @@ describe('converter refuses what it must not convert', () => {
   const uiGate = skippableTest(['ui.map']);
   const refusals: [string, (b: Buffer) => void, string][] = [
     ['a nonzero entry word at +0x18', (b) => b.writeUInt32LE(1, b.readUInt32LE(0x10) + 0x28 + 5 * 0x20 + 0x18), 'entryFlags'],
-    ['a nonzero entry word at +0x1C', (b) => b.writeUInt32LE(0x10000, b.readUInt32LE(0x10) + 0x28 + 9 * 0x20 + 0x1c), 'entryFlags'],
     ['a header file size that does not match', (b) => b.writeUInt32LE(b.length + 4, 0x8), 'fileSize'],
     ['a nonzero header padding length', (b) => b.writeUInt32LE(16, 0xc), 'padding'],
     ['a tag array pointer that is not 0x40440028', (b) => b.writeUInt32LE(0x4bf10028, b.readUInt32LE(0x10)), 'tagDataAddress'],
   ];
+  // Decision A (PRD 2026-10-12): OpenCE never reads an entry's +0x1C word, so it is reported, not refused.
+  it.skipIf(uiGate.skip)(`a nonzero entry word at +0x1C is an info row naming the tag, not a refusal${uiGate.titleSuffix}`, () => {
+    const buf = asRetail(readSampleMap('ui.map'));
+    buf.writeUInt32LE(0x0b000000, buf.readUInt32LE(0x10) + 0x28 + 9 * 0x20 + 0x1c);
+    const report = preflightRetailConversion(buf);
+    expect(report.checks.find((c) => c.id === 'entryFlags')?.status).toBe('pass');
+    const row = report.checks.find((c) => c.id === 'entryUnusedWord')!;
+    expect(row.status).toBe('info');
+    expect(row.details).toHaveLength(1);
+    expect(row.details[0]).toMatch(/^#9 .*: \+0x1C = 0xB000000$/);
+  });
+
   for (const [what, corrupt, id] of refusals) {
     it.skipIf(uiGate.skip)(`refuses a retail-layout map with ${what}${uiGate.titleSuffix}`, () => {
       const buf = asRetail(readSampleMap('ui.map'));
@@ -187,18 +198,31 @@ describe('converter on a synthetic retail-layout map with all data internal (ui.
     expect(report.newCrc32).toBe(rawCrc(ui));
   });
 
-  it.skipIf(gate.skip)(`its script function calls need an acknowledgement; without it the converter refuses${gate.titleSuffix}`, () => {
+  // Since 2026-10-12 the script row checks what OpenCE needs (every call and engine global names what it
+  // uses; OpenCE looks them up by name), so no acknowledgement is needed.
+  it.skipIf(gate.skip)(`its script calls all name their functions: the row passes, no acknowledgement${gate.titleSuffix}`, () => {
     const report = preflightRetailConversion(retail);
     expect(report.canConvert).toBe(true);
-    expect(report.requiresAcknowledgement).toBe(true);
-    expect(report.checks.find((c) => c.id === 'scripts')).toMatchObject({ status: 'warn', requiresAcknowledgement: true });
-    try {
-      convertRetailToCustomEdition(retail, { acknowledgeScripts: false });
-      throw new Error('expected a refusal');
-    } catch (err) {
-      expect(err).toBeInstanceOf(ConversionRefusedError);
-      expect((err as ConversionRefusedError).code).toBe('ACKNOWLEDGEMENT_REQUIRED');
-    }
+    expect(report.requiresAcknowledgement).toBe(false);
+    const row = report.checks.find((c) => c.id === 'scripts')!;
+    expect(row).toMatchObject({ status: 'pass', requiresAcknowledgement: false });
+    expect(row.message).toMatch(/^\d+ function call\(s\) of \d+ function\(s\)/);
+    expect(row.details.length).toBeGreaterThan(0);
+    expect(() => convertRetailToCustomEdition(retail, { acknowledgeScripts: false })).not.toThrow();
+  });
+
+  it.skipIf(gate.skip)(`without its script strings the calls name nothing, and the map is refused${gate.titleSuffix}`, () => {
+    const broken = Buffer.from(retail);
+    const tdo = broken.readUInt32LE(0x10);
+    const scenarioAt = tdo + (broken.readUInt32LE(tdo + 0x28 + (broken.readUInt32LE(tdo + 4) & 0xffff) * 0x20 + 0x14) - CE_BASE);
+    const strings = resolveStruct('Scenario').fields.find((f) => f.name === 'script string data')!;
+    broken.writeUInt32LE(0, scenarioAt + strings.offset); // size 0
+    const report = preflightRetailConversion(broken);
+    expect(report.canConvert).toBe(false);
+    const row = report.checks.find((c) => c.id === 'scripts')!;
+    expect(row.status).toBe('refuse');
+    expect(row.details[0]).toMatch(/^script node \d+: a function call whose first child/);
+    expect(() => convertRetailToCustomEdition(broken, { acknowledgeScripts: true })).toThrow(ConversionRefusedError);
   });
 
   it.skipIf(gate.skip)(`converted and finalized as ui.map it is byte-identical to the (internal-marked) ui.map${gate.titleSuffix}`, () => {

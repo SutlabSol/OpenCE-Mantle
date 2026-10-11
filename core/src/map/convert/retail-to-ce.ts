@@ -19,7 +19,7 @@ import { checkTagDataExtents } from './extent-check';
 import { checkModelParts } from './model-part-check';
 import { applyTagDataAlignment, measureBlockAlignment, planTagDataAlignment } from './align-tag-data';
 import type { TagDataAlignmentPlan } from './align-tag-data';
-import { applyTagDataRepairs, planTagDataRepairs, repairBytesAdded } from './tag-data-repairs';
+import { applyTagDataRepairs, DATA_ARRAY_COUNT, DATA_ARRAY_ELEMENT_SIZE, DATA_ARRAY_HEADER_SIZE, DATA_ARRAY_MAXIMUM_COUNT, planTagDataRepairs, repairBytesAdded, SCRIPT_NODE_SIZE } from './tag-data-repairs';
 import type { AppliedTagDataRepair, TagDataRepairId, TagDataRepairPlan } from './tag-data-repairs';
 
 /**
@@ -78,10 +78,13 @@ export type ConversionCheckStatus = 'pass' | 'warn' | 'refuse' | 'info';
 
 export type ConversionCheckId =
   | 'layout'
+  | 'demoLayout'
+  | 'demoRebase'
   | 'fileSize'
   | 'padding'
   | 'tagDataAddress'
   | 'entryFlags'
+  | 'entryUnusedWord'
   | 'regions'
   | 'validation'
   | 'referenceIdentity'
@@ -146,6 +149,10 @@ export interface RetailConversionReport {
 export type ConversionResourceFiles = Partial<Record<ResourceKind, RandomAccessFile>>;
 
 export interface RetailConversionOptions {
+  /**
+   * Kept for the app's IPC. Since 2026-10-12 no check needs it: OpenCE looks every script call up by
+   * name (see `scriptCheck`), and a map whose calls don't name their function is refused instead.
+   */
   acknowledgeScripts: boolean;
   /** Tag data repairs to apply. Every repair the report marks required must be true, or the conversion is refused (REPAIR_REQUIRED). */
   repairs?: Partial<Record<TagDataRepairId, boolean>>;
@@ -190,7 +197,7 @@ interface ParsedView {
  * script check (needs acknowledgement). `full` adds the slower warnings (validation, references,
  * required tags, pointer walk) used for the pre-flight dialog.
  */
-function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceFiles = {}): { report: RetailConversionReport; parsed: ParsedView | null } {
+function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceFiles = {}, origin?: SourceOrigin): { report: RetailConversionReport; parsed: ParsedView | null } {
   const checks: ConversionCheck[] = [];
   const report: RetailConversionReport = {
     canConvert: false,
@@ -223,14 +230,15 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     return done(null);
   }
   if (layout.kind === 'demo') {
-    checks.push(check('layout', layoutLabel, 'refuse', 'This is an original Halo demo map (true demo layout, version 6). Converting this layout is not supported yet (Phase 2).'));
+    checks.push(check('layout', layoutLabel, 'refuse', 'This is an original Halo demo map (true demo layout, version 6). It is converted by the demo converter (Phase 2, `demo-to-ce.ts`), not as a retail-layout map.'));
     return done(null);
   }
   if (layout.kind !== 'retail') {
     checks.push(check('layout', layoutLabel, 'refuse', layout.kind === 'otherVersion' ? `Cache version ${layout.version} can't be converted; only version 7 (retail layout) can.` : 'This does not look like a Halo map file.'));
     return done(null);
   }
-  checks.push(check('layout', layoutLabel, 'pass', 'Standard header, cache version 7.'));
+  if (origin) checks.push(...origin.rows);
+  else checks.push(check('layout', layoutLabel, 'pass', 'Standard header, cache version 7.'));
 
   report.scenarioName = readFixedString(buffer, 0x20, TAG_STRING_SIZE);
   report.buildString = readFixedString(buffer, BUILD_STRING_OFFSET, TAG_STRING_SIZE);
@@ -273,20 +281,35 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
   const { header, tagIndex, view } = parsed;
   report.tagCount = tagIndex.tagCount;
 
-  // Retail maps have no CE "external" flag: a nonzero word here would be read by CE as external.
+  // Retail maps have no CE "external" flag: a nonzero word at +0x18 would be read by CE as external.
+  // +0x1C is read by nothing in OpenCE (PRD 2026-10-12, decision A: its tag instance structs call
+  // +0x18/+0x1C `unused[2]`, and its loader reads +0x18 only), so a nonzero +0x1C is reported, not refused.
   const arrayAt = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
   const flagged: string[] = [];
+  const unusedWord: string[] = [];
   for (const e of tagIndex.entries) {
     const at = arrayAt + e.index * TAG_ENTRY_SIZE;
     const w18 = buffer.readUInt32LE(at + 0x18);
     const w1c = buffer.readUInt32LE(at + 0x1c);
-    if (w18 !== 0 || w1c !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex(w18)}, +0x1C = ${hex(w1c)}`);
+    if (w18 !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex(w18)}`);
+    if (w1c !== 0) unusedWord.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x1C = ${hex(w1c)}`);
   }
   checks.push(
     flagged.length === 0
-      ? check('entryFlags', 'No tag entry is marked external (whole tags)', 'pass', `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`)
-      : check('entryFlags', 'No tag entry is marked external (whole tags)', 'refuse', `${flagged.length} tag entr${flagged.length === 1 ? 'y has' : 'ies have'} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged),
+      ? check('entryFlags', 'No tag entry is marked external (whole tags)', 'pass', `All ${tagIndex.tagCount} tag entries have 0 at +0x18, so every tag is inside the map.`)
+      : check('entryFlags', 'No tag entry is marked external (whole tags)', 'refuse', `${flagged.length} tag entr${flagged.length === 1 ? 'y has' : 'ies have'} a nonzero word at +0x18. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged),
   );
+  if (unusedWord.length > 0) {
+    checks.push(
+      check(
+        'entryUnusedWord',
+        'Tag entries with a value in their unused word (+0x1C)',
+        'info',
+        `${unusedWord.length} tag entr${unusedWord.length === 1 ? 'y has' : 'ies have'} a nonzero word at +0x1C, which Custom Edition maps leave 0. OpenCE never reads this word, so it is left as it is.`,
+        unusedWord,
+      ),
+    );
+  }
 
   const regionsLabel = 'BSP, model data and tag data are inside the file';
   let headerOnlyCrc: number | null = null;
@@ -595,17 +618,28 @@ function validationCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagInd
   );
 }
 
+/**
+ * References whose tag ID differs from their entry's are listed (a warning). References whose tag ID
+ * matches but whose path pointer differs are only counted, in one line (PRD 2026-10-12, decision D):
+ * map protection gives the tag table other names and leaves the references' path pointers alone
+ * (MacDemo mods: thousands each). The game follows a reference by its tag ID, never its path pointer.
+ */
 function referenceIdentityCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
   const issues = findReferenceIdentityIssues(view, header, tagIndex);
-  const label = 'Tag references carry their tag\'s exact ID and path pointer';
+  const label = "Tag references carry their tag's exact ID and path pointer";
   if (issues.length === 0) return check('referenceIdentity', label, 'pass', 'Every non-null reference matches its tag entry.');
+  const wrongId = issues.filter((i) => i.tagId !== i.entryTagId);
+  const pathOnly = issues.length - wrongId.length;
+  const pathOnlyLine = `${pathOnly.toLocaleString('en-US')} reference${pathOnly === 1 ? '' : 's'} name${pathOnly === 1 ? 's' : ''} the right tag ID but keep${pathOnly === 1 ? 's' : ''} another path pointer than the tag's entry (for example after map protection renamed the tags). The game follows tag IDs, never these path pointers; they are left as they are.`;
+  if (wrongId.length === 0) return check('referenceIdentity', label, 'info', pathOnlyLine);
   return check(
     'referenceIdentity',
     label,
     'warn',
-    `${issues.length} reference${issues.length === 1 ? '' : 's'} point${issues.length === 1 ? 's' : ''} at a tag with an outdated tag ID or path pointer, most likely left over from the demo version of this map. ` +
-      'The Custom Edition sample maps have none of these. They are converted unchanged. If the converted map crashes, or scenery or sounds are missing in OpenCE, check these first.',
-    issues.map((i) => `${i.context}: tag ID ${hex(i.tagId)} (tag entry ${i.entryTagId === null ? 'missing' : hex(i.entryTagId)}), path pointer ${hex(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? 'missing' : hex(i.entryPathPointer)})`),
+    `${wrongId.length} reference${wrongId.length === 1 ? '' : 's'} point${wrongId.length === 1 ? 's' : ''} at a tag with an outdated tag ID, most likely left over from the demo version of this map. ` +
+      'The Custom Edition sample maps have none of these. They are converted unchanged (OpenCE sets such a reference to none). If the converted map crashes, or scenery or sounds are missing in OpenCE, check these first.' +
+      (pathOnly > 0 ? ` Also: ${pathOnlyLine}` : ''),
+    wrongId.map((i) => `${i.context}: tag ID ${hex(i.tagId)} (tag entry ${i.entryTagId === null ? 'missing' : hex(i.entryTagId)}), path pointer ${hex(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? 'missing' : hex(i.entryPathPointer)})`),
   );
 }
 
@@ -620,17 +654,6 @@ function requiredTagsCheck(header: CacheFileHeader, tagIndex: TagIndex): Convers
   return check('requiredTags', label, 'warn', `${missing.length} required tag${missing.length === 1 ? ' is' : 's are'} missing. The game may refuse to load the map. Nothing is added.`, missing);
 }
 
-const SCRIPT_NODE_TABLE_HEADER_SIZE = 56;
-const SCRIPT_NODE_FLAG_PRIMITIVE = 0x1;
-const SCRIPT_NODE_FLAG_SCRIPT_CALL = 0x2;
-
-/**
- * Halo demo and Custom Edition number some script functions differently (RIAT definitions: 19
- * console/server functions, e.g. sv_map 493 -> 492; memory/demo-converter.md). The complete list is
- * not in this repo, so any function call in a map with scripts or globals needs an explicit
- * acknowledgement. No remapping is done. A function call node is a used node (salt != 0) that is
- * neither a primitive nor a script call (`ScenarioScriptNodeFlags`).
- */
 /**
  * OpenCE's model part checks (`model-part-check.ts`): a failing part stops OpenCE's load (fatal), so
  * the map is refused. The 2026-10-12 decision: refuse and name the parts; no repair (PRD).
@@ -655,16 +678,38 @@ function modelPartsCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagInd
   );
 }
 
+const SCRIPT_NODE_TABLE_HEADER_SIZE = DATA_ARRAY_HEADER_SIZE;
+const SCRIPT_NODE_FLAG_PRIMITIVE = 0x1;
+const SCRIPT_NODE_FLAG_SCRIPT_CALL = 0x2;
+const SCRIPT_NODE_FLAG_GLOBAL = 0x4;
+/** `_hs_function_name` (OpenCE source/hs/hs.h: the third value of the value type enum). */
+const SCRIPT_NODE_TYPE_FUNCTION_NAME = 2;
+/** An engine global's designator has bit 15 set (OpenCE `HS_EXTERNAL_GLOBAL_DESIGNATOR_BIT`). */
+const SCRIPT_ENGINE_GLOBAL_BIT = 0x8000;
+
+/**
+ * OpenCE looks every script call and engine global of a Custom Edition map up again by the name in
+ * the map's own script string data (port/linux/game/custom_edition_scripts.c, `function_call_convert`
+ * and `engine_global_convert`, build 185), so the function numbers the source game stored don't
+ * matter (measured 2026-10-12: the Mac demo numbers 37 of b30's 122 functions differently from CE,
+ * and not like RIAT's PC demo either). OpenCE refuses the map ("does not name what it uses") when a
+ * call's first child is not a function name node with a readable name, or an engine global reference
+ * has no readable name, or the node table is not laid out as it expects. This row checks exactly
+ * that, over the `count` nodes in use (the ones OpenCE converts). Names OpenCE lacks are made inert
+ * by OpenCE; that is not checked here (no function table in this repo).
+ * Node layout (OpenCE source/hs/hs_scenario_definitions.h, `hs_syntax_node`, 20 bytes): +0 salt,
+ * +2 function index, +4 type, +6 flags, +8 next node, +12 string offset, +16 data.
+ */
 function scriptCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
-  const label = 'Scripts that may call the wrong function in Custom Edition';
+  const label = 'Script calls name their functions (OpenCE looks them up by name)';
   const scenario = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];
   const scenarioStruct = getGroupStructName('scenario')!;
   if (!scenario || scenario.isExternal || scenario.primaryClassName !== 'scenario') {
-    return check('scripts', label, 'warn', 'The scenario tag could not be found, so its scripts were not checked. Function numbering differs between demo and Custom Edition for some functions.', [], true);
+    return check('scripts', label, 'refuse', "The scenario tag could not be found, so its scripts can't be checked.");
   }
   const at = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
   if (!isRangeInBuffer(at, resolveStruct(scenarioStruct).totalSize, view.length)) {
-    return check('scripts', label, 'warn', 'The scenario tag is outside the file, so its scripts were not checked.', [], true);
+    return check('scripts', label, 'refuse', "The scenario tag is outside the file, so its scripts can't be checked.");
   }
   const decoded = decodeStruct(view, at, scenarioStruct);
   const count = (name: string) => {
@@ -673,42 +718,77 @@ function scriptCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex):
   };
   const scripts = count('scripts');
   const globals = count('globals');
-  if (scripts === 0 && globals === 0) return check('scripts', label, 'pass', 'The scenario has no scripts and no script globals, so no script function numbers are involved.');
-
   const syntax = decoded.get('script syntax data');
-  const unreadable = () =>
-    check('scripts', label, 'warn', `The scenario has ${scripts} script(s) and ${globals} global(s), but its script node table could not be read. Some script functions are numbered differently in demo and Custom Edition; nothing is remapped.`, [], true);
-  if (syntax?.kind !== 'tagDataOffset' || syntax.value.size < SCRIPT_NODE_TABLE_HEADER_SIZE) return unreadable();
+  if (syntax?.kind !== 'tagDataOffset' || syntax.value.size === 0) {
+    return check('scripts', label, 'pass', `The scenario has no script data (${scripts} script(s), ${globals} global(s)), so there is nothing to look up.`);
+  }
+  const unreadable = (why: string) =>
+    check('scripts', label, 'refuse', `The scenario's script data can't be read the way OpenCE reads it (${why}). OpenCE refuses to load a map whose scripts it can't convert, so the map is not converted.`);
   const tableAt = resolvePointer(syntax.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
-  if (!isRangeInBuffer(tableAt, syntax.value.size, view.length)) return unreadable();
-  const table = decodeStruct(view, tableAt, 'ScenarioScriptNodeTable');
-  const num = (name: string) => {
-    const v = table.get(name);
-    return v?.kind === 'basic' ? Number(v.value) : -1;
+  if (syntax.value.size < SCRIPT_NODE_TABLE_HEADER_SIZE || !isRangeInBuffer(tableAt, syntax.value.size, view.length)) return unreadable('the node table is outside the file');
+  // OpenCE's `struct data_array` (source/memory/data.h): maximum count +0x20, size +0x22, count +0x2E.
+  // (The schema's ScenarioScriptNodeTable, from Invader, calls +0x2E "size" and +0x30 "count".)
+  const maximum = view.readInt16LE(tableAt + DATA_ARRAY_MAXIMUM_COUNT);
+  const elementSize = view.readInt16LE(tableAt + DATA_ARRAY_ELEMENT_SIZE);
+  const used = view.readInt16LE(tableAt + DATA_ARRAY_COUNT);
+  if (elementSize !== SCRIPT_NODE_SIZE) return unreadable(`its node size is ${elementSize}, not ${SCRIPT_NODE_SIZE}`);
+  if (used < 0 || maximum < 0 || used > maximum) return unreadable(`${used} nodes in use of ${maximum}`);
+  if (SCRIPT_NODE_TABLE_HEADER_SIZE + maximum * SCRIPT_NODE_SIZE > syntax.value.size) return unreadable(`${maximum} nodes don't fit in its ${syntax.value.size} bytes`);
+
+  const strings = decoded.get('script string data');
+  let stringsAt = -1;
+  let stringBytes = 0;
+  if (strings?.kind === 'tagDataOffset' && strings.value.size > 0) {
+    stringsAt = resolvePointer(strings.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    stringBytes = isRangeInBuffer(stringsAt, strings.value.size, view.length) ? strings.value.size : 0;
+  }
+  /** OpenCE's `script_string_get`: an offset inside the string data with a 0 after it. */
+  const nameAt = (offset: number): string | null => {
+    if (offset < 0 || offset >= stringBytes) return null;
+    const end = view.indexOf(0, stringsAt + offset);
+    return end >= 0 && end < stringsAt + stringBytes ? view.toString('latin1', stringsAt + offset, end) : null;
   };
-  const maximum = num('maximum count');
-  const elementSize = num('element size');
-  if (maximum < 0 || elementSize < 8 || SCRIPT_NODE_TABLE_HEADER_SIZE + maximum * elementSize > syntax.value.size) return unreadable();
-  const functionIndices = new Map<number, number>();
-  if (num('count') > 0) {
-    for (let i = 0; i < maximum; i++) {
-      const node = tableAt + SCRIPT_NODE_TABLE_HEADER_SIZE + i * elementSize;
-      if (view.readUInt16LE(node) === 0) continue;
-      const flags = view.readUInt16LE(node + 6);
-      if (flags & (SCRIPT_NODE_FLAG_PRIMITIVE | SCRIPT_NODE_FLAG_SCRIPT_CALL)) continue;
-      const index = view.readUInt16LE(node + 2);
-      functionIndices.set(index, (functionIndices.get(index) ?? 0) + 1);
+  const node = (i: number) => tableAt + SCRIPT_NODE_TABLE_HEADER_SIZE + i * SCRIPT_NODE_SIZE;
+  const functions = new Map<string, number>();
+  let calls = 0;
+  let engineGlobals = 0;
+  const problems: string[] = [];
+  for (let i = 0; i < used; i++) {
+    const n = node(i);
+    if (view.readUInt16LE(n) === 0) continue;
+    const flags = view.readUInt16LE(n + 6);
+    if (!(flags & (SCRIPT_NODE_FLAG_PRIMITIVE | SCRIPT_NODE_FLAG_SCRIPT_CALL))) {
+      const child = view.readUInt32LE(n + 16) & 0xffff;
+      const called = child < used && view.readInt16LE(node(child) + 4) === SCRIPT_NODE_TYPE_FUNCTION_NAME ? nameAt(view.readInt32LE(node(child) + 12)) : null;
+      if (called === null) {
+        problems.push(`script node ${i}: a function call whose first child (node ${child}) is not a function name with a readable name`);
+      } else {
+        calls++;
+        functions.set(called, (functions.get(called) ?? 0) + 1);
+      }
+    } else if (flags & SCRIPT_NODE_FLAG_PRIMITIVE && flags & SCRIPT_NODE_FLAG_GLOBAL && view.readUInt16LE(n + 16) & SCRIPT_ENGINE_GLOBAL_BIT) {
+      if (nameAt(view.readInt32LE(n + 12)) === null) problems.push(`script node ${i}: an engine global reference without a readable name`);
+      else engineGlobals++;
     }
   }
-  const calls = [...functionIndices.values()].reduce((a, b) => a + b, 0);
-  if (calls === 0) return check('scripts', label, 'pass', `The scenario has ${scripts} script(s) and ${globals} global(s), with no function calls.`);
+  if (problems.length > 0) {
+    return check(
+      'scripts',
+      label,
+      'refuse',
+      `${problems.length} script node(s) don't name what they use. OpenCE looks every call and engine global up by its name and refuses to load the map when one has none, so the map is not converted.`,
+      problems,
+    );
+  }
+  if (calls === 0 && engineGlobals === 0) {
+    return check('scripts', label, 'pass', `The scenario's scripts (${scripts} script(s), ${globals} global(s)) make no function calls and use no engine globals.`);
+  }
   return check(
     'scripts',
     label,
-    'warn',
-    `The scenario's ${scripts} script(s) and ${globals} global(s) make ${calls} function call(s) (${functionIndices.size} different functions). Halo demo and Custom Edition number some script functions differently (at least 19 console/server functions, for example sv_map), and this tool does not check or remap which ones the scripts use. In Custom Edition a script may call the wrong function.`,
-    [...functionIndices.entries()].sort((a, b) => a[0] - b[0]).map(([index, n]) => `function #${index}: ${n} call(s)`),
-    true,
+    'pass',
+    `${calls} function call(s) of ${functions.size} function(s) and ${engineGlobals} engine global reference(s), each naming what it uses in the script strings. OpenCE looks every one up again by name when it loads the map, so the function numbers stored by the source game (which differ between Halo versions) don't matter.`,
+    [...functions.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([n, c]) => `${n}: ${c} call(s)`),
   );
 }
 
@@ -732,6 +812,25 @@ function injectAfterwardsCheck(view: Buffer, header: CacheFileHeader, tagIndex: 
 /** The full pre-flight report for the Convert dialog. Never throws for a malformed map; problems are checks. */
 export function preflightRetailConversion(buffer: Buffer, resources: ConversionResourceFiles = {}): RetailConversionReport {
   return runChecks(buffer, true, resources).report;
+}
+
+/**
+ * Where a retail-layout buffer came from when it is not the user's file itself: converter Phase 2
+ * (`demo-to-ce.ts`) turns a true demo map into a retail-layout copy in memory and runs the same checks
+ * and conversion on it. `rows` replace the retail layout row (they describe the demo map and the rebase).
+ */
+export interface SourceOrigin {
+  rows: ConversionCheck[];
+}
+
+/** Phase 2 only: the pre-flight of a retail-layout copy made from another layout. */
+export function preflightRetailLayoutCopy(buffer: Buffer, resources: ConversionResourceFiles, origin: SourceOrigin): RetailConversionReport {
+  return runChecks(buffer, true, resources, origin).report;
+}
+
+/** Phase 2 only: converts a retail-layout copy made from another layout (see `SourceOrigin`). `copy` is the converter's own and may be changed in place. */
+export function convertRetailLayoutCopy(copy: Buffer, options: RetailConversionOptions, origin: SourceOrigin): RetailConversionResult {
+  return convertRetailLayout(copy, options, origin);
 }
 
 export interface RetailConversionResult {
@@ -758,7 +857,11 @@ const ACKNOWLEDGEMENTS: { id: ConversionCheckId; option: 'acknowledgeScripts'; t
  * or when the scripts need an acknowledgement that wasn't given. Never mutates `source`.
  */
 export function convertRetailToCustomEdition(source: Buffer, options: RetailConversionOptions): RetailConversionResult {
-  const { report, parsed } = runChecks(source, false, options.resources);
+  return convertRetailLayout(source, options);
+}
+
+function convertRetailLayout(source: Buffer, options: RetailConversionOptions, origin?: SourceOrigin): RetailConversionResult {
+  const { report, parsed } = runChecks(source, false, options.resources, origin);
   if (!report.canConvert) {
     const reasons = report.checks.filter((c) => c.status === 'refuse').map((c) => c.message);
     throw new ConversionRefusedError(`This map can't be converted. ${reasons.join(' ')}`);
@@ -792,7 +895,8 @@ export function convertRetailToCustomEdition(source: Buffer, options: RetailConv
       throw err;
     }
   } else {
-    out = Buffer.from(source);
+    // A Phase 2 copy belongs to the converter already; the user's own buffer is never changed.
+    out = origin ? source : Buffer.from(source);
   }
   out.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);

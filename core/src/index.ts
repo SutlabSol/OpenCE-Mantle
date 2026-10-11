@@ -21,6 +21,7 @@ export * from './map/finalize-map';
 export * from './map/convert/classify';
 export * from './map/convert/reference-identity';
 export * from './map/convert/retail-to-ce';
+export * from './map/convert/demo-to-ce';
 export * from './map/raw-data-region';
 export * from './map/convert/resource-files';
 export * from './map/convert/externalize-in';

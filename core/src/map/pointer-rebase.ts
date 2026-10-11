@@ -250,6 +250,54 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout, op
   return sites;
 }
 
+/**
+ * Pointers in BSP space (converter Phase 2 only: the whole tag space moves, so the BSPs' load
+ * addresses move with it). Kept apart from `collectTagDataPointers`, whose sites are what ADD moves:
+ * - `bspAddress`: the scenario's "structure bsps" element `bsp address` (a plain uint32 in tag data);
+ * - `bspHeader`: the first word of the BSP's header (the address of the BSP struct);
+ * - `bspReflexive`: every TagReflexive pointer inside the BSP (count-0 ones with a pointer too);
+ * - `bspDataBlock`: every pointer-based TagDataOffset inside the BSP with a size, or a zero size and
+ *   a pointer inside the BSP.
+ * Measured (memory/demo-converter.md, MacDemo bloodgulch): 1 header, 386 reflexive, 81 data block;
+ * after moving them every BSP-space word equals PC bloodgulch's. Refused (UnwalkableTagError) when the
+ * header's words 0x4-0x10 are not 0, when a `Pointer` field inside the BSP holds a BSP address, or a
+ * data block with a size lies outside the BSP. Zero-size data blocks whose pointer is outside the BSP
+ * (lightmap "compressed vertices" holds such values in every MacDemo map) are not pointers and stay.
+ */
+export type BspSpacePointerKind = 'bspAddress' | 'bspHeader' | 'bspReflexive' | 'bspDataBlock';
+
+export const BSP_SPACE_POINTER_KINDS: readonly BspSpacePointerKind[] = ['bspAddress', 'bspHeader', 'bspReflexive', 'bspDataBlock'];
+
+export interface BspSpacePointerSite {
+  kind: BspSpacePointerKind;
+  at: number;
+  value: number;
+  tagIndex: number;
+}
+
+/** Every BSP-space pointer of every BSP the scenario lists. Reads only; throws `UnwalkableTagError` like `collectTagDataPointers`. */
+export function collectBspSpacePointers(buffer: Buffer, layout: TagDataLayout, options: CollectOptions = {}): BspSpacePointerSite[] {
+  const { tagDataOffset, tagDataSize, baseMemoryAddress } = layout;
+  const fileOf = (pointer: number) => tagDataOffset + ((pointer - baseMemoryAddress) | 0);
+  const inTagData = (pointer: number, length: number) => {
+    const at = fileOf(pointer);
+    return at >= tagDataOffset && at + length <= tagDataOffset + tagDataSize && at + length <= buffer.length;
+  };
+  const sites: BspSpacePointerSite[] = [];
+  const seen = new Set<number>();
+  const stalePath = (pathPointer: number) => options.tolerate?.staleReferencePaths === true && !inTagData(pathPointer, 1);
+  collectBspReferencePaths(buffer, layout, inTagData, fileOf, () => undefined, stalePath, () => undefined, (kind, at, tagIndex) => {
+    if (seen.has(at)) return;
+    seen.add(at);
+    sites.push({ kind, at, value: buffer.readUInt32LE(at), tagIndex });
+  });
+  return sites;
+}
+
+/** The 24-byte BSP header: +0x0 the BSP struct's address, +0x4..+0x13 zero in every PC/CE/demo sample, +0x14 'sbsp'. */
+const BSP_HEADER_SIZE = 0x18;
+const BSP_HEADER_SIGNATURE_OFFSET = 0x14;
+
 /** Reads one basic (numeric) field of a decoded struct, or undefined. */
 function basicNumber(decoded: Map<string, DecodedFieldValue>, name: string): number | undefined {
   const v = decoded.get(name);
@@ -268,6 +316,8 @@ function collectBspReferencePaths(
   addSite: (kind: TagDataPointerKind, at: number, tagIndex: number) => void,
   stalePath: (pathPointer: number) => boolean = () => false,
   tolerate: (pointer: ToleratedPointer) => void = () => undefined,
+  /** Set only by `collectBspSpacePointers`: receives the BSP-space pointers too. */
+  bspSpace?: (kind: BspSpacePointerKind, at: number, tagIndex: number) => void,
 ): void {
   const scenarioStruct = getGroupStructName('scenario');
   const bspStruct = getGroupStructName('scenario_structure_bsp');
@@ -281,8 +331,10 @@ function collectBspReferencePaths(
     if (bsps?.kind !== 'reflexive' || bsps.value.count === 0) continue;
     if (!scenarioBspStruct) throw new UnwalkableTagError(scenario.index, scenario.path, 'scenario', '"structure bsps" is not a block list in this build\'s definitions');
     const elementSize = resolveStruct(scenarioBspStruct).totalSize;
+    const addressField = resolveStruct(scenarioBspStruct).fields.find((f) => f.name === 'bsp address');
     for (let b = 0; b < bsps.value.count; b++) {
-      const element = decodeStruct(buffer, fileOf(bsps.value.pointerLow + b * elementSize), scenarioBspStruct);
+      const elementAt = fileOf(bsps.value.pointerLow + b * elementSize);
+      const element = decodeStruct(buffer, elementAt, scenarioBspStruct);
       const ref = element.get('structure bsp');
       const bspEntry = ref?.kind === 'dependency' ? layout.entries[ref.value.tagId & 0xffff] : undefined;
       const name = bspEntry ?? { index: scenario.index, path: `${scenario.path} structure bsps[${b}]` };
@@ -299,6 +351,15 @@ function collectBspReferencePaths(
         const at = bspStart! + ((pointer - bspAddress!) | 0);
         return at >= bspStart! && at + length <= bspStart! + bspSize! && at + length <= buffer.length;
       };
+      if (bspSpace) {
+        if (!addressField) fail('"bsp address" is not in this build\'s definitions');
+        bspSpace('bspAddress', elementAt + addressField!.offset, name.index);
+        if (bspStart! + BSP_HEADER_SIZE > buffer.length) fail('its BSP header is outside the file');
+        for (let w = 4; w < BSP_HEADER_SIGNATURE_OFFSET; w += 4) {
+          if (buffer.readUInt32LE(bspStart! + w) !== 0) fail(`its BSP header word at +0x${w.toString(16)} is not 0, and how to move it is not known`);
+        }
+        bspSpace('bspHeader', bspStart!, name.index);
+      }
       const visited = new Set<string>();
       const walk = (structName: string, pointer: number, where: string): void => {
         const size = resolveStruct(structName).totalSize;
@@ -311,6 +372,23 @@ function collectBspReferencePaths(
         for (const field of resolveStruct(structName).fields) {
           const value = decoded.get(field.name);
           if (!value || field.def.nonCached) continue;
+          if (bspSpace) {
+            if (value.kind === 'reflexive' && field.def.type === 'TagReflexive') {
+              const pointer = value.value.pointerLow >>> 0;
+              if (pointer !== 0 && (value.value.count > 0 || inBsp(pointer, 1))) bspSpace('bspReflexive', at + field.offset + 4, name.index);
+            } else if (value.kind === 'tagDataOffset' && field.def.type === 'TagDataOffset' && !field.def.externalFileOffset) {
+              const pointer = value.value.pointerLow >>> 0;
+              if (value.value.size > 0) {
+                if (!inBsp(pointer, value.value.size)) fail(`${where}.${field.name} (${value.value.size} bytes) is outside the BSP data`);
+                bspSpace('bspDataBlock', at + field.offset + 12, name.index);
+              } else if (pointer !== 0 && inBsp(pointer, 1)) {
+                bspSpace('bspDataBlock', at + field.offset + 12, name.index);
+              }
+            } else if (field.def.type === 'Pointer') {
+              const raw = buffer.readUInt32LE(at + field.offset);
+              if (raw !== 0 && raw !== 0xffffffff && inBsp(raw, 1)) fail(`${where}.${field.name} is a runtime pointer into the BSP data, which this build doesn't know how to move`);
+            }
+          }
           if (value.kind === 'dependency') {
             const pathPointer = value.value.pathPointer >>> 0;
             if (pathPointer === 0) continue;
