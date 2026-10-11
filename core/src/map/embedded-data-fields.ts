@@ -33,6 +33,14 @@ export interface EmbeddedDataFieldMatch {
   patchWidth: number;
 }
 
+/**
+ * Only bit 0 of a TagDataOffset's external/flags word means "in the resource map". Measured on the
+ * sample maps (PRD 2026-10-11 "Sound external bit"): external sounds have 0x1; internal sounds have
+ * 0 or 0x01000000 (coldsnap 9, Yoyorast_Island 3, HaloMD barrier 8), and the bytes of the
+ * 0x01000000 ones lie inside the map's own raw-data region, which the internal ranges tile exactly.
+ */
+const TAG_DATA_OFFSET_EXTERNAL_BIT = 0x1;
+
 function resourceMapToKind(resourceMap: string): EmbeddedDataAssetKind {
   if (resourceMap === 'bitmaps.map') return 'bitmap';
   if (resourceMap === 'sounds.map') return 'sound';
@@ -55,7 +63,7 @@ export function findEmbeddedDataFields(resolved: ResolvedStruct, decoded: Map<st
       out.push({
         fieldName: field.name,
         kind: resourceMapToKind(field.def.externalFileOffset),
-        external: value.value.external !== 0,
+        external: (value.value.external & TAG_DATA_OFFSET_EXTERNAL_BIT) !== 0,
         resourceMap: field.def.externalFileOffset,
         fileOffset: value.value.fileOffset,
         size: value.value.size,

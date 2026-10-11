@@ -27,6 +27,16 @@ describe('findEmbeddedDataFields (unit, no real map needed - synthetic resolved/
     expect(matches[0]).toMatchObject({ kind: 'sound', external: true, fileOffset: 2000, size: 512 });
   });
 
+  it('TagDataOffset external word: only bit 0 means external (0x01000000 is internal, seen in coldsnap, Yoyorast_Island and HaloMD barrier)', () => {
+    const resolved = struct([field('samples', 8, { type: 'TagDataOffset', externalFileOffset: 'sounds.map' })]);
+    const isExternal = (word: number) =>
+      findEmbeddedDataFields(resolved, new Map<string, DecodedFieldValue>([['samples', { kind: 'tagDataOffset', value: { size: 512, external: word, fileOffset: 1000, pointerLow: 0, pointerHigh: 0 } } as DecodedFieldValue]]))[0].external;
+    expect(isExternal(0)).toBe(false);
+    expect(isExternal(0x01000000)).toBe(false);
+    expect(isExternal(1)).toBe(true);
+    expect(isExternal(0x01000001)).toBe(true);
+  });
+
   it('bitfield + externalDataSibling, external bit unset: reports an embedded bitmap match using the sibling offset field', () => {
     const resolved = struct([
       field('flags', 4, { type: 'BitmapDataFlags', externalDataSibling: { offsetField: 'pixel data offset', sizeField: 'pixel data size', resourceMap: 'bitmaps.map' } }),
