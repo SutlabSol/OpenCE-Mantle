@@ -18,3 +18,6 @@ export * from './map/tag-injector';
 export * from './map/embedded-data-verifier';
 export * from './map/cache-crc';
 export * from './map/finalize-map';
+export * from './map/convert/classify';
+export * from './map/convert/reference-identity';
+export * from './map/convert/retail-to-ce';
