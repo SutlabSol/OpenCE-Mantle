@@ -24,7 +24,8 @@ export interface TagEntrySummary {
 }
 
 export type LoadMapResult =
-  | { status: 'ok'; filePath: string; header: MapHeaderSummary; tags: TagEntrySummary[] }
+  /** `modified`: the worker's in-memory map has changes (Inject) not yet written by File > Save / Save As. Absent = false. */
+  | { status: 'ok'; filePath: string; header: MapHeaderSummary; tags: TagEntrySummary[]; modified?: boolean }
   | { status: 'compressed'; filePath: string }
   | { status: 'unsupported'; filePath: string; message: string }
   | { status: 'error'; message: string };
@@ -160,15 +161,26 @@ export interface InjectPlanSummary {
 
 export type PlanInjectResult = { ok: true; plan: InjectPlanSummary } | { ok: false; code: string; message: string };
 
+/** The open map as the renderer shows it (tag browser, info panel). */
+export type OpenMapSummary = Extract<LoadMapResult, { status: 'ok' }>;
+
+/** Inject applies to the worker's in-memory map only; nothing is written to disk. `map` is the refreshed, modified map. */
 export type ApplyInjectResult =
-  | { ok: true; outputPath: string; addedCount: number; reusedCount: number; swappedCount: number; scenarioName: string; crc32: number; warnings: string[]; staleChecksumWarning: string }
-  | { ok: false; code: 'CANCELLED'; message: string }
+  | { ok: true; addedCount: number; reusedCount: number; swappedCount: number; map: OpenMapSummary }
   | { ok: false; code: string; message: string };
 
-/** File > Save As: the open map written to a new file with its scenario name set from the file name and the header CRC32 recomputed. */
-export type SaveMapAsResult =
-  | { ok: true; outputPath: string; scenarioName: string; crc32: number; warnings: string[]; staleChecksumWarning: string }
+/**
+ * File > Save (overwrites the open file) and File > Save As (writes a new file, which then becomes
+ * the open map): scenario name set from the file name, header CRC32 recomputed. `map` is the open
+ * map afterwards (not modified).
+ */
+export type SaveMapResult =
+  | { ok: true; outputPath: string; scenarioName: string; previousScenarioName: string; crc32: number; warnings: string[]; staleChecksumWarning: string; map: OpenMapSummary }
   | { ok: false; code: string; message: string };
+export type SaveMapAsResult = SaveMapResult;
+
+/** File > Discard Changes: `map` is the file reopened from disk. */
+export type DiscardChangesResult = { ok: true; map: LoadMapResult } | { ok: false; code: string; message: string };
 
 export interface VerifyEmbeddedDataCounts {
   embedded: number;
@@ -192,7 +204,8 @@ export type WorkerRequest =
   | { type: 'getDependencies'; requestId: string; originalIndices: number[] }
   | { type: 'extractTags'; requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }
   | { type: 'planInject'; requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
-  | { type: 'applyInject'; requestId: string; outputPath: string }
+  | { type: 'applyInject'; requestId: string }
+  | { type: 'saveMap'; requestId: string }
   | { type: 'saveMapAs'; requestId: string; outputPath: string }
   | { type: 'verifyEmbeddedData'; requestId: string }
   | { type: 'cancel'; requestId: string };
@@ -206,8 +219,10 @@ export type WorkerResponse =
 /* --------------------------------------------- API --------------------------------------------- */
 
 export interface OpenceApi {
+  /** null: cancelled (in the file dialog, or in the unsaved-changes prompt). */
   openMapDialog(): Promise<LoadMapResult | null>;
-  loadMap(filePath: string): Promise<LoadMapResult>;
+  /** null: cancelled in the unsaved-changes prompt; the current map stays open. */
+  loadMap(filePath: string): Promise<LoadMapResult | null>;
   decompressMap(filePath: string): Promise<CompressionResult | null>;
   recompressMap(filePath: string): Promise<CompressionResult | null>;
   getDependencies(originalIndices: number[]): Promise<GetDependenciesResult>;
@@ -217,9 +232,14 @@ export interface OpenceApi {
   getResourceMapStatuses(): Promise<Record<ResourceMapKind, ResourceMapStatus>>;
   pickInjectContainer(): Promise<{ path: string } | null>;
   planInject(containerPath: string, mode: InjectionMode): Promise<PlanInjectResult>;
+  /** Applies the reviewed plan to the open map in memory. Writes nothing; File > Save / Save As do. */
   applyInject(): Promise<ApplyInjectResult>;
+  /** File > Save: overwrites the open file (temp file + atomic rename). Only while modified; never for a .bak. */
+  saveMap(): Promise<SaveMapResult>;
   /** File > Save As: main shows the native dialog, refuses the open map's own path, and has the worker write the copy. */
   saveMapAs(): Promise<SaveMapAsResult>;
+  /** File > Discard Changes: asks, then reopens the open file from disk. null: cancelled. */
+  discardChanges(): Promise<DiscardChangesResult | null>;
   verifyEmbeddedData(): Promise<VerifyEmbeddedDataResult>;
   openContainingFolder(filePath: string): Promise<void>;
   getSettings(): Promise<AppSettings>;
@@ -231,6 +251,8 @@ export interface OpenceApi {
   onLog(cb: (e: LogEvent) => void): () => void;
   onMenuAction(cb: (action: string) => void): () => void;
   onMapLoaded(cb: (result: LoadMapResult) => void): () => void;
+  /** The open map changed in place (Inject applied, saved, discarded): refresh it, keep the selection. */
+  onMapUpdated(cb: (result: OpenMapSummary) => void): () => void;
   getPathForFile(file: File): string;
 }
 
