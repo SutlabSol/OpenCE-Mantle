@@ -251,6 +251,15 @@ needs re-verification / unverified / blocked)
         the renderer gets status, never paths), re-validate on use, handle moved or deleted files; Convert
         blocked while a required file is missing, naming it and the sources that would supply it.
     13. No bundled game files (recorded in "Converter: per-asset external data" below).
+    **Additions (user, 2026-10-12; recorded, not built; for retail-layout and Mac Demo maps alike):**
+    14. The Convert dialog asks for the converted map's name. Default: the part of the file name after
+        "bloodgulch-" (Mac demo mods are all renamed bloodgulch-<mod>.map with header name bloodgulch),
+        else the file name; at most 31 characters; warn when the name is "bloodgulch" and when it
+        duplicates a map the user already has.
+    15. Source files step: takes a folder or individual files; defaults to the map's own folder;
+        remembers folders per source family; recognises files by content; says which maps each file is
+        compatible with; accepts a mod's own bitmaps.map / sounds.map in place of the stock ones when
+        the range check passes (never by name or size); never bundles game files.
     Plus: checklist rows in the dialog, estimated size and free disk space, progress and Cancel,
     dev-mock scenarios, component tests, and the acknowledgement checkbox for the new row.
   - **Note for later (user, 2026-10-11):** extracting the Yoyorast_Island mongoose is blocked by 3 model

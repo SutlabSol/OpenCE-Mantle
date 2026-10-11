@@ -163,3 +163,37 @@ Nothing has been run in the game, so every "verified" above means verified again
 - `theisland_3.map`: the scenario has **two** validation errors, not one: scenery palette[14] points at a sound, and palette[15] points at a device_machine.
 - Both HaloMD maps contain exactly one stale reference from the demo, with an old tag ID salt and a path pointer in the 0x4BF10000 range. In heh_2 it is the BSP `sound environment palette[0]`; in theisland_3 it is scenery palette[14]. The CE validator checks only the index, so it missed both. The 5 CE maps have 0 such references. Phase 1 warns about them and does not fix them (see PRD "Converter Phase 1").
 - Both maps: padding 0, 0 scripts, 0 globals, all tag entries 0 at +0x18/+0x1C, and tag-file checksum 0x5E2AF81E (same as the original demo bloodgulch).
+
+## Phase 2 research: sample_maps/MacDemo (2026-10-12, read-only, measured in this repo)
+
+Method: a scratch prototype (not in the repo) rebased each map in memory with `pointer-rebase.ts`
+(tolerant mode) plus a BSP-space walk, then ran Phase 1's pre-flight on the result. Nothing was written.
+
+| File | Bytes | Layout / header | Tags | Notes |
+| --- | --- | --- | --- | --- |
+| bloodgulch.map (stock) | 14,459,752 | demo v6, MP, CRC 0xE7E08C22 | 2,410 | every check passes; 676 + 951 external ranges, all in MacDemo's files |
+| ui.map | 2,649,984 | demo v6, UI | 1,411 | passes; 1 script, 23 calls |
+| b30.map | 35,961,124 | demo v6, SP, 2 BSPs | 3,696 | passes; 85 scripts, 1,451 calls of 122 functions |
+| bloodgulch-MGMWeaponCollab | 54,054,536 | demo v6, name bloodgulch, stock CRC kept | 6,354 | protected; blocks 1 mod 4, last 12 tags 3 mod 4; script overlap; 3 sound ranges past the end of MacDemo's sounds.map (needs the mod's own) |
+| bloodgulch-ParanoiaV2 | 26,577,568 | same | 3,278 | BSP `collision bsp[0].bsp2d references` count 0xFFFFFFFF (stock 13,221, same pointer): unwalkable |
+| bloodgulch-TrueInfectionV2 | 162,406,536 | same | 5,283 | protected; all data internal; script overlap; aligned |
+| bloodgulch-Zombiemod | 22,842,929 | same | 3,691 | protected; aligned; script overlap; 856 + 5,252 ranges, all in MacDemo's files |
+| bitmaps.map / sounds.map | 82,347,606 / 79,916,792 | resource maps (type 1 / 2), 1,107 / 7,192 entries | | HaloMD's files fail the range check for every MacDemo map except ui |
+
+- Every demo header: 'Ehed' at 0x2C0, version 6, build 01.00.00.0576, tag array 0x4BF10028, scenario ID
+  0xE1740000; the bytes outside the known fields are random-looking filler (not copied). The tag data is
+  the last block; BSP address = 0x4BF10000 + 23 MiB - size in every map. Delta to CE: -0x0BAD0000.
+- Stock bloodgulch: 20,865 tag-data pointers (2,410 paths, 2,409 data, 6,982 reflexive, 2,052 data
+  block, 6,918 reference path, 94 BSP reference path) + BSP space (1 header, 386 reflexive, 81 data
+  block). After the rebase every BSP-space pointer equals PC/bloodgulch's; model data is byte-identical.
+- The earlier prototype's CRC 0x46B6B108 is reproduced exactly when the 94 BSP reference path pointers
+  are not moved; its "about 18,800" was an addition slip (its own kinds sum to 21,238).
+- Map protection (MGM, TrueInfection, Zombiemod): ~90% of entries share one path string, a dummy last tag
+  has a nonzero +0x1C word (OpenCE reads only +0x18), netgame flags 191+ hold junk weapon-group
+  references (tolerated as stale; OpenCE corrects bad IDs to NONE), thousands of reference path pointers
+  differ from their entries (tag IDs match).
+- Scripts: the Mac demo does NOT number functions like RIAT's gbx-demo (PC demo 0578): in b30, 201 calls'
+  stored index differs from RIAT's demo index for the same name, and 37 of its 122 functions differ from
+  CE's index (e.g. game_save 315 -> 311). Every call's name node is readable and every name exists in CE.
+  OpenCE (custom_edition_scripts.c) re-resolves every call and engine global by name on load, so the
+  stored index does not matter to OpenCE. RIAT is GPL-3.0 (read-only clone C:\temp\riat-src, 2dad455).
