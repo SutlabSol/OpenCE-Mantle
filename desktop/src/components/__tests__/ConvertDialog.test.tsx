@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import ConvertDialog from '../ConvertDialog';
 import type { OpenceApi, ConvertMapResult, ConvertPreflightResult, RetailConversionReport } from '../../../electron/shared-types';
-import { buildMockConvertReport, buildMockRepairConvertReport } from '../../test-fixtures/dependency-fixtures';
+import { buildMockConvertReport, buildMockModelPartsConvertReport, buildMockRepairConvertReport } from '../../test-fixtures/dependency-fixtures';
 
 function install(preflight: ConvertPreflightResult | null, convert: ConvertMapResult = { ok: false, code: 'CANCELLED', message: 'cancelled' }) {
   const convertPreflight = vi.fn(async () => preflight);
@@ -54,6 +54,21 @@ describe('ConvertDialog', () => {
     await waitFor(() => expect(screen.getByTestId('convert-dialog-refused')).toBeTruthy());
     expect(screen.getByTestId('convert-check-layout').textContent).toMatch(/already a Custom Edition map/);
     expect((screen.getByTestId('convert-dialog-convert') as HTMLButtonElement).disabled).toBe(true);
+    expect(convertMap).not.toHaveBeenCalled();
+  });
+
+  it("a model that fails OpenCE's part check refuses the map, names the model, parts and bad indices; ticked repairs do not enable Convert", async () => {
+    const { convertMap } = install(ok(buildMockModelPartsConvertReport()));
+    render(<ConvertDialog source="open" onClose={vi.fn()} log={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('convert-dialog-refused')).toBeTruthy());
+    const row = screen.getByTestId('convert-check-modelParts');
+    expect(row.getAttribute('data-status')).toBe('refuse');
+    expect(row.textContent).toMatch(/forerunner dark structure: geometry 0 part 0: 2 of 104 strip indices are past its 70 vertices \(value@position: 70@100, 71@102\)/);
+    expect(row.textContent).toMatch(/geometry 1 part 0: 33 of 66 strip indices/);
+    expect((screen.getByTestId('convert-repair-scriptSyntaxData') as HTMLInputElement).checked).toBe(true);
+    const button = screen.getByTestId('convert-dialog-convert') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
     expect(convertMap).not.toHaveBeenCalled();
   });
 

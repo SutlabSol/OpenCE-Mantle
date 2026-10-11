@@ -18,7 +18,7 @@ import type {
   InjectionMode,
   ConvertMapResult,
 } from '../electron/shared-types';
-import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult, buildMockConvertReport, buildMockRepairConvertReport } from './test-fixtures/dependency-fixtures';
+import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult, buildMockConvertReport, buildMockRepairConvertReport, buildMockModelPartsConvertReport } from './test-fixtures/dependency-fixtures';
 
 /**
  * Dev-only mock of window.opence, used when previewing the renderer in a plain browser
@@ -91,7 +91,7 @@ export function installDevMock() {
 
   const mock: OpenceApi = {
     openMapDialog: async () => {
-      if (scenario === 'convert-retail' || scenario === 'convert-scripts' || scenario === 'convert-repairs') {
+      if (scenario === 'convert-retail' || scenario === 'convert-scripts' || scenario === 'convert-repairs' || scenario === 'convert-model-parts') {
         currentMock = null;
         return { status: 'unsupported', filePath: 'C:/HaloMD/maps/heh_2.map', message: 'This is a retail-layout map (cache version 7), for example a HaloMD or Mac demo map. It can be converted to a Custom Edition (609) map with "Convert to Custom Edition...". (mock)', layout: 'retail', convertible: true };
       }
@@ -203,6 +203,7 @@ export function installDevMock() {
     convertPreflight: async () => {
       await fakeProgress('convertPreflight');
       if (scenario === 'convert-repairs') return { ok: true, sourceFileName: 'theisland_3.map', report: buildMockRepairConvertReport() };
+      if (scenario === 'convert-model-parts') return { ok: true, sourceFileName: 'theisland_3.map', report: buildMockModelPartsConvertReport() };
       return { ok: true, sourceFileName: 'heh_2.map', report: buildMockConvertReport(scenario === 'convert-scripts') };
     },
     convertMap: async (acknowledgeScripts, repairs): Promise<ConvertMapResult> => {

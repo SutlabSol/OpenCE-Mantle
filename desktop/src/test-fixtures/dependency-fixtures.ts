@@ -22,6 +22,7 @@ export const MOCK_SCENARIOS = [
   'convert-retail',
   'convert-scripts',
   'convert-repairs',
+  'convert-model-parts',
 ] as const;
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
@@ -356,6 +357,7 @@ export function buildMockConvertReport(withScripts: boolean): RetailConversionRe
     check('tagDataAddress', 'Tag data at the Custom Edition address', 'pass', 'Tag array pointer 0x40440028 (base 0x40440000).'),
     check('entryFlags', 'No tag is marked external', 'pass', 'All 2410 tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.'),
     check('regions', 'BSP, model data and tag data are inside the file', 'pass', 'New CRC32 0xD1C331E9 (was 0x0).'),
+    check('modelParts', "Models pass OpenCE's part check", 'pass', '70 models, 447 parts: every part passes.'),
     withScripts
       ? check('scripts', 'Scripts that may call the wrong function in Custom Edition', 'warn', "The scenario's 1 script(s) and 0 global(s) make 23 function call(s) (3 different functions). (mock)", ['function #5: 10 call(s)', 'function #114: 12 call(s)', 'function #493: 1 call(s)'], true)
       : check('scripts', 'Scripts that may call the wrong function in Custom Edition', 'pass', 'The scenario has no scripts and no script globals, so no script function numbers are involved.'),
@@ -417,4 +419,27 @@ export function buildMockRepairConvertReport(required = true): RetailConversionR
     estimatedOutputSize: required ? 105_728_562 : null,
     repairs: [{ id: 'scriptSyntaxData', required, tagPath: 'levels\test\bloodgulch\bloodgulch', bytesAdded: 380_078 }],
   };
+}
+
+/**
+ * ?mock=convert-model-parts: HaloMD theisland_3 as the real pre-flight gives it since 2026-10-12: the
+ * repairs as in ?mock=convert-repairs, and the model part row refuses (OpenCE stops at model #2574).
+ * Detail lines measured on the real file (the second one shortened).
+ */
+export function buildMockModelPartsConvertReport(): RetailConversionReport {
+  const base = buildMockRepairConvertReport();
+  const row = {
+    id: 'modelParts' as const,
+    label: "Models pass OpenCE's part check",
+    status: 'refuse' as const,
+    message:
+      '82 models, 506 parts: 2 parts of 1 model fail. OpenCE stops loading a map with such a part ("names a node, vertex, shader or part that does not exist"), so the map is not converted. Repairing them is not supported yet. (mock)',
+    details: [
+      '#2574 effects\\debris objects\\forerunner dark structure\\forerunner dark structure: geometry 0 part 0: 2 of 104 strip indices are past its 70 vertices (value@position: 70@100, 71@102)',
+      '#2574 effects\\debris objects\\forerunner dark structure\\forerunner dark structure: geometry 1 part 0: 33 of 66 strip indices are past its 44 vertices (value@position: 570@0, 570@1, 571@2, 571@3, 267@4, ...)',
+    ],
+    requiresAcknowledgement: false,
+  };
+  const checks = base.checks.map((c) => (c.id === 'modelParts' ? row : c));
+  return { ...base, canConvert: false, checks };
 }
