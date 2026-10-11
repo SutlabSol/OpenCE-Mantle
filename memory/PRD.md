@@ -222,24 +222,40 @@ needs re-verification / unverified / blocked)
   work (branch `feat/inject-in-memory-save`, user-confirmed on Windows and in OpenCE). **Next:
   task 2, the converter, Phase 1** (retail-layout, version 7). **Update:** Phase 1 built on
   `feat/demo-converter-phase1`, verified by tests, waiting for the user's Windows/OpenCE check.
-  **Planned after the converter (user request 2026-10-11; NOT started, nothing built).** Its order
-  relative to M7a/M7b gets decided when it is planned.
-  - **A. Separate files on multi-tag extraction.** When several selected tags are extracted in one
-    go (e.g. a warthog and a ghost), write one `.ocetags` file per selected tag instead of one
-    combined file. Applies to every tag type.
-  - **B. Batch extract.** Extract a whole open map in one go into a folder structure, with each tag
-    in a folder named for what it is (weapons, vehicles, scenery, ...).
-  - **Open design questions (answer these when planning A/B):**
-    1. Shared dependencies when several tags are exported separately: duplicated into each file,
-       or stored once and referenced (and how inject then finds them)?
-    2. How blocked tags (gbxmodel geometry, BSP, uncaptured data) and external data
-       (bitmaps/sounds/loc.map) are reported in a batch: per file, in one summary, or both?
-    3. Folder layout and file names: by tag group or by tag path, how to name files, and how to
-       handle name collisions and characters Windows doesn't allow.
-    4. Progress and cancel for thousands of tags: granularity, what a cancel leaves on disk (temp
-       file + rename per file), and whether a partial batch can be resumed.
-    5. Whether a manifest file is written (what was exported, skipped or blocked, source map
-       identity), and in what format.
+  **Planned after the converter, in this order (user decisions 2026-10-11; NOT started, nothing
+  built).** Replaces the earlier A/B note of the same day. Order relative to M7a/M7b is decided
+  when these are planned.
+  - **A. Separate files on multi-tag extraction.** Several tags selected for one extraction (e.g. a
+    warthog and a ghost) -> one `.ocetags` file per selected tag, for every tag type.
+    - Decided: each file carries its own full dependency set (sizes are not a concern for single
+      files).
+    - One selected tag keeps the file Save dialog; several selected tags use a folder picker.
+    - Inject's file picker accepts several `.ocetags` files at once and stacks them in memory (the
+      in-memory Inject already stacks; File > Save / Save As still write).
+  - **B. Model geometry Stage 2** (see "gbxmodel geometry" in the status table), so tags with
+    gbxmodels can be extracted and injected.
+  - **C. Batch extract of a whole open map.** Decisions:
+    - Output: `<chosen parent folder>\<mapname>\<top-level folder of the tag path>\...`, mirroring the
+      tag path (weapons, vehicles, scenery, ...). `<mapname>` comes from the map's file name (strip
+      `.map` and `.bak`), so extracting two maps never mixes their files.
+    - Each tag file carries all its dependencies.
+    - Progress bar and Cancel. On Cancel ask: keep what has been exported, or delete everything from
+      this batch. Planned design: a staging folder inside `<mapname>`, moved into place at the end or
+      on Cancel/Keep; Cancel/Delete removes the staging folder, so nothing already on disk is lost.
+    - Re-running the same map: ask Skip existing / Replace all / Cancel, default Skip. If Skip
+      proves too large to build, fall back to a clear confirmation before replacing all existing
+      files.
+    - A small manifest per batch (tool version, container version, files), so files made by older
+      versions can be identified and offered for replacement.
+    - Blocked tags (gbxmodel geometry until B is done, BSP, uncaptured data) are listed in a report,
+      never silently skipped.
+  - **D. Open design questions (settle when planning A and C):**
+    1. File names when two tags share a path but differ in class (e.g. `halo_logo` as a
+       ui_widget_definition and as a bitmap).
+    2. Windows limits: path length, reserved names (CON, NUL, ...), case-insensitive collisions.
+    3. Estimating total output size and free disk space before starting (measure bloodgulch and
+       coldsnap).
+    4. Progress and cancel behaviour for thousands of tags.
 - 2026-10-11: **Swap load failure (branch `fix/swap-load-failure`, user-approved with
   conditions).** The user's SWAP of `globals\globals` with dependencies into bloodgulch (1037
   swapped, 50 gbxmodels blocked) showed a blank blue screen in OpenCE; the original with only the
