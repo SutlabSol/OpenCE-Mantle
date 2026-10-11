@@ -101,6 +101,11 @@ $env:SAMPLE_MAPS_DIR = "C:\HaloCE\maps"; yarn test
 The resolution logic lives in one place, `tests/helpers/sample-maps.ts` - no test or script in
 this repo hardcodes an absolute path to the sample maps directory.
 
+Maps from other games go in sub-folders, because file names repeat (`HaloMD\heh_2.map`,
+`MacDemo\bloodgulch.map`, `PC\bitmaps.map`, ...). The folder names live only in `SAMPLE_FOLDERS`
+in that helper; tests name a file with `sampleIn('haloMD', 'heh_2.map')`. The converter tests
+need `HaloMD\heh_2.map`, `HaloMD\theisland_3.map` and `MacDemo\bloodgulch.map`.
+
 ### Which sample files each suite needs
 
 Every test is gated on exactly the file(s) **it** needs (never a blanket per-file skip) - if a

@@ -37,9 +37,49 @@ needs re-verification / unverified / blocked)
    to succeed with only "External data"/"BSP" style warnings, never a crash.
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
-| Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. |
+| Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. **Blue-screens in OpenCE (user, 2026-10-11): heh_2_ce and crossing_ce.** Cause: their bitmap and sound data is external (per asset) in the retail resource files, which CE does not have. A header-only conversion is valid only for maps whose data is all internal. Fix planned as Phase 1b (see "Converter: per-asset external data" in Decisions). |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: **Converter: per-asset external data (finding) and Phase 1b plan. PLANNED, NOT STARTED.**
+  - **Finding (user, OpenCE):** heh_2_ce.map and crossing_ce.map blue-screen. Measured with
+    `verifyEmbeddedData` (counting only bit 0 of the sound word as external, see the open issue below):
+    heh_2 676 bitmap images (44,396,916 B) + 951 sound permutations (11,972,226 B), all external,
+    no raw region (model data at the BSP end 1,519,616). theisland_3 742 (60,659,138 B) + 1129
+    (20,946,198 B), all external. crossing 622 ext + 16 int bitmaps, 931 ext + 61 int sounds. barrier
+    610 ext + 36 int bitmaps, 941 ext + 65 int sounds. The Phase 1 check "No tag is marked external"
+    only reads the tag entry (+0x18/+0x1C), so it missed this.
+  - **Resource identity (measured):** every external (offset, size) in heh_2, theisland_3, crossing and
+    barrier equals a resource entry's (data offset, size) in HaloMD/ and PC/ bitmaps.map and sounds.map,
+    and the entry name is `<tag>_<image>` / `<tag>__<pitch range>__<permutation>` for all but one (barrier
+    reuses `detail metal sratches_0` for `detail metal scratches fix`). MacDemo/ matches 349-355 per map;
+    CE's own files about 1. heh_2's 1627 (offset, size) pairs equal stock bloodgulch's for the same tag.
+    HaloMD/ and PC/ have identical tables; sounds.map is byte-identical, bitmaps.map differs only in the
+    16 entries `ui\shellitmaps\mp_map_grafix_3..18` (MP map thumbnails), so the table cannot tell them
+    apart and either gives the same game data apart from those thumbnails.
+  - **Raw region layout (measured on crossing, barrier, coldsnap, Yoyorast):** internal ranges tile
+    `[last BSP end, model data offset)` exactly, back to back, no padding or alignment, absolute file offsets.
+  - **Open issue (pre-existing, not fixed):** the sound `samples` word +0x44 is 0x1 for external data, but
+    some internal sounds carry 0x01000000 (barrier 8, coldsnap 9, Yoyorast 3; their bytes lie inside the
+    map's raw region). `embedded-data-fields.ts` treats any nonzero value as external, so Verify Embedded
+    Data, the walker and extraction misreport these. Needs its own decision and fix.
+  - **Roadmap (in order, none started):**
+    a. Phase 1b: v7 maps with per-asset external data, using the source game's full-version resource
+       files (HaloMD maps: HaloMD/bitmaps.map and HaloMD/sounds.map). Header-only Phase 1 is valid only
+       when all data is internal. Covers heh_2, theisland_3, crossing, barrier (all v7, base 0x40440000).
+    b. Phase 2: true demo layout (v6, base 0x4BF10000), e.g. MacDemo/bloodgulch.map, with the MacDemo
+       resource files.
+    c. Mac full-version maps (folder added later): same path as 1b if resource identity matches.
+    d. Xbox (v5): compressed after the header (header file size is the decompressed size), tag data base
+       0x803A6000, model data inside tag data, Xbox tag formats. Much larger; not planned in detail.
+    e. MCC (CEA, versions 7/13, ipak/FSB, compressed chunks): no maps; OpenCE may load MCC natively. Hold.
+    f. barrier and crossing (HaloMD-only): both v7 retail layout with some internal data; part of 1b.
+  - **Not verifiable without OpenCE:** whether CE plays retail sound sample formats unchanged; the stale
+    demo-era references (salt mismatch); the stale tag-file checksum.
+- 2026-10-11: **Sample folders.** `sample_maps/` (untracked, git-ignored): CE maps and CE resource maps at
+  the root; `HaloMD/`, `MacDemo/`, `PC/`, `xbox/`, `MCC/` each with that game's maps and resource maps.
+  Folder names live only in `SAMPLE_FOLDERS` in `core/tests/helpers/sample-maps.ts`. Measured: xbox/
+  bitmaps/sounds/loc.map are byte-identical to the CE root files; HaloMD/b30 and sounds.map equal PC's;
+  HaloMD/bloodgulch.map and ui.map differ from PC's in about 240 bytes of tag data (UTF-16 text).
 - 2026-10-11: **Converter Phase 1 (branch `feat/demo-converter-phase1`, user-approved plan with conditions).**
   - **Scope:** retail-layout maps (standard header, version 7, tag array 0x40440028) -> 609. True demo
     layout (v6) is detected and refused with a Phase 2 message. Module `core/src/map/convert/`
@@ -542,8 +582,8 @@ needs re-verification / unverified / blocked)
   (retail-layout maps, cache version 7, base 0x40440000: header patch + CRC) comes first; Phase 2
   (true demo layout, version 6, base 0x4BF10000: schema-driven pointer rebase) only starts after
   Phase 1 is confirmed in OpenCE. Research notes: `memory/demo-converter.md`. The converter is a
-  separate module and the CE-only parser/validators stay unchanged. Demo sample maps live in
-  `sample_maps/demo/` (separate from the CE maps, since both have a `bloodgulch.map`). Never
+  separate module and the CE-only parser/validators stay unchanged. Demo sample maps lived in
+  `sample_maps/demo/` (moved 2026-10-11 to `HaloMD/` and `MacDemo/`, see the sample-folder entry). Never
   convert in place; refuse maps that are already 609. Open item: the tag-data-header field order
   (checksum vs scenario ID at +0x4/+0x8) differs between the Halo Map Structure PDF and the
   research notes, so confirm it from real bytes before relying on it. M5/M6 work is paused,
