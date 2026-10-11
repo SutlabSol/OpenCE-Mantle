@@ -224,3 +224,9 @@ bloodgulch, converted with the developer script; aligned) load and play with cle
 sound permutations converted to 1712772 bytes of Xbox ADPCM", "32 HUD elements ... half their scale" and
 "2 HUD meters", as bgali does. This confirms the cause above: the retail-to-CE conversion itself is fine;
 the HaloMD maps' unaligned tag data is the problem. Fix: Phase 1c (PRD), align the tag data.
+
+**Phase 1c outputs to test (2026-10-12):** heh_2_ce 70,827,480 B (CRC32 0x03C90A64), crossing_ce
+75,214,271 (0xAC83C8A3), barrier_ce 77,718,428 (0x9259F2E9); every block, tag and data block 4-aligned.
+Expected in OpenCE's log: "60 sound permutations converted ..." (heh_2; crossing and barrier have
+their own counts), "32 HUD elements ... half their scale" (barrier: 42), "2 HUD meters"; clean death,
+announcer and plasma overheat sounds; normal ammo icons and meters.

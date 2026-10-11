@@ -67,6 +67,18 @@ needs re-verification / unverified / blocked)
     anything else; the alignment row mirrors `loaded_block_get` exactly and finds 0 on the 5 CE maps,
     PC and HaloMD bloodgulch and every HaloMD output after the repair; align first, then the other
     repairs (script padding drops to 0, output sizes unchanged); a map with mixed remainders is refused.
+  - **Built (Phase 1c; verified by tests, unverified in OpenCE):** `convert/align-tag-data.ts`, the
+    tolerant walker mode in `pointer-rebase.ts`, rows "Tag blocks are 4-aligned (OpenCE skips unaligned
+    blocks)" and "Repair: align the tag data" (required), `?mock=convert-align`. Details and decisions:
+    SOURCES.md "Converter Phase 1c". Two corrections to the plan: (1) theisland_3's second stale
+    pointer has tag ID NONE (banshee_mp weapons[0].weapon), so the tolerance rule is "reference path
+    pointer outside the tag data", any tag ID; (2) the expected sizes were wrong for heh_2 and crossing:
+    once aligned, their script data needs no repair (it was only misaligned), so they are 380,076 B
+    smaller than before. Barrier and theisland_3 keep the script repair (overlap).
+  - **Outputs** (`core/scripts/convert-external.ts`, HaloMD resource files; CRC checked with node:zlib):
+    heh_2 70,827,480 B, CRC32 0x03C90A64 (+2 alignment, no other repair); crossing 75,214,271,
+    0xAC83C8A3 (+3, then #2404's 72-byte struct); barrier 77,718,428, 0x9259F2E9 (+2, then the
+    380,076-byte script block, 0 padding); theisland_3 still refused (model #2574).
 - 2026-10-12: **OpenCE results: heh_2, crossing, barrier play; glitches; theisland_3 model check; roadmap.**
   Details: `memory/opence-notes.md` ("Results in OpenCE", "Known problems on converted maps").
   - **User's tests (OpenCE build 185, debug and release builds):** heh_2_ce, crossing_ce and barrier_ce
