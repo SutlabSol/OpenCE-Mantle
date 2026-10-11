@@ -215,8 +215,10 @@ describe('converter on a synthetic retail-layout map with all data internal (ui.
 });
 
 const HALOMD_CASES = [
-  { file: HEH, name: 'heh_2', bitmaps: { count: 676, bytes: 44_396_916 }, sounds: { count: 951, bytes: 11_972_226 }, size: 70_827_478 },
-  { file: ISLAND, name: 'theisland_3', bitmaps: { count: 742, bytes: 60_659_138 }, sounds: { count: 1129, bytes: 20_946_198 }, size: 105_348_484 },
+  // heh_2: no tag data problem; its script data is only misaligned and has no used nodes (a note, no repair).
+  { file: HEH, name: 'heh_2', bitmaps: { count: 676, bytes: 44_396_916 }, sounds: { count: 951, bytes: 11_972_226 }, size: 70_827_478, rows: { tagDataExtents: 'pass', scriptDataAlignment: 'info' }, repairs: [] as string[] },
+  // theisland_3: + 2 bytes of padding + 380,076 bytes for the required script data repair.
+  { file: ISLAND, name: 'theisland_3', bitmaps: { count: 742, bytes: 60_659_138 }, sounds: { count: 1129, bytes: 20_946_198 }, size: 105_728_562, rows: { tagDataExtents: 'warn', repairScriptSyntaxData: 'warn' }, repairs: ['scriptSyntaxData'] },
 ];
 
 /**
@@ -245,7 +247,9 @@ for (const c of HALOMD_CASES) {
       expect(report.externalData).toEqual({ bitmaps: c.bitmaps, sounds: c.sounds });
       expect(report.estimatedOutputSize).toBe(c.size);
       const status = Object.fromEntries(report.checks.map((k) => [k.id, k.status]));
-      expect(status).toMatchObject({ layout: 'pass', fileSize: 'pass', padding: 'pass', tagDataAddress: 'pass', entryFlags: 'pass', regions: 'pass', tagDataOutside: 'pass', externalData: 'refuse', scripts: 'pass', requiredTags: 'pass', referenceIdentity: 'warn', injectAfterwards: 'warn' });
+      expect(status).toMatchObject({ layout: 'pass', fileSize: 'pass', padding: 'pass', tagDataAddress: 'pass', entryFlags: 'pass', regions: 'pass', ...c.rows, externalData: 'refuse', scripts: 'pass', requiredTags: 'pass', referenceIdentity: 'warn', injectAfterwards: 'warn' });
+      expect(report.repairs.map((r) => r.id)).toEqual(c.repairs);
+      expect(report.repairs.every((r) => r.required)).toBe(true);
       expect(report.checks.find((k) => k.id === 'externalData')!.message).toMatch(/Missing: bitmaps\.map, sounds\.map/);
       const refs = report.checks.find((k) => k.id === 'referenceIdentity')!;
       expect(refs.details).toHaveLength(1);
@@ -254,7 +258,7 @@ for (const c of HALOMD_CASES) {
 
     it.skipIf(gate.skip)(`convert without resource files throws REFUSED and returns nothing${gate.titleSuffix}`, () => {
       try {
-        convertRetailToCustomEdition(source, { acknowledgeScripts: true, acknowledgeTagDataOutside: true });
+        convertRetailToCustomEdition(source, { acknowledgeScripts: true, repairs: { scriptSyntaxData: true, tagRootOutside: true } });
         throw new Error('expected a refusal');
       } catch (err) {
         expect(err).toBeInstanceOf(ConversionRefusedError);

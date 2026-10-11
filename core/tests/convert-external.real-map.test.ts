@@ -10,8 +10,11 @@ import { writeFinalizedMap } from '../src/map/write-map';
 import { inspectCustomEditionMap } from '../src/map/open-map';
 import { verifyEmbeddedData } from '../src/map/embedded-data-verifier';
 import { getGroupStructName, resolveStruct } from '../src/map/definitions/engine';
+import { checkTagDataExtents } from '../src/map/convert/extent-check';
+import { parseCacheFileHeader } from '../src/map/header';
+import { parseTagIndex } from '../src/map/tag-index';
 import { sampleIn, sampleMapPath, skippableTest } from './helpers/sample-maps';
-import { RAW_LAYOUT, rawAssets, rawBspRegions, rawCrc, tagDataOffsetOf } from './helpers/raw-map';
+import { BASE, RAW_LAYOUT, rawAssets, rawBspRegions, rawCrc, tagDataOffsetOf } from './helpers/raw-map';
 import type { RawAsset } from './helpers/raw-map';
 
 /**
@@ -25,12 +28,48 @@ import type { RawAsset } from './helpers/raw-map';
  */
 
 const RES = { bitmaps: sampleIn('haloMD', 'bitmaps.map'), sounds: sampleIn('haloMD', 'sounds.map') };
-const CASES = [
-  { file: sampleIn('haloMD', 'heh_2.map'), out: 'heh_2_ce.map', size: 70_827_478, acknowledgeTagDataOutside: false },
-  { file: sampleIn('haloMD', 'theisland_3.map'), out: 'theisland_3_ce.map', size: 105_348_484, acknowledgeTagDataOutside: false },
-  { file: sampleIn('haloMD', 'crossing.map'), out: 'crossing_ce.map', size: 75_214_196, acknowledgeTagDataOutside: true },
-  { file: sampleIn('haloMD', 'barrier.map'), out: 'barrier_ce.map', size: 77_338_350, acknowledgeTagDataOutside: false },
+/**
+ * `repair`: the required tag data repair OpenCE needs (PRD "OpenCE findings"): the scenario's script
+ * syntax data (theisland_3, barrier) or tag #2404's root (crossing). Sizes = Phase 1b size + padding
+ * to 4 from the tag data start + the new block (380,076-byte script data, 72-byte sound_environment).
+ */
+type ExpectedRepair = { kind: 'scriptSyntaxData'; blockSize: number } | { kind: 'tagRootOutside'; tagIndex: number; blockSize: number };
+const CASES: { file: string; out: string; size: number; repair: ExpectedRepair | null }[] = [
+  { file: sampleIn('haloMD', 'heh_2.map'), out: 'heh_2_ce.map', size: 70_827_478, repair: null },
+  { file: sampleIn('haloMD', 'theisland_3.map'), out: 'theisland_3_ce.map', size: 105_348_484 + 2 + 380_076, repair: { kind: 'scriptSyntaxData', blockSize: 380_076 } },
+  { file: sampleIn('haloMD', 'crossing.map'), out: 'crossing_ce.map', size: 75_214_196 + 3 + 72, repair: { kind: 'tagRootOutside', tagIndex: 2404, blockSize: 72 } },
+  { file: sampleIn('haloMD', 'barrier.map'), out: 'barrier_ce.map', size: 77_338_350 + 2 + 380_076, repair: { kind: 'scriptSyntaxData', blockSize: 380_076 } },
 ];
+
+/** Raw file offset of the scenario struct (tag data header +0x4 names the scenario). */
+function rawScenarioAt(buf: Buffer): number {
+  const td = tagDataOffsetOf(buf);
+  const entry = td + 0x28 + (buf.readUInt32LE(td + 4) & 0xffff) * 0x20;
+  return td + (buf.readUInt32LE(entry + 0x14) - BASE);
+}
+
+/**
+ * The repair as computed here from raw bytes: the pointer that moves (offset inside the tag data),
+ * its old value, and the exact bytes appended after the old tag data (padding, then the block).
+ * Script data: the 56-byte data array header and the used nodes (count at +0x2E, 20-byte nodes, per
+ * OpenCE memory/data.h and hs.h) are copied, the rest is zero.
+ */
+function expectedRepair(source: Buffer, r: ExpectedRepair): { pointerInTagData: number; oldPointer: number; tail: Buffer; usedNodes: number } {
+  const td = tagDataOffsetOf(source);
+  const size = source.readUInt32LE(0x14);
+  const padding = (4 - (size % 4)) % 4;
+  const tail = Buffer.alloc(padding + r.blockSize);
+  if (r.kind === 'scriptSyntaxData') {
+    const pointerAt = rawScenarioAt(source) + 0x474 + 0xc;
+    const oldPointer = source.readUInt32LE(pointerAt);
+    const oldAt = td + (oldPointer - BASE);
+    const usedNodes = source.readInt16LE(oldAt + 0x2e);
+    source.copy(tail, padding, oldAt, oldAt + 56 + usedNodes * 20);
+    return { pointerInTagData: pointerAt - td, oldPointer, tail, usedNodes };
+  }
+  const pointerAt = td + 0x28 + r.tagIndex * 0x20 + 0x14;
+  return { pointerInTagData: pointerAt - td, oldPointer: source.readUInt32LE(pointerAt), tail, usedNodes: 0 };
+}
 
 /** A read-only file handle read by offset (the test's own, not the script's or the worker's). */
 function openReadOnly(file: string): RandomAccessFile & { close(): void } {
@@ -78,6 +117,7 @@ for (const c of CASES) {
     let dir = '';
     let source: Buffer;
     let out: Buffer;
+    let converted: ReturnType<typeof convertRetailToCustomEdition>;
     let sourceHash = '';
     let copyPath = '';
     let resourceStats: { size: number; mtimeMs: number }[] = [];
@@ -97,7 +137,7 @@ for (const c of CASES) {
       });
       bitmaps = openReadOnly(sampleMapPath(RES.bitmaps));
       sounds = openReadOnly(sampleMapPath(RES.sounds));
-      const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: false, acknowledgeTagDataOutside: c.acknowledgeTagDataOutside, resources: { bitmaps, sounds } });
+      converted = convertRetailToCustomEdition(source, { acknowledgeScripts: false, repairs: { scriptSyntaxData: true, tagRootOutside: true }, resources: { bitmaps, sounds } });
       const outPath = path.join(dir, c.out);
       writeFinalizedMap(converted.buffer, outPath, writeOps);
       out = fs.readFileSync(outPath);
@@ -118,8 +158,11 @@ for (const c of CASES) {
       expect(out.readUInt32LE(0x8)).toBe(c.size);
     });
 
+    /** Bytes the Phase 1b copy inserted before the model data (the tag data moved by this much). */
+    const importShift = () => tagDataOffsetOf(out) - tagDataOffsetOf(source);
+
     it.skipIf(gate.skip)(`every copied range equals the resource bytes at its old offset, packed back to back from the old model data offset (offsets computed here)${gate.titleSuffix}`, () => {
-      const shift = out.length - source.length;
+      const shift = importShift();
       const src = rawAssets(source);
       const outAssets = rawAssets(out);
       expect(outAssets).toHaveLength(src.length);
@@ -144,7 +187,7 @@ for (const c of CASES) {
     });
 
     it.skipIf(gate.skip)(`no external bit remains; every other flag bit is unchanged${gate.titleSuffix}`, () => {
-      const shift = out.length - source.length;
+      const shift = importShift();
       const src = rawAssets(source);
       const after = rawAssets(out);
       expect(after.filter((a) => a.external)).toEqual([]);
@@ -164,22 +207,24 @@ for (const c of CASES) {
       expect(rawBspRegions(out)).toEqual(rawBspRegions(source));
       expect(out.subarray(0x800, oldModel).equals(source.subarray(0x800, oldModel))).toBe(true);
       const newModel = out.readUInt32LE(tagDataOffsetOf(out) + 0x14);
-      expect(newModel).toBe(oldModel + (out.length - source.length));
+      expect(newModel).toBe(oldModel + importShift());
       expect(out.readUInt32LE(tagDataOffsetOf(out) + 0x20)).toBe(modelSize);
       expect(out.subarray(newModel, newModel + modelSize).equals(source.subarray(oldModel, oldModel + modelSize))).toBe(true);
     });
 
-    it.skipIf(gate.skip)(`tag data: same size, and every changed byte is an asset offset, an external flag or the model data offset${gate.titleSuffix}`, () => {
+    it.skipIf(gate.skip)(`tag data: every changed byte of the old tag data is an asset offset, an external flag, the model data offset or the repaired pointer; it is still the last block${gate.titleSuffix}`, () => {
       const oldTd = tagDataOffsetOf(source);
       const newTd = tagDataOffsetOf(out);
       const size = source.readUInt32LE(0x14);
-      expect(out.readUInt32LE(0x14)).toBe(size);
-      expect(newTd + size).toBe(out.length);
+      const tail = c.repair ? expectedRepair(source, c.repair).tail.length : 0;
+      expect(out.readUInt32LE(0x14)).toBe(size + tail);
+      expect(newTd + size + tail).toBe(out.length);
       const allowed = new Set<number>();
       const allow = (at: number, n: number) => {
         for (let i = 0; i < n; i++) allowed.add(at - oldTd + i);
       };
       allow(oldTd + 0x14, 4);
+      if (c.repair) allow(oldTd + expectedRepair(source, c.repair).pointerInTagData, 4);
       for (const a of rawAssets(source)) {
         if (!a.external) continue;
         allow(a.offsetAt, 4);
@@ -190,15 +235,55 @@ for (const c of CASES) {
       expect(unexpected.slice(0, 10)).toEqual([]);
     });
 
-    it.skipIf(gate.skip)(`header: only version, file size, tag data offset, name, build string and CRC changed${gate.titleSuffix}`, () => {
-      const allowed = (i: number) => (i >= 0x4 && i < 0xc) || (i >= 0x10 && i < 0x14) || (i >= 0x20 && i < 0x60) || (i >= 0x64 && i < 0x68);
+    if (c.repair) {
+      const r = c.repair;
+      it.skipIf(gate.skip)(`repair ${r.kind}: the pointer moved to the 4-aligned end of the old tag data; the appended bytes are exactly the padding and the block computed here${gate.titleSuffix}`, () => {
+        const size = source.readUInt32LE(0x14);
+        const expected = expectedRepair(source, r);
+        const newTd = tagDataOffsetOf(out);
+        const padding = (4 - (size % 4)) % 4;
+        expect(out.readUInt32LE(newTd + expected.pointerInTagData)).toBe(BASE + size + padding);
+        expect((BASE + size + padding - BASE) % 4).toBe(0);
+        expect(out.subarray(newTd + size).equals(expected.tail)).toBe(true);
+        // The tool reports the same values.
+        expect(converted.repairs).toEqual([
+          expect.objectContaining({ id: r.kind, oldPointer: expected.oldPointer, newPointer: BASE + size + padding, padding, blockSize: r.blockSize, bytesAppended: padding + r.blockSize }),
+        ]);
+      });
+    }
+    if (c.repair?.kind === 'scriptSyntaxData') {
+      const r = c.repair;
+      it.skipIf(gate.skip)(`repaired script data: header and used nodes as in the source, every other node slot free (identifier 0, as OpenCE's data.c reads a free slot)${gate.titleSuffix}`, () => {
+        const expected = expectedRepair(source, r);
+        const at = tagDataOffsetOf(out) + (out.readUInt32LE(tagDataOffsetOf(out) + expected.pointerInTagData) - BASE);
+        const oldAt = tagDataOffsetOf(source) + (expected.oldPointer - BASE);
+        expect(out.subarray(at, at + 56).equals(source.subarray(oldAt, oldAt + 56))).toBe(true);
+        const maximum = out.readInt16LE(at + 0x20);
+        expect(out.readInt16LE(at + 0x2e)).toBe(expected.usedNodes);
+        expect(56 + maximum * out.readInt16LE(at + 0x22)).toBe(r.blockSize);
+        for (let i = 0; i < maximum; i++) {
+          const node = at + 56 + i * 20;
+          if (i < expected.usedNodes) expect(out.subarray(node, node + 20).equals(source.subarray(oldAt + 56 + i * 20, oldAt + 76 + i * 20))).toBe(true);
+          else if (out.readInt16LE(node) !== 0) throw new Error(`node slot ${i} is not free`);
+        }
+        expect((at - tagDataOffsetOf(out)) % 4).toBe(0);
+      });
+    }
+
+    it.skipIf(gate.skip)(`same-reader: the block check (OpenCE's rules) finds no problem in the output${gate.titleSuffix}`, () => {
+      const header = parseCacheFileHeader(out);
+      expect(checkTagDataExtents(out, header, parseTagIndex(out, header)).violations.map((v) => v.text)).toEqual([]);
+    });
+
+    it.skipIf(gate.skip)(`header: only version, file size, tag data offset and size, name, build string and CRC changed${gate.titleSuffix}`, () => {
+      const allowed = (i: number) => (i >= 0x4 && i < 0xc) || (i >= 0x10 && i < 0x18) || (i >= 0x20 && i < 0x60) || (i >= 0x64 && i < 0x68);
       const unexpected: string[] = [];
       for (let i = 0; i < 0x800; i++) if (source[i] !== out[i] && !allowed(i)) unexpected.push(`0x${i.toString(16)}`);
       expect(unexpected).toEqual([]);
       expect(out.readUInt32LE(0x4)).toBe(609);
       expect(out.subarray(0x40, 0x60).toString('latin1').replace(/\0+$/, '')).toBe('01.00.00.0609');
       expect(out.subarray(0x20, 0x40).toString('latin1').replace(/\0+$/, '')).toBe(c.out.replace(/\.map$/, ''));
-      expect(out.readUInt32LE(0x10)).toBe(source.readUInt32LE(0x10) + (out.length - source.length));
+      expect(out.readUInt32LE(0x10)).toBe(source.readUInt32LE(0x10) + importShift());
     });
 
     it.skipIf(gate.skip)(`the header CRC32 matches an independent node:zlib computation${gate.titleSuffix}`, () => {
@@ -274,19 +359,26 @@ describe('Phase 1b refusals', () => {
   });
 
   const crossingGate = skippableTest([CROSSING, RES.bitmaps, RES.sounds]);
-  it.skipIf(crossingGate.skip)(`crossing: the tag outside the tag data needs an acknowledgement${crossingGate.titleSuffix}`, () => {
+  it.skipIf(crossingGate.skip)(`crossing: the tag outside the tag data gets a required repair row; converting without it is refused (REPAIR_REQUIRED)${crossingGate.titleSuffix}`, () => {
     const source = fs.readFileSync(sampleMapPath(CROSSING));
     const files = [openReadOnly(sampleMapPath(RES.bitmaps)), openReadOnly(sampleMapPath(RES.sounds))];
     try {
       const resources = { bitmaps: files[0], sounds: files[1] };
-      const row = preflightRetailConversion(source, resources).checks.find((k) => k.id === 'tagDataOutside')!;
-      expect(row).toMatchObject({ status: 'warn', requiresAcknowledgement: true });
-      expect(row.details).toEqual([expect.stringMatching(/^#2404 sound\\sound environments\\arena\.sound_environment/)]);
-      try {
-        convertRetailToCustomEdition(source, { acknowledgeScripts: true, resources });
-        throw new Error('expected a refusal');
-      } catch (err) {
-        expect((err as ConversionRefusedError).code).toBe('ACKNOWLEDGEMENT_REQUIRED');
+      const report = preflightRetailConversion(source, resources);
+      expect(report.canConvert).toBe(true);
+      expect(report.requiresAcknowledgement).toBe(false);
+      expect(report.checks.find((k) => k.id === 'tagDataExtents')).toMatchObject({ status: 'warn', details: [expect.stringMatching(/^#2404 sound\\sound environments\\arena\.sound_environment root: 72 bytes at 0x409DC695, outside the tag data/)] });
+      const row = report.checks.find((k) => k.id === 'repairTagRootOutside')!;
+      expect(row).toMatchObject({ status: 'warn', requiresAcknowledgement: false, repair: { id: 'tagRootOutside', required: true } });
+      expect(report.repairs).toEqual([{ id: 'tagRootOutside', required: true, tagPath: 'sound\\sound environments\\arena', bytesAdded: 75 }]);
+      expect(report.estimatedOutputSize).toBe(75_214_196 + 75);
+      for (const repairs of [undefined, { tagRootOutside: false }, { scriptSyntaxData: true }]) {
+        try {
+          convertRetailToCustomEdition(source, { acknowledgeScripts: true, resources, repairs });
+          throw new Error('expected a refusal');
+        } catch (err) {
+          expect((err as ConversionRefusedError).code).toBe('REPAIR_REQUIRED');
+        }
       }
     } finally {
       files.forEach((f) => f.close());

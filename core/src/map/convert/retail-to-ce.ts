@@ -15,6 +15,9 @@ import type { ExternalImportPlan, PerAssetScan } from './externalize-in';
 import { readResourceTable } from './resource-files';
 import type { RandomAccessFile, ResourceKind, ResourceTable } from './resource-files';
 import { RawDataAppendCancelledError } from '../raw-data-region';
+import { checkTagDataExtents } from './extent-check';
+import { applyTagDataRepairs, planTagDataRepairs, repairBytesAdded } from './tag-data-repairs';
+import type { AppliedTagDataRepair, TagDataRepairId, TagDataRepairPlan } from './tag-data-repairs';
 
 /**
  * Converter Phase 1: retail-layout maps (cache version 7, standard 2048-byte header, tag data at the
@@ -84,7 +87,10 @@ export type ConversionCheckId =
   | 'injectAfterwards'
   | 'scenarioName'
   | 'tagFileChecksum'
-  | 'tagDataOutside'
+  | 'tagDataExtents'
+  | 'repairScriptSyntaxData'
+  | 'repairTagRootOutside'
+  | 'scriptDataAlignment'
   | 'externalData'
   | 'resourceFiles'
   | 'resourceNames'
@@ -100,6 +106,11 @@ export interface ConversionCheck {
   details: string[];
   /** Convert is only allowed after the user explicitly acknowledges this check. */
   requiresAcknowledgement: boolean;
+  /**
+   * Set on a repair row: the repair the user can tick. A required repair is pre-ticked; Convert is
+   * refused while it is unticked (OpenCE refuses the map without it). Optional repairs start unticked.
+   */
+  repair?: { id: TagDataRepairId; required: boolean };
 }
 
 export interface RetailConversionReport {
@@ -120,8 +131,10 @@ export interface RetailConversionReport {
   newCrc32: number | null;
   /** Bitmap images and sound permutations whose data is in the source game's resource files. Null if not read. */
   externalData: { bitmaps: { count: number; bytes: number }; sounds: { count: number; bytes: number } } | null;
-  /** Output file size: the source size plus the external data copied in. Null if not known. */
+  /** Output file size: the source size plus the external data copied in and the required repairs. Null if not known. */
   estimatedOutputSize: number | null;
+  /** The repairs this map can get (also listed as checklist rows with `repair` set). */
+  repairs: { id: TagDataRepairId; required: boolean; tagPath: string; bytesAdded: number }[];
 }
 
 /** The source game's resource files, for maps whose bitmap or sound data is external. Read by offset only. */
@@ -129,8 +142,8 @@ export type ConversionResourceFiles = Partial<Record<ResourceKind, RandomAccessF
 
 export interface RetailConversionOptions {
   acknowledgeScripts: boolean;
-  /** Required when the "Tag data pointer outside the tag data" row lists tags. */
-  acknowledgeTagDataOutside?: boolean;
+  /** Tag data repairs to apply. Every repair the report marks required must be true, or the conversion is refused (REPAIR_REQUIRED). */
+  repairs?: Partial<Record<TagDataRepairId, boolean>>;
   resources?: ConversionResourceFiles;
   /** Progress while external data is copied in, in bytes. */
   onProgress?: (bytesDone: number, bytesTotal: number) => void;
@@ -139,7 +152,7 @@ export interface RetailConversionOptions {
 }
 
 export class ConversionRefusedError extends Error {
-  constructor(message: string, public readonly code: 'REFUSED' | 'ACKNOWLEDGEMENT_REQUIRED' | 'CANCELLED' = 'REFUSED') {
+  constructor(message: string, public readonly code: 'REFUSED' | 'ACKNOWLEDGEMENT_REQUIRED' | 'REPAIR_REQUIRED' | 'CANCELLED' = 'REFUSED') {
     super(message);
     this.name = 'ConversionRefusedError';
   }
@@ -147,8 +160,8 @@ export class ConversionRefusedError extends Error {
 
 const MAX_DETAILS = 50;
 
-function check(id: ConversionCheckId, label: string, status: ConversionCheckStatus, message: string, details: string[] = [], requiresAcknowledgement = false): ConversionCheck {
-  return { id, label, status, message, details: details.slice(0, MAX_DETAILS), requiresAcknowledgement };
+function check(id: ConversionCheckId, label: string, status: ConversionCheckStatus, message: string, details: string[] = [], requiresAcknowledgement = false, repair?: ConversionCheck['repair']): ConversionCheck {
+  return { id, label, status, message, details: details.slice(0, MAX_DETAILS), requiresAcknowledgement, ...(repair ? { repair } : {}) };
 }
 
 const hex = (n: number) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
@@ -160,6 +173,7 @@ interface ParsedView {
   view: Buffer;
   /** Set when the map has per-asset external data that can be copied in (files supplied and matching). */
   importPlan: ExternalImportPlan | null;
+  repairPlan: TagDataRepairPlan | null;
 }
 
 /**
@@ -181,6 +195,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     newCrc32: null,
     externalData: null,
     estimatedOutputSize: null,
+    repairs: [],
   };
   const done = (parsed: ParsedView | null) => {
     report.canConvert = !checks.some((c) => c.status === 'refuse');
@@ -241,7 +256,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     view.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
     const header = parseCacheFileHeader(view);
     const tagIndex = parseTagIndex(view, header);
-    parsed = { header, tagIndex, view, importPlan: null };
+    parsed = { header, tagIndex, view, importPlan: null, repairPlan: null };
   } catch (err) {
     checks.push(check('regions', 'Tag index can be read', 'refuse', `The tag index can't be read: ${(err as Error).message}`));
     return done(null);
@@ -272,19 +287,20 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     checks.push(check('regions', regionsLabel, 'refuse', (err as Error).message));
   }
 
-  checks.push(tagDataOutsideCheck(header, tagIndex));
+  parsed.repairPlan = tagDataChecks(checks, view, header, tagIndex, report);
 
   const scan = scanPerAssetData(view, header, tagIndex);
   const counts = countExternal(scan);
   report.externalData = { bitmaps: counts.bitmap, sounds: counts.sound };
   if (counts.bitmap.count + counts.sound.count === 0 && scan.blocked.length === 0) {
-    report.newCrc32 = headerOnlyCrc;
-    report.estimatedOutputSize = buffer.length;
-    if (headerOnlyCrc !== null) checks.push(check('regions', regionsLabel, 'pass', `New CRC32 ${hex(headerOnlyCrc)} (was ${hex(report.previousCrc32)}).`));
+    report.newCrc32 = parsed.repairPlan?.repairs.length ? null : headerOnlyCrc;
+    report.estimatedOutputSize = buffer.length + requiredRepairBytes(header, parsed.repairPlan);
+    if (headerOnlyCrc !== null && report.newCrc32 !== null) checks.push(check('regions', regionsLabel, 'pass', `New CRC32 ${hex(headerOnlyCrc)} (was ${hex(report.previousCrc32)}).`));
+    else if (headerOnlyCrc !== null) checks.push(check('regions', regionsLabel, 'pass', 'The new CRC32 is computed after the tag data repairs.'));
     checks.push(check('externalData', 'Bitmap and sound data is inside the map', 'pass', 'No bitmap image or sound permutation keeps its data in a resource file.'));
   } else {
     if (headerOnlyCrc !== null) checks.push(check('regions', regionsLabel, 'pass', 'The new CRC32 is computed after the bitmap and sound data is copied in.'));
-    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length, report);
+    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + requiredRepairBytes(header, parsed.repairPlan), report);
   }
 
   checks.push(scriptCheck(view, header, tagIndex));
@@ -400,34 +416,56 @@ function externalDataChecks(
   return plan;
 }
 
+/** Bytes the required repairs add (the estimate assumes optional repairs stay unticked). */
+function requiredRepairBytes(header: CacheFileHeader, plan: TagDataRepairPlan | null): number {
+  return plan ? repairBytesAdded(header.tagDataSize, plan.repairs.filter((r) => r.required)) : 0;
+}
+
+const REPAIR_ROWS: Record<TagDataRepairId, { id: ConversionCheckId; label: string; required: string; optional: string }> = {
+  scriptSyntaxData: {
+    id: 'repairScriptSyntaxData',
+    label: 'Repair: move the script data to its own block',
+    required:
+      "OpenCE refuses this map: the scenario's script data overlaps other tags. The repair gives it a block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked.",
+    optional: "OpenCE runs none of this map's scripts because the script data is not 4-aligned. The repair moves it to an aligned block at the end of the tag data. Optional: the map loads either way.",
+  },
+  tagRootOutside: {
+    id: 'repairTagRootOutside',
+    label: 'Repair: give the tag outside the tag data a zeroed struct',
+    required:
+      "OpenCE refuses this map: a tag's data starts outside the tag data. The repair adds a zeroed struct of that tag's size at the end of the tag data and points the tag at it. Nothing references the tag, so its values are never used. Convert stays off while this is unticked.",
+    optional: '',
+  },
+};
+
 /**
- * Tags whose data pointer gives a struct that isn't entirely inside the tag data (HaloMD crossing: a
- * sound_environment pointing exactly at the end of the file). HaloMD runs such maps, so this is not
- * refused, but it needs an explicit acknowledgement. 0 on all 5 CE sample maps. BSP tags are skipped:
- * their data is in the BSP, not the tag data.
+ * The tag data block check (what OpenCE's validator refuses: `extent-check.ts`) and a row per
+ * repair that fixes a problem (`tag-data-repairs.ts`). A problem no repair covers refuses the map.
+ * Measured: 0 problems on all 5 CE sample maps and HaloMD heh_2; theisland_3 / barrier: the
+ * script syntax data overlaps other tags; crossing: #2404 sound_environment starts at the tag data end.
  */
-function tagDataOutsideCheck(header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
-  const label = 'Tag data pointer outside the tag data';
-  const known = new Set(getAllTagGroupNames());
-  const start = header.tagDataOffset;
-  const end = header.tagDataOffset + header.tagDataSize;
-  const lines: string[] = [];
-  for (const e of tagIndex.entries) {
-    if (e.isExternal || e.primaryClassName === 'scenario_structure_bsp') continue;
-    const structName = e.primaryClassName && known.has(e.primaryClassName) ? getGroupStructName(e.primaryClassName) : null;
-    const size = structName ? resolveStruct(structName).totalSize : 1;
-    const at = resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
-    if (at < start || at + size > end) lines.push(`#${e.index} ${e.path}.${e.primaryClassName}: its ${size}-byte data starts at file offset ${at}; the tag data is ${start} to ${end}.`);
+function tagDataChecks(checks: ConversionCheck[], view: Buffer, header: CacheFileHeader, tagIndex: TagIndex, report: RetailConversionReport): TagDataRepairPlan {
+  const extents = checkTagDataExtents(view, header, tagIndex);
+  const plan = planTagDataRepairs(view, header, tagIndex, extents);
+  const label = "Tag blocks are inside the tag data and don't overlap";
+  const scope = `${extents.blocksChecked.toLocaleString('en-US')} blocks in ${extents.tagsChecked} tags and ${extents.bspsChecked} structure BSP(s) checked the way OpenCE checks them`;
+  const problems = extents.violations.length;
+  if (problems === 0) checks.push(check('tagDataExtents', label, 'pass', `${scope}: no problems.`));
+  else if (plan.unrepairable.length > 0) {
+    checks.push(
+      check('tagDataExtents', label, 'refuse', `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these, and ${plan.unrepairable.length} can't be repaired here, so the map is not converted.`, plan.unrepairable),
+    );
+  } else {
+    checks.push(check('tagDataExtents', label, 'warn', `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
   }
-  if (lines.length === 0) return check('tagDataOutside', label, 'pass', "Every tag's data is inside the tag data.");
-  return check(
-    'tagDataOutside',
-    label,
-    'warn',
-    `${lines.length} tag(s) point at data that is not entirely inside the tag data, so the game reads whatever follows in memory. HaloMD runs this map; whether Custom Edition does is unverified. Nothing is changed.`,
-    lines,
-    true,
-  );
+  for (const r of plan.repairs) {
+    const row = REPAIR_ROWS[r.id];
+    const bytes = repairBytesAdded(header.tagDataSize, [r]);
+    report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
+    checks.push(check(row.id, row.label, r.required ? 'warn' : 'info', `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
+  }
+  if (plan.notes.length > 0) checks.push(check('scriptDataAlignment', 'Script data alignment', 'info', plan.notes[0], plan.notes.slice(1)));
+  return plan;
 }
 
 function validationCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
@@ -599,11 +637,12 @@ export interface RetailConversionResult {
   report: RetailConversionReport;
   /** Set when external bitmap and sound data was copied in. */
   imported: { rangesCopied: number; bytesAdded: number; insertAt: number; warnings: string[] } | null;
+  /** Tag data repairs applied, in order. */
+  repairs: AppliedTagDataRepair[];
 }
 
-const ACKNOWLEDGEMENTS: { id: ConversionCheckId; option: 'acknowledgeScripts' | 'acknowledgeTagDataOutside'; text: string }[] = [
+const ACKNOWLEDGEMENTS: { id: ConversionCheckId; option: 'acknowledgeScripts'; text: string }[] = [
   { id: 'scripts', option: 'acknowledgeScripts', text: 'scripts that may call the wrong function in Custom Edition' },
-  { id: 'tagDataOutside', option: 'acknowledgeTagDataOutside', text: 'tags whose data pointer is outside the tag data' },
 ];
 
 /**
@@ -619,6 +658,14 @@ export function convertRetailToCustomEdition(source: Buffer, options: RetailConv
   const unacknowledged = ACKNOWLEDGEMENTS.filter((a) => report.checks.some((c) => c.id === a.id && c.requiresAcknowledgement) && !options[a.option]);
   if (unacknowledged.length > 0) {
     throw new ConversionRefusedError(`This map has ${unacknowledged.map((a) => a.text).join(' and ')}. Confirm that you understand this before converting.`, 'ACKNOWLEDGEMENT_REQUIRED');
+  }
+  const repairPlan = parsed?.repairPlan ?? null;
+  const missingRepairs = (repairPlan?.repairs ?? []).filter((r) => r.required && !options.repairs?.[r.id]);
+  if (missingRepairs.length > 0) {
+    throw new ConversionRefusedError(
+      `OpenCE refuses this map without these repairs: ${missingRepairs.map((r) => `${REPAIR_ROWS[r.id].label} (${r.tagPath})`).join('; ')}. Tick them to convert.`,
+      'REPAIR_REQUIRED',
+    );
   }
   let out: Buffer;
   let imported: RetailConversionResult['imported'] = null;
@@ -637,5 +684,33 @@ export function convertRetailToCustomEdition(source: Buffer, options: RetailConv
   }
   out.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
-  return { buffer: out, report, imported };
+  let repairs: AppliedTagDataRepair[] = [];
+  const chosen = (repairPlan?.repairs ?? []).filter((r) => options.repairs?.[r.id]);
+  if (repairPlan && chosen.length > 0) {
+    const applied = applyTagDataRepairs(out, repairPlan, chosen);
+    out = applied.buffer;
+    repairs = applied.applied;
+  }
+  verifyOutputExtents(out);
+  return { buffer: out, report, imported, repairs };
+}
+
+/**
+ * The block check runs again on the converted map before anything is written; any problem refuses
+ * the conversion. Same-reader (it shares the schema engine with the conversion); anchored by 0
+ * problems on the 5 CE sample maps and by the exact match with the addresses OpenCE logged.
+ */
+function verifyOutputExtents(out: Buffer): void {
+  let violations: string[];
+  try {
+    const header = parseCacheFileHeader(out);
+    violations = checkTagDataExtents(out, header, parseTagIndex(out, header)).violations.map((v) => v.text);
+  } catch (err) {
+    violations = [`The converted map can't be read back: ${(err as Error).message}`];
+  }
+  if (violations.length > 0) {
+    throw new ConversionRefusedError(
+      `The converted map still has tag data problems OpenCE would refuse, so nothing was written: ${violations.slice(0, 5).join('; ')}${violations.length > 5 ? ` (and ${violations.length - 5} more)` : ''}.`,
+    );
+  }
 }
