@@ -1,6 +1,7 @@
 /** Shared IPC contract between main, preload, and renderer. Kept dependency-free (no Electron types). */
 
 import type { WarningKind } from '../../core/src/map/dependency-walker';
+import type { RetailConversionReport } from '../../core/src/map/convert/retail-to-ce';
 
 export interface MapHeaderSummary {
   scenarioName: string;
@@ -27,7 +28,8 @@ export type LoadMapResult =
   /** `modified`: the worker's in-memory map has changes (Inject) not yet written by File > Save / Save As. Absent = false. */
   | { status: 'ok'; filePath: string; header: MapHeaderSummary; tags: TagEntrySummary[]; modified?: boolean }
   | { status: 'compressed'; filePath: string }
-  | { status: 'unsupported'; filePath: string; message: string }
+  /** `layout`: set for layouts the converter knows (retail 7, true demo 6). `convertible`: Convert to Custom Edition is offered. */
+  | { status: 'unsupported'; filePath: string; message: string; layout?: 'retail' | 'demo'; convertible?: boolean }
   | { status: 'error'; message: string };
 
 export interface ProgressEvent {
@@ -196,6 +198,32 @@ export type VerifyEmbeddedDataResult =
   | { ok: true; mapLabel: string; totalBitmapSoundTags: number; checkedTags: number; counts: VerifyEmbeddedDataCounts; reportText: string }
   | { ok: false; code: string; message: string };
 
+/* ---------------------- Converter Phase 1: retail layout (7) -> Custom Edition (609) ---------------------- */
+
+export type { RetailConversionReport };
+
+/** Pre-flight for Convert to Custom Edition. Main keeps the source path; the renderer only gets its file name. */
+export type ConvertPreflightResult = { ok: true; sourceFileName: string; report: RetailConversionReport } | { ok: false; code: string; message: string };
+
+/**
+ * The converted map was written to a new file (temp file + rename; name and CRC32 set by
+ * finalizeForSave) and is now the open, unmodified map. The source file is never written.
+ */
+export type ConvertMapResult =
+  | {
+      ok: true;
+      sourcePath: string;
+      outputPath: string;
+      scenarioName: string;
+      previousScenarioName: string;
+      crc32: number;
+      previousCrc32: number;
+      warnings: string[];
+      staleChecksumWarning: string;
+      map: OpenMapSummary;
+    }
+  | { ok: false; code: string; message: string };
+
 /* --------------------------- main <-> worker thread protocol (internal) --------------------------- */
 
 export type WorkerRequest =
@@ -208,6 +236,8 @@ export type WorkerRequest =
   | { type: 'saveMap'; requestId: string }
   | { type: 'saveMapAs'; requestId: string; outputPath: string }
   | { type: 'verifyEmbeddedData'; requestId: string }
+  | { type: 'convertPreflight'; requestId: string; filePath: string }
+  | { type: 'convertMap'; requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean }
   | { type: 'cancel'; requestId: string };
 
 export type WorkerResponse =
@@ -241,6 +271,13 @@ export interface OpenceApi {
   /** File > Discard Changes: asks, then reopens the open file from disk. null: cancelled. */
   discardChanges(): Promise<DiscardChangesResult | null>;
   verifyEmbeddedData(): Promise<VerifyEmbeddedDataResult>;
+  /**
+   * Convert to Custom Edition, step 1: 'open' checks the map just opened (the unsupported banner);
+   * 'pick' shows a file dialog first. null: the file dialog was cancelled.
+   */
+  convertPreflight(source: 'open' | 'pick'): Promise<ConvertPreflightResult | null>;
+  /** Step 2: converts the map from the last pre-flight. Main shows the Save dialog and refuses the source path. */
+  convertMap(acknowledgeScripts: boolean): Promise<ConvertMapResult>;
   openContainingFolder(filePath: string): Promise<void>;
   getSettings(): Promise<AppSettings>;
   notImplemented(feature: string): void;

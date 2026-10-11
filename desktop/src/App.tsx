@@ -17,6 +17,7 @@ import ConfirmDialog from './components/ConfirmDialog';
 import InjectDialog from './components/InjectDialog';
 import SettingsDialog from './components/SettingsDialog';
 import VerifyEmbeddedDataDialog from './components/VerifyEmbeddedDataDialog';
+import ConvertDialog from './components/ConvertDialog';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
 const LARGE_SELECTION_CONFIRM_THRESHOLD = 200;
@@ -30,6 +31,8 @@ export default function App() {
   const [injectDialogOpen, setInjectDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
+  /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
+  const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
   const { logs, progress, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
@@ -69,6 +72,7 @@ export default function App() {
       else if (action === 'inject-tags') setInjectDialogOpen(true);
       else if (action === 'verify-embedded-data') setVerifyDialogOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
+      else if (action === 'convert-map') setConvertSource('pick');
       else if (action.endsWith('-stub')) log('warn', `${action.replace('-stub', '')} is coming in a later milestone.`);
     });
     const offLoaded = window.opence.onMapLoaded((result) => {
@@ -189,6 +193,7 @@ export default function App() {
               { label: 'Save', onClick: handleSave, disabled: !canSave },
               { label: 'Save As...', onClick: handleSaveAs, disabled: !canSaveAs },
               { label: 'Discard Changes...', onClick: handleDiscard, disabled: !isModified },
+              { label: 'Convert to Custom Edition...', onClick: () => setConvertSource('pick') },
               { label: 'Exit', onClick: () => window.close() },
             ],
           },
@@ -220,7 +225,7 @@ export default function App() {
       />
 
       {mapState?.status === 'compressed' && <CompressedBanner onDecompress={handleDecompress} />}
-      {mapState?.status === 'unsupported' && <UnsupportedBanner message={mapState.message} />}
+      {mapState?.status === 'unsupported' && <UnsupportedBanner message={mapState.message} onConvert={mapState.convertible ? () => setConvertSource('open') : undefined} />}
       {mapState?.status === 'error' && <UnsupportedBanner message={mapState.message} />}
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
@@ -249,6 +254,7 @@ export default function App() {
       {injectDialogOpen && <InjectDialog onClose={() => setInjectDialogOpen(false)} log={log} />}
       {settingsDialogOpen && <SettingsDialog onClose={() => setSettingsDialogOpen(false)} />}
       {verifyDialogOpen && <VerifyEmbeddedDataDialog onClose={() => setVerifyDialogOpen(false)} log={log} />}
+      {convertSource && <ConvertDialog source={convertSource} onClose={() => setConvertSource(null)} log={log} />}
 
       {largeSelectionConfirm && (
         <ConfirmDialog

@@ -21,6 +21,8 @@ function installMockOpence(verifyEmbeddedData: () => Promise<VerifyEmbeddedDataR
     saveMapAs: vi.fn(async () => ({ ok: false, code: 'NO_MAP_LOADED', message: 'mock' }) as const),
     saveMap: vi.fn(async () => ({ ok: false, code: 'NO_MAP_LOADED', message: 'mock' }) as const),
     discardChanges: vi.fn(async () => null),
+    convertPreflight: vi.fn(async () => null),
+    convertMap: vi.fn(async () => ({ ok: false, code: 'NO_SOURCE', message: 'mock' }) as const),
     verifyEmbeddedData: vi.fn(verifyEmbeddedData),
     openContainingFolder: vi.fn(async () => {}),
     getSettings: vi.fn(async () => ({ lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } })),

@@ -16,8 +16,9 @@ import type {
   ApplyInjectResult,
   SaveMapAsResult,
   InjectionMode,
+  ConvertMapResult,
 } from '../electron/shared-types';
-import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult } from './test-fixtures/dependency-fixtures';
+import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult, buildMockConvertReport } from './test-fixtures/dependency-fixtures';
 
 /**
  * Dev-only mock of window.opence, used when previewing the renderer in a plain browser
@@ -74,6 +75,7 @@ export function installDevMock() {
   /** The mock's "open map", so Inject -> modified -> Save behaves like the real app. */
   let currentMock: OpenMapSummary | null = null;
   const updatedListeners = new Set<(m: OpenMapSummary) => void>();
+  const loadedListeners = new Set<(m: LoadMapResult) => void>();
   const mockResourceMapStatuses: Record<ResourceMapKind, ResourceMapStatus> = {
     bitmaps: { state: 'not-configured' },
     sounds: { state: 'not-configured' },
@@ -89,6 +91,10 @@ export function installDevMock() {
 
   const mock: OpenceApi = {
     openMapDialog: async () => {
+      if (scenario === 'convert-retail' || scenario === 'convert-scripts') {
+        currentMock = null;
+        return { status: 'unsupported', filePath: 'C:/HaloMD/maps/heh_2.map', message: 'This is a retail-layout map (cache version 7), for example a HaloMD or Mac demo map. It can be converted to a Custom Edition (609) map with "Convert to Custom Edition...". (mock)', layout: 'retail', convertible: true };
+      }
       const r = mockLoadResult('C:/HaloCE/maps/bloodgulch.map');
       currentMock = r.status === 'ok' ? r : null;
       return r;
@@ -194,6 +200,20 @@ export function installDevMock() {
       logListeners.forEach((cb) => cb({ level: 'info', message: '(mock) Discarded unsaved changes; reopened from disk.', timestamp: Date.now() }));
       return { ok: true as const, map: currentMock };
     },
+    convertPreflight: async () => {
+      await fakeProgress('convertPreflight');
+      return { ok: true, sourceFileName: 'heh_2.map', report: buildMockConvertReport(scenario === 'convert-scripts') };
+    },
+    convertMap: async (acknowledgeScripts): Promise<ConvertMapResult> => {
+      if (scenario === 'convert-scripts' && !acknowledgeScripts) return { ok: false, code: 'ACKNOWLEDGEMENT_REQUIRED', message: 'Confirm the script warning first. (mock)' };
+      await fakeProgress('convertMap');
+      const base = mockLoadResult('C:/HaloCE/maps/heh_2_ce.map') as OpenMapSummary;
+      const map: OpenMapSummary = { ...base, header: { ...base.header, scenarioName: 'heh_2_ce', buildString: '01.00.00.0609', crc32: 0xd1c331e9, tagCount: 2410 } };
+      currentMock = map;
+      loadedListeners.forEach((cb) => cb(map));
+      logListeners.forEach((cb) => cb({ level: 'info', message: '(mock) Converted to C:/HaloCE/maps/heh_2_ce.map - map name "heh_2_ce", CRC32 0x00000000 -> 0xD1C331E9. heh_2.map was not changed.', timestamp: Date.now() }));
+      return { ok: true, sourcePath: 'C:/HaloMD/maps/heh_2.map', outputPath: map.filePath, scenarioName: 'heh_2_ce', previousScenarioName: 'heh_2', crc32: 0xd1c331e9, previousCrc32: 0, warnings: [], staleChecksumWarning: 'The separate tag-file checksum was not recalculated (mock).', map };
+    },
     verifyEmbeddedData: async () => {
       await fakeProgress('verifyEmbeddedData');
       return buildMockVerifyEmbeddedDataResult(scenario);
@@ -207,7 +227,10 @@ export function installDevMock() {
       return () => logListeners.delete(cb);
     },
     onMenuAction: () => () => {},
-    onMapLoaded: () => () => {},
+    onMapLoaded: (cb) => {
+      loadedListeners.add(cb);
+      return () => loadedListeners.delete(cb);
+    },
     onMapUpdated: (cb) => {
       updatedListeners.add(cb);
       return () => updatedListeners.delete(cb);

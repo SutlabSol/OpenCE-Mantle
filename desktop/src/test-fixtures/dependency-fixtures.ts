@@ -1,4 +1,4 @@
-import type { DependencyWalkSummary, DependencyTagInfo, DependencyNotExtractedInfo, DependencyWarningInfo, InjectPlanSummary, InjectionMode, VerifyEmbeddedDataResult } from '../../electron/shared-types';
+import type { DependencyWalkSummary, DependencyTagInfo, DependencyNotExtractedInfo, DependencyWarningInfo, InjectPlanSummary, InjectionMode, VerifyEmbeddedDataResult, RetailConversionReport } from '../../electron/shared-types';
 
 /**
  * Realistic dependency-walk fixtures shared between `dev-mock.ts` (Vite browser preview) and
@@ -19,6 +19,8 @@ export const MOCK_SCENARIOS = [
   'inject-blocked',
   'verify-clean',
   'verify-blocked',
+  'convert-retail',
+  'convert-scripts',
 ] as const;
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
@@ -332,4 +334,38 @@ export function buildMockVerifyEmbeddedDataResult(scenario: MockScenario): Verif
       'No embedded (external=0) bitmap/sound data in this map - everything routes through bitmaps.map/sounds.map.',
     ].join('\n'),
   };
+}
+
+/* ------------------------- Converter Phase 1 (?mock=convert-retail / convert-scripts) ------------------------- */
+
+/** A pre-flight report shaped like the real one for heh_2.map (values measured on the real file); `withScripts` adds the acknowledgement case. */
+export function buildMockConvertReport(withScripts: boolean): RetailConversionReport {
+  const check = (id: RetailConversionReport['checks'][number]['id'], label: string, status: 'pass' | 'warn' | 'refuse' | 'info', message: string, details: string[] = [], requiresAcknowledgement = false) => ({
+    id,
+    label,
+    status,
+    message,
+    details,
+    requiresAcknowledgement,
+  });
+  const checks = [
+    check('layout', 'Retail-layout map (cache version 7)', 'pass', 'Standard header, cache version 7.'),
+    check('fileSize', 'File size matches the header', 'pass', '14458336 bytes.'),
+    check('padding', 'Header padding length is 0', 'pass', 'Same as Custom Edition maps.'),
+    check('tagDataAddress', 'Tag data at the Custom Edition address', 'pass', 'Tag array pointer 0x40440028 (base 0x40440000).'),
+    check('entryFlags', 'No tag is marked external', 'pass', 'All 2410 tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.'),
+    check('regions', 'BSP, model data and tag data are inside the file', 'pass', 'New CRC32 0xD1C331E9 (was 0x0).'),
+    withScripts
+      ? check('scripts', 'Scripts that may call the wrong function in Custom Edition', 'warn', "The scenario's 1 script(s) and 0 global(s) make 23 function call(s) (3 different functions). (mock)", ['function #5: 10 call(s)', 'function #114: 12 call(s)', 'function #493: 1 call(s)'], true)
+      : check('scripts', 'Scripts that may call the wrong function in Custom Edition', 'pass', 'The scenario has no scripts and no script globals, so no script function numbers are involved.'),
+    check('validation', 'Every tag reads cleanly with the Custom Edition definitions', 'pass', '2410 tags checked, 0 problems.'),
+    check('referenceIdentity', "Tag references carry their tag's exact ID and path pointer", 'warn', '1 reference points at a tag with an outdated tag ID or path pointer, most likely left over from the demo version of this map. (mock)', [
+      'levels\test\bloodgulch\bloodgulch.scenario_structure_bsp.sound environment palette[0].sound environment: tag ID 0xEADF0969 (tag entry 0xEADD0969), path pointer 0x4BF3ED7B (tag entry 0x4046ED7B)',
+    ]),
+    check('requiredTags', 'Tags Custom Edition requires are present', 'pass', 'All 10 required tags are in the map.'),
+    check('injectAfterwards', 'Inject Tags can add tags to the converted map', 'warn', 'Inject Tags will refuse to add new tags to the converted map. (mock)'),
+    check('scenarioName', 'Internal map name', 'info', 'The internal name is "heh_2". It is set from the output file name when the converted map is saved, so the two always match.'),
+    check('tagFileChecksum', 'Tag-file checksum left unchanged', 'info', "The tag data header's tag-file checksum (0x5E2AF81E) is kept, as File > Save does."),
+  ];
+  return { canConvert: true, requiresAcknowledgement: withScripts, checks, scenarioName: 'heh_2', buildString: '01.00.00.0576', mapType: 1, tagCount: 2410, previousCrc32: 0, newCrc32: 0xd1c331e9 };
 }

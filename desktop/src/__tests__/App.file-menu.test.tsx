@@ -43,6 +43,8 @@ function installMockOpence(openResult: LoadMapResult = OK_MAP) {
     saveMap,
     saveMapAs,
     discardChanges,
+    convertPreflight: vi.fn(async () => null),
+    convertMap: vi.fn(async () => ({ ok: false, code: 'NO_SOURCE', message: 'mock' }) as const),
     verifyEmbeddedData: vi.fn(async () => ({ ok: false, code: 'NO_MAP_LOADED', message: 'mock' }) as const),
     openContainingFolder: vi.fn(async () => {}),
     getSettings: vi.fn(async () => ({ lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } })),
@@ -154,5 +156,40 @@ describe('App File menu: Save / Save As / Discard Changes', () => {
     await waitFor(() => expect(screen.queryByTestId('status-bar-modified')).not.toBeInTheDocument());
     expect(screen.getByTestId('status-bar-tag-count')).toHaveTextContent('0 tags');
     expect(notImplemented).not.toHaveBeenCalled();
+  });
+});
+
+describe('App: Convert to Custom Edition entry points', () => {
+  const RETAIL: LoadMapResult = { status: 'unsupported', filePath: 'C:\HaloMD\heh_2.map', message: 'This is a retail-layout map (cache version 7).', layout: 'retail', convertible: true };
+  const DEMO: LoadMapResult = { status: 'unsupported', filePath: 'C:\HaloMD\bloodgulch.map', message: 'Not supported yet (Phase 2).', layout: 'demo', convertible: false };
+
+  async function openUnsupported() {
+    fireEvent.click(screen.getByTestId('menu-file'));
+    fireEvent.click(screen.getByTestId('menu-item-file-open-map'));
+    await waitFor(() => expect(screen.getByTestId('unsupported-banner')).toBeInTheDocument());
+  }
+
+  it('a version 7 map shows Convert in the banner; it opens the dialog on the open map', async () => {
+    installMockOpence(RETAIL);
+    render(<App />);
+    await openUnsupported();
+    fireEvent.click(screen.getByTestId('unsupported-banner-convert'));
+    await waitFor(() => expect(screen.getByTestId('convert-dialog')).toBeInTheDocument());
+    expect(window.opence.convertPreflight).toHaveBeenCalledWith('open');
+  });
+
+  it('a version 6 (true demo) map has no Convert button', async () => {
+    installMockOpence(DEMO);
+    render(<App />);
+    await openUnsupported();
+    expect(screen.getByTestId('unsupported-banner')).toHaveTextContent('Phase 2');
+    expect(screen.queryByTestId('unsupported-banner-convert')).not.toBeInTheDocument();
+  });
+
+  it('File > Convert to Custom Edition... is always available and asks for a file', async () => {
+    installMockOpence();
+    render(<App />);
+    fireEvent.click(menuItem('convert-to-custom-edition'));
+    await waitFor(() => expect(window.opence.convertPreflight).toHaveBeenCalledWith('pick'));
   });
 });

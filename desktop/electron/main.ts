@@ -8,6 +8,7 @@ import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-ma
 import { saveMapAsFlow, registerSaveMapAsIpc, type SaveMapAsDeps } from './save-map-as';
 import { saveMapFlow, confirmUnsavedChanges, SAVE_MAP_CHANNEL, type SaveMapDeps } from './save-map';
 import { backupOnOpenFlow, isBackedUp } from './backup-on-open';
+import { convertMapFlow, type ConvertMapDeps } from './convert-map';
 import { isBackupFilePath, COMPRESSED_MAP_MESSAGE } from './map-file-rules';
 import type {
   LoadMapResult,
@@ -27,6 +28,8 @@ import type {
   OpenMapSummary,
   InjectionMode,
   VerifyEmbeddedDataResult,
+  ConvertPreflightResult,
+  ConvertMapResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -41,6 +44,10 @@ let currentMapBackedUp = false;
 let overwriteConfirmed = false;
 let currentExtractRequestId: string | null = null;
 let currentInjectContainerPath: string | null = null;
+/** The last map opened that the converter can convert (shown in the unsupported banner). */
+let lastConvertiblePath: string | null = null;
+/** The map the last Convert pre-flight checked; Convert converts exactly this file. */
+let convertSourcePath: string | null = null;
 
 const isDev = !app.isPackaged;
 
@@ -175,6 +182,7 @@ async function loadMapAtPath(filePath: string, options: { askBackup: boolean }):
     currentMapModified = false;
     currentMapBackedUp = false;
     overwriteConfirmed = false;
+    lastConvertiblePath = result.status === 'unsupported' && result.convertible ? filePath : null;
     if (result.status === 'ok') {
       currentMapPath = filePath;
       currentMapCompressed = false;
@@ -619,6 +627,84 @@ function canSaveMap(): boolean {
   return canSaveMapAs() && currentMapModified && !isBackupFilePath(currentMapPath!);
 }
 
+/** Convert to Custom Edition, step 1: picks the source ('open' = the map in the unsupported banner) and runs the read-only pre-flight. */
+async function convertPreflightFlow(source: unknown): Promise<ConvertPreflightResult | null> {
+  if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
+  let sourcePath: string | null;
+  if (source === 'open') {
+    sourcePath = lastConvertiblePath;
+    if (!sourcePath) return { ok: false, code: 'NO_SOURCE', message: 'No convertible map is open. Use File > Convert to Custom Edition... to choose one.' };
+  } else {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Convert to Custom Edition: choose a retail-layout (HaloMD) map',
+      filters: [{ name: 'Halo map', extensions: ['map'] }],
+      properties: ['openFile'],
+    });
+    if (canceled || filePaths.length === 0) return null;
+    sourcePath = filePaths[0];
+  }
+  convertSourcePath = sourcePath;
+  sendLog('info', `Checking ${sourcePath} for conversion to Custom Edition...`);
+  const { promise } = sendWorkerRequest<ConvertPreflightResult>({ type: 'convertPreflight', filePath: sourcePath }, sendLog, (stage, percent) =>
+    mainWindow?.webContents.send('map:progress', { taskId: 'convertPreflight', stage, percent }),
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      const counts = (s: string) => result.report.checks.filter((c) => c.status === s).length;
+      sendLog(result.report.canConvert ? 'info' : 'warn', `${result.sourceFileName}: ${result.report.canConvert ? 'can be converted' : 'cannot be converted'} (${counts('refuse')} refused, ${counts('warn')} warning(s)).`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Convert check failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+const convertMapDeps: ConvertMapDeps = {
+  getSourcePath: () => convertSourcePath,
+  getOpenMapPath: () => currentMapPath,
+  confirmUnsavedChanges: () => confirmUnsavedChanges(unsavedChangesDeps),
+  showSaveDialog: async (defaultPath) => {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow!, {
+      title: 'Save converted Custom Edition map as',
+      defaultPath,
+      filters: [{ name: 'Halo CE Map', extensions: ['map'] }],
+    });
+    return canceled || !filePath ? null : filePath;
+  },
+  confirmOverwrite: saveMapAsDeps.confirmOverwrite,
+  confirmScenarioName,
+  showError: showErrorBox,
+  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts) =>
+    sendWorkerRequest<ConvertMapResult>({ type: 'convertMap', sourcePath, outputPath, acknowledgeScripts }, sendLog, (stage, percent) =>
+      mainWindow?.webContents.send('map:progress', { taskId: 'convertMap', stage, percent }),
+    ).promise,
+  log: sendLog,
+};
+
+/** Convert to Custom Edition, step 2. The output (a new file) becomes the open map; the source is never written. */
+async function runConvertMap(acknowledgeScripts: unknown): Promise<ConvertMapResult> {
+  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true);
+  if (result.ok) {
+    addRecentMap(result.outputPath);
+    currentMapPath = result.outputPath;
+    currentMapCompressed = false;
+    currentMapScenarioName = result.scenarioName;
+    currentMapModified = false;
+    // A new file nothing else depends on: File > Save on it overwrites only it (same rule as after Save As).
+    currentMapBackedUp = true;
+    overwriteConfirmed = false;
+    lastConvertiblePath = null;
+    convertSourcePath = null;
+    buildMenu();
+    updateTitle();
+    mainWindow?.webContents.send('map:loaded', result.map);
+  }
+  return result;
+}
+
 async function verifyEmbeddedDataFlow(): Promise<VerifyEmbeddedDataResult> {
   if (!currentMapPath || currentMapCompressed) return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress a map before verifying embedded data.' };
   sendLog('info', 'Verifying embedded bitmap/sound data...');
@@ -672,6 +758,8 @@ function buildMenu() {
               ? recents.map((p) => ({ label: p, click: () => openMapGuarded(p).then((r) => r && mainWindow?.webContents.send('map:loaded', r)) }))
               : [{ label: '(none yet)', enabled: false }],
         },
+        { type: 'separator' },
+        { label: 'Convert to Custom Edition...', click: () => mainWindow?.webContents.send('menu:action', 'convert-map') },
         { type: 'separator' },
         { label: 'Exit', role: 'quit' },
       ],
@@ -728,6 +816,8 @@ app.whenReady().then(() => {
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());
+  ipcMain.handle('map:convertPreflight', (_e, source: unknown) => convertPreflightFlow(source));
+  ipcMain.handle('map:convert', (_e, acknowledgeScripts: unknown) => runConvertMap(acknowledgeScripts));
   ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
   });

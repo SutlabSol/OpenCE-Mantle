@@ -21,6 +21,12 @@ import {
   verifyEmbeddedData,
   formatEmbeddedDataReport,
   finalizeForSave,
+  classifyMapLayout,
+  describeUnsupportedLayout,
+  isConvertibleRetailLayout,
+  preflightRetailConversion,
+  convertRetailToCustomEdition,
+  ConversionRefusedError,
   AllTagsExcludedError,
   OperationCancelledError,
   ContainerFormatError,
@@ -43,6 +49,8 @@ import type {
   InjectionMode,
   ResourceMapKind,
   VerifyEmbeddedDataResult,
+  ConvertPreflightResult,
+  ConvertMapResult,
 } from './shared-types';
 import { isBackupFilePath, BACKUP_FILE_SAVE_MESSAGE } from './map-file-rules';
 
@@ -174,9 +182,24 @@ export async function runInspect(task: { requestId: string; filePath: string }) 
   const buffer = fs.readFileSync(task.filePath);
   const diskStat = diskStatOf(task.filePath);
   progress(task.requestId, 'Parsing header and tag index', 50);
-  const inspected = inspectCustomEditionMap(buffer);
   currentInject = null;
 
+  // Layouts the converter knows are reported as unsupported (with Convert offered for version 7)
+  // before the CE reader sees them; the true demo layout would otherwise fail as "not a Halo map".
+  const layout = classifyMapLayout(buffer);
+  if (layout.kind === 'retail' || layout.kind === 'demo') {
+    currentMap = null;
+    progress(task.requestId, 'Done', 100);
+    return sendResult(task.requestId, {
+      status: 'unsupported',
+      filePath: task.filePath,
+      message: describeUnsupportedLayout(layout)!,
+      layout: layout.kind,
+      convertible: isConvertibleRetailLayout(layout),
+    } satisfies LoadMapResult);
+  }
+
+  const inspected = inspectCustomEditionMap(buffer);
   let payload: LoadMapResult;
   if (inspected.status === 'ok') {
     currentMap = { filePath: task.filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified: false, diskStat };
@@ -350,10 +373,10 @@ export const TAG_FILE_CHECKSUM_WARNING =
  * Plain-language reason a map write failed (no stack trace). Nothing at `targetPath` changed:
  * the temp file is removed by the caller and the rename is the only step that touches it.
  */
-export function describeMapWriteError(err: unknown, targetPath: string): string {
+export function describeMapWriteError(err: unknown, targetPath: string, stillOpenNote = 'your changes are still open in the app'): string {
   const code = (err as NodeJS.ErrnoException)?.code;
   const name = path.basename(targetPath);
-  const unchanged = `${name} on disk was not changed, and your changes are still open in the app.`;
+  const unchanged = `${name} on disk was not changed, and ${stillOpenNote}.`;
   if (code === 'ENOSPC') return `There is not enough free disk space to save ${name}. ${unchanged} Free some space, or use File > Save As to save to another drive.`;
   if (code === 'EBUSY' || code === 'EPERM' || code === 'EACCES' || code === 'EROFS')
     return `${name} could not be written: the file is in use by another program (for example OpenCE or Halo), or the file or its folder is read-only. ${unchanged} Close the other program and try again, or use File > Save As.`;
@@ -367,7 +390,7 @@ export function describeMapWriteError(err: unknown, targetPath: string): string 
  * leaves a partial file at `outputPath` and never touches an existing one. Throws a
  * `WRITE_FAILED` error with a plain message (temp file already removed) when writing fails.
  */
-function writeFinalizedMap(map: Buffer, outputPath: string): FinalizeResult {
+function writeFinalizedMap(map: Buffer, outputPath: string, stillOpenNote?: string): FinalizeResult {
   const finalized = finalizeForSave(map, { fileName: path.basename(outputPath) });
   const tempPath = `${outputPath}.tmp-${randomUUID()}`;
   try {
@@ -375,7 +398,7 @@ function writeFinalizedMap(map: Buffer, outputPath: string): FinalizeResult {
     mapFs.renameSync(tempPath, outputPath);
   } catch (err) {
     removeTempFile(tempPath);
-    throw Object.assign(new Error(describeMapWriteError(err, outputPath)), { code: 'WRITE_FAILED' });
+    throw Object.assign(new Error(describeMapWriteError(err, outputPath, stillOpenNote)), { code: 'WRITE_FAILED' });
   }
   return finalized;
 }
@@ -458,6 +481,60 @@ export function runSaveMapAs(task: { requestId: string; outputPath: string }) {
   }
 }
 
+const samePath = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+/** Convert to Custom Edition, step 1: the read-only pre-flight report. Doesn't touch the held map. */
+export function runConvertPreflight(task: { requestId: string; filePath: string }) {
+  try {
+    progress(task.requestId, 'Reading file', 10);
+    const buffer = fs.readFileSync(task.filePath);
+    progress(task.requestId, 'Checking the map', 40);
+    const report = preflightRetailConversion(buffer);
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, { ok: true, sourceFileName: path.basename(task.filePath), report } satisfies ConvertPreflightResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/**
+ * Convert to Custom Edition, step 2. Reads the source again (never writes it), converts the header
+ * (version, build string), checks the result reads as a CE map, then writes it through the same
+ * path as Save As (`writeFinalizedMap`: name from the file name, CRC32, temp file + rename).
+ * Afterwards the output is the open, unmodified map.
+ */
+export function runConvertMap(task: { requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean }) {
+  if (samePath(task.sourcePath, task.outputPath)) return sendError(task.requestId, 'REFUSED_SOURCE_PATH', 'The converted map cannot overwrite the map it was converted from. Choose a different file name or folder.');
+  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, 'REFUSED_OPEN_MAP', 'The converted map cannot overwrite the map that is open in the app. Choose a different file name.');
+  if (isBackupFilePath(task.outputPath)) return sendError(task.requestId, 'REFUSED_BACKUP_FILE', 'The converted map cannot be written as a .bak file. Choose a .map file name.');
+  try {
+    progress(task.requestId, 'Reading file', 10);
+    const source = fs.readFileSync(task.sourcePath);
+    progress(task.requestId, 'Converting the header', 40);
+    const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts });
+    if (inspectCustomEditionMap(converted.buffer).status !== 'ok') throw new Error('The converted map could not be read back as a Custom Edition map; nothing was written.');
+    progress(task.requestId, 'Writing map', 60);
+    const finalized = writeFinalizedMap(converted.buffer, task.outputPath, 'the source map was not changed');
+    currentMap = reparse(task.outputPath, finalized.buffer, false, diskStatOf(task.outputPath));
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      sourcePath: task.sourcePath,
+      outputPath: task.outputPath,
+      scenarioName: finalized.scenarioName,
+      previousScenarioName: finalized.previousScenarioName,
+      crc32: finalized.crc32,
+      previousCrc32: finalized.previousCrc32,
+      warnings: finalized.warnings,
+      staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING,
+      map: summarizeOpenMap(currentMap),
+    } satisfies ConvertMapResult);
+  } catch (err) {
+    if (err instanceof ConversionRefusedError) return sendError(task.requestId, err.code, err.message);
+    sendWriteError(task.requestId, err);
+  }
+}
+
 /**
  * Applies the reviewed plan to the held map IN MEMORY and marks it modified. Writes nothing to
  * disk. The next plan runs against this buffer, so injections stack. Not finalized (name/CRC32)
@@ -517,6 +594,8 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'saveMap') runSaveMap(task);
     else if (task.type === 'saveMapAs') runSaveMapAs(task);
     else if (task.type === 'verifyEmbeddedData') runVerifyEmbeddedData(task);
+    else if (task.type === 'convertPreflight') runConvertPreflight(task);
+    else if (task.type === 'convertMap') runConvertMap(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }
