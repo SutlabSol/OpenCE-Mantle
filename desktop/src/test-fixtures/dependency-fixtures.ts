@@ -401,7 +401,7 @@ export function buildMockRepairConvertReport(required = true): RetailConversionR
     label: 'Repair: move the script data to its own block',
     status: required ? ('warn' as const) : ('info' as const),
     message: required
-      ? "OpenCE refuses this map: the scenario's script data overlaps other tags. The repair gives it a block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked. Adds 380,078 bytes. (mock)"
+      ? `OpenCE refuses this map without this repair: the scenario's script data overlaps other tags or is not 4-aligned, and OpenCE stops loading at "the scenario's script data is missing or damaged" (a blue screen). The repair gives it a 4-aligned block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked. Adds 380,078 bytes. (mock)`
       : "OpenCE runs none of this map's scripts because the script data is not 4-aligned. The repair moves it to an aligned block at the end of the tag data. Optional: the map loads either way. Adds 380,078 bytes. (mock)",
     details: ['Only the first 346,620 of its 380,076 bytes are its own; the rest belongs to other tags. 0 of 19,001 node slots are used (56 bytes with the header), so everything in use fits. (mock)'],
     requiresAcknowledgement: false,
