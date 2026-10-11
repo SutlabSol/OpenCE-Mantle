@@ -38,6 +38,8 @@ __export(map_worker_exports, {
   __setSinkForTest: () => __setSinkForTest,
   describeMapWriteError: () => describeMapWriteError,
   runApplyInject: () => runApplyInject,
+  runConvertMap: () => runConvertMap,
+  runConvertPreflight: () => runConvertPreflight,
   runExtractTags: () => runExtractTags,
   runGetDependencies: () => runGetDependencies,
   runInspect: () => runInspect,
@@ -226,6 +228,11 @@ function readFixedString(buffer, offset, length) {
   const trimmed = nullIndex === -1 ? slice : slice.subarray(0, nullIndex);
   return trimmed.toString("ascii");
 }
+function writeFixedString(buffer, offset, length, value) {
+  buffer.fill(0, offset, offset + length);
+  const bytes = Buffer.from(value, "ascii").subarray(0, length - 1);
+  bytes.copy(buffer, offset);
+}
 function readCString(buffer, offset) {
   let end = offset;
   while (end < buffer.length && buffer[end] !== 0) {
@@ -277,6 +284,9 @@ function parseCacheFileHeader(buffer) {
 // ../core/src/map/tag-index.ts
 function resolveTagDataPointer(pointer, header, baseMemoryAddress) {
   return header.tagDataOffset + (pointer - baseMemoryAddress);
+}
+function inferBaseMemoryAddressForClassifier(tagArrayAddress) {
+  return tagArrayAddress - TAG_DATA_HEADER_PC_SIZE >>> 0;
 }
 function parseTagIndex(buffer, header) {
   const tagDataHeaderOffset = header.tagDataOffset;
@@ -33973,6 +33983,11 @@ function decodeReflexive(buffer, offset) {
     pointerHigh: buffer.readUInt32LE(offset + 8)
   };
 }
+function encodeReflexive(buffer, offset, value) {
+  buffer.writeUInt32LE(value.count, offset + 0);
+  buffer.writeUInt32LE(value.pointerLow, offset + 4);
+  buffer.writeUInt32LE(value.pointerHigh, offset + 8);
+}
 function decodeTagDataOffset(buffer, offset) {
   return {
     size: buffer.readUInt32LE(offset + 0),
@@ -33981,6 +33996,13 @@ function decodeTagDataOffset(buffer, offset) {
     pointerLow: buffer.readUInt32LE(offset + 12),
     pointerHigh: buffer.readUInt32LE(offset + 16)
   };
+}
+function encodeTagDataOffset(buffer, offset, value) {
+  buffer.writeUInt32LE(value.size, offset + 0);
+  buffer.writeUInt32LE(value.external, offset + 4);
+  buffer.writeUInt32LE(value.fileOffset, offset + 8);
+  buffer.writeUInt32LE(value.pointerLow, offset + 12);
+  buffer.writeUInt32LE(value.pointerHigh, offset + 16);
 }
 function decodeBasicUnit(buffer, offset, type) {
   switch (type) {
@@ -34027,6 +34049,63 @@ function decodeBasicUnit(buffer, offset, type) {
     return out;
   }
   throw new Error(`decodeBasicUnit: unknown basic type "${type}"`);
+}
+function encodeBasicUnit(buffer, offset, type, value) {
+  switch (type) {
+    case "int8":
+      buffer.writeInt8(value, offset);
+      return;
+    case "uint8":
+      buffer.writeUInt8(value, offset);
+      return;
+    case "int16":
+      buffer.writeInt16LE(value, offset);
+      return;
+    case "uint16":
+    case "Index":
+      buffer.writeUInt16LE(value, offset);
+      return;
+    case "int32":
+      buffer.writeInt32LE(value, offset);
+      return;
+    case "uint32":
+    case "Pointer":
+    case "TagFourCC":
+    case "TagID":
+    case "ColorARGBInt":
+      buffer.writeUInt32LE(value, offset);
+      return;
+    case "float":
+    case "Angle":
+    case "Fraction":
+      buffer.writeFloatLE(value, offset);
+      return;
+    case "ScenarioScriptNodeValue":
+      buffer.writeUInt32LE(value, offset);
+      return;
+    case "TagString": {
+      const v = value;
+      if (v.raw) {
+        v.raw.copy(buffer, offset);
+        return;
+      }
+      buffer.fill(0, offset, offset + 32);
+      const bytes = Buffer.from(v.text, "ascii").subarray(0, 31);
+      bytes.copy(buffer, offset);
+      return;
+    }
+  }
+  if (type in FLOAT_COMPOSITE_COMPONENT_COUNT) {
+    const arr = value;
+    for (let i = 0; i < arr.length; i++) buffer.writeFloatLE(arr[i], offset + i * 4);
+    return;
+  }
+  if (type in INT16_COMPOSITE_COMPONENT_COUNT) {
+    const arr = value;
+    for (let i = 0; i < arr.length; i++) buffer.writeInt16LE(arr[i], offset + i * 2);
+    return;
+  }
+  throw new Error(`encodeBasicUnit: unknown basic type "${type}"`);
 }
 
 // ../core/src/map/definitions/engine.ts
@@ -34202,6 +34281,41 @@ function decodeValueField(buffer, absOffset, field) {
   }
   return { kind: "basic", type: field.type, value: decodeBasicUnit(buffer, absOffset, field.type) };
 }
+function encodeValueField(buffer, absOffset, decoded) {
+  switch (decoded.kind) {
+    case "dependency":
+      encodeDependency(buffer, absOffset, decoded.value);
+      return;
+    case "reflexive":
+      encodeReflexive(buffer, absOffset, decoded.value);
+      return;
+    case "tagDataOffset":
+      encodeTagDataOffset(buffer, absOffset, decoded.value);
+      return;
+    case "enum":
+      buffer.writeUInt16LE(decoded.value, absOffset);
+      return;
+    case "bitfield":
+      if (decoded.width === 8) buffer.writeUInt8(decoded.value, absOffset);
+      else if (decoded.width === 16) buffer.writeUInt16LE(decoded.value, absOffset);
+      else buffer.writeUInt32LE(decoded.value, absOffset);
+      return;
+    case "bounds": {
+      const unitSize = basicUnitSize(decoded.type);
+      encodeBasicUnit(buffer, absOffset, decoded.type, decoded.value[0]);
+      encodeBasicUnit(buffer, absOffset + unitSize, decoded.type, decoded.value[1]);
+      return;
+    }
+    case "array": {
+      const unitSize = basicUnitSize(decoded.type);
+      decoded.value.forEach((v, i) => encodeBasicUnit(buffer, absOffset + i * unitSize, decoded.type, v));
+      return;
+    }
+    case "basic":
+      encodeBasicUnit(buffer, absOffset, decoded.type, decoded.value);
+      return;
+  }
+}
 function decodeStruct(buffer, baseOffset, structName) {
   const resolved = resolveStruct(structName);
   const out = /* @__PURE__ */ new Map();
@@ -34209,6 +34323,171 @@ function decodeStruct(buffer, baseOffset, structName) {
     out.set(field.name, decodeValueField(buffer, baseOffset + field.offset, field.def));
   }
   return out;
+}
+function encodeStruct(buffer, baseOffset, structName, decoded) {
+  const resolved = resolveStruct(structName);
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value) {
+      throw new DefinitionLoadError(`encodeStruct: missing decoded value for field "${field.name}" in struct "${structName}".`);
+    }
+    encodeValueField(buffer, baseOffset + field.offset, value);
+  }
+}
+
+// ../core/src/map/definitions/validate-tag.ts
+var MAX_ELEMENTS_FULLY_VALIDATED_PER_REFLEXIVE = 2e3;
+var NULL_TAG_ID = 4294967295;
+var ABSTRACT_CLASS_EXPANSIONS = {
+  model: ["model", "gbxmodel"],
+  item: ["item", "weapon", "equipment", "garbage"],
+  unit: ["unit", "biped", "vehicle"],
+  device: ["device", "device_control", "device_light_fixture", "device_machine"],
+  object: [
+    "object",
+    "biped",
+    "vehicle",
+    "weapon",
+    "equipment",
+    "garbage",
+    "projectile",
+    "scenery",
+    "device_control",
+    "device_light_fixture",
+    "device_machine",
+    "placeholder",
+    "sound_scenery"
+  ],
+  shader: [
+    "shader",
+    "shader_environment",
+    "shader_model",
+    "shader_transparent_chicago",
+    "shader_transparent_chicago_extended",
+    "shader_transparent_generic",
+    "shader_transparent_glass",
+    "shader_transparent_meter",
+    "shader_transparent_plasma",
+    "shader_transparent_water"
+  ]
+};
+function classAccepts(classes, actualClassName) {
+  if (classes.includes("*")) return true;
+  if (classes.includes(actualClassName)) return true;
+  return classes.some((c) => ABSTRACT_CLASS_EXPANSIONS[c]?.includes(actualClassName));
+}
+function validateDependency(dep, classes, tagIndex, context, errors) {
+  if (dep.tagId === NULL_TAG_ID) return;
+  const idx = dep.tagId & 65535;
+  if (idx >= tagIndex.entries.length) {
+    errors.push(`${context}: dependency tag_id index ${idx} is out of range (tag count ${tagIndex.entries.length}).`);
+    return;
+  }
+  const referenced = tagIndex.entries[idx];
+  if (referenced.primaryClassFourCC !== dep.fourcc) {
+    errors.push(
+      `${context}: dependency fourcc "${fourCCToString(dep.fourcc)}" does not match referenced tag #${idx} (${referenced.path}) actual class "${fourCCToString(referenced.primaryClassFourCC)}".`
+    );
+    return;
+  }
+  if (referenced.primaryClassName === null || !classAccepts(classes, referenced.primaryClassName)) {
+    errors.push(
+      `${context}: dependency resolves to tag #${idx} (${referenced.path}, class=${referenced.primaryClassName}) which is not in this field's allowed classes [${classes.join(", ")}].`
+    );
+  }
+}
+function roundTripCheck(buffer, fileOffset, structName, totalSize, decoded, context, errors) {
+  const reEncoded = Buffer.alloc(totalSize);
+  buffer.copy(reEncoded, 0, fileOffset, fileOffset + totalSize);
+  try {
+    encodeStruct(reEncoded, 0, structName, decoded);
+  } catch (error) {
+    errors.push(`${context}: failed to re-encode: ${error.message}`);
+    return;
+  }
+  const original = buffer.subarray(fileOffset, fileOffset + totalSize);
+  if (!reEncoded.equals(original)) {
+    let firstDiff = -1;
+    for (let i = 0; i < totalSize; i++) {
+      if (reEncoded[i] !== original[i]) {
+        firstDiff = i;
+        break;
+      }
+    }
+    errors.push(`${context}: round-trip encode did not reproduce original bytes (first mismatch at struct-relative offset ${firstDiff}).`);
+  }
+}
+function validateStructInstance(buffer, tagIndex, structName, fileOffset, fileOffsetAnchor, baseMemoryAddress, context, errors, stats) {
+  const resolved = resolveStruct(structName);
+  stats.structsVisited++;
+  if (fileOffset < 0 || fileOffset + resolved.totalSize > buffer.length) {
+    errors.push(`${context}: struct "${structName}" at file offset ${fileOffset} (size ${resolved.totalSize}) is out of bounds of the file.`);
+    return;
+  }
+  const decoded = decodeStruct(buffer, fileOffset, structName);
+  roundTripCheck(buffer, fileOffset, structName, resolved.totalSize, decoded, context, errors);
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value) continue;
+    if (field.def.nonCached) continue;
+    const fieldContext = `${context}.${field.name}`;
+    if (value.kind === "dependency") {
+      stats.dependenciesChecked++;
+      const classes = field.def.type === "TagDependency" ? field.def.classes ?? [] : [];
+      validateDependency(value.value, classes, tagIndex, fieldContext, errors);
+    } else if (value.kind === "reflexive") {
+      stats.reflexivesChecked++;
+      const { count, pointerLow } = value.value;
+      if (count === 0) continue;
+      const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+      if (!childStructName) continue;
+      const childSize = resolveStruct(childStructName).totalSize;
+      const childBaseOffset = resolvePointer(pointerLow, fileOffsetAnchor, baseMemoryAddress);
+      if (childBaseOffset < 0 || childBaseOffset + count * childSize > buffer.length) {
+        errors.push(
+          `${fieldContext}: reflexive of ${count}x "${childStructName}" at file offset ${childBaseOffset} is out of bounds of the file.`
+        );
+        continue;
+      }
+      stats.elementsBoundsChecked += count;
+      const fullyValidateCount = Math.min(count, MAX_ELEMENTS_FULLY_VALIDATED_PER_REFLEXIVE);
+      for (let i = 0; i < fullyValidateCount; i++) {
+        validateStructInstance(
+          buffer,
+          tagIndex,
+          childStructName,
+          childBaseOffset + i * childSize,
+          fileOffsetAnchor,
+          baseMemoryAddress,
+          `${fieldContext}[${i}]`,
+          errors,
+          stats
+        );
+      }
+    }
+  }
+}
+function locateStructureBsp(buffer, tagIndex, scenarioFileOffset, scenarioFileOffsetAnchor, scenarioBaseMemoryAddress, targetTagId) {
+  const decodedScenario = decodeStruct(buffer, scenarioFileOffset, "Scenario");
+  const bspsField = decodedScenario.get("structure bsps");
+  if (!bspsField || bspsField.kind !== "reflexive") return null;
+  const { count, pointerLow } = bspsField.value;
+  if (count === 0) return null;
+  const childSize = resolveStruct("ScenarioBSP").totalSize;
+  const arrayOffset = scenarioFileOffsetAnchor + (pointerLow - scenarioBaseMemoryAddress);
+  for (let i = 0; i < count; i++) {
+    const entryOffset = arrayOffset + i * childSize;
+    const decoded = decodeStruct(buffer, entryOffset, "ScenarioBSP");
+    const dep = decoded.get("structure bsp");
+    if (!dep || dep.kind !== "dependency") continue;
+    if (dep.value.tagId !== targetTagId) continue;
+    const bspStart = decoded.get("bsp start").value;
+    const bspAddress = decoded.get("bsp address").value;
+    if (bspStart + 24 > buffer.length) return null;
+    const metaPointer = buffer.readUInt32LE(bspStart + 0);
+    return { fileOffset: bspStart + (metaPointer - bspAddress), fileOffsetAnchor: bspStart, baseMemoryAddress: bspAddress };
+  }
+  return null;
 }
 
 // ../core/src/map/embedded-data-fields.ts
@@ -34318,7 +34597,7 @@ function expectedBitmapPixelDataSize(width, height, depth, typeName, formatName,
 }
 
 // ../core/src/map/dependency-walker.ts
-var NULL_TAG_ID = 4294967295;
+var NULL_TAG_ID2 = 4294967295;
 var UNCERTAIN_GROUPS = ["spheroid"];
 var MAX_ELEMENTS_WALKED_PER_REFLEXIVE = 2e3;
 function walkDependencies(buffer, header, tagIndex, rootIndices, options = {}) {
@@ -34434,7 +34713,7 @@ function collectDirectDependencyRefs(buffer, structName, fileOffset, tagIndex) {
   const out = [];
   for (const field of resolved.fields) {
     const value = decoded.get(field.name);
-    if (!value || value.kind !== "dependency" || value.value.tagId === NULL_TAG_ID) continue;
+    if (!value || value.kind !== "dependency" || value.value.tagId === NULL_TAG_ID2) continue;
     const idx = value.value.tagId & 65535;
     const referenced = idx < tagIndex.entries.length ? tagIndex.entries[idx] : void 0;
     out.push({ originalIndex: idx, group: referenced?.primaryClassName ?? fourCCToString(value.value.fourcc), path: referenced?.path ?? "(unknown)" });
@@ -34459,7 +34738,7 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
     if (!value) continue;
     if (field.def.nonCached) continue;
     if (value.kind === "dependency") {
-      if (value.value.tagId !== NULL_TAG_ID) {
+      if (value.value.tagId !== NULL_TAG_ID2) {
         enqueue({
           index: value.value.tagId & 65535,
           bspLocation: field.name === "structure bsp" ? bspLocationForStructureBsp : void 0,
@@ -34545,7 +34824,7 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
 }
 
 // ../core/src/map/tag-extractor.ts
-var NULL_TAG_ID2 = 4294967295;
+var NULL_TAG_ID3 = 4294967295;
 var AllTagsExcludedError = class extends Error {
   constructor(notExtracted, externalRoots = []) {
     const parts = [
@@ -34568,7 +34847,7 @@ function isRelocatedTagDataField(field, value) {
   return value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size > 0;
 }
 function classifyDependency(dep, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
-  if (dep.tagId === NULL_TAG_ID2) return { fieldPath, group: "", path: "", kind: "null" };
+  if (dep.tagId === NULL_TAG_ID3) return { fieldPath, group: "", path: "", kind: "null" };
   const idx = dep.tagId & 65535;
   const referenced = idx < tagIndex.entries.length ? tagIndex.entries[idx] : void 0;
   const group = referenced?.primaryClassName ?? fourCCToString(dep.fourcc);
@@ -35137,7 +35416,7 @@ function ceCrcRegions(buffer, header, tagIndex) {
 }
 
 // ../core/src/map/tag-injector.ts
-var NULL_TAG_ID3 = 4294967295;
+var NULL_TAG_ID4 = 4294967295;
 function normalizeTagPath(path2) {
   return path2.toLowerCase().replace(/\//g, "\\");
 }
@@ -35457,7 +35736,7 @@ function checkDependencyMap(t) {
   }
   for (const site of sites) {
     const dep = entryByPath.get(site.fieldPath);
-    const fieldIsNull = site.tagId === NULL_TAG_ID3;
+    const fieldIsNull = site.tagId === NULL_TAG_ID4;
     if (!fieldIsNull && !dep) problems.push(`"${site.fieldPath}" holds a tag reference but the container has no entry for it`);
     else if (dep && dep.kind === "null" !== fieldIsNull) problems.push(`"${site.fieldPath}" ${fieldIsNull ? "is empty but its entry names a tag" : "holds a tag reference but its entry is empty"}`);
   }
@@ -35475,7 +35754,7 @@ function rewriteAddedTagData(data, structName, localOffset, fieldPath, depsByPat
     const absFieldOffset = localOffset + field.offset;
     const path2 = childFieldPath(fieldPath, field.name);
     if (value.kind === "dependency") {
-      if (value.value.tagId !== NULL_TAG_ID3) {
+      if (value.value.tagId !== NULL_TAG_ID4) {
         const dep = depsByPath.get(path2);
         if (!dep) throw new Error(`Internal error: no dependency entry for "${path2}" - planInjection should have blocked this tag.`);
         const newTagId = resolveDepTagId(dep);
@@ -35869,6 +36148,394 @@ function finalizeForSave(map, options) {
   return { buffer: out, scenarioName: name, previousScenarioName: header.scenarioName, crc32, previousCrc32: header.crc32 >>> 0, warnings };
 }
 
+// ../core/src/map/convert/classify.ts
+var DEMO_HEAD_OFFSET = 704;
+var DEMO_VERSION_OFFSET = 1416;
+var DEMO_FOOT_OFFSET = 1520;
+function classifyMapLayout(buffer) {
+  if (buffer.length < CACHE_FILE_HEADER_SIZE) return { kind: "notAMap" };
+  if (isChimeraCompressedCustomEdition(buffer)) return { kind: "customEditionCompressed" };
+  const standard = buffer.readUInt32LE(0) === 1751474532 /* HEAD */ && buffer.readUInt32LE(2044) === 1718579060 /* FOOT */;
+  if (standard) {
+    const version = buffer.readUInt32LE(4);
+    if (version === 609 /* CUSTOM_EDITION */) return { kind: "customEdition" };
+    if (version === 7 /* RETAIL */) {
+      const tagDataOffset = buffer.readUInt32LE(16);
+      const inferredBase = tagDataOffset + 4 <= buffer.length ? inferBaseMemoryAddressForClassifier(buffer.readUInt32LE(tagDataOffset)) : null;
+      return { kind: "retail", version, inferredBase };
+    }
+    return { kind: "otherVersion", version };
+  }
+  if (buffer.readUInt32LE(DEMO_HEAD_OFFSET) === 1164469604 /* HEAD_DEMO */ && buffer.readUInt32LE(DEMO_FOOT_OFFSET) === 1197895540 /* FOOT_DEMO */) {
+    return { kind: "demo", version: buffer.readUInt32LE(DEMO_VERSION_OFFSET) };
+  }
+  return { kind: "notAMap" };
+}
+function isConvertibleRetailLayout(layout) {
+  return layout.kind === "retail" && layout.inferredBase === CE_BASE_MEMORY_ADDRESS;
+}
+function describeUnsupportedLayout(layout) {
+  switch (layout.kind) {
+    case "retail":
+      return isConvertibleRetailLayout(layout) ? 'This is a retail-layout map (cache version 7), for example a HaloMD or Mac demo map. It can be converted to a Custom Edition (609) map with "Convert to Custom Edition...".' : `This is a retail-layout map (cache version 7), but its tag data is not at the Custom Edition address (base ${layout.inferredBase === null ? "unreadable" : `0x${layout.inferredBase.toString(16).toUpperCase()}`}), so it can't be converted.`;
+    case "demo":
+      return "This is an original Halo demo map (true demo layout, cache version 6). Converting this layout to Custom Edition is not supported yet (planned as Phase 2).";
+    default:
+      return null;
+  }
+}
+
+// ../core/src/map/convert/reference-identity.ts
+var TAG_DEPENDENCY_PATH_POINTER = 4;
+var NULL_TAG_ID5 = 4294967295;
+function findReferenceIdentityIssues(buffer, header, tagIndex) {
+  const arrayAt = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
+  const entryPathPointer = (index) => buffer.readUInt32LE(arrayAt + index * TAG_ENTRY_SIZE + 16);
+  const issues = [];
+  const visited = /* @__PURE__ */ new Set();
+  const walk = (structName, at, anchor, base, context) => {
+    const resolved = resolveStruct(structName);
+    if (!isRangeInBuffer(at, resolved.totalSize, buffer.length)) return;
+    const key = `${structName}@${at}`;
+    if (visited.has(key)) return;
+    visited.add(key);
+    const decoded = decodeStruct(buffer, at, structName);
+    for (const field of resolved.fields) {
+      if (field.def.nonCached) continue;
+      const value = decoded.get(field.name);
+      if (!value) continue;
+      if (value.kind === "dependency") {
+        const tagId = value.value.tagId >>> 0;
+        if (tagId === NULL_TAG_ID5) continue;
+        const pathPointer = buffer.readUInt32LE(at + field.offset + TAG_DEPENDENCY_PATH_POINTER);
+        const index = tagId & 65535;
+        const entry = index < tagIndex.entries.length ? tagIndex.entries[index] : null;
+        const entryTagId = entry ? entry.tagId >>> 0 : null;
+        const entryPath = entry ? entryPathPointer(index) : null;
+        if (entryTagId !== tagId || entryPath !== pathPointer) {
+          issues.push({ context: `${context}.${field.name}`, tagId, entryTagId, pathPointer, entryPathPointer: entryPath });
+        }
+      } else if (value.kind === "reflexive" && value.value.count > 0 && field.def.type === "TagReflexive") {
+        const child = field.def.struct;
+        if (!child) continue;
+        const size = resolveStruct(child).totalSize;
+        const first = resolvePointer(value.value.pointerLow, anchor, base);
+        if (!isRangeInBuffer(first, value.value.count * size, buffer.length)) continue;
+        for (let i = 0; i < value.value.count; i++) walk(child, first + i * size, anchor, base, `${context}.${field.name}[${i}]`);
+      }
+    }
+  };
+  const known = new Set(getAllTagGroupNames());
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scenarioAt = scenario && !scenario.isExternal ? resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress) : null;
+  for (const entry of tagIndex.entries) {
+    const group = entry.primaryClassName;
+    if (!group || !known.has(group) || entry.isExternal) continue;
+    const structName = getGroupStructName(group);
+    if (!structName) continue;
+    if (group === "scenario_structure_bsp") {
+      if (scenarioAt === null) continue;
+      const bsp = locateStructureBsp(buffer, tagIndex, scenarioAt, header.tagDataOffset, tagIndex.baseMemoryAddress, entry.tagId);
+      if (bsp) walk(structName, bsp.fileOffset, bsp.fileOffsetAnchor, bsp.baseMemoryAddress, `${entry.path}.${group}`);
+    } else {
+      walk(structName, resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress), header.tagDataOffset, tagIndex.baseMemoryAddress, `${entry.path}.${group}`);
+    }
+  }
+  return issues;
+}
+
+// ../core/src/map/convert/retail-to-ce.ts
+var VERSION_OFFSET = 4;
+var FILE_SIZE_OFFSET = 8;
+var PADDING_OFFSET = 12;
+var BUILD_STRING_OFFSET = 64;
+var CE_BUILD_STRING = "01.00.00.0609";
+var CE_REQUIRED_TAGS = [
+  { group: "tag_collection", path: "ui\\ui_tags_loaded_all_scenario_types" },
+  { group: "sound", path: "sound\\sfx\\ui\\cursor" },
+  { group: "sound", path: "sound\\sfx\\ui\\back" },
+  { group: "sound", path: "sound\\sfx\\ui\\flag_failure" },
+  { group: "unicode_string_list", path: "ui\\shell\\main_menu\\mp_map_list" },
+  { group: "unicode_string_list", path: "ui\\shell\\strings\\loading" },
+  { group: "bitmap", path: "ui\\shell\\bitmaps\\trouble_brewing" },
+  { group: "bitmap", path: "ui\\shell\\bitmaps\\background" },
+  { group: "globals", path: "globals\\globals" }
+];
+var CE_SCENARIO_TYPE_COLLECTIONS = [
+  "ui\\ui_tags_loaded_solo_scenario_type",
+  "ui\\ui_tags_loaded_multiplayer_scenario_type",
+  "ui\\ui_tags_loaded_mainmenu_scenario_type"
+];
+var ConversionRefusedError = class extends Error {
+  constructor(message, code = "REFUSED") {
+    super(message);
+    this.code = code;
+    this.name = "ConversionRefusedError";
+  }
+};
+var MAX_DETAILS = 50;
+function check(id, label, status, message, details = [], requiresAcknowledgement = false) {
+  return { id, label, status, message, details: details.slice(0, MAX_DETAILS), requiresAcknowledgement };
+}
+var hex = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
+function runChecks(buffer, full) {
+  const checks = [];
+  const report = {
+    canConvert: false,
+    requiresAcknowledgement: false,
+    checks,
+    scenarioName: null,
+    buildString: null,
+    mapType: null,
+    tagCount: null,
+    previousCrc32: null,
+    newCrc32: null
+  };
+  const done = (parsed2) => {
+    report.canConvert = !checks.some((c) => c.status === "refuse");
+    report.requiresAcknowledgement = checks.some((c) => c.requiresAcknowledgement);
+    return { report, parsed: parsed2 };
+  };
+  const layout = classifyMapLayout(buffer);
+  const layoutLabel = "Retail-layout map (cache version 7)";
+  if (layout.kind === "customEdition") {
+    checks.push(check("layout", layoutLabel, "refuse", "This map is already a Custom Edition map (version 609). There is nothing to convert."));
+    return done(null);
+  }
+  if (layout.kind === "customEditionCompressed") {
+    checks.push(check("layout", layoutLabel, "refuse", "This is a compressed Custom Edition map, not a retail-layout map. There is nothing to convert."));
+    return done(null);
+  }
+  if (layout.kind === "demo") {
+    checks.push(check("layout", layoutLabel, "refuse", "This is an original Halo demo map (true demo layout, version 6). Converting this layout is not supported yet (Phase 2)."));
+    return done(null);
+  }
+  if (layout.kind !== "retail") {
+    checks.push(check("layout", layoutLabel, "refuse", layout.kind === "otherVersion" ? `Cache version ${layout.version} can't be converted; only version 7 (retail layout) can.` : "This does not look like a Halo map file."));
+    return done(null);
+  }
+  checks.push(check("layout", layoutLabel, "pass", "Standard header, cache version 7."));
+  report.scenarioName = readFixedString(buffer, 32, TAG_STRING_SIZE);
+  report.buildString = readFixedString(buffer, BUILD_STRING_OFFSET, TAG_STRING_SIZE);
+  report.mapType = buffer.readUInt16LE(96);
+  report.previousCrc32 = buffer.readUInt32LE(100);
+  const declaredSize = buffer.readUInt32LE(FILE_SIZE_OFFSET);
+  checks.push(
+    declaredSize === buffer.length ? check("fileSize", "File size matches the header", "pass", `${buffer.length} bytes.`) : check("fileSize", "File size matches the header", "refuse", `The header says ${declaredSize} bytes but the file has ${buffer.length}. The file may be truncated or modified.`)
+  );
+  const padding = buffer.readUInt32LE(PADDING_OFFSET);
+  checks.push(
+    padding === 0 ? check("padding", "Header padding length is 0", "pass", "Same as Custom Edition maps.") : check("padding", "Header padding length is 0", "refuse", `The header's padding length (0xC) is ${padding}; every Custom Edition map has 0 there. How to convert that is not known, so the map is not converted.`)
+  );
+  if (!isConvertibleRetailLayout(layout)) {
+    checks.push(
+      check("tagDataAddress", "Tag data at the Custom Edition address", "refuse", `The tag array pointer gives base ${layout.inferredBase === null ? "unreadable" : hex(layout.inferredBase)}, not 0x40440000. Moving tag data (a pointer rebase) is not part of this converter.`)
+    );
+    return done(null);
+  }
+  checks.push(check("tagDataAddress", "Tag data at the Custom Edition address", "pass", `Tag array pointer ${hex(CE_TAG_ARRAY_ADDRESS)} (base 0x40440000).`));
+  if (declaredSize !== buffer.length) return done(null);
+  let parsed;
+  try {
+    const view2 = Buffer.from(buffer);
+    view2.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
+    const header2 = parseCacheFileHeader(view2);
+    const tagIndex2 = parseTagIndex(view2, header2);
+    parsed = { header: header2, tagIndex: tagIndex2, view: view2 };
+  } catch (err) {
+    checks.push(check("regions", "Tag index can be read", "refuse", `The tag index can't be read: ${err.message}`));
+    return done(null);
+  }
+  const { header, tagIndex, view } = parsed;
+  report.tagCount = tagIndex.tagCount;
+  const arrayAt = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
+  const flagged = [];
+  for (const e of tagIndex.entries) {
+    const at = arrayAt + e.index * TAG_ENTRY_SIZE;
+    const w18 = buffer.readUInt32LE(at + 24);
+    const w1c = buffer.readUInt32LE(at + 28);
+    if (w18 !== 0 || w1c !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex(w18)}, +0x1C = ${hex(w1c)}`);
+  }
+  checks.push(
+    flagged.length === 0 ? check("entryFlags", "No tag is marked external", "pass", `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`) : check("entryFlags", "No tag is marked external", "refuse", `${flagged.length} tag entr${flagged.length === 1 ? "y has" : "ies have"} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged)
+  );
+  try {
+    report.newCrc32 = computeCacheCrc32(view, ceCrcRegions(view, header, tagIndex));
+    checks.push(check("regions", "BSP, model data and tag data are inside the file", "pass", `New CRC32 ${hex(report.newCrc32)} (was ${hex(report.previousCrc32)}).`));
+  } catch (err) {
+    checks.push(check("regions", "BSP, model data and tag data are inside the file", "refuse", err.message));
+  }
+  checks.push(scriptCheck(view, header, tagIndex));
+  if (full) {
+    checks.push(validationCheck(view, header, tagIndex));
+    checks.push(referenceIdentityCheck(view, header, tagIndex));
+    checks.push(requiredTagsCheck(header, tagIndex));
+    checks.push(injectAfterwardsCheck(view, header, tagIndex));
+    checks.push(
+      check("scenarioName", "Internal map name", "info", `The internal name is "${report.scenarioName}". It is set from the output file name when the converted map is saved, so the two always match.`)
+    );
+    checks.push(
+      check("tagFileChecksum", "Tag-file checksum left unchanged", "info", `The tag data header's tag-file checksum (${hex(tagIndex.tagChecksum)}) is kept, as File > Save does. Whether the game checks it is unverified; maps saved this way load in OpenCE.`)
+    );
+  }
+  return done(parsed);
+}
+function validationCheck(view, header, tagIndex) {
+  const known = new Set(getAllTagGroupNames());
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scenarioAt = scenario && !scenario.isExternal ? resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress) : null;
+  const lines = [];
+  let failed = 0;
+  let checked = 0;
+  let noDefinition = 0;
+  for (const e of tagIndex.entries) {
+    if (e.isExternal) continue;
+    const group = e.primaryClassName;
+    const structName = group && known.has(group) ? getGroupStructName(group) : null;
+    if (!structName) {
+      noDefinition++;
+      lines.push(`#${e.index} ${e.path}: tag class "${group}" has no definition in this build, so it was not checked.`);
+      continue;
+    }
+    const errors = [];
+    const stats = { structsVisited: 0, dependenciesChecked: 0, reflexivesChecked: 0, elementsBoundsChecked: 0 };
+    const context = `${e.path}.${group}`;
+    if (group === "scenario_structure_bsp") {
+      const bsp = scenarioAt === null ? null : locateStructureBsp(view, tagIndex, scenarioAt, header.tagDataOffset, tagIndex.baseMemoryAddress, e.tagId);
+      if (!bsp) errors.push(`${context}: not found in the scenario's "structure bsps" list.`);
+      else validateStructInstance(view, tagIndex, structName, bsp.fileOffset, bsp.fileOffsetAnchor, bsp.baseMemoryAddress, context, errors, stats);
+    } else {
+      validateStructInstance(view, tagIndex, structName, resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress), header.tagDataOffset, tagIndex.baseMemoryAddress, context, errors, stats);
+    }
+    checked++;
+    if (errors.length > 0) {
+      failed++;
+      lines.push(...errors);
+    }
+  }
+  const label = "Every tag reads cleanly with the Custom Edition definitions";
+  if (failed === 0 && noDefinition === 0) return check("validation", label, "pass", `${checked} tags checked, 0 problems.`);
+  return check(
+    "validation",
+    label,
+    "warn",
+    `${failed} of ${checked} tags have problems${noDefinition ? ` and ${noDefinition} could not be checked` : ""}. They are converted unchanged; nothing is fixed.`,
+    lines
+  );
+}
+function referenceIdentityCheck(view, header, tagIndex) {
+  const issues = findReferenceIdentityIssues(view, header, tagIndex);
+  const label = "Tag references carry their tag's exact ID and path pointer";
+  if (issues.length === 0) return check("referenceIdentity", label, "pass", "Every non-null reference matches its tag entry.");
+  return check(
+    "referenceIdentity",
+    label,
+    "warn",
+    `${issues.length} reference${issues.length === 1 ? "" : "s"} point${issues.length === 1 ? "s" : ""} at a tag with an outdated tag ID or path pointer, most likely left over from the demo version of this map. The Custom Edition sample maps have none of these. They are converted unchanged. If the converted map crashes, or scenery or sounds are missing in OpenCE, check these first.`,
+    issues.map((i) => `${i.context}: tag ID ${hex(i.tagId)} (tag entry ${i.entryTagId === null ? "missing" : hex(i.entryTagId)}), path pointer ${hex(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? "missing" : hex(i.entryPathPointer)})`)
+  );
+}
+function requiredTagsCheck(header, tagIndex) {
+  const has = (group, p) => tagIndex.entries.some((e) => e.primaryClassName === group && e.path.toLowerCase() === p.toLowerCase());
+  const missing = CE_REQUIRED_TAGS.filter((t) => !has(t.group, t.path)).map((t) => `${t.path}.${t.group}`);
+  const collection = CE_SCENARIO_TYPE_COLLECTIONS[header.mapType];
+  if (collection === void 0) missing.push(`(scenario type ${header.mapType} is not 0, 1 or 2, so its tag collection is unknown)`);
+  else if (!has("tag_collection", collection)) missing.push(`${collection}.tag_collection`);
+  const label = "Tags Custom Edition requires are present";
+  if (missing.length === 0) return check("requiredTags", label, "pass", `All ${CE_REQUIRED_TAGS.length + 1} required tags are in the map.`);
+  return check("requiredTags", label, "warn", `${missing.length} required tag${missing.length === 1 ? " is" : "s are"} missing. The game may refuse to load the map. Nothing is added.`, missing);
+}
+var SCRIPT_NODE_TABLE_HEADER_SIZE = 56;
+var SCRIPT_NODE_FLAG_PRIMITIVE = 1;
+var SCRIPT_NODE_FLAG_SCRIPT_CALL = 2;
+function scriptCheck(view, header, tagIndex) {
+  const label = "Scripts that may call the wrong function in Custom Edition";
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scenarioStruct = getGroupStructName("scenario");
+  if (!scenario || scenario.isExternal || scenario.primaryClassName !== "scenario") {
+    return check("scripts", label, "warn", "The scenario tag could not be found, so its scripts were not checked. Function numbering differs between demo and Custom Edition for some functions.", [], true);
+  }
+  const at = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(at, resolveStruct(scenarioStruct).totalSize, view.length)) {
+    return check("scripts", label, "warn", "The scenario tag is outside the file, so its scripts were not checked.", [], true);
+  }
+  const decoded = decodeStruct(view, at, scenarioStruct);
+  const count = (name) => {
+    const v = decoded.get(name);
+    return v?.kind === "reflexive" ? v.value.count : 0;
+  };
+  const scripts = count("scripts");
+  const globals = count("globals");
+  if (scripts === 0 && globals === 0) return check("scripts", label, "pass", "The scenario has no scripts and no script globals, so no script function numbers are involved.");
+  const syntax = decoded.get("script syntax data");
+  const unreadable = () => check("scripts", label, "warn", `The scenario has ${scripts} script(s) and ${globals} global(s), but its script node table could not be read. Some script functions are numbered differently in demo and Custom Edition; nothing is remapped.`, [], true);
+  if (syntax?.kind !== "tagDataOffset" || syntax.value.size < SCRIPT_NODE_TABLE_HEADER_SIZE) return unreadable();
+  const tableAt = resolvePointer(syntax.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(tableAt, syntax.value.size, view.length)) return unreadable();
+  const table = decodeStruct(view, tableAt, "ScenarioScriptNodeTable");
+  const num = (name) => {
+    const v = table.get(name);
+    return v?.kind === "basic" ? Number(v.value) : -1;
+  };
+  const maximum = num("maximum count");
+  const elementSize = num("element size");
+  if (maximum < 0 || elementSize < 8 || SCRIPT_NODE_TABLE_HEADER_SIZE + maximum * elementSize > syntax.value.size) return unreadable();
+  const functionIndices = /* @__PURE__ */ new Map();
+  if (num("count") > 0) {
+    for (let i = 0; i < maximum; i++) {
+      const node = tableAt + SCRIPT_NODE_TABLE_HEADER_SIZE + i * elementSize;
+      if (view.readUInt16LE(node) === 0) continue;
+      const flags = view.readUInt16LE(node + 6);
+      if (flags & (SCRIPT_NODE_FLAG_PRIMITIVE | SCRIPT_NODE_FLAG_SCRIPT_CALL)) continue;
+      const index = view.readUInt16LE(node + 2);
+      functionIndices.set(index, (functionIndices.get(index) ?? 0) + 1);
+    }
+  }
+  const calls = [...functionIndices.values()].reduce((a, b) => a + b, 0);
+  if (calls === 0) return check("scripts", label, "pass", `The scenario has ${scripts} script(s) and ${globals} global(s), with no function calls.`);
+  return check(
+    "scripts",
+    label,
+    "warn",
+    `The scenario's ${scripts} script(s) and ${globals} global(s) make ${calls} function call(s) (${functionIndices.size} different functions). Halo demo and Custom Edition number some script functions differently (at least 19 console/server functions, for example sv_map), and this tool does not check or remap which ones the scripts use. In Custom Edition a script may call the wrong function.`,
+    [...functionIndices.entries()].sort((a, b) => a[0] - b[0]).map(([index, n]) => `function #${index}: ${n} call(s)`),
+    true
+  );
+}
+function injectAfterwardsCheck(view, header, tagIndex) {
+  const label = "Inject Tags can add tags to the converted map";
+  try {
+    collectTagDataPointers(view, tagDataLayoutOf(header, tagIndex));
+    return check("injectAfterwards", label, "pass", "Every pointer in the map can be followed.");
+  } catch (err) {
+    if (!(err instanceof UnwalkableTagError)) throw err;
+    return check(
+      "injectAfterwards",
+      label,
+      "warn",
+      "Inject Tags will refuse to add new tags to the converted map (ADD, or a SWAP that brings in tags the map doesn't have), because one tag has a pointer that can't be followed. Converting, opening, extracting, and a SWAP that adds no tags are not affected.",
+      [err.message]
+    );
+  }
+}
+function preflightRetailConversion(buffer) {
+  return runChecks(buffer, true).report;
+}
+function convertRetailToCustomEdition(source, options) {
+  const { report } = runChecks(source, false);
+  if (!report.canConvert) {
+    const reasons = report.checks.filter((c) => c.status === "refuse").map((c) => c.message);
+    throw new ConversionRefusedError(`This map can't be converted. ${reasons.join(" ")}`);
+  }
+  if (report.requiresAcknowledgement && !options.acknowledgeScripts) {
+    throw new ConversionRefusedError("This map has scripts that may call the wrong function in Custom Edition. Confirm that you understand this before converting.", "ACKNOWLEDGEMENT_REQUIRED");
+  }
+  const out = Buffer.from(source);
+  out.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
+  writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
+  return { buffer: out, report };
+}
+
 // electron/map-file-rules.ts
 function isBackupFilePath(filePath) {
   return /\.bak$/i.test(filePath);
@@ -35965,8 +36632,20 @@ async function runInspect(task) {
   const buffer = fs.readFileSync(task.filePath);
   const diskStat = diskStatOf(task.filePath);
   progress(task.requestId, "Parsing header and tag index", 50);
-  const inspected = inspectCustomEditionMap(buffer);
   currentInject = null;
+  const layout = classifyMapLayout(buffer);
+  if (layout.kind === "retail" || layout.kind === "demo") {
+    currentMap = null;
+    progress(task.requestId, "Done", 100);
+    return sendResult(task.requestId, {
+      status: "unsupported",
+      filePath: task.filePath,
+      message: describeUnsupportedLayout(layout),
+      layout: layout.kind,
+      convertible: isConvertibleRetailLayout(layout)
+    });
+  }
+  const inspected = inspectCustomEditionMap(buffer);
   let payload;
   if (inspected.status === "ok") {
     currentMap = { filePath: task.filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified: false, diskStat };
@@ -36117,17 +36796,17 @@ function runPlanInject(task) {
   }
 }
 var TAG_FILE_CHECKSUM_WARNING = "The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.";
-function describeMapWriteError(err, targetPath) {
+function describeMapWriteError(err, targetPath, stillOpenNote = "your changes are still open in the app") {
   const code = err?.code;
   const name = path.basename(targetPath);
-  const unchanged = `${name} on disk was not changed, and your changes are still open in the app.`;
+  const unchanged = `${name} on disk was not changed, and ${stillOpenNote}.`;
   if (code === "ENOSPC") return `There is not enough free disk space to save ${name}. ${unchanged} Free some space, or use File > Save As to save to another drive.`;
   if (code === "EBUSY" || code === "EPERM" || code === "EACCES" || code === "EROFS")
     return `${name} could not be written: the file is in use by another program (for example OpenCE or Halo), or the file or its folder is read-only. ${unchanged} Close the other program and try again, or use File > Save As.`;
   if (code === "ENOENT") return `The folder for ${name} no longer exists. ${unchanged}`;
   return `Could not save ${name}: ${err instanceof Error ? err.message : String(err)}. ${unchanged}`;
 }
-function writeFinalizedMap(map, outputPath) {
+function writeFinalizedMap(map, outputPath, stillOpenNote) {
   const finalized = finalizeForSave(map, { fileName: path.basename(outputPath) });
   const tempPath = `${outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
   try {
@@ -36135,7 +36814,7 @@ function writeFinalizedMap(map, outputPath) {
     mapFs.renameSync(tempPath, outputPath);
   } catch (err) {
     removeTempFile(tempPath);
-    throw Object.assign(new Error(describeMapWriteError(err, outputPath)), { code: "WRITE_FAILED" });
+    throw Object.assign(new Error(describeMapWriteError(err, outputPath, stillOpenNote)), { code: "WRITE_FAILED" });
   }
   return finalized;
 }
@@ -36202,6 +36881,50 @@ function runSaveMapAs(task) {
     sendWriteError(task.requestId, err);
   }
 }
+var samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+function runConvertPreflight(task) {
+  try {
+    progress(task.requestId, "Reading file", 10);
+    const buffer = fs.readFileSync(task.filePath);
+    progress(task.requestId, "Checking the map", 40);
+    const report = preflightRetailConversion(buffer);
+    progress(task.requestId, "Done", 100);
+    sendResult(task.requestId, { ok: true, sourceFileName: path.basename(task.filePath), report });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+function runConvertMap(task) {
+  if (samePath(task.sourcePath, task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "The converted map cannot overwrite the map it was converted from. Choose a different file name or folder.");
+  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_OPEN_MAP", "The converted map cannot overwrite the map that is open in the app. Choose a different file name.");
+  if (isBackupFilePath(task.outputPath)) return sendError(task.requestId, "REFUSED_BACKUP_FILE", "The converted map cannot be written as a .bak file. Choose a .map file name.");
+  try {
+    progress(task.requestId, "Reading file", 10);
+    const source = fs.readFileSync(task.sourcePath);
+    progress(task.requestId, "Converting the header", 40);
+    const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts });
+    if (inspectCustomEditionMap(converted.buffer).status !== "ok") throw new Error("The converted map could not be read back as a Custom Edition map; nothing was written.");
+    progress(task.requestId, "Writing map", 60);
+    const finalized = writeFinalizedMap(converted.buffer, task.outputPath, "the source map was not changed");
+    currentMap = reparse(task.outputPath, finalized.buffer, false, diskStatOf(task.outputPath));
+    progress(task.requestId, "Done", 100);
+    sendResult(task.requestId, {
+      ok: true,
+      sourcePath: task.sourcePath,
+      outputPath: task.outputPath,
+      scenarioName: finalized.scenarioName,
+      previousScenarioName: finalized.previousScenarioName,
+      crc32: finalized.crc32,
+      previousCrc32: finalized.previousCrc32,
+      warnings: finalized.warnings,
+      staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    if (err instanceof ConversionRefusedError) return sendError(task.requestId, err.code, err.message);
+    sendWriteError(task.requestId, err);
+  }
+}
 function runApplyInject(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   if (!currentInject) return sendError(task.requestId, "NO_PLAN", 'Run "Inject Tags..." and review the plan before applying it.');
@@ -36252,6 +36975,8 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "saveMap") runSaveMap(task);
     else if (task.type === "saveMapAs") runSaveMapAs(task);
     else if (task.type === "verifyEmbeddedData") runVerifyEmbeddedData(task);
+    else if (task.type === "convertPreflight") runConvertPreflight(task);
+    else if (task.type === "convertMap") runConvertMap(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -36272,6 +36997,8 @@ try {
   __setSinkForTest,
   describeMapWriteError,
   runApplyInject,
+  runConvertMap,
+  runConvertPreflight,
   runExtractTags,
   runGetDependencies,
   runInspect,
