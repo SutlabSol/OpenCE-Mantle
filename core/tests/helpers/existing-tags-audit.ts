@@ -35,7 +35,7 @@ const inTagData = (m: RawMap, at: number, length: number) => at >= m.tagDataOffs
 /** Whether a tag-array data field holds an address inside the map's tag data. Decided by value here on purpose (independent of the injector, which decides by group). */
 const isTagDataAddress = (m: RawMap, value: number) => inTagData(m, fileOf(m, value), 1);
 
-const isPointerData = (f: { def: { type: string; nonCached?: boolean; externalFileOffset?: boolean } }) => f.def.type === 'TagDataOffset' && !f.def.nonCached && !f.def.externalFileOffset;
+const isPointerData = (f: { def: { type: string; nonCached?: boolean; externalFileOffset?: unknown } }) => f.def.type === 'TagDataOffset' && !f.def.nonCached && !f.def.externalFileOffset;
 
 export interface ExistingTagsReport {
   /** Stored tag array pointer in the output's tag data header. */
@@ -100,10 +100,10 @@ export function auditExistingTags(sourceBuf: Buffer, sourceIndex: TagIndex, outp
           report(i, `${p}: count ${av.value.count} -> ${bv.value.count}`);
           continue;
         }
-        const size = resolveStruct(f.def.struct).totalSize;
+        const size = resolveStruct(f.def.struct!).totalSize;
         const sb = fileOf(src, av.value.pointerLow);
         const ob = fileOf(out, bv.value.pointerLow);
-        for (let k = 0; k < av.value.count; k++) compare(i, f.def.struct, sb + k * size, ob + k * size, `${p}[${k}]`);
+        for (let k = 0; k < av.value.count; k++) compare(i, f.def.struct!, sb + k * size, ob + k * size, `${p}[${k}]`);
       } else if (av.kind === 'tagDataOffset' && bv.kind === 'tagDataOffset' && isPointerData(f) && av.value.size > 0) {
         pointerBytes.fill(1, f.offset + 12, f.offset + 16);
         const sb = fileOf(src, av.value.pointerLow);
@@ -184,7 +184,7 @@ export function bspReferencePaths(buf: Buffer, ti: TagIndex): BspReferencePath[]
   const bsps = decodeStruct(buf, fileOf(m, scenario.tagDataPointerOrResourceIndex), scenarioStruct).get('structure bsps');
   if (bsps?.kind !== 'reflexive') return found;
   const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === 'structure bsps')!;
-  const elementStruct = field.def.type === 'TagReflexive' ? field.def.struct : '';
+  const elementStruct = field.def.type === 'TagReflexive' ? field.def.struct ?? '' : '';
   const elementSize = resolveStruct(elementStruct).totalSize;
   for (let b = 0; b < bsps.value.count; b++) {
     const el = decodeStruct(buf, fileOf(m, bsps.value.pointerLow) + b * elementSize, elementStruct);
@@ -202,8 +202,8 @@ export function bspReferencePaths(buf: Buffer, ti: TagIndex): BspReferencePath[]
         if (!v || f.def.nonCached) continue;
         if (v.kind === 'dependency' && v.value.pathPointer >>> 0 !== 0) found.push({ at: at + f.offset + 4, value: v.value.pathPointer >>> 0, where: `${where}.${f.name}` });
         else if (v.kind === 'reflexive' && f.def.type === 'TagReflexive' && v.value.count > 0) {
-          const size = resolveStruct(f.def.struct).totalSize;
-          for (let k = 0; k < v.value.count; k++) walk(f.def.struct, inBsp(v.value.pointerLow) + k * size, `${where}.${f.name}[${k}]`);
+          const size = resolveStruct(f.def.struct!).totalSize;
+          for (let k = 0; k < v.value.count; k++) walk(f.def.struct!, inBsp(v.value.pointerLow) + k * size, `${where}.${f.name}[${k}]`);
         }
       }
     };
@@ -236,8 +236,8 @@ export function pointerCensus(buf: Buffer, ti: TagIndex): PointerCensus {
       } else if (v.kind === 'reflexive' && f.def.type === 'TagReflexive') {
         if (v.value.pointerLow >>> 0 === 0) continue; // count 0, or blocks in a resource map
         c.reflexive++;
-        const size = resolveStruct(f.def.struct).totalSize;
-        for (let k = 0; k < v.value.count; k++) walk(f.def.struct, fileOf(m, v.value.pointerLow) + k * size);
+        const size = resolveStruct(f.def.struct!).totalSize;
+        for (let k = 0; k < v.value.count; k++) walk(f.def.struct!, fileOf(m, v.value.pointerLow) + k * size);
       } else if (v.kind === 'tagDataOffset' && isPointerData(f) && (v.value.size > 0 || v.value.pointerLow >>> 0 !== 0)) {
         c.dataBlock++;
       }
@@ -281,11 +281,11 @@ function ownedBlocks(m: RawMap, arrayAt: number, entries: TagIndex['entries'], s
         const v = d.get(f.name);
         if (!v || f.def.nonCached) continue;
         if (v.kind === 'reflexive' && f.def.type === 'TagReflexive' && v.value.count > 0 && v.value.pointerLow >>> 0 !== 0) {
-          const childSize = resolveStruct(f.def.struct).totalSize;
+          const childSize = resolveStruct(f.def.struct!).totalSize;
           const childAt = fileOf(m, v.value.pointerLow);
           if (!inTagData(m, childAt, v.value.count * childSize)) continue;
           blocks.push({ start: childAt, end: childAt + v.value.count * childSize, owner: e.index });
-          for (let k = 0; k < v.value.count; k++) walk(f.def.struct, childAt + k * childSize);
+          for (let k = 0; k < v.value.count; k++) walk(f.def.struct!, childAt + k * childSize);
         } else if (v.kind === 'tagDataOffset' && isPointerData(f) && v.value.size > 0) {
           const blockAt = fileOf(m, v.value.pointerLow);
           blocks.push({ start: blockAt, end: blockAt + v.value.size, owner: e.index });
