@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import ConvertDialog from '../ConvertDialog';
 import type { OpenceApi, ConvertMapResult, ConvertPreflightResult, RetailConversionReport } from '../../../electron/shared-types';
-import { buildMockConvertReport, buildMockModelPartsConvertReport, buildMockRepairConvertReport } from '../../test-fixtures/dependency-fixtures';
+import { buildMockAlignConvertReport, buildMockConvertReport, buildMockModelPartsConvertReport, buildMockRepairConvertReport } from '../../test-fixtures/dependency-fixtures';
 
 function install(preflight: ConvertPreflightResult | null, convert: ConvertMapResult = { ok: false, code: 'CANCELLED', message: 'cancelled' }) {
   const convertPreflight = vi.fn(async () => preflight);
@@ -93,7 +93,30 @@ describe('ConvertDialog', () => {
     fireEvent.click(box);
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
-    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, { scriptSyntaxData: true }));
+    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, { alignTagData: true, scriptSyntaxData: true }));
+  });
+
+  it('the tag data alignment is a required, pre-ticked repair row after the alignment check row; unticking it turns Convert off; Convert passes it', async () => {
+    const { convertMap } = install(ok(buildMockAlignConvertReport()));
+    render(<ConvertDialog source="open" onClose={vi.fn()} log={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('convert-check-repairAlignTagData')).toBeTruthy());
+    const check = screen.getByTestId('convert-check-tagBlockAlignment');
+    expect(check.getAttribute('data-status')).toBe('warn');
+    expect(check.textContent).toMatch(/6,982 of 6,982 tag data blocks .* start 2 mod 4/);
+    expect(check.textContent).toMatch(/path pointer 0x4BF3ED7B is outside the tag data/);
+    const row = screen.getByTestId('convert-check-repairAlignTagData');
+    expect(row.textContent).toMatch(/\(required\).*Adds 2 bytes/);
+    expect(row.textContent).toMatch(/Inserts 2 zero byte\(s\) at 0x4046ED9E .* moves 11,443 pointers/);
+    const box = screen.getByTestId('convert-repair-alignTagData') as HTMLInputElement;
+    const button = screen.getByTestId('convert-dialog-convert') as HTMLButtonElement;
+    expect(box.checked).toBe(true);
+    expect(screen.queryByTestId('convert-repair-scriptSyntaxData')).toBeNull();
+    fireEvent.click(box);
+    expect(button.disabled).toBe(true);
+    expect(screen.getByTestId('convert-dialog-repair-off').textContent).toMatch(/without "Repair: align the tag data"/);
+    fireEvent.click(box);
+    fireEvent.click(button);
+    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, { alignTagData: true }));
   });
 
   it('an optional repair starts unticked and never blocks Convert', async () => {

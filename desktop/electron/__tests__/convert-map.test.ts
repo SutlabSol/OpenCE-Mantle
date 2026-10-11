@@ -102,6 +102,8 @@ describe('Convert to Custom Edition (main-process flow)', () => {
   it('sanitizeRepairChoice keeps only known repair ids set to exactly true', () => {
     expect(sanitizeRepairChoice({ scriptSyntaxData: true, tagRootOutside: 'yes', other: true })).toEqual({ scriptSyntaxData: true });
     expect(sanitizeRepairChoice({ tagRootOutside: true, scriptSyntaxData: false })).toEqual({ tagRootOutside: true });
+    // Phase 1c: the alignment repair passes through (it was missing from a hard-coded list once).
+    expect(sanitizeRepairChoice({ alignTagData: true, tagRootOutside: true })).toEqual({ alignTagData: true, tagRootOutside: true });
     for (const bad of [undefined, null, 'scriptSyntaxData', 1, []]) expect(sanitizeRepairChoice(bad)).toEqual({});
   });
 

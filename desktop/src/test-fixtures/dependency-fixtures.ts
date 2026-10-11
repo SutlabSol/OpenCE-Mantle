@@ -23,6 +23,7 @@ export const MOCK_SCENARIOS = [
   'convert-scripts',
   'convert-repairs',
   'convert-model-parts',
+  'convert-align',
 ] as const;
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
@@ -374,13 +375,80 @@ export function buildMockConvertReport(withScripts: boolean): RetailConversionRe
 }
 
 /**
+ * The Phase 1c rows (`tagBlockAlignment` and the required `alignTagData` repair) as the real
+ * pre-flight gives them; values measured on the real files (core align-tag-data.real-map.test.ts).
+ */
+function mockAlignmentRows(v: { blocks: number; bspBlocks: number; roots: number; data: number; remainder: number; bytes: number; at: string; moved: string; tolerated: string[] }): RetailConversionReport['checks'] {
+  const n = (x: number) => x.toLocaleString('en-US');
+  return [
+    {
+      id: 'tagBlockAlignment',
+      label: 'Tag blocks are 4-aligned (OpenCE skips unaligned blocks)',
+      status: 'warn',
+      message: `${n(v.blocks)} blocks in the tag data and ${n(v.bspBlocks)} in the structure BSP(s) checked the way OpenCE reads them: ${n(v.blocks)} of ${n(v.blocks)} tag data blocks (and ${n(v.roots)} of ${n(v.roots)} tags, ${n(v.data)} of ${n(v.data)} data blocks) start ${v.remainder} mod 4. OpenCE skips such blocks without a message (its sound conversion and HUD passes don't run on them). Fixed by the required repair below. (mock)`,
+      details: v.tolerated,
+      requiresAcknowledgement: false,
+    },
+    {
+      id: 'repairAlignTagData',
+      label: 'Repair: align the tag data',
+      status: 'warn',
+      message: `OpenCE needs this repair: it skips every block that is not 4-aligned without a message, so this map's Ogg Vorbis sounds (player deaths, the announcer, the plasma overheat) play as noise and its weapon HUD is drawn twice too large with the wrong meter channels. The repair inserts zero bytes after the tag names and moves every pointer past them, so every tag and block starts 4-aligned, as in Custom Edition maps. Path strings, BSPs and model data don't move. Convert stays off while this is unticked. Adds ${v.bytes} bytes. (mock)`,
+      details: [`Inserts ${v.bytes} zero byte(s) at ${v.at} (the end of the tag names) and moves ${v.moved} pointers past it by ${v.bytes}.`],
+      requiresAcknowledgement: false,
+      repair: { id: 'alignTagData', required: true },
+    },
+  ];
+}
+
+/**
+ * ?mock=convert-align: HaloMD heh_2 (with its resource files) as the real pre-flight gives it since
+ * Phase 1c: the alignment rows and no other repair (its script data is aligned by the alignment).
+ */
+export function buildMockAlignConvertReport(): RetailConversionReport {
+  const base = buildMockConvertReport(false);
+  const at = base.checks.findIndex((c) => c.id === 'regions') + 1;
+  const rows = mockAlignmentRows({
+    blocks: 6982,
+    bspBlocks: 386,
+    roots: 2409,
+    data: 2052,
+    remainder: 2,
+    bytes: 2,
+    at: '0x4046ED9E',
+    moved: '11,443',
+    tolerated: [
+      'levels\\test\\bloodgulch\\bloodgulch.sound environment palette[0].sound environment: path pointer 0x4BF3ED7B is outside the tag data (a stale leftover; the game never follows it), left as it is.',
+    ],
+  });
+  return { ...base, checks: [...base.checks.slice(0, at), ...rows, ...base.checks.slice(at)], newCrc32: null, estimatedOutputSize: 70_827_480, repairs: [{ id: 'alignTagData', required: true, tagPath: '(all tags)', bytesAdded: 2 }] };
+}
+
+/**
  * ?mock=convert-repairs: the tag data rows as the real pre-flight gives them for HaloMD theisland_3
- * (values measured on the real file; the script syntax data overlaps other tags). `required: false`
- * gives the optional (alignment-only, used nodes) form of the same repair.
+ * (values measured on the real file): the alignment, then the script syntax data, which overlaps other
+ * tags. `required: false` gives the optional (used nodes) form of the script repair, without the
+ * alignment rows.
  */
 export function buildMockRepairConvertReport(required = true): RetailConversionReport {
   const base = buildMockConvertReport(false);
   const at = base.checks.findIndex((c) => c.id === 'regions') + 1;
+  const alignment = required
+    ? mockAlignmentRows({
+        blocks: 7578,
+        bspBlocks: 1349,
+        roots: 2601,
+        data: 2066,
+        remainder: 2,
+        bytes: 2,
+        at: '0x404766D6',
+        moved: '12,245',
+        tolerated: [
+          'levels\\test\\bloodgulch\\bloodgulch.scenario.scenery palette[14].name: path pointer 0x4BF243BC is outside the tag data (a stale leftover; the game never follows it), left as it is.',
+          'vehicles\\banshee\\banshee_mp.weapons[0].weapon: path pointer 0x4BF2D0A9 is outside the tag data (a stale leftover; the game never follows it), left as it is.',
+        ],
+      })
+    : [];
   const extents = required
     ? {
         id: 'tagDataExtents' as const,
@@ -403,13 +471,13 @@ export function buildMockRepairConvertReport(required = true): RetailConversionR
     label: 'Repair: move the script data to its own block',
     status: required ? ('warn' as const) : ('info' as const),
     message: required
-      ? `OpenCE refuses this map without this repair: the scenario's script data overlaps other tags or is not 4-aligned, and OpenCE stops loading at "the scenario's script data is missing or damaged" (a blue screen). The repair gives it a 4-aligned block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked. Adds 380,078 bytes. (mock)`
+      ? `OpenCE refuses this map without this repair: the scenario's script data overlaps other tags or is not 4-aligned, and OpenCE stops loading at "the scenario's script data is missing or damaged" (a blue screen). The repair gives it a 4-aligned block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked. Adds 380,076 bytes. (mock)`
       : "OpenCE runs none of this map's scripts because the script data is not 4-aligned. The repair moves it to an aligned block at the end of the tag data. Optional: the map loads either way. Adds 380,078 bytes. (mock)",
     details: ['Only the first 346,620 of its 380,076 bytes are its own; the rest belongs to other tags. 0 of 19,001 node slots are used (56 bytes with the header), so everything in use fits. (mock)'],
     requiresAcknowledgement: false,
     repair: { id: 'scriptSyntaxData' as const, required },
   };
-  const checks = [...base.checks.slice(0, at), extents, repair, ...base.checks.slice(at)];
+  const checks = [...base.checks.slice(0, at), ...alignment, extents, repair, ...base.checks.slice(at)];
   return {
     ...base,
     checks,
@@ -417,7 +485,10 @@ export function buildMockRepairConvertReport(required = true): RetailConversionR
     tagCount: 2601,
     newCrc32: null,
     estimatedOutputSize: required ? 105_728_562 : null,
-    repairs: [{ id: 'scriptSyntaxData', required, tagPath: 'levels\test\bloodgulch\bloodgulch', bytesAdded: 380_078 }],
+    repairs: [
+      ...(required ? [{ id: 'alignTagData' as const, required: true, tagPath: '(all tags)', bytesAdded: 2 }] : []),
+      { id: 'scriptSyntaxData', required, tagPath: 'levels\\test\\bloodgulch\\bloodgulch', bytesAdded: required ? 380_076 : 380_078 },
+    ],
   };
 }
 

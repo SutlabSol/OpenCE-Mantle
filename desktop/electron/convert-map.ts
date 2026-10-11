@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import type { ConvertMapResult, ConvertRepairChoice, LogEvent, TagDataRepairId } from './shared-types';
 import { isSamePath } from './save-map-as';
 import { isBackupFilePath } from './map-file-rules';
+import { TAG_DATA_REPAIR_IDS } from '../../core/src/map/convert/tag-data-repairs';
 
 /**
  * Main-process side of Convert to Custom Edition (converter Phase 1), with its dependencies
@@ -35,7 +36,8 @@ export function defaultConvertOutputPath(sourcePath: string): string {
   return path.join(dir, `${stem}_ce.map`);
 }
 
-const REPAIR_IDS: readonly TagDataRepairId[] = ['scriptSyntaxData', 'tagRootOutside'];
+/** Every repair id core knows (one list, so a new repair can't be dropped here). */
+const REPAIR_IDS: readonly TagDataRepairId[] = TAG_DATA_REPAIR_IDS;
 
 /** The repair ticks from the renderer, kept only when they are known ids set to exactly true. */
 export function sanitizeRepairChoice(value: unknown): ConvertRepairChoice {
