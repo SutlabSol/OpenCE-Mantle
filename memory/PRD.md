@@ -73,6 +73,12 @@ needs re-verification / unverified / blocked)
        0x803A6000, model data inside tag data, Xbox tag formats. Much larger; not planned in detail.
     e. MCC (CEA, versions 7/13, ipak/FSB, compressed chunks): no maps; OpenCE may load MCC natively. Hold.
     f. barrier and crossing (HaloMD-only): both v7 retail layout with some internal data; part of 1b.
+  - **Distribution (user decision 2026-10-11):** the tool never bundles game resource files. Bundling the
+    Mac demo (about 162 MB) and HaloMD (about 535 MB) bitmaps/sounds.map was considered and rejected
+    (copyright, size). Users point the tool at their own files; the tool ships only fingerprints (sizes and
+    hashes of header + resource table, optional full hash), never game data.
+  - **Note for later:** a converted map that lacks CE-required tags will need them from CE's own ui.map,
+    bitmaps.map, sounds.map and loc.map, which every OpenCE player has. Not planned yet.
   - **Not verifiable without OpenCE:** whether CE plays retail sound sample formats unchanged; the stale
     demo-era references (salt mismatch); the stale tag-file checksum.
 - 2026-10-11: **Sample folders.** `sample_maps/` (untracked, git-ignored): CE maps and CE resource maps at
