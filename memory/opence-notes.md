@@ -218,3 +218,9 @@ requested" line would mean the pool overflowed.
 `bg_md_ce.map`: 70,735,338 B, 0xB38CBC61. Both 0 repairs, 0 warnings, 1,627 ranges; CRC checked
 independently (node:zlib). Prediction: clean death and announcer sounds and HUD, and logs with "60 sound
 permutations converted" and "32 HUD elements". If they glitch, this explanation is wrong or incomplete.
+
+**Control test result (user, 2026-10-12, OpenCE build 185):** bg_pc_ce and bg_md_ce (stock PC and HaloMD
+bloodgulch, converted with the developer script; aligned) load and play with clean sounds and log "60
+sound permutations converted to 1712772 bytes of Xbox ADPCM", "32 HUD elements ... half their scale" and
+"2 HUD meters", as bgali does. This confirms the cause above: the retail-to-CE conversion itself is fine;
+the HaloMD maps' unaligned tag data is the problem. Fix: Phase 1c (PRD), align the tag data.

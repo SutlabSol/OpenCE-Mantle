@@ -55,7 +55,18 @@ needs re-verification / unverified / blocked)
     (70,735,338 B, CRC32 0xA6E5A966 / 0xB38CBC61, 0 repairs). Their blocks are aligned, so they should
     play clean and log "60 sound permutations converted" and "32 HUD elements". Commands in
     opence-notes.md.
-  - **Next (proposed, not approved):** Phase 1c, a required "align the tag data" repair. Plan only.
+  - **Control test result (user, OpenCE build 185):** bg_pc_ce and bg_md_ce load and play with clean
+    sounds and log "60 sound permutations converted to 1712772 bytes of Xbox ADPCM", "32 HUD elements
+    ... half their scale" and "2 HUD meters", like bgali. Cause confirmed.
+  - **Decision (user): Phase 1c approved as planned.** Measured: the HaloMD tool did not pad after the
+    tag path strings, so every root, block and data block is 2 mod 4 (heh_2, theisland_3, barrier) or
+    1 mod 4 (crossing); CE and stock maps are padded (0 unaligned). Repair: insert 2 or 3 zero bytes
+    after the path strings and move every pointer past that point (the ADD growth mechanism,
+    `applyPointerShift`). Conditions: the tolerant walker allows only the known stale pointers (heh_2 1,
+    theisland_3 2 dependency path pointers outside the tag data; crossing #2404's root) and refuses
+    anything else; the alignment row mirrors `loaded_block_get` exactly and finds 0 on the 5 CE maps,
+    PC and HaloMD bloodgulch and every HaloMD output after the repair; align first, then the other
+    repairs (script padding drops to 0, output sizes unchanged); a map with mixed remainders is refused.
 - 2026-10-12: **OpenCE results: heh_2, crossing, barrier play; glitches; theisland_3 model check; roadmap.**
   Details: `memory/opence-notes.md` ("Results in OpenCE", "Known problems on converted maps").
   - **User's tests (OpenCE build 185, debug and release builds):** heh_2_ce, crossing_ce and barrier_ce
