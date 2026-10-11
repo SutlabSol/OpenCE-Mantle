@@ -166,3 +166,55 @@ then a control test: stock PC/bloodgulch and HaloMD/bloodgulch converted the sam
   and bad indices, using the same rules as `custom_edition_model_part_verify`; it must find 0 on the 5 CE
   maps and on heh_2, crossing and barrier. Option 2 (opt-in repair of the 35 indices) is a later,
   separate decision.
+
+## Cause of the sound and HUD glitches (research 2026-10-12; code at 6399ed9, bytes measured read-only)
+
+**One cause: unaligned tag blocks.** `loaded_block_get` (port/linux/game/cache_file_formats.c) returns
+"unreadable" for any block whose offset in the tag cache is not a multiple of 4 (`!(*offset & 3)`).
+`custom_edition_cache_block_element` uses it. Every OpenCE pass that walks blocks through these skips an
+unaligned block silently. In converted heh_2 / crossing / barrier every sound's pitch-range and
+permutation blocks are 1 or 2 mod 4 (333 / 340 / 339 of 333 / 340 / 339); stock PC and HaloMD
+bloodgulch: 0 of 333 (also 0 for the HUD blocks below).
+
+**Sounds.** `custom_edition_sounds_decode` (custom_edition_sounds.c) re-encodes a permutation only when
+it is Ogg Vorbis (3), uncompressed (0) or mono at 44 kHz; Xbox ADPCM (1) plays as it is. It reaches the
+permutations through `custom_edition_cache_block_element`, so with unaligned blocks it converts nothing,
+yet still sets the sound header's compression to Xbox ADPCM. Playback picks the format from the header
+(`sound_valid_for_channel`, source/sound/sound_manager.c), so the Ogg data plays as ADPCM noise. Both
+counters stay 0, so the "sound permutations converted" line is not logged. `sound_prepare`
+(cache_file_formats.c) is skipped the same way (12 permutations each in crossing and barrier keep
+another tag's handle in their runtime fields; effect unknown).
+- Affected (all Ogg, identified by path and class; references from globals not traced): `sound\dialog\
+  chief\deathquiet` / `deathviolent` (unit_dialog, mono 22 kHz, 7 + 16 permutations); 36 x
+  `sound\dialog\multiplayer1\*` (scripted_effect, stereo 22 kHz, 1 each: slayer, game_over, ...);
+  `sound\sfx\weapons\weapon_anims\plasma_cannon_overheat` (weapon_overheat, mono 22 kHz: the plasma
+  pistol sound); crossing also 4 energy-sword sounds (stereo 44 kHz). heh_2: 60 Ogg permutations =
+  bgali's "60 converted". Every sound that plays fine is Xbox ADPCM.
+- CE bloodgulch: all 333 sounds whole-tag in sounds.map, same compression / rate / channels and the same
+  60 Ogg permutations; `resource_sound_load` places them 4-aligned (`tag_cache_allocate`).
+
+**HUD.** `hud_placement_block_convert` / `hud_meters_convert` (cache_file_formats.c; halve the scale of
+elements drawn from Halo PC's double-resolution bitmaps) and `weapon_hud_meters_add`
+(custom_edition_bitmaps.c; meter channel order) use the same block reads. Simulated count: CE bloodgulch
+32 halved (= bgali's log), heh_2 / crossing 12 (= the log), barrier 22 (predicted; check its log). The
+missed 20: weapon statics and meters and the cyborg auxiliary meters, all in unaligned blocks. Effect:
+`hud_ammo_alphas` (512x512 A8R8G8B8) drawn at twice the intended size (pixelated); `hud_ammo_meters`
+drawn with color and alpha swapped (depleted rounds wrong, plasma overheat meter distorted). The unit
+HUD's shield and health meters are fixed fields, still converted (fits "1 HUD meter" vs 2; not simulated
+exactly). The bitmaps are identical (format, size, flags) in heh_2, PC bloodgulch and CE bitmaps.map: the
+source data is fine; the layout is the problem.
+
+**"build_sprite failed to allocate dynamic vertices"** (source/render/render_sprite.c, `build_sprite`):
+each bitmap a particle draws reserves 4 x its maximum sprite count from `_rasterizer_dynamic_vertices_new`
+(source/rasterizer/xbox/rasterizer_xbox_draw_primitives.c), refused when the frame's world-sprite pool
+(`RASTERIZER_MAXIMUM_DYNAMIC_UNLIT_VERTICES` = 4 x 8192) or 1,023 dynamic buffers are used up (the
+screen-space group's maximum is 0 there). Those sprites are not drawn that frame; logged once per run.
+A per-frame particle limit, not shown to be a map defect; an earlier "### ERROR too many dynamic vertices
+requested" line would mean the pool overflowed.
+
+**Control test (expected, developer script, from core/):**
+`npx tsx scripts/convert-external.ts ..\sample_maps\PC\bloodgulch.map ..\sample_maps\PC <out>\bg_pc_ce.map`:
+70,735,338 B, CRC32 0xA6E5A966. Same with `HaloMD\bloodgulch.map` and `..\sample_maps\HaloMD`, output
+`bg_md_ce.map`: 70,735,338 B, 0xB38CBC61. Both 0 repairs, 0 warnings, 1,627 ranges; CRC checked
+independently (node:zlib). Prediction: clean death and announcer sounds and HUD, and logs with "60 sound
+permutations converted" and "32 HUD elements". If they glitch, this explanation is wrong or incomplete.

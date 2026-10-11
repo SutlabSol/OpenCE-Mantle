@@ -41,6 +41,21 @@ needs re-verification / unverified / blocked)
 | Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. **Tag data repairs** (see "OpenCE findings and tag data repairs" in Decisions): built, verified by tests (independent byte checks; the output re-check is same-reader); repair rows in the Convert dialog verified in component tests and `?mock=convert-repairs` only; **In progress.** OpenCE build 185, debug and release (user, 2026-10-12): **heh_2_ce, crossing_ce and barrier_ce load and play.** Known problems on all three: some one-off player/announcer sounds garbled, pixelated HUD ammo icons and a distorted plasma pistol overheat meter (research pending, see 2026-10-12 in Decisions). theisland_3 is refused at OpenCE's model part check (one HaloMD model with bad strip indices); decided: a blocking checklist row (option 1). |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-12: **Research: the sound and HUD glitches have one cause (unaligned tag blocks).** Details,
+  citations and measurements: `memory/opence-notes.md` "Cause of the sound and HUD glitches".
+  - OpenCE's `loaded_block_get` treats any block not 4-aligned in the tag cache as unreadable, so its
+    sound conversion (Ogg Vorbis -> Xbox ADPCM), HUD half-scale pass and meter channel pass skip the
+    HaloMD maps' blocks (1 or 2 mod 4) without a message. Ogg sounds (player death, announcer, plasma
+    overheat) then play as ADPCM noise; weapon HUD elements stay double size, meters keep Halo PC's
+    channel order. The source data equals CE's; the converter's untouched layout is the problem.
+    Simulated HUD counts match the logs (CE bloodgulch 32, heh_2 12).
+  - "build_sprite failed to allocate dynamic vertices": a per-frame particle vertex limit
+    (4 x 8192 world-sprite vertices or 1,023 buffers), not shown to be a map defect.
+  - **Control test (pending, user):** stock PC and HaloMD bloodgulch converted with the developer script
+    (70,735,338 B, CRC32 0xA6E5A966 / 0xB38CBC61, 0 repairs). Their blocks are aligned, so they should
+    play clean and log "60 sound permutations converted" and "32 HUD elements". Commands in
+    opence-notes.md.
+  - **Next (proposed, not approved):** Phase 1c, a required "align the tag data" repair. Plan only.
 - 2026-10-12: **OpenCE results: heh_2, crossing, barrier play; glitches; theisland_3 model check; roadmap.**
   Details: `memory/opence-notes.md` ("Results in OpenCE", "Known problems on converted maps").
   - **User's tests (OpenCE build 185, debug and release builds):** heh_2_ce, crossing_ce and barrier_ce
