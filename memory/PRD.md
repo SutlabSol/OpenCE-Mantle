@@ -38,9 +38,61 @@ needs re-verification / unverified / blocked)
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
 | Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. **Blue-screens in OpenCE (user, 2026-10-11): heh_2_ce and crossing_ce.** Cause: their bitmap and sound data is external (per asset) in the retail resource files, which CE does not have. A header-only conversion is valid only for maps whose data is all internal. Fix planned as Phase 1b (see "Converter: per-asset external data" in Decisions). |
-| Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. |
+| Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. **Tag data repairs** (see "OpenCE findings and tag data repairs" in Decisions): built, verified by tests (independent byte checks; the output re-check is same-reader); repair rows in the Convert dialog verified in component tests and `?mock=convert-repairs` only; unverified in OpenCE. heh_2 blue screen: cause unknown, waiting for halo.log + crash dump. |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: **OpenCE findings and tag data repairs (user-approved plan, decisions and conditions).**
+  - **OpenCE findings (read in OpenCE's code, scratch clone C:\temp\OpenCE-src at 6399ed9; addresses from
+    OpenCE's log):**
+    - `tag_validate.c` `validate_data_extent`: every block and data range must lie inside the tag data,
+      and each claims its bytes; touching a claimed byte is refused. Order: tag data header, tag table,
+      every tag's root, then each tag walked in order. OpenCE stops at the first refusal.
+    - theisland_3 / barrier: the scenario's script syntax data (380,076 B) overlaps other tags.
+      theisland_3 has 346,620 bytes of its own (33,456 overlap: script strings, the structure bsps
+      block, roots and blocks of tags #1-#35); barrier 378,924 (1,152 overlap). Neither has used script
+      nodes; past the 56-byte header the bytes are empty-slot fill. Logged at 0x404864FE / 0x4047662A.
+    - crossing: `custom_edition_cache_load` (`cache_file_formats.c`) refuses a tag whose address is
+      outside the tag data; #2404 `sound\sound environments\arena` points at the tag data end (= file end).
+    - heh_2 "script data is damaged": `hs_scenario_syntax_data_valid` (`hs.c` l.12790) needs a 4-aligned
+      address (heh_2: 0x4047A916; every HaloMD map is unaligned, the 5 CE maps are aligned). Afterwards
+      scripts are off and OpenCE uses its own empty array, so this message does not explain the blue screen.
+    - Free slot rule: `data.c` (`datum_new` l.314, `datum_try_and_get` l.135, `data_next_index` l.468,
+      `data_iterator_next` l.438, `data_delete_all` l.393): a slot with identifier (first int16) 0 is free.
+    - Other checks a converted map may still hit (not yet reached by crossing): shader type, model strips
+      and vertices, BSP header and lightmap layout, animation node counts, tag data below the lowest BSP
+      (HaloMD maps have 9.6-18.3 MB of room). Script function indices: OpenCE renumbers calls by name.
+      Resource maps: OpenCE loads bitmaps.map / sounds.map / loc.map next to the map.
+  - **Built:** `convert/extent-check.ts` (the block check in OpenCE's order, all violations reported;
+    0 on the 5 CE maps and heh_2; theisland_3 / barrier / crossing match OpenCE's logged addresses).
+    `convert/tag-data-repairs.ts`:
+    - (a) `scriptSyntaxData`: new block of the declared size at the end of the tag data, 0-3 zero padding
+      so it starts 4-aligned from the tag data start (base + offset); 56-byte header and used nodes
+      (count x 20) copied, the rest zero; scenario +0x480 pointer rewritten; size unchanged. Required when
+      the block check flags it and the used nodes fit in its own bytes (unrepairable otherwise). Optional
+      (unticked) when it is only misaligned and has used nodes; a note only when it has none (heh_2).
+    - (b) `tagRootOutside`: zeroed struct of the group's schema size (crossing #2404: 72 B, = OpenCE's
+      0x48), tag entry +0x14 rewritten. Only when no reference names the tag with its full tag ID.
+    - Refused (with the reason) unless the tag data is the last block of the file and the new end stays
+      below the lowest structure BSP address. Changes: header 0x8 and 0x14, one pointer per repair, the
+      appended bytes; the CRC is recomputed by the writer.
+    - The block check runs again on the output; any problem refuses the write (same-reader, anchored by
+      the 0 on the CE maps and the exact match with OpenCE's addresses).
+  - **Checklist:** "Tag blocks are inside the tag data and don't overlap" replaces "Tag data pointer
+    outside the tag data" (its acknowledgement is gone). Each repair is a row with a checkbox; required
+    ones are pre-ticked and unticking one turns Convert off with the reason (`REPAIR_REQUIRED` in core).
+    "Script data alignment" is an info row. Dev mock: `?mock=convert-repairs`.
+  - **Outputs (`core/scripts/convert-external.ts`, HaloMD resource files, required repairs applied):**
+    theisland_3 105,728,562 B, CRC32 0xFC042F66 (+2 padding +380,076); barrier 77,718,428, 0x6F5E37CB
+    (+2 +380,076); crossing 75,214,271, 0x25480338 (+3 +72). heh_2 needs no repair (70,827,478, unchanged).
+  - **Cannot be verified here:** whether OpenCE accepts the moved script data and the zeroed struct; the
+    cause of heh_2's blue screen (next step: user supplies halo.log, the crashes\ dump and the -symbols
+    zip; run `tools/symbolize_crash.py` from the scratch clone and read the crash site before proposing
+    anything); scripts in maps that really have used nodes; a full `map_validate` run.
+  - **Next, optional, separate task:** `map_validate` via WSL (Linux-only, 32-bit, clang + ninja). Read
+    `port/linux/README.md` first and propose exact steps; nothing is installed without the user approving
+    each step.
+  - **Roadmap notes:** OpenCE plays Xbox maps natively from a disc image, so an Xbox converter is not
+    needed for OpenCE (roadmap item d below is on hold). OpenCE PR #241 (MCC v13 support) is unchecked.
 - 2026-10-11: **Converter Phase 1b, Stage 2 (core only, no GUI; user-approved plan and decisions).**
   - **Built:** `core/src/map/raw-data-region.ts` (`appendToRawDataRegion`: adds bytes at the end of the
     raw-data region = the model data offset; moves model data + tag data; updates header 0x8 file size,
@@ -65,6 +117,8 @@ needs re-verification / unverified / blocked)
     with explicit acknowledgement; measured: 0 on all 5 CE maps, HaloMD heh_2 / theisland_3 / barrier /
     bloodgulch / ui / b30 and PC bloodgulch 0, crossing 1 = #2404 `sound\sound environments\arena`).
     "No tag is marked external" was renamed "No tag entry is marked external (whole tags)".
+    (Superseded: the acknowledgement row became the block check and repair rows, see "OpenCE findings
+    and tag data repairs" above; --acknowledge-tag-data-outside is gone.)
   - **Outputs (developer script, HaloMD resource files):** heh_2 70,827,478 bytes, CRC32 0x90103670;
     theisland_3 105,348,484, 0xC990AADF; crossing 75,214,196, 0x9B38092C (needs
     --acknowledge-tag-data-outside); barrier 77,338,350, 0x6A0F30B7. Sizes equal the estimates.
