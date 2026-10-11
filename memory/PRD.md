@@ -37,7 +37,42 @@ needs re-verification / unverified / blocked)
    to succeed with only "External data"/"BSP" style warnings, never a crash.
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
+| Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. |
+
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: **Converter Phase 1 (branch `feat/demo-converter-phase1`, user-approved plan with conditions).**
+  - **Scope:** retail-layout maps (standard header, version 7, tag array 0x40440028) -> 609. True demo
+    layout (v6) is detected and refused with a Phase 2 message. Module `core/src/map/convert/`
+    (`classify.ts`, `reference-identity.ts`, `retail-to-ce.ts`); the CE reader is unchanged (checks read a
+    private copy with version 609).
+  - **Header bytes (measured on heh_2 and theisland_3 vs the 5 CE maps):** only 0x4-0x5 (7 -> 609),
+    0x4A-0x4C (build "0576" -> "0609"), 0x64-0x67 (CRC was 0), plus the name bytes when the output name
+    differs (finalizeForSave). Padding (0xC) already 0, type matches, 0x18-0x1F / 0x62 / 0x68-0x7FB zero
+    as in CE, tag data header already CE (array 0x40440028, scenario ID 0xE1740000). Tag-file checksum
+    (0x5E2AF81E, the demo bloodgulch value) left unchanged, as Save does.
+  - **Refused:** not version 7; file size != header; padding != 0; array pointer != 0x40440028; any tag
+    entry with nonzero +0x18 or +0x1C (retail has no CE external flag; both HaloMD maps have 0 in all
+    entries); BSP/model/tag-data regions outside the file; an already-609 map.
+  - **Warnings (converted unchanged, nothing fixed):** validation errors; references whose full tag ID or
+    path pointer differs from the entry; missing PC_REQUIRED_TAGS; Inject ADD refused afterwards (pointer
+    walk can't follow the stale reference); internal name; tag-file checksum.
+  - **Stale references (decision: warn only, no repair now).** The CE validator only checks the index, so
+    it missed these. Each HaloMD map has exactly one, left from the demo: heh_2 BSP `sound environment
+    palette[0]` (ID 0xEADF0969 vs entry 0xEADD0969, path 0x4BF3ED7B), theisland_3 scenario `scenery
+    palette[14]` (ID 0xEB2D0989 vs 0xEAFD0989, path 0x4BF243BC). All 5 CE maps: 0 mismatches
+    (bloodgulch 7048, sidewinder 7111, coldsnap 8844, ui 3311, Yoyorast 6810 references). If a converted
+    map crashes or loses scenery/sounds in OpenCE, add a separate explicit repair step.
+  - **Scripts:** any function call in a map with scripts or globals needs an explicit acknowledgement
+    (checkbox); no remapping. The complete demo/CE function-index difference list is not in this repo,
+    so this is a superset of "functions whose indices differ". Both HaloMD maps: 0 scripts, 0 globals.
+  - **GUI:** banner button (v7 only) and File > Convert to Custom Edition...; checklist dialog with old
+    and new CRC32; Save dialog defaults to `<name>_ce.map` next to the source; refuses the source path,
+    the open map's path and `.bak`; writes through `writeFinalizedMap` (temp + rename, name from the file
+    name with the truncation warning); the output opens as the current unmodified map. The source and the
+    backup-on-open flow are never touched.
+  - **Correction to the research notes:** theisland_3's scenario has two validation errors, not one:
+    scenery palette[14] -> a sound and palette[15] -> a device_machine.
+
 - 2026-10-11: **In-memory inject and File > Save (branch `feat/inject-in-memory-save`, user-approved
   plan with changes).**
   - **Inject** applies ADD/SWAP to the worker's held map (buffer replaced, header and tag index
@@ -185,7 +220,8 @@ needs re-verification / unverified / blocked)
   **Progress (2026-10-11):** task 1 is done (swap load failure, the ADD tag-array growth fix
   and real Save As, all user-confirmed in OpenCE), and so is the in-memory Inject / File > Save
   work (branch `feat/inject-in-memory-save`, user-confirmed on Windows and in OpenCE). **Next:
-  task 2, the converter, Phase 1** (retail-layout, version 7).
+  task 2, the converter, Phase 1** (retail-layout, version 7). **Update:** Phase 1 built on
+  `feat/demo-converter-phase1`, verified by tests, waiting for the user's Windows/OpenCE check.
 - 2026-10-11: **Swap load failure (branch `fix/swap-load-failure`, user-approved with
   conditions).** The user's SWAP of `globals\globals` with dependencies into bloodgulch (1037
   swapped, 50 gbxmodels blocked) showed a blank blue screen in OpenCE; the original with only the

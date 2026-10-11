@@ -157,3 +157,9 @@ Nothing has been run in the game, so every "verified" above means verified again
 
 1. Finish verifying the Phase 2 prototype using the checks listed under Prototype status.
 2. Write the **single combined Emergent prompt** covering Phase 1 and Phase 2, with every verified detail and the test expectations.
+
+## Corrections from Phase 1 (2026-10-11, measured in this repo)
+
+- `theisland_3.map`: the scenario has **two** validation errors, not one: scenery palette[14] points at a sound, and palette[15] points at a device_machine.
+- Both HaloMD maps contain exactly one stale reference from the demo, with an old tag ID salt and a path pointer in the 0x4BF10000 range. In heh_2 it is the BSP `sound environment palette[0]`; in theisland_3 it is scenery palette[14]. The CE validator checks only the index, so it missed both. The 5 CE maps have 0 such references. Phase 1 warns about them and does not fix them (see PRD "Converter Phase 1").
+- Both maps: padding 0, 0 scripts, 0 globals, all tag entries 0 at +0x18/+0x1C, and tag-file checksum 0x5E2AF81E (same as the original demo bloodgulch).
