@@ -99,26 +99,33 @@ describe("OpenCE's free-slot rule (data.c): a zeroed slot is free", () => {
 describe('tag data repairs: planning', () => {
   for (const name of CE_MAPS) {
     const gate = skippableTest([name]);
-    it.skipIf(gate.skip)(`${name}: nothing to repair, nothing unrepairable, no notes${gate.titleSuffix}`, () => {
+    it.skipIf(gate.skip)(`${name}: nothing to repair, nothing unrepairable (its script data is 4-aligned)${gate.titleSuffix}`, () => {
       const p = plan(readSampleMap(name)).plan;
-      expect(p).toMatchObject({ repairs: [], unrepairable: [], notes: [] });
+      expect(p).toMatchObject({ repairs: [], unrepairable: [] });
     }, 60_000);
   }
 
   const hehGate = skippableTest([HEH]);
-  it.skipIf(hehGate.skip)(`heh_2: misaligned script data with no used nodes is a note only${hehGate.titleSuffix}`, () => {
+  it.skipIf(hehGate.skip)(`heh_2: misaligned script data with no used nodes and no overlap is a required repair copying the header only${hehGate.titleSuffix}`, () => {
     const p = plan(readSampleMap(HEH)).plan;
-    expect(p.repairs).toEqual([]);
     expect(p.unrepairable).toEqual([]);
-    expect(p.notes).toEqual([expect.stringMatching(/0x4047A916, which is not 4-aligned.*no used script nodes/)]);
+    expect(p.repairs).toEqual([expect.objectContaining({ id: 'scriptSyntaxData', required: true, oldPointer: 0x4047a916, blockSize: 380_076, copyBytes: 56 })]);
+    expect(p.repairs[0].details[0]).toMatch(/0x4047A916, which is not 4-aligned from the tag data start/);
   }, 60_000);
 
-  it.skipIf(hehGate.skip)(`heh_2 with used script nodes: the alignment repair is offered as optional${hehGate.titleSuffix}`, () => {
+  it.skipIf(hehGate.skip)(`heh_2 with used script nodes: still required, copying the header and the used nodes${hehGate.titleSuffix}`, () => {
     const map = readSampleMap(HEH);
     map.writeInt16LE(5, syntaxAt(map) + DATA_ARRAY_COUNT);
     const p = plan(map).plan;
-    expect(p.repairs).toEqual([expect.objectContaining({ id: 'scriptSyntaxData', required: false, oldPointer: 0x4047a916, blockSize: 380_076, copyBytes: 56 + 5 * 20 })]);
-    expect(p.notes).toEqual([]);
+    expect(p.repairs).toEqual([expect.objectContaining({ id: 'scriptSyntaxData', required: true, oldPointer: 0x4047a916, blockSize: 380_076, copyBytes: 56 + 5 * 20 })]);
+  }, 60_000);
+
+  it.skipIf(hehGate.skip)(`heh_2 whose misaligned script header is not a script node array: unrepairable, nothing planned${hehGate.titleSuffix}`, () => {
+    const map = readSampleMap(HEH);
+    map.writeInt16LE(16, syntaxAt(map) + DATA_ARRAY_ELEMENT_SIZE);
+    const p = plan(map).plan;
+    expect(p.repairs).toEqual([]);
+    expect(p.unrepairable).toEqual([expect.stringMatching(/not 4-aligned.*can't be read as a script node array \(19001 slots of 16 bytes/)]);
   }, 60_000);
 
   const islandGate = skippableTest([ISLAND]);
@@ -140,10 +147,10 @@ describe('tag data repairs: planning', () => {
   }, 60_000);
 
   const crossingGate = skippableTest([CROSSING]);
-  it.skipIf(crossingGate.skip)(`crossing: a required zeroed-struct repair for #2404 (72 bytes)${crossingGate.titleSuffix}`, () => {
+  it.skipIf(crossingGate.skip)(`crossing: the required script data repair (unaligned), then a required zeroed-struct repair for #2404 (72 bytes)${crossingGate.titleSuffix}`, () => {
     const p = plan(readSampleMap(CROSSING)).plan;
     expect(p.unrepairable).toEqual([]);
-    expect(p.repairs).toEqual([expect.objectContaining({ id: 'tagRootOutside', required: true, tagIndex: 2404, oldPointer: 0x409dc695, blockSize: 72, copyBytes: 0, pointerAddress: BASE + 0x28 + 2404 * 0x20 + 0x14 })]);
+    expect(p.repairs).toEqual([expect.objectContaining({ id: 'scriptSyntaxData', required: true, blockSize: 380_076, copyBytes: 56 }), expect.objectContaining({ id: 'tagRootOutside', required: true, tagIndex: 2404, oldPointer: 0x409dc695, blockSize: 72, copyBytes: 0, pointerAddress: BASE + 0x28 + 2404 * 0x20 + 0x14 })]);
   }, 60_000);
 
   it.skipIf(crossingGate.skip)(`crossing with a reference that names #2404 exactly: unrepairable${crossingGate.titleSuffix}`, () => {
@@ -154,7 +161,7 @@ describe('tag data repairs: planning', () => {
     expect(map.toString('latin1', 0x8fd8, 0x8fdc)).toBe('edns');
     map.writeUInt32LE(id, 0x8fd8 + 0xc);
     const p = plan(map).plan;
-    expect(p.repairs).toEqual([]);
+    expect(p.repairs.map((r) => r.id)).toEqual(['scriptSyntaxData']);
     expect(p.unrepairable).toEqual([expect.stringMatching(/1 reference\(s\) name this tag/)]);
   }, 60_000);
 
@@ -164,7 +171,8 @@ describe('tag data repairs: planning', () => {
     map.writeUInt32LE(map.length, 0x8);
     const p = plan(map).plan;
     expect(p.repairs).toEqual([]);
-    expect(p.unrepairable).toEqual([expect.stringMatching(/is not the last block of the file/)]);
+    expect(p.unrepairable).toHaveLength(2);
+    expect(p.unrepairable.every((u) => /is not the last block of the file/.test(u))).toBe(true);
   }, 60_000);
 
   it.skipIf(crossingGate.skip)(`new end past the lowest BSP address: every repair refused with the reason${crossingGate.titleSuffix}`, () => {
@@ -194,10 +202,10 @@ describe('tag data repairs: applying', () => {
     expect(changed.equals(before)).toBe(true);
   }, 60_000);
 
-  it.skipIf(gate.skip)(`applied alone: only header 0x8 / 0x14 and the entry pointer change, and 75 zero bytes are appended${gate.titleSuffix}`, () => {
+  it.skipIf(gate.skip)(`the struct repair applied alone: only header 0x8 / 0x14 and the entry pointer change, and 75 zero bytes are appended${gate.titleSuffix}`, () => {
     const source = readSampleMap(CROSSING);
     const { plan: p } = plan(source);
-    const { buffer: out, applied } = applyTagDataRepairs(source, p, p.repairs);
+    const { buffer: out, applied } = applyTagDataRepairs(source, p, p.repairs.filter((r) => r.id === 'tagRootOutside'));
     expect(out.length).toBe(source.length + 75);
     expect(out.readUInt32LE(0x8)).toBe(out.length);
     expect(out.readUInt32LE(0x14)).toBe(source.readUInt32LE(0x14) + 75);

@@ -16,13 +16,17 @@ import type { ExtentReport } from './extent-check';
  *     code (OpenCE 6399ed9, `source/memory/data.c`: `datum_new` l.314, `datum_try_and_get` l.135,
  *     `data_next_index` l.468, `data_iterator_next` l.438) treats a slot whose identifier (its first
  *     int16, `data.h` struct datum_header) is 0 as free, and `data_delete_all` (l.393) frees slots
- *     by writing 0 there. Tested in `tag-data-repairs.real-map.test.ts`. Offered when the block overlaps another
- *     block or lies outside the tag data (required: OpenCE refuses the map), only when the used
- *     nodes fit in the bytes that are really the block's own; and when it is only misaligned and has
- *     used nodes (optional: OpenCE's `hs_scenario_syntax_data_valid` in `source/hs/hs.c` l.12790
- *     runs no scripts from an address that is not 4-aligned; it tests the absolute address, which
- *     is the same as measuring from the tag data start for the known base addresses, 0x40440000 and
- *     0x4BF10000, both 4-aligned).
+ *     by writing 0 there. Tested in `tag-data-repairs.real-map.test.ts`. Required (OpenCE refuses
+ *     the map without it) in two cases:
+ *     - the block overlaps another block or lies outside the tag data (the validator refuses it),
+ *       only when the used nodes fit in the bytes that are really the block's own;
+ *     - the block is not 4-aligned, measured from the tag data start (base + offset), with or
+ *       without used nodes: OpenCE's `hs_scenario_syntax_data_valid` (`source/hs/hs.c` l.12790)
+ *       rejects it, and `hs_allocate` then logs "the scenario's script data is missing or damaged"
+ *       with `error(0, ...)`, an `_error_immediate` that ends in `system_exit` and
+ *       `halt_and_catch_fire` (the blue screen; user's bgali / bgmis experiment, OpenCE notes).
+ *       OpenCE tests the absolute address, the same as measuring from the tag data start for the
+ *       known base addresses, 0x40440000 and 0x4BF10000, both 4-aligned.
  *   tagRootOutside: a tag whose root struct lies (partly) outside the tag data gets a zeroed struct
  *     of its group's schema size. Only when no reference names that tag with its full tag ID, so
  *     nothing reads the zeroed values (required: OpenCE refuses the map).
@@ -59,8 +63,6 @@ export interface TagDataRepairPlan {
   repairs: PlannedTagDataRepair[];
   /** Problems no repair covers, or repairs that can't be done here (each refuses the conversion). */
   unrepairable: string[];
-  /** Notes that need no action (e.g. misaligned script data without used nodes). */
-  notes: string[];
   baseMemoryAddress: number;
   /** New tag data must end at or below this address (the lowest BSP address, or the tag space end). */
   limitAddress: number;
@@ -132,7 +134,6 @@ export function planTagDataRepairs(view: Buffer, header: Pick<CacheFileHeader, '
   const tds = header.tagDataSize;
   const repairs: PlannedTagDataRepair[] = [];
   const unrepairable: string[] = [];
-  const notes: string[] = [];
   const inTagData = (address: number, size: number) => address >= base && address - base + size <= tds;
   const fileOf = (address: number) => tdo + (address - base);
   const handled = new Set<number>();
@@ -192,13 +193,15 @@ export function planTagDataRepairs(view: Buffer, header: Pick<CacheFileHeader, '
             `New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes copied, the rest zero (a zeroed slot is a free slot).`,
           ]);
         }
-      } else if (!aligned && consistent && count > 0) {
-        plan(false, [
-          `${where} starts at ${hex(address)}, which is not 4-aligned from the tag data start, so OpenCE runs none of this map's scripts (${count} node slots used).`,
-          `Moving it to a 4-aligned block at the end of the tag data (${fmt(size)} bytes: header and used nodes copied, rest zero) lets OpenCE read it.`,
+      } else if (!aligned && consistent) {
+        plan(true, [
+          `${where} starts at ${hex(address)}, which is not 4-aligned from the tag data start. OpenCE stops loading at "the scenario's script data is missing or damaged; its scripts won't run" (a blue screen).`,
+          `${count} of ${maximum} node slots are used. New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes (${fmt(used)} bytes) copied, the rest zero (a zeroed slot is a free slot).`,
         ]);
       } else if (!aligned) {
-        notes.push(`${where} starts at ${hex(address)}, which is not 4-aligned, so OpenCE reports "the scenario's script data is missing or damaged". It has no used script nodes, so no script is lost and nothing needs to change.`);
+        unrepairable.push(
+          `${where} starts at ${hex(address)}, which is not 4-aligned, so OpenCE stops loading at "the scenario's script data is missing or damaged". Its header can't be read as a script node array (${maximum} slots of ${elementSize} bytes, ${count} in use, ${fmt(size)} bytes declared), so it is not moved.`,
+        );
       }
     }
   }
@@ -250,7 +253,7 @@ export function planTagDataRepairs(view: Buffer, header: Pick<CacheFileHeader, '
       repairs.length = 0;
     }
   }
-  return { repairs, unrepairable, notes, baseMemoryAddress: base, limitAddress };
+  return { repairs, unrepairable, baseMemoryAddress: base, limitAddress };
 }
 
 /**

@@ -215,8 +215,8 @@ describe('converter on a synthetic retail-layout map with all data internal (ui.
 });
 
 const HALOMD_CASES = [
-  // heh_2: no tag data problem; its script data is only misaligned and has no used nodes (a note, no repair).
-  { file: HEH, name: 'heh_2', bitmaps: { count: 676, bytes: 44_396_916 }, sounds: { count: 951, bytes: 11_972_226 }, size: 70_827_478, rows: { tagDataExtents: 'pass', scriptDataAlignment: 'info' }, repairs: [] as string[] },
+  // heh_2: no block problem, but its script data is not 4-aligned: + 2 bytes of padding + 380,076 bytes for the required script data repair.
+  { file: HEH, name: 'heh_2', bitmaps: { count: 676, bytes: 44_396_916 }, sounds: { count: 951, bytes: 11_972_226 }, size: 71_207_556, rows: { tagDataExtents: 'pass', repairScriptSyntaxData: 'warn' }, repairs: ['scriptSyntaxData'] },
   // theisland_3: + 2 bytes of padding + 380,076 bytes for the required script data repair.
   { file: ISLAND, name: 'theisland_3', bitmaps: { count: 742, bytes: 60_659_138 }, sounds: { count: 1129, bytes: 20_946_198 }, size: 105_728_562, rows: { tagDataExtents: 'warn', repairScriptSyntaxData: 'warn' }, repairs: ['scriptSyntaxData'] },
 ];

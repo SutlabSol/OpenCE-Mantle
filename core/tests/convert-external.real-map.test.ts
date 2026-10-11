@@ -29,16 +29,19 @@ import type { RawAsset } from './helpers/raw-map';
 
 const RES = { bitmaps: sampleIn('haloMD', 'bitmaps.map'), sounds: sampleIn('haloMD', 'sounds.map') };
 /**
- * `repair`: the required tag data repair OpenCE needs (PRD "OpenCE findings"): the scenario's script
- * syntax data (theisland_3, barrier) or tag #2404's root (crossing). Sizes = Phase 1b size + padding
- * to 4 from the tag data start + the new block (380,076-byte script data, 72-byte sound_environment).
+ * `repairs`: the required tag data repairs OpenCE needs (PRD "OpenCE findings"), in the order the
+ * converter applies them: the scenario's script syntax data (every HaloMD map: it is not 4-aligned;
+ * theisland_3 / barrier: it also overlaps other tags), then tag #2404's root (crossing). Sizes =
+ * Phase 1b size + for each block, padding to 4 from the tag data start + the block (380,076-byte
+ * script data, 72-byte sound_environment).
  */
 type ExpectedRepair = { kind: 'scriptSyntaxData'; blockSize: number } | { kind: 'tagRootOutside'; tagIndex: number; blockSize: number };
-const CASES: { file: string; out: string; size: number; repair: ExpectedRepair | null }[] = [
-  { file: sampleIn('haloMD', 'heh_2.map'), out: 'heh_2_ce.map', size: 70_827_478, repair: null },
-  { file: sampleIn('haloMD', 'theisland_3.map'), out: 'theisland_3_ce.map', size: 105_348_484 + 2 + 380_076, repair: { kind: 'scriptSyntaxData', blockSize: 380_076 } },
-  { file: sampleIn('haloMD', 'crossing.map'), out: 'crossing_ce.map', size: 75_214_196 + 3 + 72, repair: { kind: 'tagRootOutside', tagIndex: 2404, blockSize: 72 } },
-  { file: sampleIn('haloMD', 'barrier.map'), out: 'barrier_ce.map', size: 77_338_350 + 2 + 380_076, repair: { kind: 'scriptSyntaxData', blockSize: 380_076 } },
+const SCRIPT: ExpectedRepair = { kind: 'scriptSyntaxData', blockSize: 380_076 };
+const CASES: { file: string; out: string; size: number; repairs: ExpectedRepair[] }[] = [
+  { file: sampleIn('haloMD', 'heh_2.map'), out: 'heh_2_ce.map', size: 70_827_478 + 2 + 380_076, repairs: [SCRIPT] },
+  { file: sampleIn('haloMD', 'theisland_3.map'), out: 'theisland_3_ce.map', size: 105_348_484 + 2 + 380_076, repairs: [SCRIPT] },
+  { file: sampleIn('haloMD', 'crossing.map'), out: 'crossing_ce.map', size: 75_214_196 + 3 + 380_076 + 0 + 72, repairs: [SCRIPT, { kind: 'tagRootOutside', tagIndex: 2404, blockSize: 72 }] },
+  { file: sampleIn('haloMD', 'barrier.map'), out: 'barrier_ce.map', size: 77_338_350 + 2 + 380_076, repairs: [SCRIPT] },
 ];
 
 /** Raw file offset of the scenario struct (tag data header +0x4 names the scenario). */
@@ -49,26 +52,37 @@ function rawScenarioAt(buf: Buffer): number {
 }
 
 /**
- * The repair as computed here from raw bytes: the pointer that moves (offset inside the tag data),
- * its old value, and the exact bytes appended after the old tag data (padding, then the block).
- * Script data: the 56-byte data array header and the used nodes (count at +0x2E, 20-byte nodes, per
- * OpenCE memory/data.h and hs.h) are copied, the rest is zero.
+ * The repairs as computed here from raw bytes: for each, the pointer that moves (offset inside the
+ * tag data), its old and new value and its padding; and the exact bytes appended after the old tag
+ * data (each block's padding, then the block). Script data: the 56-byte data array header and the
+ * used nodes (count at +0x2E, 20-byte nodes, per OpenCE memory/data.h and hs.h) are copied, the
+ * rest is zero.
  */
-function expectedRepair(source: Buffer, r: ExpectedRepair): { pointerInTagData: number; oldPointer: number; tail: Buffer; usedNodes: number } {
+function expectedRepairs(source: Buffer, list: ExpectedRepair[]): { tail: Buffer; each: { kind: ExpectedRepair['kind']; pointerInTagData: number; oldPointer: number; newPointer: number; padding: number; blockSize: number; usedNodes: number }[] } {
   const td = tagDataOffsetOf(source);
   const size = source.readUInt32LE(0x14);
-  const padding = (4 - (size % 4)) % 4;
-  const tail = Buffer.alloc(padding + r.blockSize);
-  if (r.kind === 'scriptSyntaxData') {
-    const pointerAt = rawScenarioAt(source) + 0x474 + 0xc;
-    const oldPointer = source.readUInt32LE(pointerAt);
-    const oldAt = td + (oldPointer - BASE);
-    const usedNodes = source.readInt16LE(oldAt + 0x2e);
-    source.copy(tail, padding, oldAt, oldAt + 56 + usedNodes * 20);
-    return { pointerInTagData: pointerAt - td, oldPointer, tail, usedNodes };
+  const parts: Buffer[] = [];
+  const each = [];
+  let end = size;
+  for (const r of list) {
+    const padding = (4 - (end % 4)) % 4;
+    const block = Buffer.alloc(padding + r.blockSize);
+    const newPointer = BASE + end + padding;
+    if (r.kind === 'scriptSyntaxData') {
+      const pointerAt = rawScenarioAt(source) + 0x474 + 0xc;
+      const oldPointer = source.readUInt32LE(pointerAt);
+      const oldAt = td + (oldPointer - BASE);
+      const usedNodes = source.readInt16LE(oldAt + 0x2e);
+      source.copy(block, padding, oldAt, oldAt + 56 + usedNodes * 20);
+      each.push({ kind: r.kind, pointerInTagData: pointerAt - td, oldPointer, newPointer, padding, blockSize: r.blockSize, usedNodes });
+    } else {
+      const pointerAt = td + 0x28 + r.tagIndex * 0x20 + 0x14;
+      each.push({ kind: r.kind, pointerInTagData: pointerAt - td, oldPointer: source.readUInt32LE(pointerAt), newPointer, padding, blockSize: r.blockSize, usedNodes: 0 });
+    }
+    parts.push(block);
+    end += padding + r.blockSize;
   }
-  const pointerAt = td + 0x28 + r.tagIndex * 0x20 + 0x14;
-  return { pointerInTagData: pointerAt - td, oldPointer: source.readUInt32LE(pointerAt), tail, usedNodes: 0 };
+  return { tail: Buffer.concat(parts), each };
 }
 
 /** A read-only file handle read by offset (the test's own, not the script's or the worker's). */
@@ -216,7 +230,8 @@ for (const c of CASES) {
       const oldTd = tagDataOffsetOf(source);
       const newTd = tagDataOffsetOf(out);
       const size = source.readUInt32LE(0x14);
-      const tail = c.repair ? expectedRepair(source, c.repair).tail.length : 0;
+      const expected = expectedRepairs(source, c.repairs);
+      const tail = expected.tail.length;
       expect(out.readUInt32LE(0x14)).toBe(size + tail);
       expect(newTd + size + tail).toBe(out.length);
       const allowed = new Set<number>();
@@ -224,7 +239,7 @@ for (const c of CASES) {
         for (let i = 0; i < n; i++) allowed.add(at - oldTd + i);
       };
       allow(oldTd + 0x14, 4);
-      if (c.repair) allow(oldTd + expectedRepair(source, c.repair).pointerInTagData, 4);
+      for (const r of expected.each) allow(oldTd + r.pointerInTagData, 4);
       for (const a of rawAssets(source)) {
         if (!a.external) continue;
         allow(a.offsetAt, 4);
@@ -235,32 +250,32 @@ for (const c of CASES) {
       expect(unexpected.slice(0, 10)).toEqual([]);
     });
 
-    if (c.repair) {
-      const r = c.repair;
-      it.skipIf(gate.skip)(`repair ${r.kind}: the pointer moved to the 4-aligned end of the old tag data; the appended bytes are exactly the padding and the block computed here${gate.titleSuffix}`, () => {
+    if (c.repairs.length > 0) {
+      it.skipIf(gate.skip)(`repairs ${c.repairs.map((r) => r.kind).join(', ')}: each pointer moved to its 4-aligned block after the old tag data; the appended bytes are exactly the paddings and blocks computed here${gate.titleSuffix}`, () => {
         const size = source.readUInt32LE(0x14);
-        const expected = expectedRepair(source, r);
+        const expected = expectedRepairs(source, c.repairs);
         const newTd = tagDataOffsetOf(out);
-        const padding = (4 - (size % 4)) % 4;
-        expect(out.readUInt32LE(newTd + expected.pointerInTagData)).toBe(BASE + size + padding);
-        expect((BASE + size + padding - BASE) % 4).toBe(0);
+        for (const r of expected.each) {
+          expect(out.readUInt32LE(newTd + r.pointerInTagData)).toBe(r.newPointer);
+          expect((r.newPointer - BASE) % 4).toBe(0);
+        }
         expect(out.subarray(newTd + size).equals(expected.tail)).toBe(true);
         // The tool reports the same values.
-        expect(converted.repairs).toEqual([
-          expect.objectContaining({ id: r.kind, oldPointer: expected.oldPointer, newPointer: BASE + size + padding, padding, blockSize: r.blockSize, bytesAppended: padding + r.blockSize }),
-        ]);
+        expect(converted.repairs).toEqual(
+          expected.each.map((r) => expect.objectContaining({ id: r.kind, oldPointer: r.oldPointer, newPointer: r.newPointer, padding: r.padding, blockSize: r.blockSize, bytesAppended: r.padding + r.blockSize })),
+        );
       });
     }
-    if (c.repair?.kind === 'scriptSyntaxData') {
-      const r = c.repair;
-      it.skipIf(gate.skip)(`repaired script data: header and used nodes as in the source, every other node slot free (identifier 0, as OpenCE's data.c reads a free slot)${gate.titleSuffix}`, () => {
-        const expected = expectedRepair(source, r);
+    if (c.repairs.some((r) => r.kind === 'scriptSyntaxData')) {
+      it.skipIf(gate.skip)(`repaired script data: 4-aligned from the tag data start; header and used nodes as in the source, every other node slot free (identifier 0, as OpenCE's data.c reads a free slot)${gate.titleSuffix}`, () => {
+        const expected = expectedRepairs(source, c.repairs).each.find((r) => r.kind === 'scriptSyntaxData')!;
+        expect((expected.oldPointer - BASE) % 4).not.toBe(0); // every HaloMD map's is unaligned
         const at = tagDataOffsetOf(out) + (out.readUInt32LE(tagDataOffsetOf(out) + expected.pointerInTagData) - BASE);
         const oldAt = tagDataOffsetOf(source) + (expected.oldPointer - BASE);
         expect(out.subarray(at, at + 56).equals(source.subarray(oldAt, oldAt + 56))).toBe(true);
         const maximum = out.readInt16LE(at + 0x20);
         expect(out.readInt16LE(at + 0x2e)).toBe(expected.usedNodes);
-        expect(56 + maximum * out.readInt16LE(at + 0x22)).toBe(r.blockSize);
+        expect(56 + maximum * out.readInt16LE(at + 0x22)).toBe(expected.blockSize);
         for (let i = 0; i < maximum; i++) {
           const node = at + 56 + i * 20;
           if (i < expected.usedNodes) expect(out.subarray(node, node + 20).equals(source.subarray(oldAt + 56 + i * 20, oldAt + 76 + i * 20))).toBe(true);
@@ -318,7 +333,7 @@ describe('Phase 1b refusals', () => {
     const report = preflightRetailConversion(source);
     expect(report.canConvert).toBe(false);
     expect(report.externalData).toEqual({ bitmaps: { count: 676, bytes: 44_396_916 }, sounds: { count: 951, bytes: 11_972_226 } });
-    expect(report.estimatedOutputSize).toBe(70_827_478);
+    expect(report.estimatedOutputSize).toBe(70_827_478 + 2 + 380_076); // the Phase 1b size + the required script data repair
     expect(report.checks.find((k) => k.id === 'externalData')).toMatchObject({ status: 'refuse', message: expect.stringMatching(/Missing: bitmaps\.map, sounds\.map/) });
     expect(() => convertRetailToCustomEdition(source, { acknowledgeScripts: true })).toThrow(ConversionRefusedError);
   });
@@ -359,7 +374,7 @@ describe('Phase 1b refusals', () => {
   });
 
   const crossingGate = skippableTest([CROSSING, RES.bitmaps, RES.sounds]);
-  it.skipIf(crossingGate.skip)(`crossing: the tag outside the tag data gets a required repair row; converting without it is refused (REPAIR_REQUIRED)${crossingGate.titleSuffix}`, () => {
+  it.skipIf(crossingGate.skip)(`crossing: the unaligned script data and the tag outside the tag data each get a required repair row; converting without either is refused (REPAIR_REQUIRED)${crossingGate.titleSuffix}`, () => {
     const source = fs.readFileSync(sampleMapPath(CROSSING));
     const files = [openReadOnly(sampleMapPath(RES.bitmaps)), openReadOnly(sampleMapPath(RES.sounds))];
     try {
@@ -368,11 +383,18 @@ describe('Phase 1b refusals', () => {
       expect(report.canConvert).toBe(true);
       expect(report.requiresAcknowledgement).toBe(false);
       expect(report.checks.find((k) => k.id === 'tagDataExtents')).toMatchObject({ status: 'warn', details: [expect.stringMatching(/^#2404 sound\\sound environments\\arena\.sound_environment root: 72 bytes at 0x409DC695, outside the tag data/)] });
-      const row = report.checks.find((k) => k.id === 'repairTagRootOutside')!;
-      expect(row).toMatchObject({ status: 'warn', requiresAcknowledgement: false, repair: { id: 'tagRootOutside', required: true } });
-      expect(report.repairs).toEqual([{ id: 'tagRootOutside', required: true, tagPath: 'sound\\sound environments\\arena', bytesAdded: 75 }]);
-      expect(report.estimatedOutputSize).toBe(75_214_196 + 75);
-      for (const repairs of [undefined, { tagRootOutside: false }, { scriptSyntaxData: true }]) {
+      expect(report.checks.find((k) => k.id === 'repairTagRootOutside')).toMatchObject({ status: 'warn', requiresAcknowledgement: false, repair: { id: 'tagRootOutside', required: true } });
+      const script = report.checks.find((k) => k.id === 'repairScriptSyntaxData')!;
+      expect(script).toMatchObject({ status: 'warn', requiresAcknowledgement: false, repair: { id: 'scriptSyntaxData', required: true } });
+      expect(script.message).toMatch(/^OpenCE refuses this map without this repair: .*not 4-aligned/);
+      expect(script.details[0]).toMatch(/starts at 0x[0-9A-F]+, which is not 4-aligned from the tag data start/);
+      // The script block comes first (3 bytes of padding), then the struct (no padding: the script block ends 4-aligned).
+      expect(report.repairs).toEqual([
+        { id: 'scriptSyntaxData', required: true, tagPath: expect.any(String), bytesAdded: 3 + 380_076 },
+        { id: 'tagRootOutside', required: true, tagPath: 'sound\\sound environments\\arena', bytesAdded: 72 },
+      ]);
+      expect(report.estimatedOutputSize).toBe(75_214_196 + 3 + 380_076 + 72);
+      for (const repairs of [undefined, { tagRootOutside: false, scriptSyntaxData: true }, { scriptSyntaxData: true }, { tagRootOutside: true }]) {
         try {
           convertRetailToCustomEdition(source, { acknowledgeScripts: true, resources, repairs });
           throw new Error('expected a refusal');
@@ -393,7 +415,7 @@ describe('Phase 1b refusals', () => {
       let calls = 0;
       const outPath = path.join(dir, 'heh_2_ce.map');
       try {
-        const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: true, resources: { bitmaps: files[0], sounds: files[1] }, shouldCancel: () => ++calls > 10 });
+        const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: true, repairs: { scriptSyntaxData: true }, resources: { bitmaps: files[0], sounds: files[1] }, shouldCancel: () => ++calls > 10 });
         writeFinalizedMap(converted.buffer, outPath, writeOps);
         throw new Error('expected cancel');
       } catch (err) {

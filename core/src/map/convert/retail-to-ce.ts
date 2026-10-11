@@ -90,7 +90,6 @@ export type ConversionCheckId =
   | 'tagDataExtents'
   | 'repairScriptSyntaxData'
   | 'repairTagRootOutside'
-  | 'scriptDataAlignment'
   | 'externalData'
   | 'resourceFiles'
   | 'resourceNames'
@@ -426,14 +425,14 @@ const REPAIR_ROWS: Record<TagDataRepairId, { id: ConversionCheckId; label: strin
     id: 'repairScriptSyntaxData',
     label: 'Repair: move the script data to its own block',
     required:
-      "OpenCE refuses this map: the scenario's script data overlaps other tags. The repair gives it a block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked.",
-    optional: "OpenCE runs none of this map's scripts because the script data is not 4-aligned. The repair moves it to an aligned block at the end of the tag data. Optional: the map loads either way.",
+      "OpenCE refuses this map without this repair: the scenario's script data overlaps other tags or is not 4-aligned, and OpenCE stops loading at \"the scenario's script data is missing or damaged\" (a blue screen). The repair gives it a 4-aligned block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked.",
+    optional: '',
   },
   tagRootOutside: {
     id: 'repairTagRootOutside',
     label: 'Repair: give the tag outside the tag data a zeroed struct',
     required:
-      "OpenCE refuses this map: a tag's data starts outside the tag data. The repair adds a zeroed struct of that tag's size at the end of the tag data and points the tag at it. Nothing references the tag, so its values are never used. Convert stays off while this is unticked.",
+      "OpenCE refuses this map without this repair: a tag's data starts outside the tag data. The repair adds a zeroed struct of that tag's size at the end of the tag data and points the tag at it. Nothing references the tag, so its values are never used. Convert stays off while this is unticked.",
     optional: '',
   },
 };
@@ -443,6 +442,7 @@ const REPAIR_ROWS: Record<TagDataRepairId, { id: ConversionCheckId; label: strin
  * repair that fixes a problem (`tag-data-repairs.ts`). A problem no repair covers refuses the map.
  * Measured: 0 problems on all 5 CE sample maps and HaloMD heh_2; theisland_3 / barrier: the
  * script syntax data overlaps other tags; crossing: #2404 sound_environment starts at the tag data end.
+ * Every HaloMD map's script data is also 2 mod 4 (a required repair on its own, `tag-data-repairs.ts`).
  */
 function tagDataChecks(checks: ConversionCheck[], view: Buffer, header: CacheFileHeader, tagIndex: TagIndex, report: RetailConversionReport): TagDataRepairPlan {
   const extents = checkTagDataExtents(view, header, tagIndex);
@@ -450,21 +450,22 @@ function tagDataChecks(checks: ConversionCheck[], view: Buffer, header: CacheFil
   const label = "Tag blocks are inside the tag data and don't overlap";
   const scope = `${extents.blocksChecked.toLocaleString('en-US')} blocks in ${extents.tagsChecked} tags and ${extents.bspsChecked} structure BSP(s) checked the way OpenCE checks them`;
   const problems = extents.violations.length;
-  if (problems === 0) checks.push(check('tagDataExtents', label, 'pass', `${scope}: no problems.`));
-  else if (plan.unrepairable.length > 0) {
+  if (plan.unrepairable.length > 0) {
     checks.push(
-      check('tagDataExtents', label, 'refuse', `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these, and ${plan.unrepairable.length} can't be repaired here, so the map is not converted.`, plan.unrepairable),
+      check('tagDataExtents', label, 'refuse', `${scope}: ${problems} problem(s). OpenCE refuses this map, and ${plan.unrepairable.length} problem(s) can't be repaired here, so the map is not converted.`, plan.unrepairable),
     );
+  } else if (problems === 0) {
+    checks.push(check('tagDataExtents', label, 'pass', `${scope}: no problems.`));
   } else {
     checks.push(check('tagDataExtents', label, 'warn', `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
   }
-  for (const r of plan.repairs) {
+  plan.repairs.forEach((r, i) => {
     const row = REPAIR_ROWS[r.id];
-    const bytes = repairBytesAdded(header.tagDataSize, [r]);
+    // (with the repairs before it applied: each block's padding depends on where the last one ended)
+    const bytes = repairBytesAdded(header.tagDataSize, plan.repairs.slice(0, i + 1)) - repairBytesAdded(header.tagDataSize, plan.repairs.slice(0, i));
     report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
     checks.push(check(row.id, row.label, r.required ? 'warn' : 'info', `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
-  }
-  if (plan.notes.length > 0) checks.push(check('scriptDataAlignment', 'Script data alignment', 'info', plan.notes[0], plan.notes.slice(1)));
+  });
   return plan;
 }
 
