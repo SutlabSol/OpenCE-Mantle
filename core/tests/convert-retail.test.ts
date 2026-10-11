@@ -1,5 +1,4 @@
 import { describe, expect, it, beforeAll } from 'vitest';
-import * as zlib from 'node:zlib';
 import { classifyMapLayout, describeUnsupportedLayout } from '../src/map/convert/classify';
 import { findReferenceIdentityIssues } from '../src/map/convert/reference-identity';
 import { convertRetailToCustomEdition, preflightRetailConversion, ConversionRefusedError, CE_BUILD_STRING } from '../src/map/convert/retail-to-ce';
@@ -7,13 +6,18 @@ import { finalizeForSave } from '../src/map/finalize-map';
 import { inspectCustomEditionMap } from '../src/map/open-map';
 import { resolveStruct } from '../src/map/definitions/engine';
 import { readSampleMap, sampleIn, skippableTest } from './helpers/sample-maps';
+import { BASE as CE_BASE, RAW_LAYOUT, rawAssets, rawCrc } from './helpers/raw-map';
 
 /**
- * Converter Phase 1 (retail layout, version 7 -> Custom Edition 609).
+ * Converter Phase 1 (retail layout, version 7 -> Custom Edition 609): the checks and the
+ * header-only conversion of a map whose bitmap and sound data is all inside it. Maps with external
+ * data (all HaloMD sample maps) are refused without the source game's resource files; the Phase 1b
+ * conversion with those files is tested in `convert-external.real-map.test.ts`.
  *
- * Independent checks (`rawCrc`, `differingRanges`, the raw header reads) use only node:zlib and raw
- * byte offsets - none of the converter, finalize, CRC or tag-index code. The only shared piece is a
- * cross-check that the Scenario "structure bsps" offset (0x5A4) agrees with the schema.
+ * Independent checks (`rawCrc`, `rawAssets`, `differingRanges`, the raw header reads) use only
+ * node:zlib and raw byte offsets (`helpers/raw-map.ts`) - none of the converter, finalize, CRC or
+ * tag-index code. The only shared piece is a cross-check that the Scenario "structure bsps" offset
+ * (0x5A4) agrees with the schema.
  * The HaloMD maps and the original Mac demo map live in their own sample folders (see the helper), never
  * mixed with the CE maps of the same name.
  */
@@ -23,27 +27,16 @@ const HEH = sampleIn('haloMD', 'heh_2.map');
 const ISLAND = sampleIn('haloMD', 'theisland_3.map');
 const DEMO_BG = sampleIn('macDemo', 'bloodgulch.map');
 
-const SCENARIO_STRUCTURE_BSPS = 0x5a4;
-const CE_BASE = 0x40440000;
+const SCENARIO_STRUCTURE_BSPS = RAW_LAYOUT.scenarioStructureBsps;
 
-/** Halo's header crc32 from raw bytes: bit-inverted CRC-32 over each BSP, model data, then tag data. */
-function rawCrc(buf: Buffer): number {
-  const tagDataOffset = buf.readUInt32LE(0x10);
-  const tagDataSize = buf.readUInt32LE(0x14);
-  const scenarioId = buf.readUInt32LE(tagDataOffset + 0x4);
-  const entry = tagDataOffset + 0x28 + (scenarioId & 0xffff) * 0x20;
-  const scenarioAt = tagDataOffset + (buf.readUInt32LE(entry + 0x14) - CE_BASE);
-  const bspCount = buf.readUInt32LE(scenarioAt + SCENARIO_STRUCTURE_BSPS);
-  const bspsAt = tagDataOffset + (buf.readUInt32LE(scenarioAt + SCENARIO_STRUCTURE_BSPS + 4) - CE_BASE);
-  let crc = 0;
-  for (let i = 0; i < bspCount; i++) {
-    const start = buf.readUInt32LE(bspsAt + i * 32);
-    crc = zlib.crc32(buf.subarray(start, start + buf.readUInt32LE(bspsAt + i * 32 + 4)), crc);
+/** A copy with every bitmap image and sound permutation marked internal (raw bytes): a map with no external data for the header-only path. */
+function withAssetsMarkedInternal(map: Buffer): Buffer {
+  const out = Buffer.from(map);
+  for (const a of rawAssets(out)) {
+    if (a.flagWidth === 2) out.writeUInt16LE(a.flagValue & ~0x100, a.flagAt);
+    else out.writeUInt32LE((a.flagValue & ~1) >>> 0, a.flagAt);
   }
-  const modelAt = buf.readUInt32LE(tagDataOffset + 0x14);
-  crc = zlib.crc32(buf.subarray(modelAt, modelAt + buf.readUInt32LE(tagDataOffset + 0x20)), crc);
-  crc = zlib.crc32(buf.subarray(tagDataOffset, tagDataOffset + tagDataSize), crc);
-  return ~crc >>> 0;
+  return out;
 }
 
 /** Inclusive [start, end] ranges of differing bytes, as "0x4-0x5". */
@@ -62,7 +55,6 @@ function differingRanges(a: Buffer, b: Buffer): string[] {
   return out;
 }
 
-const ascii = (buf: Buffer, at: number) => buf.subarray(at, at + 32).toString('latin1').replace(/\0+$/, '');
 
 /** A CE map turned into a retail-layout map for synthetic tests: version 7, the HaloMD build string. */
 function asRetail(ce: Buffer): Buffer {
@@ -168,14 +160,31 @@ describe('converter refuses what it must not convert', () => {
   }
 });
 
-describe('converter on a synthetic retail-layout map (ui.map with version 7)', () => {
+describe('converter on a synthetic retail-layout map with all data internal (ui.map, version 7, assets marked internal)', () => {
   const gate = skippableTest(['ui.map']);
   let ui: Buffer;
   let retail: Buffer;
   beforeAll(() => {
     if (gate.skip) return;
-    ui = readSampleMap('ui.map');
+    // Re-finalized so its stored crc32 matches the changed flags (the reference for "byte-identical").
+    ui = finalizeForSave(withAssetsMarkedInternal(readSampleMap('ui.map')), { fileName: 'ui.map' }).buffer;
+    expect(ui.readUInt32LE(0x64)).toBe(rawCrc(ui));
     retail = asRetail(ui);
+  });
+
+  it.skipIf(gate.skip)(`the unmodified ui.map as version 7 is refused: its 575 bitmap/sound assets are external and no resource files were given${gate.titleSuffix}`, () => {
+    const report = preflightRetailConversion(asRetail(readSampleMap('ui.map')));
+    expect(report.canConvert).toBe(false);
+    expect(report.externalData).toEqual({ bitmaps: { count: 450, bytes: 22_962_736 }, sounds: { count: 125, bytes: 3_534_102 } });
+    expect(report.checks.find((c) => c.id === 'externalData')?.status).toBe('refuse');
+  });
+
+  it.skipIf(gate.skip)(`with all data internal: no external data, header-only, estimated size = source size${gate.titleSuffix}`, () => {
+    const report = preflightRetailConversion(retail);
+    expect(report.externalData).toEqual({ bitmaps: { count: 0, bytes: 0 }, sounds: { count: 0, bytes: 0 } });
+    expect(report.checks.find((c) => c.id === 'externalData')?.status).toBe('pass');
+    expect(report.estimatedOutputSize).toBe(retail.length);
+    expect(report.newCrc32).toBe(rawCrc(ui));
   });
 
   it.skipIf(gate.skip)(`its script function calls need an acknowledgement; without it the converter refuses${gate.titleSuffix}`, () => {
@@ -192,7 +201,7 @@ describe('converter on a synthetic retail-layout map (ui.map with version 7)', (
     }
   });
 
-  it.skipIf(gate.skip)(`converted and finalized as ui.map it is byte-identical to the real ui.map${gate.titleSuffix}`, () => {
+  it.skipIf(gate.skip)(`converted and finalized as ui.map it is byte-identical to the (internal-marked) ui.map${gate.titleSuffix}`, () => {
     const out = finalizeForSave(convertRetailToCustomEdition(retail, { acknowledgeScripts: true }).buffer, { fileName: 'ui.map' }).buffer;
     expect(differingRanges(ui, out)).toEqual([]);
   });
@@ -205,22 +214,18 @@ describe('converter on a synthetic retail-layout map (ui.map with version 7)', (
   });
 });
 
-interface HaloMdCase {
-  file: string;
-  name: string;
-  crc: number;
-  /** The output name used for the "different file name" case and the name bytes it changes. */
-  renamed: string;
-  renamedNameRange: string;
-}
-
-const HALOMD_CASES: HaloMdCase[] = [
-  { file: HEH, name: 'heh_2', crc: 0xd1c331e9, renamed: 'heh_2_ce.map', renamedNameRange: '0x25-0x27' },
-  { file: ISLAND, name: 'theisland_3', crc: 0x0a5afea5, renamed: 'island_ce.map', renamedNameRange: '0x20-0x2A' },
+const HALOMD_CASES = [
+  { file: HEH, name: 'heh_2', bitmaps: { count: 676, bytes: 44_396_916 }, sounds: { count: 951, bytes: 11_972_226 }, size: 70_827_478 },
+  { file: ISLAND, name: 'theisland_3', bitmaps: { count: 742, bytes: 60_659_138 }, sounds: { count: 1129, bytes: 20_946_198 }, size: 105_348_484 },
 ];
 
+/**
+ * heh_2 and theisland_3 keep their bitmap and sound data in the source game's resource files. Their
+ * header-only conversion (CRC32 0xD1C331E9 / 0x0A5AFEA5) blue-screened in OpenCE, so without the
+ * resource files they are refused. Converting them with the files: convert-external.real-map.test.ts.
+ */
 for (const c of HALOMD_CASES) {
-  describe(`converter on ${c.file} (real bytes)`, () => {
+  describe(`converter on ${c.file} without resource files (real bytes)`, () => {
     const gate = skippableTest([c.file]);
     let source: Buffer;
     let sourceCopy: Buffer;
@@ -230,51 +235,32 @@ for (const c of HALOMD_CASES) {
       sourceCopy = Buffer.from(source);
     });
 
-    it.skipIf(gate.skip)(`pre-flight: convertible, no acknowledgement, new CRC32 0x${c.crc.toString(16).toUpperCase()}${gate.titleSuffix}`, () => {
+    it.skipIf(gate.skip)(`pre-flight: refused because ${c.bitmaps.count} bitmap images and ${c.sounds.count} sound permutations are external; the other rows as before${gate.titleSuffix}`, () => {
       const report = preflightRetailConversion(source);
-      expect(report.canConvert).toBe(true);
+      expect(report.canConvert).toBe(false);
       expect(report.requiresAcknowledgement).toBe(false);
-      expect(report.newCrc32).toBe(c.crc);
+      expect(report.newCrc32).toBeNull();
       expect(report.previousCrc32).toBe(0);
       expect(report.scenarioName).toBe(c.name);
+      expect(report.externalData).toEqual({ bitmaps: c.bitmaps, sounds: c.sounds });
+      expect(report.estimatedOutputSize).toBe(c.size);
       const status = Object.fromEntries(report.checks.map((k) => [k.id, k.status]));
-      expect(status).toMatchObject({ layout: 'pass', fileSize: 'pass', padding: 'pass', tagDataAddress: 'pass', entryFlags: 'pass', regions: 'pass', scripts: 'pass', requiredTags: 'pass', referenceIdentity: 'warn', injectAfterwards: 'warn' });
+      expect(status).toMatchObject({ layout: 'pass', fileSize: 'pass', padding: 'pass', tagDataAddress: 'pass', entryFlags: 'pass', regions: 'pass', tagDataOutside: 'pass', externalData: 'refuse', scripts: 'pass', requiredTags: 'pass', referenceIdentity: 'warn', injectAfterwards: 'warn' });
+      expect(report.checks.find((k) => k.id === 'externalData')!.message).toMatch(/Missing: bitmaps\.map, sounds\.map/);
       const refs = report.checks.find((k) => k.id === 'referenceIdentity')!;
       expect(refs.details).toHaveLength(1);
       expect(refs.details[0]).toMatch(/path pointer 0x4BF/);
     });
 
-    it.skipIf(gate.skip)(`output named ${c.name}.map: CRC32 0x${c.crc.toString(16).toUpperCase()}, differs only at 0x4-0x5, 0x4A-0x4C, 0x64-0x67${gate.titleSuffix}`, () => {
-      const out = finalizeForSave(convertRetailToCustomEdition(source, { acknowledgeScripts: false }).buffer, { fileName: `${c.name}.map` }).buffer;
-      expect(differingRanges(source, out)).toEqual(['0x4-0x5', '0x4A-0x4C', '0x64-0x67']);
-      // Independent of the converter: raw header bytes and node:zlib.
-      expect(out.readUInt32LE(0x4)).toBe(609);
-      expect(ascii(out, 0x40)).toBe(CE_BUILD_STRING);
-      expect(ascii(out, 0x20)).toBe(c.name);
-      expect(out.readUInt32LE(0x64)).toBe(c.crc);
-      expect(rawCrc(out)).toBe(c.crc);
-      expect(rawCrc(source)).toBe(c.crc);
-    });
-
-    it.skipIf(gate.skip)(`output named ${c.renamed}: also the name bytes ${c.renamedNameRange}, same CRC32${gate.titleSuffix}`, () => {
-      const out = finalizeForSave(convertRetailToCustomEdition(source, { acknowledgeScripts: false }).buffer, { fileName: c.renamed }).buffer;
-      expect(differingRanges(source, out)).toEqual(['0x4-0x5', c.renamedNameRange, '0x4A-0x4C', '0x64-0x67']);
-      expect(ascii(out, 0x20)).toBe(c.renamed.replace(/\.map$/, ''));
-      expect(out.readUInt32LE(0x64)).toBe(c.crc);
-    });
-
-    it.skipIf(gate.skip)(`the output reads with the CE reader${gate.titleSuffix}`, () => {
-      const out = finalizeForSave(convertRetailToCustomEdition(source, { acknowledgeScripts: false }).buffer, { fileName: `${c.name}.map` }).buffer;
-      const ins = inspectCustomEditionMap(out);
-      expect(ins.status).toBe('ok');
-      if (ins.status !== 'ok') return;
-      expect(ins.header.engine).toBe(609);
-      expect(ins.header.buildString).toBe(CE_BUILD_STRING);
-      expect(ins.header.scenarioName).toBe(c.name);
-      expect(ins.header.crc32 >>> 0).toBe(c.crc);
-      expect(ins.tagIndex.tagCount).toBe(source.readUInt32LE(source.readUInt32LE(0x10) + 0xc));
-      // Converted again: refused, it's a CE map now.
-      expect(() => convertRetailToCustomEdition(out, { acknowledgeScripts: true })).toThrow(/already a Custom Edition map/);
+    it.skipIf(gate.skip)(`convert without resource files throws REFUSED and returns nothing${gate.titleSuffix}`, () => {
+      try {
+        convertRetailToCustomEdition(source, { acknowledgeScripts: true, acknowledgeTagDataOutside: true });
+        throw new Error('expected a refusal');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConversionRefusedError);
+        expect((err as ConversionRefusedError).code).toBe('REFUSED');
+        expect((err as Error).message).toMatch(/source game's bitmaps\.map and sounds\.map/);
+      }
     });
 
     it.skipIf(gate.skip)(`the source buffer is never changed${gate.titleSuffix}`, () => {

@@ -10,6 +10,11 @@ import { decodeStruct, getAllTagGroupNames, getGroupStructName, isRangeInBuffer,
 import { locateStructureBsp, validateStructInstance } from '../definitions/validate-tag';
 import { classifyMapLayout, isConvertibleRetailLayout } from './classify';
 import { findReferenceIdentityIssues } from './reference-identity';
+import { countExternal, importExternalData, planExternalImport, scanPerAssetData } from './externalize-in';
+import type { ExternalImportPlan, PerAssetScan } from './externalize-in';
+import { readResourceTable } from './resource-files';
+import type { RandomAccessFile, ResourceKind, ResourceTable } from './resource-files';
+import { RawDataAppendCancelledError } from '../raw-data-region';
 
 /**
  * Converter Phase 1: retail-layout maps (cache version 7, standard 2048-byte header, tag data at the
@@ -25,6 +30,12 @@ import { findReferenceIdentityIssues } from './reference-identity';
  *
  * The CE reader is not loosened: the checks read a private copy whose version is set to 609 and
  * then go through the normal `parseCacheFileHeader` / `parseTagIndex`.
+ *
+ * Phase 1b: when bitmap images or sound permutations keep their data in the source game's resource
+ * files, the header-only conversion is not valid (CE has other resource files; such maps blue-screen
+ * in OpenCE). Then the source game's bitmaps.map / sounds.map must be supplied, and the data is
+ * copied into the map (`externalize-in.ts`), which also moves model data and tag data and updates
+ * the file size, tag data offset and model data offset.
  */
 
 const VERSION_OFFSET = 0x4;
@@ -72,7 +83,13 @@ export type ConversionCheckId =
   | 'scripts'
   | 'injectAfterwards'
   | 'scenarioName'
-  | 'tagFileChecksum';
+  | 'tagFileChecksum'
+  | 'tagDataOutside'
+  | 'externalData'
+  | 'resourceFiles'
+  | 'resourceNames'
+  | 'bitmapSizes'
+  | 'outputSize';
 
 export interface ConversionCheck {
   id: ConversionCheckId;
@@ -96,12 +113,33 @@ export interface RetailConversionReport {
   mapType: number | null;
   tagCount: number | null;
   previousCrc32: number | null;
-  /** The crc32 the converted map gets. The header is not part of the CRC, so the output file name doesn't change it. */
+  /**
+   * The crc32 the converted map gets. The header is not part of the CRC, so the output file name
+   * doesn't change it. Null when external data is copied in: then it is known only after converting.
+   */
   newCrc32: number | null;
+  /** Bitmap images and sound permutations whose data is in the source game's resource files. Null if not read. */
+  externalData: { bitmaps: { count: number; bytes: number }; sounds: { count: number; bytes: number } } | null;
+  /** Output file size: the source size plus the external data copied in. Null if not known. */
+  estimatedOutputSize: number | null;
+}
+
+/** The source game's resource files, for maps whose bitmap or sound data is external. Read by offset only. */
+export type ConversionResourceFiles = Partial<Record<ResourceKind, RandomAccessFile>>;
+
+export interface RetailConversionOptions {
+  acknowledgeScripts: boolean;
+  /** Required when the "Tag data pointer outside the tag data" row lists tags. */
+  acknowledgeTagDataOutside?: boolean;
+  resources?: ConversionResourceFiles;
+  /** Progress while external data is copied in, in bytes. */
+  onProgress?: (bytesDone: number, bytesTotal: number) => void;
+  /** Checked before each copied range; cancelling throws ConversionRefusedError with code CANCELLED. */
+  shouldCancel?: () => boolean;
 }
 
 export class ConversionRefusedError extends Error {
-  constructor(message: string, public readonly code: 'REFUSED' | 'ACKNOWLEDGEMENT_REQUIRED' = 'REFUSED') {
+  constructor(message: string, public readonly code: 'REFUSED' | 'ACKNOWLEDGEMENT_REQUIRED' | 'CANCELLED' = 'REFUSED') {
     super(message);
     this.name = 'ConversionRefusedError';
   }
@@ -120,6 +158,8 @@ interface ParsedView {
   tagIndex: TagIndex;
   /** The private copy with version 609 that `header` / `tagIndex` were read from (same bytes otherwise). */
   view: Buffer;
+  /** Set when the map has per-asset external data that can be copied in (files supplied and matching). */
+  importPlan: ExternalImportPlan | null;
 }
 
 /**
@@ -127,7 +167,7 @@ interface ParsedView {
  * script check (needs acknowledgement). `full` adds the slower warnings (validation, references,
  * required tags, pointer walk) used for the pre-flight dialog.
  */
-function runChecks(buffer: Buffer, full: boolean): { report: RetailConversionReport; parsed: ParsedView | null } {
+function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceFiles = {}): { report: RetailConversionReport; parsed: ParsedView | null } {
   const checks: ConversionCheck[] = [];
   const report: RetailConversionReport = {
     canConvert: false,
@@ -139,6 +179,8 @@ function runChecks(buffer: Buffer, full: boolean): { report: RetailConversionRep
     tagCount: null,
     previousCrc32: null,
     newCrc32: null,
+    externalData: null,
+    estimatedOutputSize: null,
   };
   const done = (parsed: ParsedView | null) => {
     report.canConvert = !checks.some((c) => c.status === 'refuse');
@@ -199,7 +241,7 @@ function runChecks(buffer: Buffer, full: boolean): { report: RetailConversionRep
     view.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
     const header = parseCacheFileHeader(view);
     const tagIndex = parseTagIndex(view, header);
-    parsed = { header, tagIndex, view };
+    parsed = { header, tagIndex, view, importPlan: null };
   } catch (err) {
     checks.push(check('regions', 'Tag index can be read', 'refuse', `The tag index can't be read: ${(err as Error).message}`));
     return done(null);
@@ -218,15 +260,31 @@ function runChecks(buffer: Buffer, full: boolean): { report: RetailConversionRep
   }
   checks.push(
     flagged.length === 0
-      ? check('entryFlags', 'No tag is marked external', 'pass', `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`)
-      : check('entryFlags', 'No tag is marked external', 'refuse', `${flagged.length} tag entr${flagged.length === 1 ? 'y has' : 'ies have'} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged),
+      ? check('entryFlags', 'No tag entry is marked external (whole tags)', 'pass', `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`)
+      : check('entryFlags', 'No tag entry is marked external (whole tags)', 'refuse', `${flagged.length} tag entr${flagged.length === 1 ? 'y has' : 'ies have'} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged),
   );
 
+  const regionsLabel = 'BSP, model data and tag data are inside the file';
+  let headerOnlyCrc: number | null = null;
   try {
-    report.newCrc32 = computeCacheCrc32(view, ceCrcRegions(view, header, tagIndex));
-    checks.push(check('regions', 'BSP, model data and tag data are inside the file', 'pass', `New CRC32 ${hex(report.newCrc32)} (was ${hex(report.previousCrc32)}).`));
+    headerOnlyCrc = computeCacheCrc32(view, ceCrcRegions(view, header, tagIndex));
   } catch (err) {
-    checks.push(check('regions', 'BSP, model data and tag data are inside the file', 'refuse', (err as Error).message));
+    checks.push(check('regions', regionsLabel, 'refuse', (err as Error).message));
+  }
+
+  checks.push(tagDataOutsideCheck(header, tagIndex));
+
+  const scan = scanPerAssetData(view, header, tagIndex);
+  const counts = countExternal(scan);
+  report.externalData = { bitmaps: counts.bitmap, sounds: counts.sound };
+  if (counts.bitmap.count + counts.sound.count === 0 && scan.blocked.length === 0) {
+    report.newCrc32 = headerOnlyCrc;
+    report.estimatedOutputSize = buffer.length;
+    if (headerOnlyCrc !== null) checks.push(check('regions', regionsLabel, 'pass', `New CRC32 ${hex(headerOnlyCrc)} (was ${hex(report.previousCrc32)}).`));
+    checks.push(check('externalData', 'Bitmap and sound data is inside the map', 'pass', 'No bitmap image or sound permutation keeps its data in a resource file.'));
+  } else {
+    if (headerOnlyCrc !== null) checks.push(check('regions', regionsLabel, 'pass', 'The new CRC32 is computed after the bitmap and sound data is copied in.'));
+    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length, report);
   }
 
   checks.push(scriptCheck(view, header, tagIndex));
@@ -244,6 +302,132 @@ function runChecks(buffer: Buffer, full: boolean): { report: RetailConversionRep
     );
   }
   return done(parsed);
+}
+
+const fmtBytes = (n: number) => `${n.toLocaleString('en-US')} bytes`;
+const EXTERNAL_DATA_LABEL = 'Bitmap and sound data is inside the map';
+
+/**
+ * Rows for per-asset external data (Phase 1b). Without the source game's resource files the map is
+ * refused: Custom Edition's own bitmaps.map / sounds.map hold other data at those offsets (converted
+ * maps blue-screened in OpenCE). A supplied file is usable only when every external range equals
+ * one of its entries (the range check); its name and size are never trusted.
+ */
+function externalDataChecks(
+  checks: ConversionCheck[],
+  view: Buffer,
+  scan: PerAssetScan,
+  counts: ReturnType<typeof countExternal>,
+  resources: ConversionResourceFiles,
+  sourceSize: number,
+  report: RetailConversionReport,
+): ExternalImportPlan | null {
+  const summary = `${counts.bitmap.count} bitmap image(s) (${fmtBytes(counts.bitmap.bytes)}) and ${counts.sound.count} sound permutation(s) (${fmtBytes(counts.sound.bytes)})`;
+  if (scan.blocked.length > 0) {
+    checks.push(check('externalData', EXTERNAL_DATA_LABEL, 'refuse', "Some bitmap or sound data can't be read, so it is not known whether it is inside the map. The map is not converted.", scan.blocked));
+    return null;
+  }
+  const needed: ResourceKind[] = [];
+  if (counts.bitmap.count > 0) needed.push('bitmaps');
+  if (counts.sound.count > 0) needed.push('sounds');
+  const neededText = needed.map((k) => `${k}.map`).join(' and ');
+  const tables: Partial<Record<ResourceKind, ResourceTable>> = {};
+  const fileErrors: string[] = [];
+  for (const kind of needed) {
+    const file = resources[kind];
+    if (!file) continue;
+    const read = readResourceTable(file, kind);
+    if (read.ok) tables[kind] = read.table;
+    else fileErrors.push(read.error);
+  }
+  const plan = planExternalImport(view, scan, tables);
+  report.estimatedOutputSize = sourceSize + plan.bytesAdded;
+
+  const missing = needed.filter((k) => !resources[k]);
+  if (missing.length > 0) {
+    checks.push(
+      check(
+        'externalData',
+        EXTERNAL_DATA_LABEL,
+        'refuse',
+        `${summary} of this map are stored in the source game's ${neededText}, which Custom Edition does not have. Converting needs those files from the game the map came from (for HaloMD maps: HaloMD's own bitmaps.map and sounds.map). Missing: ${missing.map((k) => `${k}.map`).join(', ')}.`,
+      ),
+    );
+    return null;
+  }
+  checks.push(check('externalData', EXTERNAL_DATA_LABEL, 'info', `${summary} are copied in from the supplied ${neededText}.`));
+
+  const lines = [...fileErrors];
+  let usable = fileErrors.length === 0;
+  for (const kind of needed) {
+    const table = tables[kind];
+    if (!table) continue;
+    const total = kind === 'bitmaps' ? counts.bitmap.count : counts.sound.count;
+    const bad = plan.unmatched[kind];
+    if (bad.length > 0) {
+      usable = false;
+      lines.push(`${table.label}: ${bad.length} of ${total} ranges this map needs are not entries of this file, so it is not the ${kind}.map this map was built with.`, ...bad.slice(0, 20));
+    } else {
+      lines.push(`${table.label}: all ${total} ranges this map needs are entries of this file.`);
+    }
+  }
+  const filesLabel = 'The resource files match this map';
+  checks.push(
+    usable
+      ? check('resourceFiles', filesLabel, 'pass', 'Every external bitmap and sound range of this map is an entry of the supplied files.', lines)
+      : check('resourceFiles', filesLabel, 'refuse', "The supplied resource files are not the ones this map was built with, or can't be read. Choose the bitmaps.map and sounds.map of the game the map came from.", lines),
+  );
+  if (plan.rawRegionProblem) checks.push(check('outputSize', 'Room for the copied data', 'refuse', plan.rawRegionProblem));
+  if (!usable || plan.rawRegionProblem) return null;
+
+  if (plan.nameMismatches.length > 0) {
+    checks.push(
+      check('resourceNames', 'Resource names match the tags', 'warn', `${plan.nameMismatches.length} range(s) are stored under another tag's name in the resource file (for example a modded tag reusing stock data). The bytes are copied as they are.`, plan.nameMismatches),
+    );
+  }
+  if (plan.sizeMismatches.length > 0) {
+    checks.push(
+      check(
+        'bitmapSizes',
+        'Bitmap sizes match their format',
+        'warn',
+        `${plan.sizeMismatches.length} bitmap image(s) have a stored size that differs from what their width, height and format give. They are copied by their stored size, which equals the resource entry.`,
+        plan.sizeMismatches,
+      ),
+    );
+  }
+  checks.push(check('outputSize', 'Estimated output size', 'info', `${fmtBytes(sourceSize + plan.bytesAdded)} (${plan.assets.length} ranges copied, +${fmtBytes(plan.bytesAdded)}).`));
+  return plan;
+}
+
+/**
+ * Tags whose data pointer gives a struct that isn't entirely inside the tag data (HaloMD crossing: a
+ * sound_environment pointing exactly at the end of the file). HaloMD runs such maps, so this is not
+ * refused, but it needs an explicit acknowledgement. 0 on all 5 CE sample maps. BSP tags are skipped:
+ * their data is in the BSP, not the tag data.
+ */
+function tagDataOutsideCheck(header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
+  const label = 'Tag data pointer outside the tag data';
+  const known = new Set(getAllTagGroupNames());
+  const start = header.tagDataOffset;
+  const end = header.tagDataOffset + header.tagDataSize;
+  const lines: string[] = [];
+  for (const e of tagIndex.entries) {
+    if (e.isExternal || e.primaryClassName === 'scenario_structure_bsp') continue;
+    const structName = e.primaryClassName && known.has(e.primaryClassName) ? getGroupStructName(e.primaryClassName) : null;
+    const size = structName ? resolveStruct(structName).totalSize : 1;
+    const at = resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    if (at < start || at + size > end) lines.push(`#${e.index} ${e.path}.${e.primaryClassName}: its ${size}-byte data starts at file offset ${at}; the tag data is ${start} to ${end}.`);
+  }
+  if (lines.length === 0) return check('tagDataOutside', label, 'pass', "Every tag's data is inside the tag data.");
+  return check(
+    'tagDataOutside',
+    label,
+    'warn',
+    `${lines.length} tag(s) point at data that is not entirely inside the tag data, so the game reads whatever follows in memory. HaloMD runs this map; whether Custom Edition does is unverified. Nothing is changed.`,
+    lines,
+    true,
+  );
 }
 
 function validationCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
@@ -402,8 +586,8 @@ function injectAfterwardsCheck(view: Buffer, header: CacheFileHeader, tagIndex: 
 }
 
 /** The full pre-flight report for the Convert dialog. Never throws for a malformed map; problems are checks. */
-export function preflightRetailConversion(buffer: Buffer): RetailConversionReport {
-  return runChecks(buffer, true).report;
+export function preflightRetailConversion(buffer: Buffer, resources: ConversionResourceFiles = {}): RetailConversionReport {
+  return runChecks(buffer, true, resources).report;
 }
 
 export interface RetailConversionResult {
@@ -413,23 +597,45 @@ export interface RetailConversionResult {
    */
   buffer: Buffer;
   report: RetailConversionReport;
+  /** Set when external bitmap and sound data was copied in. */
+  imported: { rangesCopied: number; bytesAdded: number; insertAt: number; warnings: string[] } | null;
 }
+
+const ACKNOWLEDGEMENTS: { id: ConversionCheckId; option: 'acknowledgeScripts' | 'acknowledgeTagDataOutside'; text: string }[] = [
+  { id: 'scripts', option: 'acknowledgeScripts', text: 'scripts that may call the wrong function in Custom Edition' },
+  { id: 'tagDataOutside', option: 'acknowledgeTagDataOutside', text: 'tags whose data pointer is outside the tag data' },
+];
 
 /**
  * Converts a retail-layout map. Refuses (ConversionRefusedError) when any header-level check refuses,
  * or when the scripts need an acknowledgement that wasn't given. Never mutates `source`.
  */
-export function convertRetailToCustomEdition(source: Buffer, options: { acknowledgeScripts: boolean }): RetailConversionResult {
-  const { report } = runChecks(source, false);
+export function convertRetailToCustomEdition(source: Buffer, options: RetailConversionOptions): RetailConversionResult {
+  const { report, parsed } = runChecks(source, false, options.resources);
   if (!report.canConvert) {
     const reasons = report.checks.filter((c) => c.status === 'refuse').map((c) => c.message);
     throw new ConversionRefusedError(`This map can't be converted. ${reasons.join(' ')}`);
   }
-  if (report.requiresAcknowledgement && !options.acknowledgeScripts) {
-    throw new ConversionRefusedError('This map has scripts that may call the wrong function in Custom Edition. Confirm that you understand this before converting.', 'ACKNOWLEDGEMENT_REQUIRED');
+  const unacknowledged = ACKNOWLEDGEMENTS.filter((a) => report.checks.some((c) => c.id === a.id && c.requiresAcknowledgement) && !options[a.option]);
+  if (unacknowledged.length > 0) {
+    throw new ConversionRefusedError(`This map has ${unacknowledged.map((a) => a.text).join(' and ')}. Confirm that you understand this before converting.`, 'ACKNOWLEDGEMENT_REQUIRED');
   }
-  const out = Buffer.from(source);
+  let out: Buffer;
+  let imported: RetailConversionResult['imported'] = null;
+  const plan = parsed?.importPlan ?? null;
+  if (plan) {
+    try {
+      const result = importExternalData(source, plan, options.resources ?? {}, { onProgress: options.onProgress, shouldCancel: options.shouldCancel });
+      out = result.buffer;
+      imported = { rangesCopied: result.rangesCopied, bytesAdded: result.bytesAdded, insertAt: result.insertAt, warnings: [...plan.nameMismatches, ...plan.sizeMismatches] };
+    } catch (err) {
+      if (err instanceof RawDataAppendCancelledError) throw new ConversionRefusedError('Converting was cancelled. Nothing was written.', 'CANCELLED');
+      throw err;
+    }
+  } else {
+    out = Buffer.from(source);
+  }
   out.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
-  return { buffer: out, report };
+  return { buffer: out, report, imported };
 }
