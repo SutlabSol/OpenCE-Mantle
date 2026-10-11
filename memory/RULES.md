@@ -2,6 +2,13 @@
 
 - Work on copies. Never modify sample maps. Write outputs via temp file then rename.
   Never overwrite the source map. Cancel leaves no partial file.
+  ONE permitted exception (user-approved 2026-10-11): File > Save may overwrite the map
+  the user opened - only File > Save, only after the backup prompt was offered on open
+  (and a confirmation when the backup was skipped or failed), only via a temp file in the
+  same folder + atomic rename after finalizeForSave, and refused when the file changed on
+  disk since it was opened. Never for a map opened from a .bak. Every other operation
+  (Inject, Save As, Extract, Decompress/Recompress, converter) writes a new file; Inject
+  writes nothing (in memory until Save / Save As).
 - Tests use the shared SAMPLE_MAPS_DIR helper, never a hardcoded /app path. Read map
   files inside beforeAll, never at describe scope.
 - Node 22 LTS and Yarn 1 only. No major dependency upgrades without asking.

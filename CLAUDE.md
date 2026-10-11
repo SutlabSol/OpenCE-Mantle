@@ -11,7 +11,7 @@ The real project lives in `core/` and `desktop/`. **`backend/` (FastAPI/Mongo), 
 ## Required reading before changing behavior
 
 - `memory/RULES.md` holds the standing rules. Follow them. The key ones:
-  - Never modify `sample_maps/`. Write maps to a temp file, then rename. Never overwrite a source map.
+  - Never modify `sample_maps/`. Write maps to a temp file, then rename. Never overwrite a source map. **One exception:** File > Save may overwrite the open map: only File > Save, only after the backup prompt on open, only atomically (temp file in the same folder + rename, after `finalizeForSave`), refused if the file changed on disk, never for a `.bak`. Every other operation writes a new file. Inject writes nothing; it changes the worker's in-memory map until Save / Save As.
   - Node 22 LTS and Yarn 1 only. No major dependency upgrades without asking.
   - No logic keyed to a specific map name, tag path, or file size. Format-level struct constants are fine.
   - If an offset, size, or flag is ambiguous, stop and ask. Log the decision in `core/src/map/definitions/SOURCES.md` or `memory/PRD.md`.
@@ -69,13 +69,14 @@ Real-map tests read from `<repo root>/sample_maps`, or from `SAMPLE_MAPS_DIR` if
 - `dependency-walker.ts` computes dependency closures and emits typed warnings (`externalData`, `uncapturedData`, BSP, ...). Some kinds block injection. Any closure containing a `gbxmodel` is currently blocked, because model geometry isn't wired into the extractor/injector yet.
 - `tag-extractor.ts` flattens tags into a self-contained `ExtractedTagSet` (appends reflexive/pointer data and rewrites pointers to local offsets). Fields marked `nonCached` are skipped.
 - `container.ts` defines the `.ocetags` format (versioned JSON, currently v4; v1 to v3 still readable).
-- `tag-injector.ts` plans and applies ADD/SWAP injection. Embedded (external=0) relocation sits behind `InjectionOptions.allowEmbeddedRelocation`, default false. **Keep it disabled in the app until the user approves.** `map-worker.ts` must never set it.
+- `tag-injector.ts` plans and applies ADD/SWAP injection (the app applies it to the open map in memory; only File > Save / Save As write). Embedded (external=0) relocation sits behind `InjectionOptions.allowEmbeddedRelocation`, default false. **Keep it disabled in the app until the user approves.** `map-worker.ts` must never set it.
 - `resource-map.ts` and `embedded-data-verifier.ts` handle bitmaps/sounds/loc map identity and embedded-data checks.
 - `gbxmodel-geometry.ts` is Stage 1 (capture only, standalone). It is not wired into the extractor or injector.
 
 **desktop/** is the Electron app:
 - `electron/main.ts` owns all dialogs, file pickers, `settings.json`, recent maps, and the `ipcMain.handle` channels.
-- `electron/map-worker.ts` is the single long-lived worker thread. It holds the open map in memory and does the heavy work. Main sends it small requests, never buffers.
+- `electron/map-worker.ts` is the single long-lived worker thread. It holds the open map in memory (Inject modifies it there; `saveMap` / `saveMapAs` are the only map writers) and does the heavy work. Main sends it small requests, never buffers.
+- `electron/save-map.ts`, `save-map-as.ts`, `backup-on-open.ts` hold the Save / Save As / backup-prompt / unsaved-changes flows with injected deps (testable without Electron).
 - `electron/shared-types.ts` is the IPC contract. `preload.ts` exposes it as `window.opence`. Never expose `ipcRenderer`. Keep `contextIsolation` on and `nodeIntegration` off.
 - The renderer (`src/`, React + Vite) imports core source directly. esbuild inlines core into `dist-electron`. `@mongodb-js/zstd` stays external and is unpacked from asar.
 - `src/dev-mock.ts` mocks `window.opence` in a plain browser (DEV only). Select a scenario with `?mock=<name>`.
