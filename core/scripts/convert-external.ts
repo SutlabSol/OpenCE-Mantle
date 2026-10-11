@@ -7,7 +7,11 @@
  *
  * Usage (from core/):
  *   npx tsx scripts/convert-external.ts <source.map> <folder with bitmaps.map and sounds.map> <output.map>
- *     [--acknowledge-scripts] [--acknowledge-tag-data-outside]
+ *     [--acknowledge-scripts]
+ *
+ * Every REQUIRED tag data repair the checks list (`tag-data-repairs.ts`: what OpenCE's validator
+ * refuses) is applied, and each is printed: what it changed, bytes appended, the pointer before and
+ * after. Optional repairs are listed but not applied.
  *
  * Never writes into the source map's folder or the resource folder (so never into sample_maps),
  * never over the source or a resource map. Resource maps are read by offset only.
@@ -22,10 +26,10 @@ import { writeFinalizedMap } from '../src/map/write-map';
 const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith('--')));
 const [sourceArg, resourceArg, outputArg] = args.filter((a) => !a.startsWith('--'));
-const known = new Set(['--acknowledge-scripts', '--acknowledge-tag-data-outside']);
+const known = new Set(['--acknowledge-scripts']);
 for (const f of flags) if (!known.has(f)) fail(`Unknown option ${f}.`);
 if (!sourceArg || !resourceArg || !outputArg) {
-  fail('Usage: npx tsx scripts/convert-external.ts <source.map> <resource folder> <output.map> [--acknowledge-scripts] [--acknowledge-tag-data-outside]');
+  fail('Usage: npx tsx scripts/convert-external.ts <source.map> <resource folder> <output.map> [--acknowledge-scripts]');
 }
 
 function fail(message: string): never {
@@ -74,7 +78,8 @@ function openResource(file: string): { file: RandomAccessFile; close: () => void
 
 function printChecks(checks: ConversionCheck[]) {
   for (const c of checks) {
-    console.log(`[${c.status.toUpperCase()}]${c.requiresAcknowledgement ? ' (needs acknowledgement)' : ''} ${c.label}: ${c.message}`);
+    const repair = c.repair ? (c.repair.required ? ' (required repair: applied)' : ' (optional repair: not applied)') : '';
+    console.log(`[${c.status.toUpperCase()}]${c.requiresAcknowledgement ? ' (needs acknowledgement)' : ''}${repair} ${c.label}: ${c.message}`);
     for (const d of c.details.slice(0, 15)) console.log(`        ${d}`);
     if (c.details.length > 15) console.log(`        ... ${c.details.length - 15} more`);
   }
@@ -98,7 +103,7 @@ try {
   let lastPercent = -1;
   const converted = convertRetailToCustomEdition(sourceBytes, {
     acknowledgeScripts: flags.has('--acknowledge-scripts'),
-    acknowledgeTagDataOutside: flags.has('--acknowledge-tag-data-outside'),
+    repairs: Object.fromEntries(report.repairs.filter((r) => r.required).map((r) => [r.id, true])),
     resources,
     onProgress: (done, total) => {
       const percent = total === 0 ? 100 : Math.floor((done / total) * 100);
@@ -138,6 +143,16 @@ try {
   console.log(`  Internal name:      "${finalized.scenarioName}" (was "${finalized.previousScenarioName}")`);
   console.log(`  Ranges copied:      ${converted.imported?.rangesCopied ?? 0}`);
   console.log(`  Bytes added:        ${(converted.imported?.bytesAdded ?? 0).toLocaleString('en-US')}`);
+  console.log(`  Tag data size:      ${out.readUInt32LE(0x14).toLocaleString('en-US')}`);
+  console.log(`  Tag data repairs:   ${converted.repairs.length}`);
+  for (const r of converted.repairs) {
+    const what =
+      r.id === 'scriptSyntaxData'
+        ? `script syntax data of #${r.tagIndex} ${r.tagPath} moved to its own block (${r.copied.toLocaleString('en-US')} bytes copied: header and used nodes; rest zero)`
+        : `tag #${r.tagIndex} ${r.tagPath} given a zeroed ${r.blockSize}-byte root struct (tag entry +0x14)`;
+    console.log(`    - ${r.id}: ${what}`);
+    console.log(`      pointer ${hex(r.oldPointer)} -> ${hex(r.newPointer)}; appended ${r.bytesAppended.toLocaleString('en-US')} bytes (${r.padding} padding + ${r.blockSize.toLocaleString('en-US')} block)`);
+  }
   const warnings = [...finalized.warnings, ...report.checks.filter((c) => c.status === 'warn').map((c) => `${c.label}: ${c.message}`), ...(converted.imported?.warnings ?? [])];
   console.log(`  Warnings:           ${warnings.length}`);
   for (const w of warnings) console.log(`    - ${w}`);
