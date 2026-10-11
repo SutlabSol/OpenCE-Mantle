@@ -4,7 +4,7 @@ import { verifyEmbeddedData, formatEmbeddedDataReport, rangesOverlap } from '../
 import type { EmbeddedDataReport } from '../src/map/embedded-data-verifier';
 import type { CacheFileHeader } from '../src/map/header';
 import type { TagIndex, TagIndexEntry } from '../src/map/tag-index';
-import { hasSampleMaps, missingSampleMapsMessage, readSampleMap } from './helpers/sample-maps';
+import { hasSampleMaps, missingSampleMapsMessage, readSampleMap, sampleIn, skippableTest } from './helpers/sample-maps';
 
 function fakeHeader(): CacheFileHeader {
   return { engine: 609, decompressedFileSize: 0, compressedPadding: 0, tagDataOffset: 0, tagDataSize: 0, scenarioName: 'x', buildString: 'x', mapType: 1, crc32: 0 };
@@ -89,7 +89,7 @@ describe('verifyEmbeddedData - coldsnap.map (a real custom map WITH embedded bit
   const suiteTitle = haveColdsnap ? 'checked against coldsnap.map' : `checked against coldsnap.map [${missingSampleMapsMessage(['coldsnap.map'])}]`;
 
   (haveColdsnap ? describe : describe.skip)(suiteTitle, () => {
-    it('reports 396 embedded, 9 external, 0 blocked, 0 bounds/overlap/readability problems - same numbers before and after the embedded-data-fields.ts shared-helper refactor', () => {
+    it('reports 405 embedded, 0 external, 0 blocked, 0 bounds/overlap/readability problems (was 396 / 9 before the sound external-bit fix: 9 permutations with the word 0x01000000 are internal)', () => {
       const buffer = readSampleMap('coldsnap.map');
       const inspected = inspectCustomEditionMap(buffer);
       expect(inspected.status).toBe('ok');
@@ -99,10 +99,57 @@ describe('verifyEmbeddedData - coldsnap.map (a real custom map WITH embedded bit
       expect(report.counts.embeddedOutOfBounds).toBe(0);
       expect(report.counts.overlapping).toBe(0);
       expect(report.counts.unreadable).toBe(0);
-      expect(report.counts.embedded).toBe(396);
-      expect(report.counts.external).toBe(9);
+      expect(report.counts.embedded).toBe(405);
+      expect(report.counts.external).toBe(0);
     });
   });
+});
+
+/**
+ * The sound external word: only bit 0 means external. If that rule is right, a map's embedded ranges
+ * fill its raw-data region [last BSP end, model data offset) exactly, back to back. The region bounds
+ * come from raw bytes (header, tag data header, scenario "structure bsps"); the asset list comes from
+ * the verifier, so this shares the schema engine for finding the assets.
+ */
+describe('embedded ranges tile the raw-data region (sound external word: bit 0 only)', () => {
+  const SCENARIO_STRUCTURE_BSPS = 0x5a4;
+  const BASE = 0x40440000;
+  const cases = [
+    { name: 'coldsnap.map', embedded: 405, external: 0 },
+    { name: 'Yoyorast_Island.map', embedded: 148, external: 0 },
+    { name: sampleIn('haloMD', 'barrier.map'), embedded: 101, external: 1551 },
+    { name: sampleIn('haloMD', 'crossing.map'), embedded: 77, external: 1553 },
+  ];
+  for (const c of cases) {
+    const gate = skippableTest([c.name]);
+    it.skipIf(gate.skip)(`${c.name}: ${c.embedded} embedded, ${c.external} external; embedded ranges fill [BSP end, model data) with no gap or overlap${gate.titleSuffix}`, () => {
+      // HaloMD maps are retail layout (version 7): read a private copy marked 609, as the converter does.
+      const buffer = Buffer.from(readSampleMap(c.name));
+      if (buffer.readUInt32LE(4) === 7) buffer.writeUInt32LE(609, 4);
+      const inspected = inspectCustomEditionMap(buffer);
+      if (inspected.status !== 'ok') throw new Error(inspected.status);
+      const report = verifyEmbeddedData(buffer, inspected.header, inspected.tagIndex);
+      expect(report.counts.embedded).toBe(c.embedded);
+      expect(report.counts.external).toBe(c.external);
+
+      const tagData = buffer.readUInt32LE(0x10);
+      const scenarioEntry = tagData + 0x28 + (buffer.readUInt32LE(tagData + 0x4) & 0xffff) * 0x20;
+      const scenarioAt = tagData + (buffer.readUInt32LE(scenarioEntry + 0x14) - BASE);
+      const bspCount = buffer.readUInt32LE(scenarioAt + SCENARIO_STRUCTURE_BSPS);
+      const bspsAt = tagData + (buffer.readUInt32LE(scenarioAt + SCENARIO_STRUCTURE_BSPS + 4) - BASE);
+      let bspEnd = 0;
+      for (let i = 0; i < bspCount; i++) bspEnd = Math.max(bspEnd, buffer.readUInt32LE(bspsAt + i * 32) + buffer.readUInt32LE(bspsAt + i * 32 + 4));
+      const modelData = buffer.readUInt32LE(tagData + 0x14);
+
+      const ranges = report.assets.filter((a) => a.location === 'embedded').map((a) => [a.fileOffset, a.size] as const).sort((a, b) => a[0] - b[0]);
+      let at = bspEnd;
+      for (const [offset, size] of ranges) {
+        expect(offset).toBe(at);
+        at = offset + size;
+      }
+      expect(at).toBe(modelData);
+    });
+  }
 });
 
 describe('formatEmbeddedDataReport', () => {

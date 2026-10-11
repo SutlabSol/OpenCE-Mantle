@@ -119,6 +119,18 @@ needs re-verification / unverified / blocked)
   - **Correction to the research notes:** theisland_3's scenario has two validation errors, not one:
     scenery palette[14] -> a sound and palette[15] -> a device_machine.
 
+- 2026-10-11: **Sound external bit (branch `fix/sound-external-bit`, user decision B).** Only bit 0 of a
+  TagDataOffset's external word means "in sounds.map". Before: any nonzero value counted, so 20 internal
+  sound permutations with the word 0x01000000 were treated as external (evidence: SOURCES.md).
+  - Verify Embedded Data, embedded / external: coldsnap 396/9 -> 405/0; Yoyorast_Island 145/3 -> 148/0;
+    HaloMD barrier 93/1559 -> 101/1551; crossing, heh_2, theisland_3 and the stock CE maps unchanged.
+  - Extraction: those sounds now carry their bytes as embedded assets instead of external references.
+    ADD of such a sound (e.g. coldsnap `sound\sfx\vehicles\pelican_wind`) into bloodgulch was
+    "added, 4 external references" (pointing at unrelated sounds.map bytes) and is now blocked as
+    embedded data, like every other embedded asset while relocation is disabled.
+  - Tests changed on purpose: the coldsnap counts in `embedded-data-verifier.test.ts` and
+    `embedded-relocation.test.ts` (396/9 -> 405/0). New: bit-0 unit test, raw-region tiling check,
+    `sound-external-bit.real-map.test.ts`.
 - 2026-10-11: **In-memory inject and File > Save (branch `feat/inject-in-memory-save`, user-approved
   plan with changes).**
   - **Inject** applies ADD/SWAP to the worker's held map (buffer replaced, header and tag index

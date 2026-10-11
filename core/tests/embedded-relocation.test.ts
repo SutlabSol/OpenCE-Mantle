@@ -196,12 +196,12 @@ describe.skipIf(!haveColdsnap)(coldsnapTitle, () => {
     expect(validated).toBeGreaterThan(1500);
   });
 
-  it('harder case: SWAPs the same embedded bitmap+sound back into a COPY of coldsnap ITSELF (which already has 396 embedded assets - these 2 tags already exist there by path, so ADD mode would just reuse them; SWAP is the correct way to force a fresh relocation against a target that already has embedded data); EVERY pre-existing embedded/external asset still resolves to byte-identical content at the SAME file offset (raw-data region never moves - it is entirely before the insertion point), full closure re-parses', () => {
+  it('harder case: SWAPs the same embedded bitmap+sound back into a COPY of coldsnap ITSELF (which already has 405 embedded assets - these 2 tags already exist there by path, so ADD mode would just reuse them; SWAP is the correct way to force a fresh relocation against a target that already has embedded data); EVERY pre-existing embedded/external asset still resolves to byte-identical content at the SAME file offset (raw-data region never moves - it is entirely before the insertion point), full closure re-parses', () => {
     const set = extractTagSet(coldsnapBuffer, coldsnapHeader, coldsnapTagIndex, [bitmapOriginalIndex, soundOriginalIndex]);
     const container = deserializeContainer(serializeContainer(set, 'coldsnap'));
 
     const beforeReport = verifyEmbeddedData(coldsnapBuffer, coldsnapHeader, coldsnapTagIndex);
-    expect(beforeReport.counts.embedded).toBe(396);
+    expect(beforeReport.counts.embedded).toBe(405);
 
     const plan = planSwapInjection({ buffer: coldsnapBuffer, header: coldsnapHeader, tagIndex: coldsnapTagIndex }, container, {}, { allowEmbeddedRelocation: true });
     expect(plan.kind).toBe('ok');

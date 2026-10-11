@@ -190,6 +190,12 @@ Investigated before writing any injection code, per explicit user requirement. A
 are cited against the real Invader source (`/tmp/invader`, commit 696830f) and cross-checked
 against real bytes in the sample maps, not inferred.
 
+- **TagDataOffset external word: only bit 0 means external (measured 2026-10-11).** External sound
+  permutations have 0x1. Internal ones have 0 or 0x01000000: coldsnap 9, Yoyorast_Island 3, HaloMD
+  barrier 8 (all 0x01000000 cases seen are vehicle/door sounds). Their bytes lie inside the map's raw-data
+  region: with bit 0 as the rule, the embedded ranges fill [last BSP end, model data offset) exactly, back
+  to back, in coldsnap, Yoyorast_Island, barrier and crossing (`embedded-data-verifier.test.ts`). The
+  meaning of 0x01000000 itself is unknown and not relied on. Applied in `embedded-data-fields.ts`.
 - **Per-mipmap/per-sound-permutation externality (`external=0` vs `external=1`) is a raw file
   offset either way, never a resource-map index.** `external=1`: `pixel_data_offset`/
   `samples.file_offset` is a byte offset INTO bitmaps.map/sounds.map (`invader/src/resource/
