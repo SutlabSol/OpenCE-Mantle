@@ -15,7 +15,9 @@ var api = {
   pickInjectContainer: () => import_electron.ipcRenderer.invoke("tags:pickInjectContainer"),
   planInject: (containerPath, mode) => import_electron.ipcRenderer.invoke("tags:planInject", containerPath, mode),
   applyInject: () => import_electron.ipcRenderer.invoke("tags:applyInject"),
+  saveMap: () => import_electron.ipcRenderer.invoke("map:save"),
   saveMapAs: () => import_electron.ipcRenderer.invoke("map:saveAs"),
+  discardChanges: () => import_electron.ipcRenderer.invoke("map:discard"),
   verifyEmbeddedData: () => import_electron.ipcRenderer.invoke("tags:verifyEmbeddedData"),
   openContainingFolder: (filePath) => import_electron.ipcRenderer.invoke("app:openContainingFolder", filePath),
   getSettings: () => import_electron.ipcRenderer.invoke("app:getSettings"),
@@ -42,6 +44,11 @@ var api = {
     const listener = (_, data) => cb(data);
     import_electron.ipcRenderer.on("map:loaded", listener);
     return () => import_electron.ipcRenderer.removeListener("map:loaded", listener);
+  },
+  onMapUpdated: (cb) => {
+    const listener = (_, data) => cb(data);
+    import_electron.ipcRenderer.on("map:updated", listener);
+    return () => import_electron.ipcRenderer.removeListener("map:updated", listener);
   },
   getPathForFile: (file) => import_electron.webUtils.getPathForFile(file)
 };

@@ -32,14 +32,20 @@ var map_worker_exports = {};
 __export(map_worker_exports, {
   TAG_FILE_CHECKSUM_WARNING: () => TAG_FILE_CHECKSUM_WARNING,
   __cancelForTest: () => __cancelForTest,
+  __getCurrentMapForTest: () => __getCurrentMapForTest,
   __setCurrentMapForTest: () => __setCurrentMapForTest,
+  __setMapFsForTest: () => __setMapFsForTest,
   __setSinkForTest: () => __setSinkForTest,
+  describeMapWriteError: () => describeMapWriteError,
   runApplyInject: () => runApplyInject,
   runExtractTags: () => runExtractTags,
   runGetDependencies: () => runGetDependencies,
+  runInspect: () => runInspect,
   runPlanInject: () => runPlanInject,
+  runSaveMap: () => runSaveMap,
   runSaveMapAs: () => runSaveMapAs,
-  runVerifyEmbeddedData: () => runVerifyEmbeddedData
+  runVerifyEmbeddedData: () => runVerifyEmbeddedData,
+  summarizeOpenMap: () => summarizeOpenMap
 });
 module.exports = __toCommonJS(map_worker_exports);
 var import_worker_threads = require("worker_threads");
@@ -35863,7 +35869,18 @@ function finalizeForSave(map, options) {
   return { buffer: out, scenarioName: name, previousScenarioName: header.scenarioName, crc32, previousCrc32: header.crc32 >>> 0, warnings };
 }
 
+// electron/map-file-rules.ts
+function isBackupFilePath(filePath) {
+  return /\.bak$/i.test(filePath);
+}
+var BACKUP_FILE_SAVE_MESSAGE = "This map was opened from a backup (.bak) file. Use File > Save As to write it under a new name; Save would overwrite the backup.";
+
 // electron/map-worker.ts
+var realMapFs = { writeFileSync: fs.writeFileSync, renameSync: fs.renameSync };
+var mapFs = realMapFs;
+function __setMapFsForTest(ops) {
+  mapFs = ops ? { ...realMapFs, ...ops } : realMapFs;
+}
 var currentMap = null;
 var currentInject = null;
 var cancelledRequests = /* @__PURE__ */ new Set();
@@ -35873,6 +35890,9 @@ function __setSinkForTest(fn) {
 }
 function __setCurrentMapForTest(map) {
   currentMap = map;
+}
+function __getCurrentMapForTest() {
+  return currentMap;
 }
 function __cancelForTest(requestId) {
   cancelledRequests.add(requestId);
@@ -35904,38 +35924,53 @@ function sizeByIndex(header, tagIndex) {
 function toWarningInfo(w) {
   return { originalIndex: w.originalIndex, path: w.path, group: w.group, kind: w.kind, message: w.message };
 }
+function diskStatOf(filePath) {
+  const s = fs.statSync(filePath);
+  return { size: s.size, mtimeMs: s.mtimeMs };
+}
+function summarizeOpenMap(map) {
+  const sizes = sizeByIndex(map.header, map.tagIndex);
+  return {
+    status: "ok",
+    filePath: map.filePath,
+    modified: !!map.modified,
+    header: {
+      scenarioName: map.header.scenarioName,
+      buildString: map.header.buildString,
+      mapType: map.header.mapType,
+      crc32: map.header.crc32,
+      tagDataOffset: map.header.tagDataOffset,
+      tagDataSize: map.header.tagDataSize,
+      decompressedFileSize: map.header.decompressedFileSize,
+      fileSizeOnDisk: map.buffer.length,
+      tagCount: map.tagIndex.tagCount
+    },
+    tags: map.tagIndex.entries.map((e) => ({
+      index: e.index,
+      tagId: e.tagId,
+      primaryClassName: e.primaryClassName ?? "?",
+      path: e.path,
+      isExternal: e.isExternal,
+      estimatedSize: sizes.get(e.index) ?? null
+    }))
+  };
+}
+function reparse(filePath, buffer, modified, diskStat) {
+  const inspected = inspectCustomEditionMap(buffer);
+  if (inspected.status !== "ok") throw new Error(`The result could not be read back as a Custom Edition map (${inspected.status}).`);
+  return { filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified, diskStat };
+}
 async function runInspect(task) {
   progress(task.requestId, "Reading file", 10);
   const buffer = fs.readFileSync(task.filePath);
+  const diskStat = diskStatOf(task.filePath);
   progress(task.requestId, "Parsing header and tag index", 50);
   const inspected = inspectCustomEditionMap(buffer);
+  currentInject = null;
   let payload;
   if (inspected.status === "ok") {
-    currentMap = { filePath: task.filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex };
-    const sizes = sizeByIndex(inspected.header, inspected.tagIndex);
-    payload = {
-      status: "ok",
-      filePath: task.filePath,
-      header: {
-        scenarioName: inspected.header.scenarioName,
-        buildString: inspected.header.buildString,
-        mapType: inspected.header.mapType,
-        crc32: inspected.header.crc32,
-        tagDataOffset: inspected.header.tagDataOffset,
-        tagDataSize: inspected.header.tagDataSize,
-        decompressedFileSize: inspected.header.decompressedFileSize,
-        fileSizeOnDisk: buffer.length,
-        tagCount: inspected.tagIndex.tagCount
-      },
-      tags: inspected.tagIndex.entries.map((e) => ({
-        index: e.index,
-        tagId: e.tagId,
-        primaryClassName: e.primaryClassName ?? "?",
-        path: e.path,
-        isExternal: e.isExternal,
-        estimatedSize: sizes.get(e.index) ?? null
-      }))
-    };
+    currentMap = { filePath: task.filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified: false, diskStat };
+    payload = summarizeOpenMap(currentMap);
   } else if (inspected.status === "compressed") {
     currentMap = null;
     payload = { status: "compressed", filePath: task.filePath };
@@ -36082,10 +36117,26 @@ function runPlanInject(task) {
   }
 }
 var TAG_FILE_CHECKSUM_WARNING = "The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.";
-function writeFinalizedMap(map, outputPath, tempPath) {
+function describeMapWriteError(err, targetPath) {
+  const code = err?.code;
+  const name = path.basename(targetPath);
+  const unchanged = `${name} on disk was not changed, and your changes are still open in the app.`;
+  if (code === "ENOSPC") return `There is not enough free disk space to save ${name}. ${unchanged} Free some space, or use File > Save As to save to another drive.`;
+  if (code === "EBUSY" || code === "EPERM" || code === "EACCES" || code === "EROFS")
+    return `${name} could not be written: the file is in use by another program (for example OpenCE or Halo), or the file or its folder is read-only. ${unchanged} Close the other program and try again, or use File > Save As.`;
+  if (code === "ENOENT") return `The folder for ${name} no longer exists. ${unchanged}`;
+  return `Could not save ${name}: ${err instanceof Error ? err.message : String(err)}. ${unchanged}`;
+}
+function writeFinalizedMap(map, outputPath) {
   const finalized = finalizeForSave(map, { fileName: path.basename(outputPath) });
-  fs.writeFileSync(tempPath, finalized.buffer);
-  fs.renameSync(tempPath, outputPath);
+  const tempPath = `${outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
+  try {
+    mapFs.writeFileSync(tempPath, finalized.buffer);
+    mapFs.renameSync(tempPath, outputPath);
+  } catch (err) {
+    removeTempFile(tempPath);
+    throw Object.assign(new Error(describeMapWriteError(err, outputPath)), { code: "WRITE_FAILED" });
+  }
   return finalized;
 }
 function isOpenMapPath(outputPath) {
@@ -36097,51 +36148,77 @@ function removeTempFile(tempPath) {
   } catch {
   }
 }
-function runSaveMapAs(task) {
+function sendWriteError(requestId, err) {
+  const e = err;
+  if (e?.code === "WRITE_FAILED") return sendError(requestId, "WRITE_FAILED", e.message);
+  handleTaskError(requestId, err);
+}
+function saved(requestId, outputPath, finalized) {
+  currentMap = reparse(outputPath, finalized.buffer, false, diskStatOf(outputPath));
+  progress(requestId, "Done", 100);
+  sendResult(requestId, {
+    ok: true,
+    outputPath,
+    scenarioName: finalized.scenarioName,
+    previousScenarioName: finalized.previousScenarioName,
+    crc32: finalized.crc32,
+    warnings: finalized.warnings,
+    staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING,
+    map: summarizeOpenMap(currentMap)
+  });
+}
+function runSaveMap(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
-  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "You cannot overwrite the open map. Choose a different file name.");
-  const tempPath = `${task.outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
+  if (isBackupFilePath(currentMap.filePath)) return sendError(task.requestId, "REFUSED_BACKUP_FILE", BACKUP_FILE_SAVE_MESSAGE);
+  if (!currentMap.modified) return sendError(task.requestId, "NOT_MODIFIED", "There are no unsaved changes.");
+  const target = currentMap.filePath;
+  let onDisk = null;
+  try {
+    onDisk = diskStatOf(target);
+  } catch {
+  }
+  const known = currentMap.diskStat;
+  if (!onDisk || !known || onDisk.size !== known.size || onDisk.mtimeMs !== known.mtimeMs) {
+    return sendError(
+      task.requestId,
+      "CHANGED_ON_DISK",
+      `${path.basename(target)} ${onDisk ? "was changed on disk by another program" : "no longer exists on disk"} since it was opened, so Save will not overwrite it. Use File > Save As to keep your changes in a new file.`
+    );
+  }
   try {
     progress(task.requestId, "Writing map", 40);
-    const finalized = writeFinalizedMap(currentMap.buffer, task.outputPath, tempPath);
-    progress(task.requestId, "Done", 100);
-    sendResult(task.requestId, {
-      ok: true,
-      outputPath: task.outputPath,
-      scenarioName: finalized.scenarioName,
-      crc32: finalized.crc32,
-      warnings: finalized.warnings,
-      staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING
-    });
+    saved(task.requestId, target, writeFinalizedMap(currentMap.buffer, target));
   } catch (err) {
-    removeTempFile(tempPath);
-    handleTaskError(task.requestId, err);
+    sendWriteError(task.requestId, err);
+  }
+}
+function runSaveMapAs(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "You cannot overwrite the open map with Save As. Use File > Save, or choose a different file name.");
+  try {
+    progress(task.requestId, "Writing map", 40);
+    saved(task.requestId, task.outputPath, writeFinalizedMap(currentMap.buffer, task.outputPath));
+  } catch (err) {
+    sendWriteError(task.requestId, err);
   }
 }
 function runApplyInject(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   if (!currentInject) return sendError(task.requestId, "NO_PLAN", 'Run "Inject Tags..." and review the plan before applying it.');
-  if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "You cannot overwrite the map you are injecting into. Choose a different location.");
-  const tempPath = `${task.outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
   try {
-    progress(task.requestId, "Writing tag data", 30);
+    progress(task.requestId, "Applying to the open map (in memory)", 30);
     const injected = currentInject.plan.mode === "swap" ? applySwapInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan) : applyAddInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan);
-    progress(task.requestId, "Writing output file", 80);
-    const finalized = writeFinalizedMap(injected, task.outputPath, tempPath);
+    progress(task.requestId, "Re-reading the tag index", 80);
+    currentMap = reparse(currentMap.filePath, injected, true, currentMap.diskStat);
     progress(task.requestId, "Done", 100);
     sendResult(task.requestId, {
       ok: true,
-      outputPath: task.outputPath,
       addedCount: currentInject.plan.counts.added,
       reusedCount: currentInject.plan.counts.reused,
       swappedCount: currentInject.plan.counts.swapped,
-      scenarioName: finalized.scenarioName,
-      crc32: finalized.crc32,
-      warnings: finalized.warnings,
-      staleChecksumWarning: TAG_FILE_CHECKSUM_WARNING
+      map: summarizeOpenMap(currentMap)
     });
   } catch (err) {
-    removeTempFile(tempPath);
     handleTaskError(task.requestId, err);
   } finally {
     currentInject = null;
@@ -36172,6 +36249,7 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "extractTags") runExtractTags(task);
     else if (task.type === "planInject") runPlanInject(task);
     else if (task.type === "applyInject") runApplyInject(task);
+    else if (task.type === "saveMap") runSaveMap(task);
     else if (task.type === "saveMapAs") runSaveMapAs(task);
     else if (task.type === "verifyEmbeddedData") runVerifyEmbeddedData(task);
   } catch (err) {
@@ -36188,13 +36266,19 @@ try {
 0 && (module.exports = {
   TAG_FILE_CHECKSUM_WARNING,
   __cancelForTest,
+  __getCurrentMapForTest,
   __setCurrentMapForTest,
+  __setMapFsForTest,
   __setSinkForTest,
+  describeMapWriteError,
   runApplyInject,
   runExtractTags,
   runGetDependencies,
+  runInspect,
   runPlanInject,
+  runSaveMap,
   runSaveMapAs,
-  runVerifyEmbeddedData
+  runVerifyEmbeddedData,
+  summarizeOpenMap
 });
 //# sourceMappingURL=map-worker.js.map

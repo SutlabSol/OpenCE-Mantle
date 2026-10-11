@@ -24,8 +24,8 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // electron/main.ts
 var import_electron3 = require("electron");
-var path5 = __toESM(require("path"));
-var fs4 = __toESM(require("fs"));
+var path7 = __toESM(require("path"));
+var fs5 = __toESM(require("fs"));
 
 // ../core/src/constants/cache-file.ts
 var CHIMERA_COMPRESSED_ENGINE_MASK = 2249850880;
@@ -33841,25 +33841,94 @@ function cancelWorkerRequest(requestId, onLog) {
 }
 
 // electron/save-map-as.ts
-var path4 = __toESM(require("path"));
+var path5 = __toESM(require("path"));
 var fs3 = __toESM(require("fs"));
+
+// electron/map-file-rules.ts
+function isBackupFilePath(filePath) {
+  return /\.bak$/i.test(filePath);
+}
+function backupPathFor(mapPath) {
+  return `${mapPath}.bak`;
+}
+var COMPRESSED_MAP_MESSAGE = "This map is compressed, so it cannot be edited, injected into or saved. Use Tools > Decompress Map to write a decompressed copy, then open that copy.";
+var BACKUP_FILE_SAVE_MESSAGE = "This map was opened from a backup (.bak) file. Use File > Save As to write it under a new name; Save would overwrite the backup.";
+
+// electron/save-map.ts
+var path4 = __toESM(require("path"));
+var SAVE_MAP_CHANNEL = "map:save";
+var hex = (n) => `0x${(n >>> 0).toString(16).padStart(8, "0")}`;
+function logSaved(log, result) {
+  const renamed = result.previousScenarioName !== result.scenarioName ? ` (changed from "${result.previousScenarioName}" to match the file name)` : "";
+  log("info", `Saved ${result.outputPath} - map name "${result.scenarioName}"${renamed}, CRC32 ${hex(result.crc32)}`);
+  for (const w of result.warnings) log("warn", w);
+  log("info", result.staleChecksumWarning);
+}
+var cancelled = { ok: false, code: "CANCELLED", message: "Save was cancelled." };
+async function saveMapFlow(deps) {
+  const open = deps.getOpenMap();
+  if (!open) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (open.compressed) {
+    deps.log("warn", COMPRESSED_MAP_MESSAGE);
+    await deps.showError("This map cannot be saved.", COMPRESSED_MAP_MESSAGE);
+    return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
+  }
+  if (isBackupFilePath(open.filePath)) {
+    deps.log("warn", BACKUP_FILE_SAVE_MESSAGE);
+    await deps.showError("Save is not available for a backup file.", BACKUP_FILE_SAVE_MESSAGE);
+    return { ok: false, code: "REFUSED_BACKUP_FILE", message: BACKUP_FILE_SAVE_MESSAGE };
+  }
+  if (!open.modified) return { ok: false, code: "NOT_MODIFIED", message: "There are no unsaved changes." };
+  if (!open.backedUp && !open.overwriteConfirmed) {
+    if (!await deps.confirmOverwriteWithoutBackup(open.filePath)) return cancelled;
+    deps.markOverwriteConfirmed();
+    deps.log("warn", `Overwriting ${path4.basename(open.filePath)} without a backup (confirmed).`);
+  }
+  if (!await deps.confirmScenarioName(open.filePath)) return cancelled;
+  deps.log("info", `Saving ${open.filePath}`);
+  try {
+    const result = await deps.runWorkerSave();
+    if (result.ok) logSaved(deps.log, result);
+    return result;
+  } catch (err) {
+    const e = err;
+    deps.log("error", `Save failed: ${e.message}`);
+    await deps.showError("The map was not saved.", e.message);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
+async function confirmUnsavedChanges(deps) {
+  if (!deps.isModified()) return true;
+  const choice = await deps.ask(deps.fileName());
+  if (choice === "cancel") return false;
+  if (choice === "dont-save") {
+    deps.log("warn", `Unsaved changes to ${deps.fileName()} were discarded.`);
+    return true;
+  }
+  const result = await deps.save();
+  return result.ok;
+}
+
+// electron/save-map-as.ts
 var SAVE_MAP_AS_CHANNEL = "map:saveAs";
 function isSamePath(a, b) {
-  return path4.resolve(a).toLowerCase() === path4.resolve(b).toLowerCase();
+  return path5.resolve(a).toLowerCase() === path5.resolve(b).toLowerCase();
 }
 async function saveMapAsFlow(deps) {
   const openMap = deps.getOpenMap();
-  if (!openMap || openMap.compressed) {
-    deps.log("warn", "Open a decompressed map before using Save As.");
-    return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before saving it." };
+  if (!openMap) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (openMap.compressed) {
+    deps.log("warn", COMPRESSED_MAP_MESSAGE);
+    await deps.showError("This map cannot be saved.", COMPRESSED_MAP_MESSAGE);
+    return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
   }
   const filePath = await deps.showSaveDialog(openMap.filePath.replace(/(\.map)?$/i, "_copy.map"));
   if (!filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  const resolvedTarget = path4.resolve(filePath);
+  const resolvedTarget = path5.resolve(filePath);
   if (isSamePath(resolvedTarget, openMap.filePath)) {
-    const message = "You cannot overwrite the open map. Choose a different file name.";
+    const message = "Save As cannot overwrite the open map. Use File > Save, or choose a different file name.";
     deps.log("error", `Save As refused: ${resolvedTarget} is the open map.`);
-    await deps.showError("You cannot overwrite the open map.", "Choose a different file name.");
+    await deps.showError("Save As cannot overwrite the open map.", "Use File > Save to overwrite it, or choose a different file name.");
     return { ok: false, code: "REFUSED_SOURCE_PATH", message };
   }
   const exists = deps.fileExists ?? fs3.existsSync;
@@ -33868,22 +33937,95 @@ async function saveMapAsFlow(deps) {
   deps.log("info", `Saving map as ${resolvedTarget}`);
   try {
     const result = await deps.runWorkerSave(resolvedTarget);
-    if (result.ok) {
-      deps.log("info", `Saved ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, "0")}`);
-      for (const w of result.warnings) deps.log("warn", w);
-      deps.log("info", result.staleChecksumWarning);
-    } else {
-      deps.log("error", `Save As failed: ${result.message}`);
-    }
+    if (result.ok) logSaved(deps.log, result);
+    else deps.log("error", `Save As failed: ${result.message}`);
     return result;
   } catch (err) {
     const e = err;
     deps.log("error", `Save As failed: ${e.message}`);
+    await deps.showError("The map was not saved.", e.message);
     return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   }
 }
-function registerSaveMapAsIpc(ipc, deps) {
-  ipc.handle(SAVE_MAP_AS_CHANNEL, () => saveMapAsFlow(deps));
+function registerSaveMapAsIpc(ipc, deps, onResult = () => {
+}) {
+  ipc.handle(SAVE_MAP_AS_CHANNEL, async () => {
+    const result = await saveMapAsFlow(deps);
+    onResult(result);
+    return result;
+  });
+}
+
+// electron/backup-on-open.ts
+var path6 = __toESM(require("path"));
+var fs4 = __toESM(require("fs"));
+var import_crypto3 = require("crypto");
+function isBackedUp(outcome) {
+  return outcome === "created" || outcome === "replaced" || outcome === "kept-existing" || outcome === "up-to-date";
+}
+function describeBackupError(err, backupName) {
+  const code = err?.code;
+  if (code === "ENOSPC") return `There is not enough free disk space to create ${backupName}.`;
+  if (code === "EACCES" || code === "EPERM" || code === "EROFS" || code === "EBUSY")
+    return `${backupName} could not be written: the folder is read-only, or the file is in use by another program.`;
+  return `${backupName} could not be created: ${err instanceof Error ? err.message : String(err)}`;
+}
+async function backupOnOpenFlow(mapPath, deps) {
+  const f = deps.fs ?? fs4;
+  if (isBackupFilePath(mapPath)) {
+    deps.log("info", `Opened a backup file (${path6.basename(mapPath)}): no backup prompt, and File > Save is disabled for it - use Save As.`);
+    return "not-applicable";
+  }
+  const backupPath = backupPathFor(mapPath);
+  const mapName = path6.basename(mapPath);
+  const backupName = path6.basename(backupPath);
+  try {
+    const exists = f.existsSync(backupPath);
+    if (exists && f.statSync(backupPath).size === f.statSync(mapPath).size && f.readFileSync(backupPath).equals(f.readFileSync(mapPath))) {
+      deps.log("info", `Backup already up to date: ${backupName} is identical to ${mapName}.`);
+      return "up-to-date";
+    }
+    if (await deps.askCreateBackup(mapName, backupName) === "skip") {
+      deps.log("warn", `Backup skipped for ${mapName}. File > Save will ask before overwriting it.`);
+      return "skipped";
+    }
+    let replacing = false;
+    if (exists) {
+      const choice = await deps.askExistingBackup(backupName);
+      if (choice === "keep") {
+        deps.log("info", `Kept the existing ${backupName} (it differs from ${mapName}; not overwritten).`);
+        return "kept-existing";
+      }
+      if (choice === "skip") {
+        deps.log("warn", `Backup skipped for ${mapName}; the existing ${backupName} was left unchanged. File > Save will ask before overwriting ${mapName}.`);
+        return "skipped";
+      }
+      replacing = true;
+    }
+    const tempPath = `${backupPath}.tmp-${(0, import_crypto3.randomUUID)()}`;
+    try {
+      f.copyFileSync(mapPath, tempPath);
+      const expected = f.statSync(mapPath).size;
+      const copied = f.statSync(tempPath).size;
+      if (copied !== expected) throw new Error(`the copy is ${copied} bytes, the map is ${expected} bytes`);
+      f.renameSync(tempPath, backupPath);
+    } catch (err) {
+      try {
+        if (f.existsSync(tempPath)) f.unlinkSync(tempPath);
+      } catch {
+      }
+      throw err;
+    }
+    deps.log("info", `${replacing ? "Replaced" : "Created"} backup ${backupPath}.`);
+    return replacing ? "replaced" : "created";
+  } catch (err) {
+    const message = describeBackupError(err, backupName);
+    deps.log("error", `Backup failed: ${message} ${mapName} is still open; File > Save will ask before overwriting it.`);
+    await deps.showError("The backup copy could not be created.", `${message}
+
+${mapName} is still open and unchanged. File > Save will ask before overwriting it.`);
+    return "failed";
+  }
 }
 
 // electron/main.ts
@@ -33891,6 +34033,9 @@ var mainWindow = null;
 var currentMapPath = null;
 var currentMapCompressed = false;
 var currentMapScenarioName = null;
+var currentMapModified = false;
+var currentMapBackedUp = false;
+var overwriteConfirmed = false;
 var currentExtractRequestId = null;
 var currentInjectContainerPath = null;
 var isDev = !import_electron3.app.isPackaged;
@@ -33905,7 +34050,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: "#15171c",
     webPreferences: {
-      preload: path5.join(__dirname, "preload.js"),
+      preload: path7.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -33914,35 +34059,123 @@ function createWindow() {
   if (isDev) {
     mainWindow.loadURL("http://localhost:5173");
   } else {
-    mainWindow.loadFile(path5.join(__dirname, "../dist/index.html"));
+    mainWindow.loadFile(path7.join(__dirname, "../dist/index.html"));
   }
   buildMenu();
+  updateTitle();
+  let closeConfirmed = false;
+  mainWindow.on("close", (event) => {
+    if (closeConfirmed || !currentMapModified) return;
+    event.preventDefault();
+    void confirmUnsavedChanges(unsavedChangesDeps).then((ok) => {
+      if (!ok) return;
+      closeConfirmed = true;
+      mainWindow?.close();
+    });
+  });
 }
-async function loadMapAtPath(filePath) {
+function updateTitle() {
+  if (!mainWindow) return;
+  const name = currentMapPath ? `${path7.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
+  mainWindow.setTitle(`${name}OpenCE Modding Tool`);
+}
+function setOpenMapState(map) {
+  currentMapPath = map.filePath;
+  currentMapScenarioName = map.header.scenarioName;
+  currentMapModified = !!map.modified;
+  buildMenu();
+  updateTitle();
+  mainWindow?.webContents.send("map:updated", map);
+}
+var unsavedChangesDeps = {
+  isModified: () => currentMapModified,
+  fileName: () => currentMapPath ? path7.basename(currentMapPath) : "the open map",
+  ask: async (fileName) => {
+    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: ["Save", "Don't save", "Cancel"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      message: `Save changes to ${fileName}?`,
+      detail: "Your injected tags are only in memory. If you don't save, they are lost."
+    });
+    return response === 0 ? "save" : response === 1 ? "dont-save" : "cancel";
+  },
+  save: () => runSaveMap(),
+  log: sendLog
+};
+async function openMapGuarded(filePath) {
+  if (!await confirmUnsavedChanges(unsavedChangesDeps)) return null;
+  return loadMapAtPath(filePath, { askBackup: true });
+}
+async function askBackup(filePath) {
+  const outcome = await backupOnOpenFlow(filePath, {
+    askCreateBackup: async (mapName, backupName) => {
+      const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+        type: "question",
+        buttons: ["Create backup", "Skip"],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+        message: `Create a backup copy of ${mapName} as ${backupName}?`,
+        detail: "File > Save overwrites the map you opened. The backup is written next to it, and Save never touches it."
+      });
+      return response === 0 ? "create" : "skip";
+    },
+    askExistingBackup: async (backupName) => {
+      const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+        type: "warning",
+        buttons: ["Keep existing", "Replace", "Skip"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        message: `${backupName} already exists and differs from the map you opened.`,
+        detail: "Keep existing leaves the old backup as it is. Replace overwrites it with a copy of the map you just opened."
+      });
+      return response === 1 ? "replace" : response === 2 ? "skip" : "keep";
+    },
+    showError: showErrorBox,
+    log: sendLog
+  });
+  currentMapBackedUp = isBackedUp(outcome);
+  overwriteConfirmed = false;
+}
+async function showErrorBox(message, detail) {
+  await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message, detail });
+}
+async function loadMapAtPath(filePath, options) {
   sendLog("info", `Opening ${filePath}`);
   try {
     const { promise } = sendWorkerRequest({ type: "inspect", filePath }, sendLog, (stage, percent) => {
       mainWindow?.webContents.send("map:progress", { taskId: "load", stage, percent });
     });
     const result = await promise;
+    currentMapModified = false;
+    currentMapBackedUp = false;
+    overwriteConfirmed = false;
     if (result.status === "ok") {
       currentMapPath = filePath;
       currentMapCompressed = false;
       currentMapScenarioName = result.header.scenarioName;
       addRecentMap(filePath);
       buildMenu();
+      updateTitle();
       sendLog("info", `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
+      if (options.askBackup) await askBackup(filePath);
     } else if (result.status === "compressed") {
       currentMapPath = filePath;
       currentMapCompressed = true;
       currentMapScenarioName = null;
       addRecentMap(filePath);
       buildMenu();
-      sendLog("warn", "This map is compressed - decompress it to browse tags.");
+      updateTitle();
+      sendLog("warn", "This map is compressed - decompress it (Tools > Decompress Map) to browse tags. Nothing of it is held for editing.");
     } else if (result.status === "unsupported") {
       currentMapPath = null;
       currentMapScenarioName = null;
       buildMenu();
+      updateTitle();
       sendLog("error", result.message);
     }
     return result;
@@ -33952,16 +34185,23 @@ async function loadMapAtPath(filePath) {
     return { status: "error", message };
   }
 }
-async function openMapFlow() {
-  if (!mainWindow) return;
+async function openMapDialogFlow() {
+  if (!mainWindow) return null;
+  if (!await confirmUnsavedChanges(unsavedChangesDeps)) return null;
   const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
     title: "Open Halo CE Map",
-    filters: [{ name: "Halo CE Map", extensions: ["map"] }],
+    filters: [
+      { name: "Halo CE Map", extensions: ["map"] },
+      { name: "Map backup", extensions: ["bak"] }
+    ],
     properties: ["openFile"]
   });
-  if (canceled || filePaths.length === 0) return;
-  const result = await loadMapAtPath(filePaths[0]);
-  mainWindow.webContents.send("map:loaded", result);
+  if (canceled || filePaths.length === 0) return null;
+  return loadMapAtPath(filePaths[0], { askBackup: true });
+}
+async function openMapFlow() {
+  const result = await openMapDialogFlow();
+  if (result) mainWindow?.webContents.send("map:loaded", result);
 }
 async function decompressFlow() {
   if (!mainWindow || !currentMapPath) return;
@@ -33984,6 +34224,11 @@ async function decompressFlow() {
 }
 async function recompressFlow() {
   if (!mainWindow || !currentMapPath) return;
+  if (currentMapModified) {
+    sendLog("warn", "Recompress reads the map file on disk, which does not have your unsaved changes. Save first (File > Save or Save As), then recompress.");
+    await showErrorBox("Save your changes before recompressing.", "Recompress reads the map file on disk, which does not have your unsaved (injected) changes.");
+    return null;
+  }
   const defaultPath = currentMapPath.replace(/\.map$/i, "_compressed.map");
   const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
     title: "Save recompressed map as",
@@ -34031,43 +34276,43 @@ async function extractTagsFlow(request) {
     return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before extracting tags." };
   }
   const settings = getSettings();
-  const defaultDir = settings.lastExtractDir && fs4.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
+  const defaultDir = settings.lastExtractDir && fs5.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
   const safeName = String(request.suggestedFileName || "extracted_tags").replace(/[<>:"/\\|?*]/g, "_") || "extracted_tags";
-  const defaultPath = path5.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
+  const defaultPath = path7.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
   const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
     title: "Extract tags to...",
     defaultPath,
     filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }]
   });
   if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  const resolvedTarget = path5.resolve(filePath);
-  const resolvedSourceMap = path5.resolve(currentMapPath);
-  const resolvedAppDir = path5.resolve(import_electron3.app.getAppPath());
+  const resolvedTarget = path7.resolve(filePath);
+  const resolvedSourceMap = path7.resolve(currentMapPath);
+  const resolvedAppDir = path7.resolve(import_electron3.app.getAppPath());
   if (resolvedTarget === resolvedSourceMap) {
     return { ok: false, code: "REFUSED_SOURCE_PATH", message: "You cannot overwrite the source map file. Choose a different location." };
   }
-  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path5.sep)) {
+  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path7.sep)) {
     return { ok: false, code: "REFUSED_APP_PATH", message: "You cannot save inside the application install directory. Choose a different location." };
   }
-  if (fs4.existsSync(resolvedTarget)) {
+  if (fs5.existsSync(resolvedTarget)) {
     const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path5.basename(resolvedTarget)}" already exists.`,
+      message: `"${path7.basename(resolvedTarget)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   }
-  setLastExtractDir(path5.dirname(resolvedTarget));
+  setLastExtractDir(path7.dirname(resolvedTarget));
   sendLog("info", `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
   const { requestId, promise } = sendWorkerRequest(
     {
       type: "extractTags",
       originalIndices: request.originalIndices,
       outputPath: resolvedTarget,
-      sourceMapName: currentMapScenarioName ?? path5.basename(currentMapPath, ".map")
+      sourceMapName: currentMapScenarioName ?? path7.basename(currentMapPath, ".map")
     },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "extract", stage, percent })
@@ -34093,7 +34338,7 @@ var RESOURCE_MAP_FILTER_NAMES = { bitmaps: "bitmaps.map", sounds: "sounds.map", 
 function readResourceMapStatus(kind, filePath) {
   if (!filePath) return { state: "not-configured" };
   try {
-    const buffer = fs4.readFileSync(filePath);
+    const buffer = fs5.readFileSync(filePath);
     const result = validateResourceMapFile(buffer, kind);
     if (!result.ok) return { state: "missing-or-unreadable", path: filePath, error: result.error };
     return { state: "ok", path: filePath, fileSizeBytes: buffer.length, entryCount: result.identity.entryCount };
@@ -34137,7 +34382,8 @@ async function pickInjectContainerFlow() {
   return { path: filePaths[0] };
 }
 async function planInjectFlow(containerPath, mode) {
-  if (!currentMapPath || currentMapCompressed) return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress the target map before injecting tags into it." };
+  if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "Open the target map before injecting tags into it." };
+  if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
   currentInjectContainerPath = containerPath;
   const settings = getSettings();
   const resourceMapPaths = {};
@@ -34162,7 +34408,7 @@ async function planInjectFlow(containerPath, mode) {
 async function confirmScenarioName(filePath) {
   let warnings;
   try {
-    warnings = scenarioNameFromFileName(path5.basename(filePath)).warnings;
+    warnings = scenarioNameFromFileName(path7.basename(filePath)).warnings;
   } catch (err) {
     await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message: "This file name cannot be used for a map.", detail: err.message });
     return false;
@@ -34179,52 +34425,91 @@ async function confirmScenarioName(filePath) {
   return response === 0;
 }
 async function applyInjectFlow() {
-  if (!mainWindow) return { ok: false, code: "NO_WINDOW", message: "Application window is not available." };
   if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
   if (!currentInjectContainerPath) return { ok: false, code: "NO_PLAN", message: 'Run "Inject Tags..." and review the plan before applying it.' };
-  const defaultPath = currentMapPath.replace(/\.map$/i, "_injected.map");
-  const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
-    title: "Save injected map as",
-    defaultPath,
-    filters: [{ name: "Halo CE Map", extensions: ["map"] }]
-  });
-  if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  const resolvedTarget = path5.resolve(filePath);
-  if (resolvedTarget === path5.resolve(currentMapPath)) {
-    return { ok: false, code: "REFUSED_SOURCE_PATH", message: "You cannot overwrite the map you are injecting into. Choose a different location." };
-  }
-  if (fs4.existsSync(resolvedTarget)) {
-    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
-      type: "warning",
-      buttons: ["Overwrite", "Cancel"],
-      defaultId: 1,
-      cancelId: 1,
-      message: `"${path5.basename(resolvedTarget)}" already exists.`,
-      detail: "Do you want to overwrite it?"
-    });
-    if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  }
-  if (!await confirmScenarioName(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  sendLog("info", `Writing injected map to ${resolvedTarget}`);
   const { promise } = sendWorkerRequest(
-    { type: "applyInject", outputPath: resolvedTarget },
+    { type: "applyInject" },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "applyInject", stage, percent })
   );
   try {
     const result = await promise;
     if (result.ok) {
-      sendLog("info", `Injected ${result.addedCount} tag(s), swapped ${result.swappedCount} (${result.reusedCount} reused) into ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, "0")}`);
-      for (const w of result.warnings) sendLog("warn", w);
+      setOpenMapState(result.map);
+      sendLog(
+        "info",
+        `Injected in memory: ${result.addedCount} added, ${result.swappedCount} swapped, ${result.reusedCount} reused - ${result.map.header.tagCount} tags now. Not saved yet: use File > Save or Save As.`
+      );
     }
     return result;
   } catch (err) {
     const e = err;
-    sendLog("error", `Injection failed: ${e.message}`);
+    sendLog("error", `Injection failed (the open map is unchanged): ${e.message}`);
     return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   } finally {
     currentInjectContainerPath = null;
   }
+}
+var saveMapDeps = {
+  getOpenMap: () => mainWindow && currentMapPath ? { filePath: currentMapPath, compressed: currentMapCompressed, modified: currentMapModified, backedUp: currentMapBackedUp, overwriteConfirmed } : null,
+  confirmOverwriteWithoutBackup: async (filePath) => {
+    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: ["Overwrite", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      message: `Overwrite ${path7.basename(filePath)} without a backup?`,
+      detail: "You skipped the backup copy when you opened this map, so the current file cannot be restored afterwards. Use File > Save As to keep it."
+    });
+    return response === 0;
+  },
+  markOverwriteConfirmed: () => {
+    overwriteConfirmed = true;
+  },
+  confirmScenarioName,
+  showError: showErrorBox,
+  runWorkerSave: () => sendWorkerRequest({ type: "saveMap" }, sendLog, (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "saveMap", stage, percent })).promise,
+  log: sendLog
+};
+async function runSaveMap() {
+  const result = await saveMapFlow(saveMapDeps);
+  if (result.ok) setOpenMapState(result.map);
+  return result;
+}
+function afterSaveAs(result) {
+  if (!result.ok) return;
+  addRecentMap(result.outputPath);
+  currentMapBackedUp = true;
+  overwriteConfirmed = false;
+  setOpenMapState(result.map);
+}
+async function runSaveMapAs() {
+  const result = await saveMapAsFlow(saveMapAsDeps);
+  afterSaveAs(result);
+  return result;
+}
+async function discardChangesFlow() {
+  if (!mainWindow || !currentMapPath || !currentMapModified) return null;
+  const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    buttons: ["Discard changes", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    message: `Discard all unsaved changes to ${path7.basename(currentMapPath)}?`,
+    detail: "The map is reopened from the file on disk. Injected tags that were not saved are lost."
+  });
+  if (response !== 0) return null;
+  const backedUp = currentMapBackedUp;
+  const confirmed = overwriteConfirmed;
+  const filePath = currentMapPath;
+  const map = await loadMapAtPath(filePath, { askBackup: false });
+  currentMapBackedUp = backedUp;
+  overwriteConfirmed = confirmed;
+  sendLog("info", `Discarded unsaved changes; reopened ${filePath} from disk.`);
+  return { ok: true, map };
 }
 var saveMapAsDeps = {
   getOpenMap: () => mainWindow && currentMapPath ? { filePath: currentMapPath, compressed: currentMapCompressed } : null,
@@ -34242,15 +34527,13 @@ var saveMapAsDeps = {
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path5.basename(filePath)}" already exists.`,
+      message: `"${path7.basename(filePath)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     return response === 0;
   },
   confirmScenarioName,
-  showError: async (message, detail) => {
-    await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message, detail });
-  },
+  showError: showErrorBox,
   runWorkerSave: (outputPath) => sendWorkerRequest(
     { type: "saveMapAs", outputPath },
     sendLog,
@@ -34260,6 +34543,9 @@ var saveMapAsDeps = {
 };
 function canSaveMapAs() {
   return !!currentMapPath && !currentMapCompressed;
+}
+function canSaveMap() {
+  return canSaveMapAs() && currentMapModified && !isBackupFilePath(currentMapPath);
 }
 async function verifyEmbeddedDataFlow() {
   if (!currentMapPath || currentMapCompressed) return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before verifying embedded data." };
@@ -34295,10 +34581,17 @@ function buildMenu() {
       label: "File",
       submenu: [
         { label: "Open Map...", accelerator: "CmdOrCtrl+O", click: () => openMapFlow() },
-        { id: "save-as", label: "Save As...", accelerator: "CmdOrCtrl+Shift+S", enabled: canSaveMapAs(), click: () => void saveMapAsFlow(saveMapAsDeps) },
+        { id: "save", label: "Save", accelerator: "CmdOrCtrl+S", enabled: canSaveMap(), click: () => void runSaveMap() },
+        { id: "save-as", label: "Save As...", accelerator: "CmdOrCtrl+Shift+S", enabled: canSaveMapAs(), click: () => void runSaveMapAs() },
+        {
+          id: "discard",
+          label: "Discard Changes...",
+          enabled: currentMapModified,
+          click: () => void discardChangesFlow().then((r) => r?.ok && mainWindow?.webContents.send("map:loaded", r.map))
+        },
         {
           label: "Recent Maps",
-          submenu: recents.length > 0 ? recents.map((p) => ({ label: p, click: () => loadMapAtPath(p).then((r) => mainWindow?.webContents.send("map:loaded", r)) })) : [{ label: "(none yet)", enabled: false }]
+          submenu: recents.length > 0 ? recents.map((p) => ({ label: p, click: () => openMapGuarded(p).then((r) => r && mainWindow?.webContents.send("map:loaded", r)) })) : [{ label: "(none yet)", enabled: false }]
         },
         { type: "separator" },
         { label: "Exit", role: "quit" }
@@ -34335,17 +34628,8 @@ function buildMenu() {
 }
 import_electron3.app.whenReady().then(() => {
   startWorker(sendLog);
-  import_electron3.ipcMain.handle("dialog:openMap", async () => {
-    if (!mainWindow) return null;
-    const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
-      title: "Open Halo CE Map",
-      filters: [{ name: "Halo CE Map", extensions: ["map"] }],
-      properties: ["openFile"]
-    });
-    if (canceled || filePaths.length === 0) return null;
-    return loadMapAtPath(filePaths[0]);
-  });
-  import_electron3.ipcMain.handle("map:load", (_e, filePath) => loadMapAtPath(filePath));
+  import_electron3.ipcMain.handle("dialog:openMap", () => openMapDialogFlow());
+  import_electron3.ipcMain.handle("map:load", (_e, filePath) => openMapGuarded(filePath));
   import_electron3.ipcMain.handle("map:decompress", () => decompressFlow());
   import_electron3.ipcMain.handle("map:recompress", () => recompressFlow());
   import_electron3.ipcMain.handle("deps:get", (_e, originalIndices) => getDependenciesFlow(originalIndices));
@@ -34359,7 +34643,9 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("tags:planInject", (_e, containerPath, mode) => planInjectFlow(containerPath, mode));
   import_electron3.ipcMain.handle("tags:applyInject", () => applyInjectFlow());
   import_electron3.ipcMain.handle("tags:verifyEmbeddedData", () => verifyEmbeddedDataFlow());
-  registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps);
+  import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
+  registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
+  import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());
   import_electron3.ipcMain.handle("app:openContainingFolder", (_e, filePath) => {
     if (typeof filePath === "string" && filePath) import_electron3.shell.showItemInFolder(filePath);
   });
@@ -34377,8 +34663,8 @@ import_electron3.app.on("window-all-closed", () => {
   if (process.platform !== "darwin") import_electron3.app.quit();
 });
 import_electron3.app.on("open-file", (_event, filePath) => {
-  if (fs4.existsSync(filePath)) {
-    loadMapAtPath(filePath).then((r) => mainWindow?.webContents.send("map:loaded", r));
+  if (fs5.existsSync(filePath)) {
+    openMapGuarded(filePath).then((r) => r && mainWindow?.webContents.send("map:loaded", r));
   }
 });
 //# sourceMappingURL=main.js.map
