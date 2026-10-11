@@ -6,6 +6,9 @@ import { getRecentMaps, addRecentMap } from './recent-maps';
 import { getSettings, setLastExtractDir, setResourceMapPath } from './settings';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
 import { saveMapAsFlow, registerSaveMapAsIpc, type SaveMapAsDeps } from './save-map-as';
+import { saveMapFlow, confirmUnsavedChanges, SAVE_MAP_CHANNEL, type SaveMapDeps } from './save-map';
+import { backupOnOpenFlow, isBackedUp } from './backup-on-open';
+import { isBackupFilePath, COMPRESSED_MAP_MESSAGE } from './map-file-rules';
 import type {
   LoadMapResult,
   CompressionResult,
@@ -19,6 +22,9 @@ import type {
   PlanInjectResult,
   ApplyInjectResult,
   SaveMapAsResult,
+  SaveMapResult,
+  DiscardChangesResult,
+  OpenMapSummary,
   InjectionMode,
   VerifyEmbeddedDataResult,
 } from './shared-types';
@@ -27,6 +33,12 @@ let mainWindow: BrowserWindow | null = null;
 let currentMapPath: string | null = null;
 let currentMapCompressed = false;
 let currentMapScenarioName: string | null = null;
+/** The worker's in-memory map has changes (Inject) not written by Save / Save As yet. */
+let currentMapModified = false;
+/** A backup exists for this open (created, kept, or already identical). False when skipped or failed. */
+let currentMapBackedUp = false;
+/** No backup: the user already confirmed File > Save's overwrite during this open. */
+let overwriteConfirmed = false;
 let currentExtractRequestId: string | null = null;
 let currentInjectContainerPath: string | null = null;
 
@@ -58,9 +70,101 @@ function createWindow() {
   }
 
   buildMenu();
+  updateTitle();
+
+  // Closing the window with unsaved changes: Save / Don't save / Cancel.
+  let closeConfirmed = false;
+  mainWindow.on('close', (event) => {
+    if (closeConfirmed || !currentMapModified) return;
+    event.preventDefault();
+    void confirmUnsavedChanges(unsavedChangesDeps).then((ok) => {
+      if (!ok) return;
+      closeConfirmed = true;
+      mainWindow?.close();
+    });
+  });
 }
 
-async function loadMapAtPath(filePath: string): Promise<LoadMapResult> {
+function updateTitle() {
+  if (!mainWindow) return;
+  const name = currentMapPath ? `${path.basename(currentMapPath)}${currentMapModified ? ' *' : ''} - ` : '';
+  mainWindow.setTitle(`${name}OpenCE Modding Tool`);
+}
+
+/** After Inject / Save / Save As: main's copy of the open map's state, menu, title, and the renderer's view. */
+function setOpenMapState(map: OpenMapSummary) {
+  currentMapPath = map.filePath;
+  currentMapScenarioName = map.header.scenarioName;
+  currentMapModified = !!map.modified;
+  buildMenu();
+  updateTitle();
+  mainWindow?.webContents.send('map:updated', map);
+}
+
+const unsavedChangesDeps = {
+  isModified: () => currentMapModified,
+  fileName: () => (currentMapPath ? path.basename(currentMapPath) : 'the open map'),
+  ask: async (fileName: string): Promise<'save' | 'dont-save' | 'cancel'> => {
+    const { response } = await dialog.showMessageBox(mainWindow!, {
+      type: 'warning',
+      buttons: ['Save', "Don't save", 'Cancel'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      message: `Save changes to ${fileName}?`,
+      detail: "Your injected tags are only in memory. If you don't save, they are lost.",
+    });
+    return response === 0 ? 'save' : response === 1 ? 'dont-save' : 'cancel';
+  },
+  save: () => runSaveMap(),
+  log: sendLog,
+};
+
+/** Every way of opening another map goes through here: unsaved-changes prompt first. null = cancelled there. */
+async function openMapGuarded(filePath: string): Promise<LoadMapResult | null> {
+  if (!(await confirmUnsavedChanges(unsavedChangesDeps))) return null;
+  return loadMapAtPath(filePath, { askBackup: true });
+}
+
+/** Backup prompt, once per open of an uncompressed .map (see backup-on-open.ts). */
+async function askBackup(filePath: string) {
+  const outcome = await backupOnOpenFlow(filePath, {
+    askCreateBackup: async (mapName, backupName) => {
+      const { response } = await dialog.showMessageBox(mainWindow!, {
+        type: 'question',
+        buttons: ['Create backup', 'Skip'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+        message: `Create a backup copy of ${mapName} as ${backupName}?`,
+        detail: 'File > Save overwrites the map you opened. The backup is written next to it, and Save never touches it.',
+      });
+      return response === 0 ? 'create' : 'skip';
+    },
+    askExistingBackup: async (backupName) => {
+      const { response } = await dialog.showMessageBox(mainWindow!, {
+        type: 'warning',
+        buttons: ['Keep existing', 'Replace', 'Skip'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        message: `${backupName} already exists and differs from the map you opened.`,
+        detail: 'Keep existing leaves the old backup as it is. Replace overwrites it with a copy of the map you just opened.',
+      });
+      return response === 1 ? 'replace' : response === 2 ? 'skip' : 'keep';
+    },
+    showError: showErrorBox,
+    log: sendLog,
+  });
+  currentMapBackedUp = isBackedUp(outcome);
+  overwriteConfirmed = false;
+}
+
+async function showErrorBox(message: string, detail: string) {
+  await dialog.showMessageBox(mainWindow!, { type: 'error', message, detail });
+}
+
+async function loadMapAtPath(filePath: string, options: { askBackup: boolean }): Promise<LoadMapResult> {
   sendLog('info', `Opening ${filePath}`);
   try {
     const { promise } = sendWorkerRequest<LoadMapResult>({ type: 'inspect', filePath }, sendLog, (stage, percent) => {
@@ -68,24 +172,31 @@ async function loadMapAtPath(filePath: string): Promise<LoadMapResult> {
     });
     const result = await promise;
 
+    currentMapModified = false;
+    currentMapBackedUp = false;
+    overwriteConfirmed = false;
     if (result.status === 'ok') {
       currentMapPath = filePath;
       currentMapCompressed = false;
       currentMapScenarioName = result.header.scenarioName;
       addRecentMap(filePath);
       buildMenu();
+      updateTitle();
       sendLog('info', `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
+      if (options.askBackup) await askBackup(filePath);
     } else if (result.status === 'compressed') {
       currentMapPath = filePath;
       currentMapCompressed = true;
       currentMapScenarioName = null;
       addRecentMap(filePath);
       buildMenu();
-      sendLog('warn', 'This map is compressed - decompress it to browse tags.');
+      updateTitle();
+      sendLog('warn', 'This map is compressed - decompress it (Tools > Decompress Map) to browse tags. Nothing of it is held for editing.');
     } else if (result.status === 'unsupported') {
       currentMapPath = null;
       currentMapScenarioName = null;
       buildMenu();
+      updateTitle();
       sendLog('error', result.message);
     }
     return result;
@@ -96,16 +207,25 @@ async function loadMapAtPath(filePath: string): Promise<LoadMapResult> {
   }
 }
 
-async function openMapFlow() {
-  if (!mainWindow) return;
+/** Open dialog (also accepts .bak backups). Unsaved-changes prompt first. null = cancelled. */
+async function openMapDialogFlow(): Promise<LoadMapResult | null> {
+  if (!mainWindow) return null;
+  if (!(await confirmUnsavedChanges(unsavedChangesDeps))) return null;
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: 'Open Halo CE Map',
-    filters: [{ name: 'Halo CE Map', extensions: ['map'] }],
+    filters: [
+      { name: 'Halo CE Map', extensions: ['map'] },
+      { name: 'Map backup', extensions: ['bak'] },
+    ],
     properties: ['openFile'],
   });
-  if (canceled || filePaths.length === 0) return;
-  const result = await loadMapAtPath(filePaths[0]);
-  mainWindow.webContents.send('map:loaded', result);
+  if (canceled || filePaths.length === 0) return null;
+  return loadMapAtPath(filePaths[0], { askBackup: true });
+}
+
+async function openMapFlow() {
+  const result = await openMapDialogFlow();
+  if (result) mainWindow?.webContents.send('map:loaded', result);
 }
 
 async function decompressFlow() {
@@ -131,6 +251,12 @@ async function decompressFlow() {
 
 async function recompressFlow() {
   if (!mainWindow || !currentMapPath) return;
+  if (currentMapModified) {
+    // Recompress reads the file on disk, which doesn't have the in-memory changes.
+    sendLog('warn', 'Recompress reads the map file on disk, which does not have your unsaved changes. Save first (File > Save or Save As), then recompress.');
+    await showErrorBox('Save your changes before recompressing.', 'Recompress reads the map file on disk, which does not have your unsaved (injected) changes.');
+    return null;
+  }
   const defaultPath = currentMapPath.replace(/\.map$/i, '_compressed.map');
   const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
     title: 'Save recompressed map as',
@@ -305,7 +431,8 @@ async function pickInjectContainerFlow(): Promise<{ path: string } | null> {
 }
 
 async function planInjectFlow(containerPath: string, mode: InjectionMode): Promise<PlanInjectResult> {
-  if (!currentMapPath || currentMapCompressed) return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress the target map before injecting tags into it.' };
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'Open the target map before injecting tags into it.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
   currentInjectContainerPath = containerPath;
   const settings = getSettings();
   const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
@@ -351,54 +478,104 @@ async function confirmScenarioName(filePath: string): Promise<boolean> {
   return response === 0;
 }
 
+/** Applies the reviewed plan to the open map in memory (worker). Writes nothing; marks the map modified. */
 async function applyInjectFlow(): Promise<ApplyInjectResult> {
-  if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
   if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
   if (!currentInjectContainerPath) return { ok: false, code: 'NO_PLAN', message: 'Run "Inject Tags..." and review the plan before applying it.' };
 
-  const defaultPath = currentMapPath.replace(/\.map$/i, '_injected.map');
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Save injected map as',
-    defaultPath,
-    filters: [{ name: 'Halo CE Map', extensions: ['map'] }],
-  });
-  if (canceled || !filePath) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
-
-  const resolvedTarget = path.resolve(filePath);
-  if (resolvedTarget === path.resolve(currentMapPath)) {
-    return { ok: false, code: 'REFUSED_SOURCE_PATH', message: 'You cannot overwrite the map you are injecting into. Choose a different location.' };
-  }
-  if (fs.existsSync(resolvedTarget)) {
-    const { response } = await dialog.showMessageBox(mainWindow, {
-      type: 'warning',
-      buttons: ['Overwrite', 'Cancel'],
-      defaultId: 1,
-      cancelId: 1,
-      message: `"${path.basename(resolvedTarget)}" already exists.`,
-      detail: 'Do you want to overwrite it?',
-    });
-    if (response !== 0) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
-  }
-  if (!(await confirmScenarioName(resolvedTarget))) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
-
-  sendLog('info', `Writing injected map to ${resolvedTarget}`);
-  const { promise } = sendWorkerRequest<ApplyInjectResult>({ type: 'applyInject', outputPath: resolvedTarget }, sendLog, (stage, percent) =>
+  const { promise } = sendWorkerRequest<ApplyInjectResult>({ type: 'applyInject' }, sendLog, (stage, percent) =>
     mainWindow?.webContents.send('map:progress', { taskId: 'applyInject', stage, percent }),
   );
   try {
     const result = await promise;
     if (result.ok) {
-      sendLog('info', `Injected ${result.addedCount} tag(s), swapped ${result.swappedCount} (${result.reusedCount} reused) into ${result.outputPath} - map name "${result.scenarioName}", CRC32 0x${result.crc32.toString(16).padStart(8, '0')}`);
-      for (const w of result.warnings) sendLog('warn', w);
+      setOpenMapState(result.map);
+      sendLog(
+        'info',
+        `Injected in memory: ${result.addedCount} added, ${result.swappedCount} swapped, ${result.reusedCount} reused - ${result.map.header.tagCount} tags now. Not saved yet: use File > Save or Save As.`,
+      );
     }
     return result;
   } catch (err) {
     const e = err as Error & { code?: string };
-    sendLog('error', `Injection failed: ${e.message}`);
+    sendLog('error', `Injection failed (the open map is unchanged): ${e.message}`);
     return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
   } finally {
     currentInjectContainerPath = null;
   }
+}
+
+/** Main-process side of File > Save (native menu, renderer IPC, unsaved-changes prompt). Logic lives in save-map.ts. */
+const saveMapDeps: SaveMapDeps = {
+  getOpenMap: () =>
+    mainWindow && currentMapPath
+      ? { filePath: currentMapPath, compressed: currentMapCompressed, modified: currentMapModified, backedUp: currentMapBackedUp, overwriteConfirmed }
+      : null,
+  confirmOverwriteWithoutBackup: async (filePath) => {
+    const { response } = await dialog.showMessageBox(mainWindow!, {
+      type: 'warning',
+      buttons: ['Overwrite', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      message: `Overwrite ${path.basename(filePath)} without a backup?`,
+      detail: 'You skipped the backup copy when you opened this map, so the current file cannot be restored afterwards. Use File > Save As to keep it.',
+    });
+    return response === 0;
+  },
+  markOverwriteConfirmed: () => {
+    overwriteConfirmed = true;
+  },
+  confirmScenarioName,
+  showError: showErrorBox,
+  runWorkerSave: () =>
+    sendWorkerRequest<SaveMapResult>({ type: 'saveMap' }, sendLog, (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'saveMap', stage, percent })).promise,
+  log: sendLog,
+};
+
+async function runSaveMap(): Promise<SaveMapResult> {
+  const result = await saveMapFlow(saveMapDeps);
+  if (result.ok) setOpenMapState(result.map);
+  return result;
+}
+
+/** After Save As the new file is the open map; Save on it overwrites only it, so no backup prompt is needed for it. */
+function afterSaveAs(result: SaveMapAsResult) {
+  if (!result.ok) return;
+  addRecentMap(result.outputPath);
+  currentMapBackedUp = true;
+  overwriteConfirmed = false;
+  setOpenMapState(result.map);
+}
+
+async function runSaveMapAs(): Promise<SaveMapAsResult> {
+  const result = await saveMapAsFlow(saveMapAsDeps);
+  afterSaveAs(result);
+  return result;
+}
+
+/** File > Discard Changes: asks, then reopens the open file from disk (no new backup prompt). null = cancelled. */
+async function discardChangesFlow(): Promise<DiscardChangesResult | null> {
+  if (!mainWindow || !currentMapPath || !currentMapModified) return null;
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Discard changes', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    message: `Discard all unsaved changes to ${path.basename(currentMapPath)}?`,
+    detail: 'The map is reopened from the file on disk. Injected tags that were not saved are lost.',
+  });
+  if (response !== 0) return null;
+  const backedUp = currentMapBackedUp;
+  const confirmed = overwriteConfirmed;
+  const filePath = currentMapPath;
+  const map = await loadMapAtPath(filePath, { askBackup: false });
+  currentMapBackedUp = backedUp;
+  overwriteConfirmed = confirmed;
+  sendLog('info', `Discarded unsaved changes; reopened ${filePath} from disk.`);
+  return { ok: true, map };
 }
 
 /** Main-process side of File > Save As (native menu and the renderer's `saveMapAs` IPC). Logic lives in save-map-as.ts. */
@@ -424,9 +601,7 @@ const saveMapAsDeps: SaveMapAsDeps = {
     return response === 0;
   },
   confirmScenarioName,
-  showError: async (message, detail) => {
-    await dialog.showMessageBox(mainWindow!, { type: 'error', message, detail });
-  },
+  showError: showErrorBox,
   runWorkerSave: (outputPath) =>
     sendWorkerRequest<SaveMapAsResult>({ type: 'saveMapAs', outputPath }, sendLog, (stage, percent) =>
       mainWindow?.webContents.send('map:progress', { taskId: 'saveMapAs', stage, percent }),
@@ -437,6 +612,11 @@ const saveMapAsDeps: SaveMapAsDeps = {
 /** Native File > Save As is enabled only while a decompressed map is open (same rule as the renderer menu). */
 function canSaveMapAs(): boolean {
   return !!currentMapPath && !currentMapCompressed;
+}
+
+/** File > Save: only with unsaved changes, and never for a map opened from a .bak (Save As only). */
+function canSaveMap(): boolean {
+  return canSaveMapAs() && currentMapModified && !isBackupFilePath(currentMapPath!);
 }
 
 async function verifyEmbeddedDataFlow(): Promise<VerifyEmbeddedDataResult> {
@@ -477,12 +657,19 @@ function buildMenu() {
       label: 'File',
       submenu: [
         { label: 'Open Map...', accelerator: 'CmdOrCtrl+O', click: () => openMapFlow() },
-        { id: 'save-as', label: 'Save As...', accelerator: 'CmdOrCtrl+Shift+S', enabled: canSaveMapAs(), click: () => void saveMapAsFlow(saveMapAsDeps) },
+        { id: 'save', label: 'Save', accelerator: 'CmdOrCtrl+S', enabled: canSaveMap(), click: () => void runSaveMap() },
+        { id: 'save-as', label: 'Save As...', accelerator: 'CmdOrCtrl+Shift+S', enabled: canSaveMapAs(), click: () => void runSaveMapAs() },
+        {
+          id: 'discard',
+          label: 'Discard Changes...',
+          enabled: currentMapModified,
+          click: () => void discardChangesFlow().then((r) => r?.ok && mainWindow?.webContents.send('map:loaded', r.map)),
+        },
         {
           label: 'Recent Maps',
           submenu:
             recents.length > 0
-              ? recents.map((p) => ({ label: p, click: () => loadMapAtPath(p).then((r) => mainWindow?.webContents.send('map:loaded', r)) }))
+              ? recents.map((p) => ({ label: p, click: () => openMapGuarded(p).then((r) => r && mainWindow?.webContents.send('map:loaded', r)) }))
               : [{ label: '(none yet)', enabled: false }],
         },
         { type: 'separator' },
@@ -523,18 +710,8 @@ app.whenReady().then(() => {
   // Started eagerly so the "worker loaded, definitions loaded" self-check is visible at launch.
   startWorker(sendLog);
 
-  ipcMain.handle('dialog:openMap', async () => {
-    if (!mainWindow) return null;
-    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-      title: 'Open Halo CE Map',
-      filters: [{ name: 'Halo CE Map', extensions: ['map'] }],
-      properties: ['openFile'],
-    });
-    if (canceled || filePaths.length === 0) return null;
-    return loadMapAtPath(filePaths[0]);
-  });
-
-  ipcMain.handle('map:load', (_e, filePath: string) => loadMapAtPath(filePath));
+  ipcMain.handle('dialog:openMap', () => openMapDialogFlow());
+  ipcMain.handle('map:load', (_e, filePath: string) => openMapGuarded(filePath));
   ipcMain.handle('map:decompress', () => decompressFlow());
   ipcMain.handle('map:recompress', () => recompressFlow());
   ipcMain.handle('deps:get', (_e, originalIndices: unknown) => getDependenciesFlow(originalIndices));
@@ -548,7 +725,9 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:planInject', (_e, containerPath: string, mode: InjectionMode) => planInjectFlow(containerPath, mode));
   ipcMain.handle('tags:applyInject', () => applyInjectFlow());
   ipcMain.handle('tags:verifyEmbeddedData', () => verifyEmbeddedDataFlow());
-  registerSaveMapAsIpc(ipcMain, saveMapAsDeps);
+  ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
+  registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
+  ipcMain.handle('map:discard', () => discardChangesFlow());
   ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
   });
@@ -572,6 +751,6 @@ app.on('window-all-closed', () => {
 // Drag-and-drop of a .map file onto the window dock/taskbar icon (macOS/Windows "open with").
 app.on('open-file', (_event, filePath) => {
   if (fs.existsSync(filePath)) {
-    loadMapAtPath(filePath).then((r) => mainWindow?.webContents.send('map:loaded', r));
+    openMapGuarded(filePath).then((r) => r && mainWindow?.webContents.send('map:loaded', r));
   }
 });

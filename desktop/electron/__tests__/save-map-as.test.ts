@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { registerSaveMapAsIpc, SAVE_MAP_AS_CHANNEL, type SaveMapAsDeps, type IpcMainLike } from '../save-map-as';
-import type { SaveMapAsResult } from '../shared-types';
+import type { SaveMapAsResult, OpenMapSummary } from '../shared-types';
 
 const OPEN_MAP = 'C:\\HaloCE\\maps\\bloodgulch.map';
+const OPEN_SUMMARY: OpenMapSummary = {
+  status: 'ok',
+  filePath: OPEN_MAP,
+  modified: false,
+  header: { scenarioName: 'bloodgulch_copy', buildString: '01.00.00.0609', mapType: 1, crc32: 0x0badf00d, tagDataOffset: 0, tagDataSize: 0, decompressedFileSize: 0, fileSizeOnDisk: 0, tagCount: 0 },
+  tags: [],
+};
 
 function makeDeps(chosenPath: string | null, overrides: Partial<SaveMapAsDeps> = {}) {
   const logs: { level: string; message: string }[] = [];
@@ -17,9 +24,11 @@ function makeDeps(chosenPath: string | null, overrides: Partial<SaveMapAsDeps> =
         ok: true,
         outputPath,
         scenarioName: 'bloodgulch_copy',
+        previousScenarioName: 'bloodgulch',
         crc32: 0x0badf00d,
         warnings: ['Scenario name truncated to 31 characters.'],
         staleChecksumWarning: 'tag-file checksum not recalculated',
+        map: { ...OPEN_SUMMARY, filePath: outputPath },
       }),
     ),
     log: (level, message) => logs.push({ level, message }),
@@ -59,16 +68,18 @@ describe('map:saveAs IPC handler', () => {
     const result = await registerAndGetInvoker(deps)();
     expect(result.ok).toBe(true);
     expect(deps.runWorkerSave).toHaveBeenCalledWith('C:\\HaloCE\\maps\\bloodgulch_copy.map');
-    expect(logs).toContainEqual({ level: 'info', message: 'Saved C:\\HaloCE\\maps\\bloodgulch_copy.map - map name "bloodgulch_copy", CRC32 0x0badf00d' });
+    expect(logs).toContainEqual({ level: 'info', message: 'Saved C:\\HaloCE\\maps\\bloodgulch_copy.map - map name "bloodgulch_copy" (changed from "bloodgulch" to match the file name), CRC32 0x0badf00d' });
     expect(logs).toContainEqual({ level: 'warn', message: 'Scenario name truncated to 31 characters.' });
   });
 
-  it('returns NO_MAP_LOADED without opening a dialog when no map (or a compressed map) is open', async () => {
-    for (const openMap of [null, { filePath: OPEN_MAP, compressed: true }]) {
-      const { deps } = makeDeps('C:\\x.map', { getOpenMap: () => openMap });
-      expect(await registerAndGetInvoker(deps)()).toMatchObject({ ok: false, code: 'NO_MAP_LOADED' });
-      expect(deps.showSaveDialog).not.toHaveBeenCalled();
-    }
+  it('no map: NO_MAP_LOADED; compressed map: refused with a message pointing to Decompress; no dialog either way', async () => {
+    const none = makeDeps('C:\\x.map', { getOpenMap: () => null });
+    expect(await registerAndGetInvoker(none.deps)()).toMatchObject({ ok: false, code: 'NO_MAP_LOADED' });
+    expect(none.deps.showSaveDialog).not.toHaveBeenCalled();
+    const compressed = makeDeps('C:\\x.map', { getOpenMap: () => ({ filePath: OPEN_MAP, compressed: true }) });
+    expect(await registerAndGetInvoker(compressed.deps)()).toMatchObject({ ok: false, code: 'COMPRESSED', message: expect.stringMatching(/Tools > Decompress Map/) });
+    expect(compressed.deps.showSaveDialog).not.toHaveBeenCalled();
+    expect(compressed.deps.runWorkerSave).not.toHaveBeenCalled();
   });
 
   it('cancel in the dialog writes nothing', async () => {

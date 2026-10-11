@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode } from './shared-types';
+import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode, OpenMapSummary } from './shared-types';
 
 const api: OpenceApi = {
   openMapDialog: () => ipcRenderer.invoke('dialog:openMap'),
@@ -14,7 +14,9 @@ const api: OpenceApi = {
   pickInjectContainer: () => ipcRenderer.invoke('tags:pickInjectContainer'),
   planInject: (containerPath: string, mode: InjectionMode) => ipcRenderer.invoke('tags:planInject', containerPath, mode),
   applyInject: () => ipcRenderer.invoke('tags:applyInject'),
+  saveMap: () => ipcRenderer.invoke('map:save'),
   saveMapAs: () => ipcRenderer.invoke('map:saveAs'),
+  discardChanges: () => ipcRenderer.invoke('map:discard'),
   verifyEmbeddedData: () => ipcRenderer.invoke('tags:verifyEmbeddedData'),
   openContainingFolder: (filePath: string) => ipcRenderer.invoke('app:openContainingFolder', filePath),
   getSettings: () => ipcRenderer.invoke('app:getSettings'),
@@ -41,6 +43,11 @@ const api: OpenceApi = {
     const listener = (_: unknown, data: LoadMapResult) => cb(data);
     ipcRenderer.on('map:loaded', listener);
     return () => ipcRenderer.removeListener('map:loaded', listener);
+  },
+  onMapUpdated: (cb: (result: OpenMapSummary) => void) => {
+    const listener = (_: unknown, data: OpenMapSummary) => cb(data);
+    ipcRenderer.on('map:updated', listener);
+    return () => ipcRenderer.removeListener('map:updated', listener);
   },
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
 };
