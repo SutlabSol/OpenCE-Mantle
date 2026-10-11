@@ -38,9 +38,34 @@ needs re-verification / unverified / blocked)
 4. Report back pass/fail - if both pass, M4 extraction moves to **verified**.
 
 | Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. **Blue-screens in OpenCE (user, 2026-10-11): heh_2_ce and crossing_ce.** Cause: their bitmap and sound data is external (per asset) in the retail resource files, which CE does not have. A header-only conversion is valid only for maps whose data is all internal. Fix planned as Phase 1b (see "Converter: per-asset external data" in Decisions). |
-| Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. **Tag data repairs** (see "OpenCE findings and tag data repairs" in Decisions): built, verified by tests (independent byte checks; the output re-check is same-reader); repair rows in the Convert dialog verified in component tests and `?mock=convert-repairs` only; unverified in OpenCE. heh_2 blue screen: cause unknown, waiting for halo.log + crash dump. |
+| Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. **Tag data repairs** (see "OpenCE findings and tag data repairs" in Decisions): built, verified by tests (independent byte checks; the output re-check is same-reader); repair rows in the Convert dialog verified in component tests and `?mock=convert-repairs` only; **In progress.** OpenCE build 185 (user, 2026-10-11): **barrier_ce loads and plays** (first converted map confirmed). heh_2 and crossing stopped at the script-data message (unaligned script data, fatal in OpenCE); the repair is now required for them too (sizes and CRCs below), awaiting the user's test. theisland_3 is refused at OpenCE's model part check (one HaloMD model with bad strip indices; open, see "OpenCE results" in Decisions). The converter stays in progress until heh_2, crossing and theisland_3 are confirmed. |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-11: **OpenCE results, script-data repair for every unaligned map, theisland_3 model problem.**
+  Details and citations: `memory/opence-notes.md` (OpenCE build 185 = commit 6399ed9).
+  - **User's tests (build 185, debug build):** bgali (CE bloodgulch, script data moved to an aligned
+    address) loads and plays; bgmis (same, 2 mod 4) blue-screens after "the scenario's script data is
+    missing or damaged", exactly like heh_2_ce and crossing_ce. **barrier_ce (overlap repair, aligned
+    block) loads and plays: first converted map confirmed in OpenCE.** crossing_ce passed the address
+    check (struct repair works) and stopped at the script line. theisland_3_ce passed the validator and
+    was refused at the model part check. None of these hang; the blue screen is OpenCE's halt screen.
+  - **Why it is silent (code):** that message is `error(0, ...)` = `_error_immediate`, which ends in
+    `system_exit` -> `halt_and_catch_fire` (blue fog, forever) with `error()`'s lock still held, so
+    nothing more is logged. `hs_scenario_postprocess`'s FALSE return is ignored by its callers.
+    (The earlier research note that the message was harmless was wrong and has been corrected.)
+  - **Decision (user) and built (commit a346a97):** script-data repair (a) is required for every map
+    whose script data is not 4-aligned (base + offset), with or without used nodes and overlap; the
+    overlap condition stays. A misaligned header that is not a script node array is unrepairable
+    (refused). The alignment note row is gone.
+  - **Expected outputs** (`core/scripts/convert-external.ts`, HaloMD resource files, output names
+    `<map>_ce.map`; computed in memory, not written): heh_2 71,207,556 B, CRC32 0xEF4726E1 (+2 +380,076);
+    crossing 75,594,347, 0xF4E6246C (+3 +380,076, then +0 +72); theisland_3 105,728,562, 0xFC042F66
+    and barrier 77,718,428, 0x6F5E37CB (both unchanged).
+  - **Open: theisland_3 model.** OpenCE's `custom_edition_model_part_verify` refuses a part whose strip
+    indices reach past its vertex count. `effects\debris objects\forerunner dark structure\forerunner
+    dark structure` (#2574, used only by the pelican explosion's debris object) has 2 such
+    indices in geometry 0 (70, 71 of 70 vertices) and 33 in geometry 1 (225-575 of 44). 0 failing
+    parts in the 5 CE maps and every other HaloMD map. Options proposed, no decision yet.
 - 2026-10-11: **OpenCE findings and tag data repairs (user-approved plan, decisions and conditions).**
   - **OpenCE findings (read in OpenCE's code, scratch clone C:\temp\OpenCE-src at 6399ed9; addresses from
     OpenCE's log):**

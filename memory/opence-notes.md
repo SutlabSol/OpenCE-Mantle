@@ -37,57 +37,98 @@ found again. Everything below was read at the pinned commit unless marked otherw
 | Load (tags, BSP, models, shaders, resources) | `custom_edition_cache_load`, port/linux/game/cache_file_formats.c | every tag address inside the tag data; tag data in the 0x1700000-byte tag cache at 0x40440000; index/vertex/instance offsets 4-aligned; BSP, model, shader, animation, resource checks (one status each) | "custom edition: cannot load '...': <status> (tag N, 0x...)" |
 | Block extents | `validate_data_extent` / `validate_block_extent` / `claim`, port/linux/game/tag_validate.c | every block and data range inside the tags, no byte claimed twice; order: header, tag table, roots, then each tag | "the map '...' ... outside the tags or overlapping another's" |
 | Tag references | `validate_tag_index`, tag_validate.c | the full tag ID (salt included) must equal the entry's, and the group must match; otherwise **corrected to NONE** (not refused) | "the map '...' is corrected: ... names XXXXXXXX, not a tag of ...: none"; then "custom edition: the map's tags needed N corrections (above)" |
-| Script data | `hs_scenario_syntax_data_valid` / `hs_allocate`, source/hs/hs.c | size 56+19001x20, inside the tag cache, absolute address 4-aligned, header signature 'd@t@', maximum 19001, element 20, valid, counts in range; string data >= 0x400 B in the tag cache | "the scenario's script data is missing or damaged; its scripts won't run" (once per process) |
+| Script data | `hs_scenario_syntax_data_valid` / `hs_allocate`, source/hs/hs.c | size 56+19001x20, inside the tag cache, absolute address 4-aligned, header signature 'd@t@', maximum 19001, element 20, valid, counts in range; string data >= 0x400 B in the tag cache | "the scenario's script data is missing or damaged; its scripts won't run". **Fatal** (see below): the load stops on the blue halt screen |
 | Data array free slots | source/memory/data.c (`datum_new`, `datum_try_and_get`, `data_next_index`, `data_iterator_next`, `data_delete_all`) | identifier 0 = free slot | none |
 | Predicted resources | `predicted_resource_valid`, source/cache/predicted_resources.c | tag of the right group; bitmap index < the bitmap's count | "predicted resource of type T names tag X resource R (not precached)" (once per process; the entry is skipped) |
 | Texture / sound cache | source/cache/xbox_texture_cache.c, xbox_sound_cache.c; sizes in port/linux/include/halo_port_capacity.h | desktop: textures 256 MB, sounds 16 MB, LRU | "YOU GOT STABBED" (texture drawn as default) / "SOUND CACHE BLOWN" |
 | BSP placement | `custom_edition_structure_bsp_reference_valid`, custom_edition_cache.c | BSP loads above the tag data and inside the tag cache | "a structure bsp's ... outside its tag cache" |
+| Model parts | `custom_edition_model_verify` / `custom_edition_model_part_verify`, port/linux/game/custom_edition_geometry.c | see "theisland_3: model part check" below | "custom edition: part P of geometry G of the model '...' names a node, vertex, shader or part that does not exist, or has a vector this build cannot compress", then "cannot run '...'" and "game_load() failed." (fatal) |
 
-## Findings: heh_2_ce blue screen (build 185, code reading only)
+## Fatal messages: why the blue screen has no log line after it
 
-1. **After the script message.** It is logged in `hs_allocate` (from `hs_initialize_for_new_map`, inside
-   `game_initialize_for_new_map`, source/game/game.c). OpenCE then makes its own empty node array once
-   (`data_new` + `data_make_valid`, count 0); `hs_scenario_postprocess` calls `hs_allocate` again and
-   returns FALSE at its validity check. Scripts and globals are 0 already. Nothing the load uses is left
-   uninitialised; only the compile globals for console expressions are not set for this map (unused
-   while loading). Then, still in `game_initialize_for_new_map`: recorded animations, cheats,
-   `objects_place`, `ai_place`, `network_objects_placed`, `ui_widgets_safe_to_load`; back in
-   `network_game_create_game_objects` (networking/network_game_manager.c) the players' `player_new`; then
-   `network_game_client_game_has_started` (network_client_manager.c) sends client_loaded and logs
-   "local machine is loaded & ready to play". Every failure on that path logs a line.
-2. **No per-frame wait after the script message.** The only load loops that present frames
-   (`game_precache_new_map`, `game_unload`) run before `game_load`, so before the message. Nothing
-   between the message and "ready" presents a frame. The texture and sound `block` loops spin (no log,
-   no frames) until a read completes, but a CE map's reads complete at once (`cache_file_read` ->
-   `custom_edition_cache_read`). Endless frame loops exist only in `halt_and_catch_fire` (main.c:
-   draws with **blue** fog, never returns; every caller found logs first: "EXCEPTION halt", "crash:")
-   and `main_loop_of_death` (after "damaged media"). **The code shows no wait that matches the symptom.**
-   A silent loop in one of the calls listed in 1 is not excluded. Next evidence needed: a dump of the
-   hung process (Task Manager > halo.exe > Create dump file) with the build's halo.pdb, or the debug
-   build's halo.log. symbolize_crash.py reads `crash:` lines only, not a hang dump.
-3. **"predicted resource of type 0 names tag ffffffff resource 4".** heh_2's
+- `error(priority, ...)` (source/cseries/errors.c) writes the line to debug.txt first; when the priority
+  is 0 (`_error_immediate`, cseries/errors.h) it then calls `system_exit(-4998)`. That never returns:
+  `system_exit` (cseries/cseries_windows.c) goes to `halt_and_catch_fire` (main/main.c), which draws a
+  frame with blue fog and the recent messages, forever. `error()` holds its recursion lock until it
+  returns, so it never does and nothing else is logged. The process keeps running (CPU and GPU busy):
+  no crash, no `crash:` lines, no `crashes\`.
+- `hs_allocate` logs "the scenario's script data is missing or damaged; its scripts won't run" with
+  `error(0, ...)`: **fatal**, although the code around it means to carry on (scripts disabled, its own
+  empty array). The other `error(0, ...)` calls on the script path are fatal the same way
+  ("couldn't allocate script syntax data"; in `hs_scenario_postprocess`: too many globals or scripts,
+  "recompiling scripts ...", "the scenario's scripts won't run").
+- `hs_scenario_postprocess`'s FALSE return is not what stops the load: its three callers
+  (`hs_initialize`, `hs_hack`, `hs_initialize_for_new_map`, all hs.c) ignore it. The halt happens
+  earlier, inside `hs_allocate`.
+- "game_load() failed." is also `error(0, ...)` (networking/network_game_manager.c,
+  `network_game_create_game_objects`; main/main.c `main_new_map` uses `_error_immediate` explicitly),
+  so a refused map (theisland_3_ce) ends on the same blue screen, after its reason is logged.
+- Correction: the previous version of these notes said the script message was harmless and that the
+  code showed no matching stop. Both were wrong: the priority 0 was misread as non-fatal.
+
+## Other load-path findings (heh_2; build 185, code reading and read-only byte scans)
+
+- **"predicted resource of type 0 names tag ffffffff resource 4".** heh_2's
    `weapons\sniper rifle\sniper rifle` (#1254) predicted resource [0] is bitmap index 4 of tag 0x000004E9
    (salt 0; the entry is 0xE65D04E9, a 1-image bitmap). The loader corrects the ID to NONE, so the
    check skips it and logs once per process. It is predicted by `game_engine_predict_resources`
    (game_engine.c, from `game_engine_initialize_for_new_map`, before the script message) only when the
    game variant's weapon set maps a slot to the sniper rifle. So it depends on the game variant, not on
    release vs debug. It cannot stall: the entry is skipped.
-4. **Limits vs heh_2.** All of these are refused with a message or logged, none is waited on: file size,
+- **Limits vs heh_2.** All of these are refused with a message or logged, none is waited on: file size,
    resource map sizes, tag cache 0x1700000 (heh_2 tag data 5.5 MB; BSP at 0x419CD800, 16.9 MB above the
    tag data end, the same address as CE bloodgulch's), texture cache 256 MB (LRU; heh_2 has 44.4 MB of pixels),
    sound cache 16 MB (LRU; 12.0 MB of samples), objects 8192, predicted resources (no count limit; the
    loop is long). The raw region size is not checked as such, only each range. No bitmap or sound count
    limit was found in the CE loader.
-5. **Alignment repair for heh_2 (verified by reading the bytes, read-only script).** heh_2's script
+- **Alignment repair for heh_2 (verified by reading the bytes, read-only script).** heh_2's script
    header is valid in every field (signature, maximum 19001, element 20, valid 1, counts 0, string data
    1,024 B in the tag data) and identical to CE bloodgulch's apart from its address (0x4047A916, 2 mod
    4). An aligned copy passes `hs_scenario_syntax_data_valid`; the engine then uses the map's own array
-   (count 0), `hs_compile_postprocess` finds no nodes and returns TRUE: CE bloodgulch's path. Note: the
-   current converter rule does nothing for misaligned script data with no used nodes (heh_2), so this
-   repair needs a decision.
-6. **Rare paths in the HaloMD maps.** heh_2: every root, 6,982 of 7,368 blocks and 2,052 of 2,133 data
+   (count 0), `hs_compile_postprocess` finds no nodes and returns TRUE: CE bloodgulch's path. Decided
+   and built: the repair is now required for every unaligned script array (commit a346a97).
+- **Rare paths in the HaloMD maps.** heh_2: every root, 6,982 of 7,368 blocks and 2,052 of 2,133 data
    fields are 2 mod 4 (theisland_3 similar). CE bloodgulch and coldsnap: 0. x86 reads unaligned values,
    but no CE map exercises this. 850 of 1,407 predicted resources carry stale salts (CE bloodgulch,
    the same 1,407 in 101 lists: 0; theisland_3: 0), so they are corrected to NONE. One stale reference
    (BSP sound environment). Tag data file offset 8,721,390 (2 mod 4): no effect (the tag data is copied
    to 0x40440000; coldsnap's is 2 mod 4 too and loads).
+
+## Results in OpenCE (build 185, debug build; user, 2026-10-11)
+
+| Map | Result |
+| --- | --- |
+| bgali: CE bloodgulch, script data moved to an aligned address | loads and plays |
+| bgmis: the same, script data at 2 mod 4 | blue screen after the script message (as heh_2_ce, crossing_ce) |
+| barrier_ce (overlap repair; the new block is aligned) | **loads and plays**: first converted map confirmed |
+| crossing_ce (struct repair only) | past the address check; stops at the script message (its script data is unaligned) |
+| heh_2_ce (no repair) | stops at the script message |
+| theisland_3_ce (overlap repair) | past the validator; refused at the model part check below |
+
+Converter consequence: the script data repair is required for every map whose script data is not
+4-aligned (base + offset), with or without used nodes (converter commit a346a97).
+
+## theisland_3: model part check (code read at 6399ed9; bytes measured read-only)
+
+- `custom_edition_models_convert` (custom_edition_geometry.c): first `model_local_nodes_make` (models of
+  44+ nodes without local nodes), then per model `custom_edition_model_part_shaders_bound` (a shader
+  index past the model's shaders becomes its last one, logged, not refused), then
+  `custom_edition_model_verify`, which refuses at the first failing part. A part fails
+  `custom_edition_model_part_verify` when: shader index outside the shaders; centroid primary or
+  secondary node outside the nodes; previous or next part index < -1 or >= the part count; local nodes
+  set but local node count 0, or a local node index >= the nodes; **any of its `strip_triangle_count + 2`
+  strip indices >= its vertex count**; any vertex's two node indices outside [0, local node count or
+  node count); any normal, binormal or tangent component with |x| > 1.005 (or NaN). Before that,
+  `gbxmodel_part_check` (cache_file_formats.c) checks strip and vertex types, ranges and alignment.
+- Measured with the schema (models, geometries, parts) and OpenCE's part / vertex layout (0x84, 0x44):
+  0 failing parts in all 5 CE maps (1,950 parts) and in HaloMD heh_2, crossing, barrier, bloodgulch,
+  b30 and ui. theisland_3: 1 model, 2 parts, and only strip indices fail:
+  - `effects\debris objects\forerunner dark structure\forerunner dark structure` (#2574; 1 node,
+    1 shader, 2 geometries of 1 part): geometry 0 part 0 has 70 vertices, and 2 of its 104 strip
+    indices are 70 and 71 (strip positions 100 and 102). Geometry 1 part 0 has 44 vertices, and 33 of
+    its 66 strip indices are 225 to 575 (the in-range ones go up to 16).
+  - Its strips and vertices are the last in the model data and overlap no other part's, so the indices
+    themselves are wrong (not misplaced data). On Halo PC such indices read neighbouring vertices
+    (garbage triangles, no crash), which is why HaloMD runs the map.
+  - Used by: #2573 the same-named garbage object (its model), spawned by
+    `vehicles\pelican\effects\pelican explosion` (4 effect parts).
