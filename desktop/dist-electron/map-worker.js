@@ -36774,7 +36774,6 @@ function planTagDataRepairs(view, header, tagIndex, extents) {
   const tds = header.tagDataSize;
   const repairs = [];
   const unrepairable = [];
-  const notes = [];
   const inTagData = (address, size) => address >= base && address - base + size <= tds;
   const fileOf = (address) => tdo + (address - base);
   const handled = /* @__PURE__ */ new Set();
@@ -36829,13 +36828,15 @@ function planTagDataRepairs(view, header, tagIndex, extents) {
             `New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes copied, the rest zero (a zeroed slot is a free slot).`
           ]);
         }
-      } else if (!aligned && consistent && count > 0) {
-        plan(false, [
-          `${where} starts at ${hex2(address)}, which is not 4-aligned from the tag data start, so OpenCE runs none of this map's scripts (${count} node slots used).`,
-          `Moving it to a 4-aligned block at the end of the tag data (${fmt(size)} bytes: header and used nodes copied, rest zero) lets OpenCE read it.`
+      } else if (!aligned && consistent) {
+        plan(true, [
+          `${where} starts at ${hex2(address)}, which is not 4-aligned from the tag data start. OpenCE stops loading at "the scenario's script data is missing or damaged; its scripts won't run" (a blue screen).`,
+          `${count} of ${maximum} node slots are used. New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes (${fmt(used)} bytes) copied, the rest zero (a zeroed slot is a free slot).`
         ]);
       } else if (!aligned) {
-        notes.push(`${where} starts at ${hex2(address)}, which is not 4-aligned, so OpenCE reports "the scenario's script data is missing or damaged". It has no used script nodes, so no script is lost and nothing needs to change.`);
+        unrepairable.push(
+          `${where} starts at ${hex2(address)}, which is not 4-aligned, so OpenCE stops loading at "the scenario's script data is missing or damaged". Its header can't be read as a script node array (${maximum} slots of ${elementSize} bytes, ${count} in use, ${fmt(size)} bytes declared), so it is not moved.`
+        );
       }
     }
   }
@@ -36877,7 +36878,7 @@ function planTagDataRepairs(view, header, tagIndex, extents) {
       repairs.length = 0;
     }
   }
-  return { repairs, unrepairable, notes, baseMemoryAddress: base, limitAddress };
+  return { repairs, unrepairable, baseMemoryAddress: base, limitAddress };
 }
 function applyTagDataRepairs(map, plan, repairs) {
   if (repairs.length === 0) return { buffer: Buffer.from(map), applied: [] };
@@ -37153,13 +37154,13 @@ var REPAIR_ROWS = {
   scriptSyntaxData: {
     id: "repairScriptSyntaxData",
     label: "Repair: move the script data to its own block",
-    required: "OpenCE refuses this map: the scenario's script data overlaps other tags. The repair gives it a block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked.",
-    optional: "OpenCE runs none of this map's scripts because the script data is not 4-aligned. The repair moves it to an aligned block at the end of the tag data. Optional: the map loads either way."
+    required: `OpenCE refuses this map without this repair: the scenario's script data overlaps other tags or is not 4-aligned, and OpenCE stops loading at "the scenario's script data is missing or damaged" (a blue screen). The repair gives it a 4-aligned block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked.`,
+    optional: ""
   },
   tagRootOutside: {
     id: "repairTagRootOutside",
     label: "Repair: give the tag outside the tag data a zeroed struct",
-    required: "OpenCE refuses this map: a tag's data starts outside the tag data. The repair adds a zeroed struct of that tag's size at the end of the tag data and points the tag at it. Nothing references the tag, so its values are never used. Convert stays off while this is unticked.",
+    required: "OpenCE refuses this map without this repair: a tag's data starts outside the tag data. The repair adds a zeroed struct of that tag's size at the end of the tag data and points the tag at it. Nothing references the tag, so its values are never used. Convert stays off while this is unticked.",
     optional: ""
   }
 };
@@ -37169,21 +37170,21 @@ function tagDataChecks(checks, view, header, tagIndex, report) {
   const label = "Tag blocks are inside the tag data and don't overlap";
   const scope = `${extents.blocksChecked.toLocaleString("en-US")} blocks in ${extents.tagsChecked} tags and ${extents.bspsChecked} structure BSP(s) checked the way OpenCE checks them`;
   const problems = extents.violations.length;
-  if (problems === 0) checks.push(check("tagDataExtents", label, "pass", `${scope}: no problems.`));
-  else if (plan.unrepairable.length > 0) {
+  if (plan.unrepairable.length > 0) {
     checks.push(
-      check("tagDataExtents", label, "refuse", `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these, and ${plan.unrepairable.length} can't be repaired here, so the map is not converted.`, plan.unrepairable)
+      check("tagDataExtents", label, "refuse", `${scope}: ${problems} problem(s). OpenCE refuses this map, and ${plan.unrepairable.length} problem(s) can't be repaired here, so the map is not converted.`, plan.unrepairable)
     );
+  } else if (problems === 0) {
+    checks.push(check("tagDataExtents", label, "pass", `${scope}: no problems.`));
   } else {
     checks.push(check("tagDataExtents", label, "warn", `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
   }
-  for (const r of plan.repairs) {
+  plan.repairs.forEach((r, i) => {
     const row = REPAIR_ROWS[r.id];
-    const bytes = repairBytesAdded(header.tagDataSize, [r]);
+    const bytes = repairBytesAdded(header.tagDataSize, plan.repairs.slice(0, i + 1)) - repairBytesAdded(header.tagDataSize, plan.repairs.slice(0, i));
     report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
     checks.push(check(row.id, row.label, r.required ? "warn" : "info", `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
-  }
-  if (plan.notes.length > 0) checks.push(check("scriptDataAlignment", "Script data alignment", "info", plan.notes[0], plan.notes.slice(1)));
+  });
   return plan;
 }
 function validationCheck(view, header, tagIndex) {
