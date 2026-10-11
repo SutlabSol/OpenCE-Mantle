@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode, OpenMapSummary } from './shared-types';
+import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode, OpenMapSummary, ConvertRepairChoice } from './shared-types';
 
 const api: OpenceApi = {
   openMapDialog: () => ipcRenderer.invoke('dialog:openMap'),
@@ -19,7 +19,7 @@ const api: OpenceApi = {
   discardChanges: () => ipcRenderer.invoke('map:discard'),
   verifyEmbeddedData: () => ipcRenderer.invoke('tags:verifyEmbeddedData'),
   convertPreflight: (source: 'open' | 'pick') => ipcRenderer.invoke('map:convertPreflight', source),
-  convertMap: (acknowledgeScripts: boolean) => ipcRenderer.invoke('map:convert', acknowledgeScripts),
+  convertMap: (acknowledgeScripts: boolean, repairs: ConvertRepairChoice) => ipcRenderer.invoke('map:convert', acknowledgeScripts, repairs),
   openContainingFolder: (filePath: string) => ipcRenderer.invoke('app:openContainingFolder', filePath),
   getSettings: () => ipcRenderer.invoke('app:getSettings'),
   notImplemented: (feature: string) => ipcRenderer.send('app:notImplemented', feature),

@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import type { ConvertMapResult, LogEvent } from './shared-types';
+import type { ConvertMapResult, ConvertRepairChoice, LogEvent, TagDataRepairId } from './shared-types';
 import { isSamePath } from './save-map-as';
 import { isBackupFilePath } from './map-file-rules';
 
@@ -23,7 +23,7 @@ export interface ConvertMapDeps {
   /** Warns when the file name can't become the scenario name exactly (truncated / replaced characters). */
   confirmScenarioName(filePath: string): Promise<boolean>;
   showError(message: string, detail: string): Promise<void>;
-  runWorkerConvert(sourcePath: string, outputPath: string, acknowledgeScripts: boolean): Promise<ConvertMapResult>;
+  runWorkerConvert(sourcePath: string, outputPath: string, acknowledgeScripts: boolean, repairs: ConvertRepairChoice): Promise<ConvertMapResult>;
   log(level: LogEvent['level'], message: string): void;
   fileExists?(filePath: string): boolean;
 }
@@ -35,9 +35,19 @@ export function defaultConvertOutputPath(sourcePath: string): string {
   return path.join(dir, `${stem}_ce.map`);
 }
 
+const REPAIR_IDS: readonly TagDataRepairId[] = ['scriptSyntaxData', 'tagRootOutside'];
+
+/** The repair ticks from the renderer, kept only when they are known ids set to exactly true. */
+export function sanitizeRepairChoice(value: unknown): ConvertRepairChoice {
+  const out: ConvertRepairChoice = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const id of REPAIR_IDS) if ((value as Record<string, unknown>)[id] === true) out[id] = true;
+  return out;
+}
+
 const cancelled = (): ConvertMapResult => ({ ok: false, code: 'CANCELLED', message: 'Convert was cancelled.' });
 
-export async function convertMapFlow(deps: ConvertMapDeps, acknowledgeScripts: boolean): Promise<ConvertMapResult> {
+export async function convertMapFlow(deps: ConvertMapDeps, acknowledgeScripts: boolean, repairs: ConvertRepairChoice = {}): Promise<ConvertMapResult> {
   const sourcePath = deps.getSourcePath();
   if (!sourcePath) return { ok: false, code: 'NO_SOURCE', message: 'Choose a map to convert first.' };
   if (!(await deps.confirmUnsavedChanges())) return cancelled();
@@ -62,7 +72,7 @@ export async function convertMapFlow(deps: ConvertMapDeps, acknowledgeScripts: b
 
   deps.log('info', `Converting ${sourcePath} to a Custom Edition map: ${target}`);
   try {
-    const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts);
+    const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts, repairs);
     if (result.ok) {
       const hex = (n: number) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, '0')}`;
       deps.log('info', `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex(result.previousCrc32)} -> ${hex(result.crc32)}. ${path.basename(sourcePath)} was not changed.`);

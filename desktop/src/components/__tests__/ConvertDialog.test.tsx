@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import ConvertDialog from '../ConvertDialog';
 import type { OpenceApi, ConvertMapResult, ConvertPreflightResult, RetailConversionReport } from '../../../electron/shared-types';
-import { buildMockConvertReport } from '../../test-fixtures/dependency-fixtures';
+import { buildMockConvertReport, buildMockRepairConvertReport } from '../../test-fixtures/dependency-fixtures';
 
 function install(preflight: ConvertPreflightResult | null, convert: ConvertMapResult = { ok: false, code: 'CANCELLED', message: 'cancelled' }) {
   const convertPreflight = vi.fn(async () => preflight);
@@ -26,7 +26,7 @@ describe('ConvertDialog', () => {
     const button = screen.getByTestId('convert-dialog-convert') as HTMLButtonElement;
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
-    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, {}));
   });
 
   it('script warning: Convert stays disabled until the acknowledgement box is ticked', async () => {
@@ -40,7 +40,7 @@ describe('ConvertDialog', () => {
     fireEvent.click(screen.getByTestId('convert-dialog-ack-checkbox'));
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
-    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(true, {}));
   });
 
   it('a refused map shows why and cannot be converted', async () => {
@@ -55,6 +55,42 @@ describe('ConvertDialog', () => {
     expect(screen.getByTestId('convert-check-layout').textContent).toMatch(/already a Custom Edition map/);
     expect((screen.getByTestId('convert-dialog-convert') as HTMLButtonElement).disabled).toBe(true);
     expect(convertMap).not.toHaveBeenCalled();
+  });
+
+  it('a required repair is a pre-ticked row; unticking it turns Convert off and says why; Convert passes the ticks', async () => {
+    const { convertMap } = install(ok(buildMockRepairConvertReport()));
+    render(<ConvertDialog source="open" onClose={vi.fn()} log={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('convert-check-repairScriptSyntaxData')).toBeTruthy());
+    const box = screen.getByTestId('convert-repair-scriptSyntaxData') as HTMLInputElement;
+    const button = screen.getByTestId('convert-dialog-convert') as HTMLButtonElement;
+    expect(box.checked).toBe(true);
+    expect(screen.getByTestId('convert-check-repairScriptSyntaxData').textContent).toMatch(/\(required\).*OpenCE refuses this map/);
+    expect(button.disabled).toBe(false);
+    expect(screen.queryByTestId('convert-dialog-repair-off')).toBeNull();
+
+    fireEvent.click(box);
+    expect(box.checked).toBe(false);
+    expect(button.disabled).toBe(true);
+    expect(screen.getByTestId('convert-dialog-repair-off').textContent).toMatch(/OpenCE refuses this map without "Repair: move the script data to its own block"/);
+    fireEvent.click(button);
+    expect(convertMap).not.toHaveBeenCalled();
+
+    fireEvent.click(box);
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, { scriptSyntaxData: true }));
+  });
+
+  it('an optional repair starts unticked and never blocks Convert', async () => {
+    const { convertMap } = install(ok(buildMockRepairConvertReport(false)));
+    render(<ConvertDialog source="open" onClose={vi.fn()} log={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('convert-repair-scriptSyntaxData')).toBeTruthy());
+    expect((screen.getByTestId('convert-repair-scriptSyntaxData') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByTestId('convert-check-repairScriptSyntaxData').textContent).toMatch(/\(optional\)/);
+    const button = screen.getByTestId('convert-dialog-convert') as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, { scriptSyntaxData: false }));
   });
 
   it('closes when the file dialog is cancelled (pre-flight returns null)', async () => {

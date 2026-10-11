@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
-import type { ConvertPreflightResult, RetailConversionReport } from '../../electron/shared-types';
+import type { ConvertPreflightResult, ConvertRepairChoice, RetailConversionReport } from '../../electron/shared-types';
 
 type ConversionCheck = RetailConversionReport['checks'][number];
 
@@ -24,12 +24,14 @@ const STATUS_COLOR: Record<ConversionCheck['status'], string> = {
 /**
  * Convert to Custom Edition (converter Phase 1): shows the pre-flight checklist (old and new CRC32,
  * refusals, warnings), requires an explicit acknowledgement for scripts that may call the wrong
- * function, then asks main to convert. Main shows the Save dialog, refuses the source path and
+ * function, shows each tag data repair as a row with a checkbox (required ones pre-ticked; Convert
+ * is off while one is unticked, with the reason), then asks main to convert. Main shows the Save dialog, refuses the source path and
  * writes the new file; the converted map then opens (main sends map:loaded).
  */
 export default function ConvertDialog({ source, onClose, log }: Props) {
   const [preflight, setPreflight] = useState<ConvertPreflightResult | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [repairChoice, setRepairChoice] = useState<ConvertRepairChoice>({});
   const [converting, setConverting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
@@ -41,6 +43,7 @@ export default function ConvertDialog({ source, onClose, log }: Props) {
     (async () => {
       const res = await window.opence.convertPreflight(source);
       if (!res) return onClose(); // file dialog cancelled
+      if (res.ok) setRepairChoice(Object.fromEntries(res.report.repairs.map((r) => [r.id, r.required])));
       setPreflight(res);
     })();
   }, [source, onClose]);
@@ -50,13 +53,15 @@ export default function ConvertDialog({ source, onClose, log }: Props) {
   }, [preflight]);
 
   const report = preflight?.ok ? preflight.report : null;
-  const canConvert = !!report && report.canConvert && (!report.requiresAcknowledgement || acknowledged) && !converting;
+  const missingRepairs = report ? report.repairs.filter((r) => r.required && !repairChoice[r.id]) : [];
+  const canConvert = !!report && report.canConvert && (!report.requiresAcknowledgement || acknowledged) && missingRepairs.length === 0 && !converting;
+  const repairLabel = (id: string) => report?.checks.find((c) => c.repair?.id === id)?.label ?? id;
 
   const convert = async () => {
     if (!canConvert) return;
     setConverting(true);
     setError(null);
-    const result = await window.opence.convertMap(acknowledged);
+    const result = await window.opence.convertMap(acknowledged, repairChoice);
     setConverting(false);
     if (result.ok) {
       log('info', `Converted map opened: ${result.outputPath}`);
@@ -115,11 +120,20 @@ export default function ConvertDialog({ source, onClose, log }: Props) {
               <div data-testid="convert-dialog-crc">
                 CRC32 {hex(report.previousCrc32)} → {hex(report.newCrc32)}
               </div>
-              <div>Changes only the header: version 7 → 609, build string → 01.00.00.0609, internal name from the output file name, CRC32. The source file is not changed.</div>
+              <div>
+                Changes the header: version 7 → 609, build string → 01.00.00.0609, internal name from the output file name, CRC32
+                {report.repairs.length > 0 ? ', and applies the ticked tag data repairs below' : ''}. The source file is not changed.
+              </div>
             </div>
             <Body>
               {report.checks.map((c) => (
-                <CheckRow key={c.id} check={c} />
+                <CheckRow
+                  key={c.id}
+                  check={c}
+                  ticked={c.repair ? !!repairChoice[c.repair.id] : undefined}
+                  onToggle={c.repair ? (on) => setRepairChoice((prev) => ({ ...prev, [c.repair!.id]: on })) : undefined}
+                  disabled={converting}
+                />
               ))}
             </Body>
             {report.requiresAcknowledgement && report.canConvert && (
@@ -138,6 +152,11 @@ export default function ConvertDialog({ source, onClose, log }: Props) {
         )}
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '10px 16px', borderTop: '1px solid var(--border)' }}>
+          {report && report.canConvert && missingRepairs.length > 0 && (
+            <span data-testid="convert-dialog-repair-off" style={{ flex: 1, alignSelf: 'center', fontSize: 12, color: 'var(--error-text)' }}>
+              Convert is off: OpenCE refuses this map without {missingRepairs.map((r) => `"${repairLabel(r.id)}"`).join(' and ')}. Tick it to convert.
+            </span>
+          )}
           {report && !report.canConvert && (
             <span data-testid="convert-dialog-refused" style={{ flex: 1, alignSelf: 'center', fontSize: 12, color: 'var(--error-text)' }}>
               This map can&apos;t be converted (see ✕ above).
@@ -159,7 +178,8 @@ function Body({ children }: { children: ReactNode }) {
   return <div style={{ padding: '8px 16px', overflowY: 'auto', flex: 1, minHeight: 0 }}>{children}</div>;
 }
 
-function CheckRow({ check }: { check: ConversionCheck }) {
+/** A checklist row; a repair row (`check.repair`) also gets its checkbox. */
+function CheckRow({ check, ticked, onToggle, disabled }: { check: ConversionCheck; ticked?: boolean; onToggle?: (on: boolean) => void; disabled?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const details = expanded ? check.details : check.details.slice(0, SHOWN_DETAILS);
   return (
@@ -167,7 +187,17 @@ function CheckRow({ check }: { check: ConversionCheck }) {
       <div style={{ display: 'flex', gap: 8 }}>
         <span style={{ width: 14, flexShrink: 0, color: STATUS_COLOR[check.status], fontWeight: 700 }}>{STATUS_MARK[check.status]}</span>
         <div style={{ flex: 1 }}>
-          <div style={{ color: check.status === 'pass' || check.status === 'info' ? 'var(--text-primary)' : STATUS_COLOR[check.status], fontWeight: 600 }}>{check.label}</div>
+          {check.repair && onToggle ? (
+            <label style={{ display: 'flex', gap: 6, alignItems: 'center', color: check.status === 'info' ? 'var(--text-primary)' : STATUS_COLOR[check.status], fontWeight: 600 }}>
+              <input data-testid={`convert-repair-${check.repair.id}`} type="checkbox" checked={!!ticked} disabled={disabled} onChange={(e) => onToggle(e.target.checked)} />
+              <span>
+                {check.label}
+                <span style={{ fontWeight: 400, color: 'var(--text-dim)' }}>{check.repair.required ? ' (required)' : ' (optional)'}</span>
+              </span>
+            </label>
+          ) : (
+            <div style={{ color: check.status === 'pass' || check.status === 'info' ? 'var(--text-primary)' : STATUS_COLOR[check.status], fontWeight: 600 }}>{check.label}</div>
+          )}
           <div style={{ color: 'var(--text-secondary)', marginTop: 2 }}>{check.message}</div>
           {details.length > 0 && (
             <ul style={{ margin: '4px 0 0', paddingLeft: 18, color: 'var(--text-dim)', fontFamily: 'var(--mono-font, monospace)', fontSize: 11.5, wordBreak: 'break-all' }}>

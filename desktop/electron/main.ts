@@ -8,7 +8,7 @@ import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-ma
 import { saveMapAsFlow, registerSaveMapAsIpc, type SaveMapAsDeps } from './save-map-as';
 import { saveMapFlow, confirmUnsavedChanges, SAVE_MAP_CHANNEL, type SaveMapDeps } from './save-map';
 import { backupOnOpenFlow, isBackedUp } from './backup-on-open';
-import { convertMapFlow, type ConvertMapDeps } from './convert-map';
+import { convertMapFlow, sanitizeRepairChoice, type ConvertMapDeps } from './convert-map';
 import { isBackupFilePath, COMPRESSED_MAP_MESSAGE } from './map-file-rules';
 import type {
   LoadMapResult,
@@ -677,16 +677,16 @@ const convertMapDeps: ConvertMapDeps = {
   confirmOverwrite: saveMapAsDeps.confirmOverwrite,
   confirmScenarioName,
   showError: showErrorBox,
-  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts) =>
-    sendWorkerRequest<ConvertMapResult>({ type: 'convertMap', sourcePath, outputPath, acknowledgeScripts }, sendLog, (stage, percent) =>
+  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts, repairs) =>
+    sendWorkerRequest<ConvertMapResult>({ type: 'convertMap', sourcePath, outputPath, acknowledgeScripts, repairs }, sendLog, (stage, percent) =>
       mainWindow?.webContents.send('map:progress', { taskId: 'convertMap', stage, percent }),
     ).promise,
   log: sendLog,
 };
 
 /** Convert to Custom Edition, step 2. The output (a new file) becomes the open map; the source is never written. */
-async function runConvertMap(acknowledgeScripts: unknown): Promise<ConvertMapResult> {
-  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true);
+async function runConvertMap(acknowledgeScripts: unknown, repairs: unknown): Promise<ConvertMapResult> {
+  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true, sanitizeRepairChoice(repairs));
   if (result.ok) {
     addRecentMap(result.outputPath);
     currentMapPath = result.outputPath;
@@ -817,7 +817,7 @@ app.whenReady().then(() => {
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());
   ipcMain.handle('map:convertPreflight', (_e, source: unknown) => convertPreflightFlow(source));
-  ipcMain.handle('map:convert', (_e, acknowledgeScripts: unknown) => runConvertMap(acknowledgeScripts));
+  ipcMain.handle('map:convert', (_e, acknowledgeScripts: unknown, repairs: unknown) => runConvertMap(acknowledgeScripts, repairs));
   ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
   });

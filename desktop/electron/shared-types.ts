@@ -2,6 +2,7 @@
 
 import type { WarningKind } from '../../core/src/map/dependency-walker';
 import type { RetailConversionReport } from '../../core/src/map/convert/retail-to-ce';
+import type { TagDataRepairId } from '../../core/src/map/convert/tag-data-repairs';
 
 export interface MapHeaderSummary {
   scenarioName: string;
@@ -200,7 +201,10 @@ export type VerifyEmbeddedDataResult =
 
 /* ---------------------- Converter Phase 1: retail layout (7) -> Custom Edition (609) ---------------------- */
 
-export type { RetailConversionReport };
+export type { RetailConversionReport, TagDataRepairId };
+
+/** The tag data repairs ticked in the Convert dialog (see `RetailConversionReport.repairs`). */
+export type ConvertRepairChoice = Partial<Record<TagDataRepairId, boolean>>;
 
 /** Pre-flight for Convert to Custom Edition. Main keeps the source path; the renderer only gets its file name. */
 export type ConvertPreflightResult = { ok: true; sourceFileName: string; report: RetailConversionReport } | { ok: false; code: string; message: string };
@@ -237,7 +241,7 @@ export type WorkerRequest =
   | { type: 'saveMapAs'; requestId: string; outputPath: string }
   | { type: 'verifyEmbeddedData'; requestId: string }
   | { type: 'convertPreflight'; requestId: string; filePath: string }
-  | { type: 'convertMap'; requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean }
+  | { type: 'convertMap'; requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean; repairs: ConvertRepairChoice }
   | { type: 'cancel'; requestId: string };
 
 export type WorkerResponse =
@@ -277,7 +281,7 @@ export interface OpenceApi {
    */
   convertPreflight(source: 'open' | 'pick'): Promise<ConvertPreflightResult | null>;
   /** Step 2: converts the map from the last pre-flight. Main shows the Save dialog and refuses the source path. */
-  convertMap(acknowledgeScripts: boolean): Promise<ConvertMapResult>;
+  convertMap(acknowledgeScripts: boolean, repairs: ConvertRepairChoice): Promise<ConvertMapResult>;
   openContainingFolder(filePath: string): Promise<void>;
   getSettings(): Promise<AppSettings>;
   notImplemented(feature: string): void;

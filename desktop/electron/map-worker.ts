@@ -53,6 +53,7 @@ import type {
   VerifyEmbeddedDataResult,
   ConvertPreflightResult,
   ConvertMapResult,
+  ConvertRepairChoice,
 } from './shared-types';
 import { isBackupFilePath, BACKUP_FILE_SAVE_MESSAGE } from './map-file-rules';
 
@@ -481,7 +482,7 @@ export function runConvertPreflight(task: { requestId: string; filePath: string 
  * path as Save As (`writeFinalizedMap`: name from the file name, CRC32, temp file + rename).
  * Afterwards the output is the open, unmodified map.
  */
-export function runConvertMap(task: { requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean }) {
+export function runConvertMap(task: { requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean; repairs?: ConvertRepairChoice }) {
   if (samePath(task.sourcePath, task.outputPath)) return sendError(task.requestId, 'REFUSED_SOURCE_PATH', 'The converted map cannot overwrite the map it was converted from. Choose a different file name or folder.');
   if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, 'REFUSED_OPEN_MAP', 'The converted map cannot overwrite the map that is open in the app. Choose a different file name.');
   if (isBackupFilePath(task.outputPath)) return sendError(task.requestId, 'REFUSED_BACKUP_FILE', 'The converted map cannot be written as a .bak file. Choose a .map file name.');
@@ -489,7 +490,7 @@ export function runConvertMap(task: { requestId: string; sourcePath: string; out
     progress(task.requestId, 'Reading file', 10);
     const source = fs.readFileSync(task.sourcePath);
     progress(task.requestId, 'Converting the header', 40);
-    const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts });
+    const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts, repairs: task.repairs ?? {} });
     if (inspectCustomEditionMap(converted.buffer).status !== 'ok') throw new Error('The converted map could not be read back as a Custom Edition map; nothing was written.');
     progress(task.requestId, 'Writing map', 60);
     const finalized = writeFinalizedMap(converted.buffer, task.outputPath, 'the source map was not changed');

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { convertMapFlow, defaultConvertOutputPath, type ConvertMapDeps } from '../convert-map';
+import { convertMapFlow, defaultConvertOutputPath, sanitizeRepairChoice, type ConvertMapDeps } from '../convert-map';
 import type { ConvertMapResult, OpenMapSummary } from '../shared-types';
 
 const SOURCE = 'C:\\HaloMD\\maps\\heh_2.map';
@@ -89,8 +89,20 @@ describe('Convert to Custom Edition (main-process flow)', () => {
     const result = await convertMapFlow(deps, true);
     expect(result).toMatchObject({ ok: true, outputPath: 'C:\\HaloCE\\maps\\heh_2.map' });
     expect(deps.confirmScenarioName).toHaveBeenCalledWith('C:\\HaloCE\\maps\\heh_2.map');
-    expect(deps.runWorkerConvert).toHaveBeenCalledWith(SOURCE, 'C:\\HaloCE\\maps\\heh_2.map', true);
+    expect(deps.runWorkerConvert).toHaveBeenCalledWith(SOURCE, 'C:\\HaloCE\\maps\\heh_2.map', true, {});
     expect(logs.some((l) => l.message.includes('0x00000000 -> 0xD1C331E9') && l.message.includes('heh_2.map was not changed'))).toBe(true);
+  });
+
+  it('passes the ticked tag data repairs to the worker', async () => {
+    const { deps } = makeDeps('C:\\HaloCE\\maps\\theisland_3_ce.map');
+    await convertMapFlow(deps, false, { scriptSyntaxData: true });
+    expect(deps.runWorkerConvert).toHaveBeenCalledWith(SOURCE, 'C:\\HaloCE\\maps\\theisland_3_ce.map', false, { scriptSyntaxData: true });
+  });
+
+  it('sanitizeRepairChoice keeps only known repair ids set to exactly true', () => {
+    expect(sanitizeRepairChoice({ scriptSyntaxData: true, tagRootOutside: 'yes', other: true })).toEqual({ scriptSyntaxData: true });
+    expect(sanitizeRepairChoice({ tagRootOutside: true, scriptSyntaxData: false })).toEqual({ tagRootOutside: true });
+    for (const bad of [undefined, null, 'scriptSyntaxData', 1, []]) expect(sanitizeRepairChoice(bad)).toEqual({});
   });
 
   it('without a pre-flight source it does nothing', async () => {

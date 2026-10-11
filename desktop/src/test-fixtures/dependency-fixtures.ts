@@ -21,6 +21,7 @@ export const MOCK_SCENARIOS = [
   'verify-blocked',
   'convert-retail',
   'convert-scripts',
+  'convert-repairs',
 ] as const;
 export type MockScenario = (typeof MOCK_SCENARIOS)[number];
 
@@ -367,5 +368,53 @@ export function buildMockConvertReport(withScripts: boolean): RetailConversionRe
     check('scenarioName', 'Internal map name', 'info', 'The internal name is "heh_2". It is set from the output file name when the converted map is saved, so the two always match.'),
     check('tagFileChecksum', 'Tag-file checksum left unchanged', 'info', "The tag data header's tag-file checksum (0x5E2AF81E) is kept, as File > Save does."),
   ];
-  return { canConvert: true, requiresAcknowledgement: withScripts, checks, scenarioName: 'heh_2', buildString: '01.00.00.0576', mapType: 1, tagCount: 2410, previousCrc32: 0, newCrc32: 0xd1c331e9, externalData: null, estimatedOutputSize: null };
+  return { canConvert: true, requiresAcknowledgement: withScripts, checks, scenarioName: 'heh_2', buildString: '01.00.00.0576', mapType: 1, tagCount: 2410, previousCrc32: 0, newCrc32: 0xd1c331e9, externalData: null, estimatedOutputSize: null, repairs: [] };
+}
+
+/**
+ * ?mock=convert-repairs: the tag data rows as the real pre-flight gives them for HaloMD theisland_3
+ * (values measured on the real file; the script syntax data overlaps other tags). `required: false`
+ * gives the optional (alignment-only, used nodes) form of the same repair.
+ */
+export function buildMockRepairConvertReport(required = true): RetailConversionReport {
+  const base = buildMockConvertReport(false);
+  const at = base.checks.findIndex((c) => c.id === 'regions') + 1;
+  const extents = required
+    ? {
+        id: 'tagDataExtents' as const,
+        label: "Tag blocks are inside the tag data and don't overlap",
+        status: 'warn' as const,
+        message: '13,717 blocks in 2601 tags and 1 structure BSP(s) checked the way OpenCE checks them: 1 problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below. (mock)',
+        details: ['#0 levels\test\bloodgulch\bloodgulch script syntax data: 380,076 bytes at 0x404864FE overlap other tags (mock)'],
+        requiresAcknowledgement: false,
+      }
+    : {
+        id: 'tagDataExtents' as const,
+        label: "Tag blocks are inside the tag data and don't overlap",
+        status: 'pass' as const,
+        message: '13,717 blocks in 2601 tags and 1 structure BSP(s) checked the way OpenCE checks them: no problems. (mock)',
+        details: [],
+        requiresAcknowledgement: false,
+      };
+  const repair = {
+    id: 'repairScriptSyntaxData' as const,
+    label: 'Repair: move the script data to its own block',
+    status: required ? ('warn' as const) : ('info' as const),
+    message: required
+      ? "OpenCE refuses this map: the scenario's script data overlaps other tags. The repair gives it a block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked. Adds 380,078 bytes. (mock)"
+      : "OpenCE runs none of this map's scripts because the script data is not 4-aligned. The repair moves it to an aligned block at the end of the tag data. Optional: the map loads either way. Adds 380,078 bytes. (mock)",
+    details: ['Only the first 346,620 of its 380,076 bytes are its own; the rest belongs to other tags. 0 of 19,001 node slots are used (56 bytes with the header), so everything in use fits. (mock)'],
+    requiresAcknowledgement: false,
+    repair: { id: 'scriptSyntaxData' as const, required },
+  };
+  const checks = [...base.checks.slice(0, at), extents, repair, ...base.checks.slice(at)];
+  return {
+    ...base,
+    checks,
+    scenarioName: 'bloodgulch',
+    tagCount: 2601,
+    newCrc32: null,
+    estimatedOutputSize: required ? 105_728_562 : null,
+    repairs: [{ id: 'scriptSyntaxData', required, tagPath: 'levels\test\bloodgulch\bloodgulch', bytesAdded: 380_078 }],
+  };
 }
