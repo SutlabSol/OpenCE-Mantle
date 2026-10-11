@@ -1,10 +1,34 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 
-const TEST_FILE_DIR = path.dirname(fileURLToPath(import.meta.url));
-/** tests/helpers -> tests -> core -> <repo root> -> sample_maps */
-const DEFAULT_SAMPLE_MAPS_DIR = path.resolve(TEST_FILE_DIR, '../../../sample_maps');
+/**
+ * tests/helpers -> tests -> core -> <repo root> -> sample_maps. Uses `__dirname` (provided by Vitest
+ * and tsx) rather than `import.meta.url`, so the desktop tests can import this helper under their
+ * CommonJS typecheck.
+ */
+const DEFAULT_SAMPLE_MAPS_DIR = path.resolve(__dirname, '../../../sample_maps');
+
+/**
+ * Sub-folders of the sample maps directory - the ONLY place folder names appear. Custom Edition maps
+ * and CE resource maps sit at the root; each other game's maps (and its own resource maps) get a
+ * folder, because several share file names (bloodgulch.map, bitmaps.map, ...). Adding a folder is one
+ * line here.
+ */
+export const SAMPLE_FOLDERS = {
+  ce: '',
+  haloMD: 'HaloMD',
+  macDemo: 'MacDemo',
+  pc: 'PC',
+  xbox: 'xbox',
+  mcc: 'MCC',
+} as const;
+export type SampleFolder = keyof typeof SAMPLE_FOLDERS;
+
+/** The sample name of `file` inside `folder`, for every helper below, e.g. `sampleIn('haloMD', 'heh_2.map')`. */
+export function sampleIn(folder: SampleFolder, file: string): string {
+  const dir = SAMPLE_FOLDERS[folder];
+  return dir ? `${dir}/${file}` : file;
+}
 
 /** `SAMPLE_MAPS_DIR` env var wins if set; otherwise `<repo root>/sample_maps`, resolved relative to this file - never an absolute `/app` path, so this works unmodified on Windows. */
 export function sampleMapsDir(): string {
