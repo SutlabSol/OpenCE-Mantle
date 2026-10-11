@@ -34212,6 +34212,7 @@ function decodeStruct(buffer, baseOffset, structName) {
 }
 
 // ../core/src/map/embedded-data-fields.ts
+var TAG_DATA_OFFSET_EXTERNAL_BIT = 1;
 function resourceMapToKind(resourceMap) {
   if (resourceMap === "bitmaps.map") return "bitmap";
   if (resourceMap === "sounds.map") return "sound";
@@ -34226,7 +34227,7 @@ function findEmbeddedDataFields(resolved, decoded) {
       out.push({
         fieldName: field.name,
         kind: resourceMapToKind(field.def.externalFileOffset),
-        external: value.value.external !== 0,
+        external: (value.value.external & TAG_DATA_OFFSET_EXTERNAL_BIT) !== 0,
         resourceMap: field.def.externalFileOffset,
         fileOffset: value.value.fileOffset,
         size: value.value.size,
