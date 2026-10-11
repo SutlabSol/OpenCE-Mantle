@@ -222,6 +222,24 @@ needs re-verification / unverified / blocked)
   work (branch `feat/inject-in-memory-save`, user-confirmed on Windows and in OpenCE). **Next:
   task 2, the converter, Phase 1** (retail-layout, version 7). **Update:** Phase 1 built on
   `feat/demo-converter-phase1`, verified by tests, waiting for the user's Windows/OpenCE check.
+  **Planned after the converter (user request 2026-10-11; NOT started, nothing built).** Its order
+  relative to M7a/M7b gets decided when it is planned.
+  - **A. Separate files on multi-tag extraction.** When several selected tags are extracted in one
+    go (e.g. a warthog and a ghost), write one `.ocetags` file per selected tag instead of one
+    combined file. Applies to every tag type.
+  - **B. Batch extract.** Extract a whole open map in one go into a folder structure, with each tag
+    in a folder named for what it is (weapons, vehicles, scenery, ...).
+  - **Open design questions (answer these when planning A/B):**
+    1. Shared dependencies when several tags are exported separately: duplicated into each file,
+       or stored once and referenced (and how inject then finds them)?
+    2. How blocked tags (gbxmodel geometry, BSP, uncaptured data) and external data
+       (bitmaps/sounds/loc.map) are reported in a batch: per file, in one summary, or both?
+    3. Folder layout and file names: by tag group or by tag path, how to name files, and how to
+       handle name collisions and characters Windows doesn't allow.
+    4. Progress and cancel for thousands of tags: granularity, what a cancel leaves on disk (temp
+       file + rename per file), and whether a partial batch can be resumed.
+    5. Whether a manifest file is written (what was exported, skipped or blocked, source map
+       identity), and in what format.
 - 2026-10-11: **Swap load failure (branch `fix/swap-load-failure`, user-approved with
   conditions).** The user's SWAP of `globals\globals` with dependencies into bloodgulch (1037
   swapped, 50 gbxmodels blocked) showed a blank blue screen in OpenCE; the original with only the
