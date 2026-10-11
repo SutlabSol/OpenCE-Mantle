@@ -39,7 +39,6 @@ type ExpectedRepair = { kind: 'scriptSyntaxData'; blockSize: number } | { kind: 
 const SCRIPT: ExpectedRepair = { kind: 'scriptSyntaxData', blockSize: 380_076 };
 const CASES: { file: string; out: string; size: number; repairs: ExpectedRepair[] }[] = [
   { file: sampleIn('haloMD', 'heh_2.map'), out: 'heh_2_ce.map', size: 70_827_478 + 2 + 380_076, repairs: [SCRIPT] },
-  { file: sampleIn('haloMD', 'theisland_3.map'), out: 'theisland_3_ce.map', size: 105_348_484 + 2 + 380_076, repairs: [SCRIPT] },
   { file: sampleIn('haloMD', 'crossing.map'), out: 'crossing_ce.map', size: 75_214_196 + 3 + 380_076 + 0 + 72, repairs: [SCRIPT, { kind: 'tagRootOutside', tagIndex: 2404, blockSize: 72 }] },
   { file: sampleIn('haloMD', 'barrier.map'), out: 'barrier_ce.map', size: 77_338_350 + 2 + 380_076, repairs: [SCRIPT] },
 ];
@@ -123,6 +122,34 @@ describe('raw-map helper layout agrees with the schema', () => {
     expect(resolveStruct('SoundPermutation').totalSize).toBe(L.permutationSize);
     expect(field('SoundPermutation', 'samples')).toBe(L.permutationSamples);
   });
+});
+
+/**
+ * theisland_3 converted (105,728,562 B, CRC32 0xFC042F66) but OpenCE refused it at its model part
+ * check (model #2574). Since 2026-10-12 the converter refuses it too, with the resource files and
+ * every repair ticked, naming the model, its parts and the bad strip indices.
+ */
+describe(`Phase 1b: HaloMD/theisland_3.map is refused at OpenCE's model part check`, () => {
+  const file = sampleIn('haloMD', 'theisland_3.map');
+  const gate = skippableTest([file, RES.bitmaps, RES.sounds]);
+  it.skipIf(gate.skip)(`refused with the resource files and every repair; the row names #2574's two parts and nothing is returned${gate.titleSuffix}`, () => {
+    const source = fs.readFileSync(sampleMapPath(file));
+    const bitmaps = openReadOnly(sampleMapPath(RES.bitmaps));
+    const sounds = openReadOnly(sampleMapPath(RES.sounds));
+    try {
+      const report = preflightRetailConversion(source, { bitmaps, sounds });
+      expect(report.canConvert).toBe(false);
+      expect(report.checks.filter((k) => k.status === 'refuse').map((k) => k.id)).toEqual(['modelParts']);
+      const row = report.checks.find((k) => k.id === 'modelParts')!;
+      expect(row.details).toHaveLength(2);
+      expect(row.details[0]).toBe('#2574 effects\\debris objects\\forerunner dark structure\\forerunner dark structure: geometry 0 part 0: 2 of 104 strip indices are past its 70 vertices (value@position: 70@100, 71@102)');
+      expect(row.details[1]).toMatch(/^#2574 .*: geometry 1 part 0: 33 of 66 strip indices are past its 44 vertices/);
+      expect(() => convertRetailToCustomEdition(source, { acknowledgeScripts: true, repairs: { scriptSyntaxData: true, tagRootOutside: true }, resources: { bitmaps, sounds } })).toThrow(ConversionRefusedError);
+    } finally {
+      bitmaps.close();
+      sounds.close();
+    }
+  }, 120_000);
 });
 
 for (const c of CASES) {

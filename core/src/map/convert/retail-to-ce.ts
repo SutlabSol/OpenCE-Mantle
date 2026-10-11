@@ -16,6 +16,7 @@ import { readResourceTable } from './resource-files';
 import type { RandomAccessFile, ResourceKind, ResourceTable } from './resource-files';
 import { RawDataAppendCancelledError } from '../raw-data-region';
 import { checkTagDataExtents } from './extent-check';
+import { checkModelParts } from './model-part-check';
 import { applyTagDataRepairs, planTagDataRepairs, repairBytesAdded } from './tag-data-repairs';
 import type { AppliedTagDataRepair, TagDataRepairId, TagDataRepairPlan } from './tag-data-repairs';
 
@@ -88,6 +89,7 @@ export type ConversionCheckId =
   | 'scenarioName'
   | 'tagFileChecksum'
   | 'tagDataExtents'
+  | 'modelParts'
   | 'repairScriptSyntaxData'
   | 'repairTagRootOutside'
   | 'externalData'
@@ -302,6 +304,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + requiredRepairBytes(header, parsed.repairPlan), report);
   }
 
+  checks.push(modelPartsCheck(view, header, tagIndex));
   checks.push(scriptCheck(view, header, tagIndex));
 
   if (full) {
@@ -550,6 +553,30 @@ const SCRIPT_NODE_FLAG_SCRIPT_CALL = 0x2;
  * acknowledgement. No remapping is done. A function call node is a used node (salt != 0) that is
  * neither a primitive nor a script call (`ScenarioScriptNodeFlags`).
  */
+/**
+ * OpenCE's model part checks (`model-part-check.ts`): a failing part stops OpenCE's load (fatal), so
+ * the map is refused. The 2026-10-12 decision: refuse and name the parts; no repair (PRD).
+ */
+function modelPartsCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
+  const label = "Models pass OpenCE's part check";
+  let report: ReturnType<typeof checkModelParts>;
+  try {
+    report = checkModelParts(view, header, tagIndex);
+  } catch (err) {
+    return check('modelParts', label, 'refuse', `The models can't be read: ${(err as Error).message}`);
+  }
+  const scope = `${report.modelsChecked} models, ${report.partsChecked} parts`;
+  if (report.problems.length === 0) return check('modelParts', label, 'pass', `${scope}: every part passes.`);
+  const models = new Set(report.problems.map((p) => p.tagIndex)).size;
+  return check(
+    'modelParts',
+    label,
+    'refuse',
+    `${scope}: ${report.problems.length} part${report.problems.length === 1 ? '' : 's'} of ${models} model${models === 1 ? '' : 's'} fail. OpenCE stops loading a map with such a part ("names a node, vertex, shader or part that does not exist"), so the map is not converted. Repairing them is not supported yet.`,
+    report.problems.map((p) => p.text),
+  );
+}
+
 function scriptCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
   const label = 'Scripts that may call the wrong function in Custom Edition';
   const scenario = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];

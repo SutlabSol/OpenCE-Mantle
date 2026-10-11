@@ -308,3 +308,32 @@ against real bytes in the sample maps, not inferred.
   per Invader's struct comments) and are already stale the moment a tag is extracted from its
   source map. M5's injector zeroes them (rather than leaving source-map garbage) on every
   dependency it rewrites, since there is one clearly-correct answer here, not a judgment call.
+
+## Converter: model part check (2026-10-12, user-approved option 1)
+
+- `core/src/map/convert/model-part-check.ts` mirrors OpenCE (build 185, commit 6399ed9):
+  `gbxmodel_part_check` (port/linux/game/cache_file_formats.c), then `custom_edition_models_convert`
+  -> `model_local_nodes_make`, `custom_edition_model_part_shaders_bound`, `custom_edition_model_verify`,
+  `custom_edition_model_part_verify` (port/linux/game/custom_edition_geometry.c). Part layout 0x84 and
+  vertex layout 0x44 are OpenCE's (`custom_edition_model_part`, `model_vertex_uncompressed`); the
+  model's blocks come from the schema (same offsets as OpenCE's `struct model`: 0x0, 0xB8, 0xD0, 0xDC).
+- **Strip index 0xFFFF:** OpenCE compares every one of the first `strip triangle count + 2` indices
+  against the vertex count with no restart value, so 0xFFFF fails (unlike the Stage-1 capture scan in
+  `gbxmodel-geometry.ts`, which treats it as a restart). Measured: no CE map fails because of it (0
+  problems on the 5 CE maps).
+- **Decision: the model-level node count is included.** `custom_edition_model_verify` refuses a model
+  of < 1 or > 64 nodes, or 44+ nodes without local nodes, in the same load step and with the same fatal
+  result, so it belongs in the same row. A 44-64-node model without local nodes passes when
+  `model_local_nodes_make` would succeed (every part's vertices name valid nodes, at most 22 per part);
+  its vertices then name local nodes and the vertex node test is skipped, as in OpenCE.
+- **Shader index:** not refused, because `custom_edition_model_part_shaders_bound` first gives an
+  out-of-range shader the model's last one; only a model with no shaders fails.
+- Measured: 0 problems on bloodgulch, sidewinder, coldsnap, ui, Yoyorast_Island and HaloMD heh_2,
+  crossing, barrier (all load in OpenCE), and on HaloMD/PC bloodgulch, b30 and ui. theisland_3: #2574
+  geometry 0 part 0 (2 of 104) and geometry 1 part 0 (33 of 66), which is where OpenCE refused it.
+- Not modelled: OpenCE runs `model_local_nodes_make` for every model before verifying any, and it writes
+  node indices into shared model data; a vertex shared by two models could change between them.
+  Measured (raw, read-only): no part's vertex range overlaps another's in the 5 CE maps or HaloMD
+  heh_2, crossing, barrier, theisland_3.
+- **Untested path:** no model in those 9 maps has 44 or more nodes, so the local-nodes branch (44-64
+  nodes) has no real-data or synthetic test. It follows the code read above, but is unverified.
