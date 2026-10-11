@@ -53,7 +53,7 @@ module.exports = __toCommonJS(map_worker_exports);
 var import_worker_threads = require("worker_threads");
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
-var import_crypto2 = require("crypto");
+var import_crypto3 = require("crypto");
 
 // ../core/src/constants/cache-file.ts
 var CHIMERA_COMPRESSED_ENGINE_MASK = 2249850880;
@@ -453,6 +453,7 @@ function computeResourceMapIdentity(buffer) {
 function resourceMapIdentitiesMatch(a, b) {
   return a.fileSize === b.fileSize && a.entryCount === b.entryCount && a.fingerprint === b.fingerprint;
 }
+var RESOURCE_MAP_TYPE_BY_KIND = { bitmaps: 1, sounds: 2, loc: 3 };
 
 // ../core/src/map/definitions/basic-types.ts
 var BASIC_TYPE_SIZES = {
@@ -36245,9 +36246,321 @@ function findReferenceIdentityIssues(buffer, header, tagIndex) {
   return issues;
 }
 
+// ../core/src/map/raw-data-region.ts
+var FILE_SIZE_OFFSET = 8;
+var TAG_DATA_OFFSET_OFFSET = 16;
+var TAG_DATA_SIZE_OFFSET = 20;
+var TAG_DATA_HEADER_MODEL_DATA_OFFSET = 20;
+var TAG_DATA_HEADER_MODEL_DATA_SIZE = 32;
+function rawDataRegionLayoutOf(map, bspEnd) {
+  const tagDataOffset = map.readUInt32LE(TAG_DATA_OFFSET_OFFSET);
+  const tagDataSize = map.readUInt32LE(TAG_DATA_SIZE_OFFSET);
+  if (tagDataOffset + TAG_DATA_HEADER_MODEL_DATA_SIZE + 4 > map.length) throw new CorruptMapError("The tag data header is outside the file.");
+  const insertAt = map.readUInt32LE(tagDataOffset + TAG_DATA_HEADER_MODEL_DATA_OFFSET);
+  const modelDataSize = map.readUInt32LE(tagDataOffset + TAG_DATA_HEADER_MODEL_DATA_SIZE);
+  if (map.readUInt32LE(FILE_SIZE_OFFSET) !== map.length) throw new CorruptMapError(`The header's file size (${map.readUInt32LE(FILE_SIZE_OFFSET)}) is not the file's size (${map.length}).`);
+  if (bspEnd > insertAt) throw new CorruptMapError(`The BSP data (ends at ${bspEnd}) runs past the model data (starts at ${insertAt}).`);
+  if (insertAt + modelDataSize !== tagDataOffset) {
+    throw new CorruptMapError(`The model data (${insertAt} + ${modelDataSize}) is not directly followed by the tag data (${tagDataOffset}); this file layout is not supported.`);
+  }
+  if (tagDataOffset + tagDataSize !== map.length) {
+    throw new CorruptMapError(`The tag data (${tagDataOffset} + ${tagDataSize}) does not end at the end of the file (${map.length}); this file layout is not supported.`);
+  }
+  return { bspEnd, insertAt, modelDataSize, tagDataOffset, tagDataSize };
+}
+var RawDataAppendCancelledError = class extends Error {
+  constructor() {
+    super("Cancelled. Nothing was written.");
+    this.name = "RawDataAppendCancelledError";
+  }
+};
+function appendToRawDataRegion(map, layout, chunks, hooks = {}) {
+  const shift = chunks.reduce((n, c) => n + c.length, 0);
+  const out = Buffer.alloc(map.length + shift);
+  map.copy(out, 0, 0, layout.insertAt);
+  const chunkOffsets = [];
+  let at = layout.insertAt;
+  for (let i = 0; i < chunks.length; i++) {
+    if (hooks.shouldCancel?.()) throw new RawDataAppendCancelledError();
+    chunks[i].write(out, at);
+    chunkOffsets.push(at);
+    at += chunks[i].length;
+    hooks.onChunk?.(i + 1, chunks.length);
+  }
+  map.copy(out, at, layout.insertAt);
+  out.writeUInt32LE(out.length, FILE_SIZE_OFFSET);
+  out.writeUInt32LE(layout.tagDataOffset + shift, TAG_DATA_OFFSET_OFFSET);
+  out.writeUInt32LE(layout.insertAt + shift, layout.tagDataOffset + shift + TAG_DATA_HEADER_MODEL_DATA_OFFSET);
+  return { buffer: out, shift, chunkOffsets };
+}
+
+// ../core/src/map/convert/resource-files.ts
+var HEADER_SIZE = 16;
+var ENTRY_SIZE = 12;
+var MAX_PATHS_BLOCK = 64 * 1024 * 1024;
+var rangeKey = (offset, size) => `${offset}:${size}`;
+function readResourceTable(file, kind) {
+  const name = `${kind}.map`;
+  if (file.size < HEADER_SIZE) return { ok: false, error: `${file.label} is too small to be a resource map.` };
+  const header = file.read(0, HEADER_SIZE);
+  const type = header.readUInt32LE(0);
+  const pathsOffset = header.readUInt32LE(4);
+  const tableOffset = header.readUInt32LE(8);
+  const count = header.readUInt32LE(12);
+  if (type !== RESOURCE_MAP_TYPE_BY_KIND[kind]) {
+    const actual = Object.keys(RESOURCE_MAP_TYPE_BY_KIND).find((k) => RESOURCE_MAP_TYPE_BY_KIND[k] === type);
+    return { ok: false, error: actual ? `${file.label} is a ${actual}.map resource file, not a ${name}.` : `${file.label} is not a resource map (type ${type}).` };
+  }
+  if (count === 0 || tableOffset + count * ENTRY_SIZE > file.size) return { ok: false, error: `${file.label}: the resource table is empty or runs past the end of the file.` };
+  if (pathsOffset < HEADER_SIZE || pathsOffset > tableOffset || tableOffset - pathsOffset > MAX_PATHS_BLOCK) {
+    return { ok: false, error: `${file.label}: the resource names block is not where a ${name} has it.` };
+  }
+  const table = file.read(tableOffset, count * ENTRY_SIZE);
+  const paths = file.read(pathsOffset, tableOffset - pathsOffset);
+  const entries = [];
+  const byRange = /* @__PURE__ */ new Map();
+  for (let i = 0; i < count; i++) {
+    const pathAt = table.readUInt32LE(i * ENTRY_SIZE);
+    const size = table.readUInt32LE(i * ENTRY_SIZE + 4);
+    const dataOffset = table.readUInt32LE(i * ENTRY_SIZE + 8);
+    if (dataOffset < HEADER_SIZE || dataOffset + size > pathsOffset) {
+      return { ok: false, error: `${file.label}: resource #${i} (offset ${dataOffset}, ${size} bytes) is outside the data area of the file.` };
+    }
+    if (pathAt >= paths.length) return { ok: false, error: `${file.label}: resource #${i} has a name outside the names block.` };
+    const end = paths.indexOf(0, pathAt);
+    const entry = { index: i, name: paths.toString("latin1", pathAt, end < 0 ? paths.length : end), dataOffset, size };
+    entries.push(entry);
+    const key = rangeKey(dataOffset, size);
+    if (!byRange.has(key)) byRange.set(key, entry);
+  }
+  return { ok: true, table: { kind, label: file.label, fileSize: file.size, entries, byRange } };
+}
+
+// ../core/src/map/convert/externalize-in.ts
+var CACHE_HEADER_SIZE = 2048;
+var MAX_BLOCKS_PER_LIST = 1 << 20;
+var mayHoldAssetsMemo = /* @__PURE__ */ new Map();
+function structMayHoldAssets(name, visiting = /* @__PURE__ */ new Set()) {
+  const memo = mayHoldAssetsMemo.get(name);
+  if (memo !== void 0) return memo;
+  if (visiting.has(name)) return false;
+  visiting.add(name);
+  const resolved = resolveStruct(name);
+  let result = false;
+  for (const f of resolved.fields) {
+    if (f.def.nonCached) continue;
+    if (f.def.externalFileOffset || f.def.externalDataSibling) result = true;
+    else if (f.def.type === "TagReflexive" && f.def.struct && structMayHoldAssets(f.def.struct, visiting)) result = true;
+    if (result) break;
+  }
+  mayHoldAssetsMemo.set(name, result);
+  return result;
+}
+function flagLocation(resolved, fieldName) {
+  const field = resolved.fields.find((f) => f.name === fieldName);
+  if (!field) return null;
+  if (field.def.type === "TagDataOffset") return { offset: field.offset + 4, width: 4, mask: 1 };
+  const bitfield = field.def.type ? getBitfieldDefinition(field.def.type) : void 0;
+  const bit = bitfield?.fields.indexOf("external") ?? -1;
+  if (!bitfield || bit < 0 || bitfield.width !== 16 && bitfield.width !== 32) return null;
+  return { offset: field.offset, width: bitfield.width === 16 ? 2 : 4, mask: 1 << bit };
+}
+function scanPerAssetData(view, header, tagIndex) {
+  const assets = [];
+  const blocked = [];
+  const visited = /* @__PURE__ */ new Set();
+  const bsps = structureBspsOf(view, header, tagIndex);
+  const bspEnd = bsps.reduce((end, b) => Math.max(end, b.start + b.size), CACHE_HEADER_SIZE);
+  const walk = (structName, at, anchor, base, tag, path2, indices) => {
+    const resolved = resolveStruct(structName);
+    if (!isRangeInBuffer(at, resolved.totalSize, view.length)) {
+      if (structMayHoldAssets(structName)) blocked.push(`${tag.path}: ${path2 || structName} is outside the file, so its bitmap or sound data can't be checked.`);
+      return;
+    }
+    const key = `${structName}@${at}`;
+    if (visited.has(key)) return;
+    visited.add(key);
+    const decoded = decodeStruct(view, at, structName);
+    for (const match of findEmbeddedDataFields(resolved, decoded)) {
+      const where = `${tag.path}: ${path2 ? `${path2}.` : ""}${match.fieldName}`;
+      const flag = match.kind === "unknown" ? null : flagLocation(resolved, match.fieldName);
+      if (match.kind === "unknown" || !flag || match.patchWidth !== 4) {
+        blocked.push(`${where}: this field's layout could not be read, so whether its data is outside the map can't be decided.`);
+        continue;
+      }
+      let sizeNote;
+      if (match.kind === "bitmap") {
+        const v = validateBitmapAssetSize(decoded, match.size);
+        if (!v.ok) sizeNote = v.reason;
+      }
+      assets.push({
+        kind: match.kind,
+        external: match.external,
+        offset: match.fileOffset,
+        size: match.size,
+        tagIndex: tag.index,
+        tagPath: tag.path,
+        fieldPath: path2,
+        blockIndices: indices,
+        offsetFieldAt: at + match.patchOffset,
+        flagAt: at + flag.offset,
+        flagWidth: flag.width,
+        flagMask: flag.mask,
+        sizeNote
+      });
+    }
+    for (const field of resolved.fields) {
+      if (field.def.nonCached || field.def.type !== "TagReflexive" || !field.def.struct) continue;
+      const value = decoded.get(field.name);
+      if (value?.kind !== "reflexive" || value.value.count === 0) continue;
+      if (!structMayHoldAssets(field.def.struct)) continue;
+      const childPath = `${path2 ? `${path2}.` : ""}${field.name}`;
+      if (value.value.count > MAX_BLOCKS_PER_LIST) {
+        blocked.push(`${tag.path}: ${childPath} claims ${value.value.count} blocks, which can't be right.`);
+        continue;
+      }
+      const childSize = resolveStruct(field.def.struct).totalSize;
+      const first = resolvePointer(value.value.pointerLow >>> 0, anchor, base);
+      for (let i = 0; i < value.value.count; i++) walk(field.def.struct, first + i * childSize, anchor, base, tag, `${childPath}[${i}]`, [...indices, i]);
+    }
+  };
+  for (const e of tagIndex.entries) {
+    if (e.isExternal) continue;
+    const structName = e.primaryClassName ? getGroupStructName(e.primaryClassName) : null;
+    if (!structName) continue;
+    if (!structMayHoldAssets(structName)) continue;
+    const tag = { index: e.index, path: e.path };
+    if (e.primaryClassName === "scenario_structure_bsp") {
+      const bsp = bsps.find((b) => b.tagId === e.tagId);
+      if (!bsp) {
+        blocked.push(`${e.path}: this BSP is not in the scenario's "structure bsps" list, so it can't be read.`);
+        continue;
+      }
+      walk(structName, resolvePointer(view.readUInt32LE(bsp.start), bsp.start, bsp.address), bsp.start, bsp.address, tag, "", []);
+    } else {
+      walk(structName, resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress), header.tagDataOffset, tagIndex.baseMemoryAddress, tag, "", []);
+    }
+  }
+  return { assets, blocked, bspEnd };
+}
+function structureBspsOf(view, header, tagIndex) {
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scenarioStruct = getGroupStructName("scenario");
+  if (!scenario || scenario.isExternal || !scenarioStruct) return [];
+  const at = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(at, resolveStruct(scenarioStruct).totalSize, view.length)) return [];
+  const list = decodeStruct(view, at, scenarioStruct).get("structure bsps");
+  const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === "structure bsps");
+  if (list?.kind !== "reflexive" || !field?.def.struct) return [];
+  const size = resolveStruct(field.def.struct).totalSize;
+  const first = resolvePointer(list.value.pointerLow >>> 0, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(first, list.value.count * size, view.length)) return [];
+  const out = [];
+  for (let i = 0; i < list.value.count; i++) {
+    const d = decodeStruct(view, first + i * size, field.def.struct);
+    const num = (n) => {
+      const v = d.get(n);
+      return v?.kind === "basic" ? Number(v.value) : NaN;
+    };
+    const dep = d.get("structure bsp");
+    const start = num("bsp start");
+    if (!Number.isFinite(start) || !isRangeInBuffer(start, 4, view.length)) continue;
+    out.push({ start, size: num("bsp size"), address: num("bsp address") >>> 0, tagId: dep?.kind === "dependency" ? dep.value.tagId >>> 0 : 0 });
+  }
+  return out;
+}
+function expectedResourceName(asset) {
+  return asset.kind === "bitmap" ? `${asset.tagPath}_${asset.blockIndices.join("_")}` : `${asset.tagPath}__${asset.blockIndices.join("__")}`;
+}
+var KIND_FILE = { bitmap: "bitmaps", sound: "sounds" };
+function countExternal(scan) {
+  const out = { bitmap: { count: 0, bytes: 0 }, sound: { count: 0, bytes: 0 } };
+  for (const a of scan.assets) {
+    if (!a.external) continue;
+    out[a.kind].count++;
+    out[a.kind].bytes += a.size;
+  }
+  return out;
+}
+function planExternalImport(view, scan, tables) {
+  const external = scan.assets.filter((a) => a.external);
+  const ordered = [...external.filter((a) => a.kind === "bitmap"), ...external.filter((a) => a.kind === "sound")];
+  const matched = { bitmaps: 0, sounds: 0 };
+  const unmatched = { bitmaps: [], sounds: [] };
+  const missing = /* @__PURE__ */ new Set();
+  const nameMismatches = [];
+  for (const a of ordered) {
+    const kind = KIND_FILE[a.kind];
+    const table = tables[kind];
+    if (!table) {
+      missing.add(kind);
+      continue;
+    }
+    const entry = table.byRange.get(rangeKey(a.offset, a.size));
+    if (!entry) {
+      unmatched[kind].push(`${a.tagPath}: ${a.fieldPath} (offset ${a.offset}, ${a.size} bytes)`);
+      continue;
+    }
+    matched[kind]++;
+    const expected = expectedResourceName(a);
+    if (entry.name.toLowerCase() !== expected.toLowerCase()) nameMismatches.push(`${a.tagPath}: ${a.fieldPath} uses resource "${entry.name}" (expected "${expected}")`);
+  }
+  const sizeMismatches = ordered.filter((a) => a.sizeNote).map((a) => `${a.tagPath}: ${a.fieldPath}: ${a.sizeNote}`);
+  let rawRegionProblem = null;
+  let insertAt = 0;
+  try {
+    insertAt = rawDataRegionLayoutOf(view, scan.bspEnd).insertAt;
+    const internalEnd = scan.assets.filter((a) => !a.external).reduce((end, a) => Math.max(end, a.offset + a.size), scan.bspEnd);
+    if (internalEnd !== insertAt) {
+      rawRegionProblem = `The map's internal bitmap and sound data ends at ${internalEnd}, but its model data starts at ${insertAt}. Where new data would go is not known, so the map is not converted.`;
+    }
+  } catch (err) {
+    rawRegionProblem = err.message;
+  }
+  return {
+    assets: ordered,
+    bytesAdded: ordered.reduce((n, a) => n + a.size, 0),
+    matched,
+    unmatched,
+    missing: [...missing],
+    nameMismatches,
+    sizeMismatches,
+    rawRegionProblem,
+    bspEnd: scan.bspEnd,
+    insertAt
+  };
+}
+function importExternalData(source, plan, files, hooks = {}) {
+  let done = 0;
+  const chunks = plan.assets.map((a) => {
+    const file = files[KIND_FILE[a.kind]];
+    if (!file) throw new Error(`No ${KIND_FILE[a.kind]}.map was supplied.`);
+    return {
+      length: a.size,
+      write: (target, at) => {
+        const bytes = file.read(a.offset, a.size);
+        if (bytes.length !== a.size) throw new Error(`${file.label}: could not read ${a.size} bytes at offset ${a.offset}.`);
+        bytes.copy(target, at);
+        done += a.size;
+        hooks.onProgress?.(done, plan.bytesAdded);
+      }
+    };
+  });
+  const layout = rawDataRegionLayoutOf(source, plan.bspEnd);
+  const { buffer, shift, chunkOffsets } = appendToRawDataRegion(source, layout, chunks, { shouldCancel: hooks.shouldCancel });
+  const moved = (at) => at >= layout.insertAt ? at + shift : at;
+  plan.assets.forEach((a, i) => {
+    buffer.writeUInt32LE(chunkOffsets[i], moved(a.offsetFieldAt));
+    const flagAt = moved(a.flagAt);
+    if (a.flagWidth === 2) buffer.writeUInt16LE(buffer.readUInt16LE(flagAt) & ~a.flagMask & 65535, flagAt);
+    else buffer.writeUInt32LE((buffer.readUInt32LE(flagAt) & ~a.flagMask) >>> 0, flagAt);
+  });
+  return { buffer, rangesCopied: plan.assets.length, bytesAdded: shift, insertAt: layout.insertAt };
+}
+
 // ../core/src/map/convert/retail-to-ce.ts
 var VERSION_OFFSET = 4;
-var FILE_SIZE_OFFSET = 8;
+var FILE_SIZE_OFFSET2 = 8;
 var PADDING_OFFSET = 12;
 var BUILD_STRING_OFFSET = 64;
 var CE_BUILD_STRING = "01.00.00.0609";
@@ -36279,7 +36592,7 @@ function check(id, label, status, message, details = [], requiresAcknowledgement
   return { id, label, status, message, details: details.slice(0, MAX_DETAILS), requiresAcknowledgement };
 }
 var hex = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
-function runChecks(buffer, full) {
+function runChecks(buffer, full, resources = {}) {
   const checks = [];
   const report = {
     canConvert: false,
@@ -36290,7 +36603,9 @@ function runChecks(buffer, full) {
     mapType: null,
     tagCount: null,
     previousCrc32: null,
-    newCrc32: null
+    newCrc32: null,
+    externalData: null,
+    estimatedOutputSize: null
   };
   const done = (parsed2) => {
     report.canConvert = !checks.some((c) => c.status === "refuse");
@@ -36320,7 +36635,7 @@ function runChecks(buffer, full) {
   report.buildString = readFixedString(buffer, BUILD_STRING_OFFSET, TAG_STRING_SIZE);
   report.mapType = buffer.readUInt16LE(96);
   report.previousCrc32 = buffer.readUInt32LE(100);
-  const declaredSize = buffer.readUInt32LE(FILE_SIZE_OFFSET);
+  const declaredSize = buffer.readUInt32LE(FILE_SIZE_OFFSET2);
   checks.push(
     declaredSize === buffer.length ? check("fileSize", "File size matches the header", "pass", `${buffer.length} bytes.`) : check("fileSize", "File size matches the header", "refuse", `The header says ${declaredSize} bytes but the file has ${buffer.length}. The file may be truncated or modified.`)
   );
@@ -36342,7 +36657,7 @@ function runChecks(buffer, full) {
     view2.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
     const header2 = parseCacheFileHeader(view2);
     const tagIndex2 = parseTagIndex(view2, header2);
-    parsed = { header: header2, tagIndex: tagIndex2, view: view2 };
+    parsed = { header: header2, tagIndex: tagIndex2, view: view2, importPlan: null };
   } catch (err) {
     checks.push(check("regions", "Tag index can be read", "refuse", `The tag index can't be read: ${err.message}`));
     return done(null);
@@ -36358,13 +36673,27 @@ function runChecks(buffer, full) {
     if (w18 !== 0 || w1c !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex(w18)}, +0x1C = ${hex(w1c)}`);
   }
   checks.push(
-    flagged.length === 0 ? check("entryFlags", "No tag is marked external", "pass", `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`) : check("entryFlags", "No tag is marked external", "refuse", `${flagged.length} tag entr${flagged.length === 1 ? "y has" : "ies have"} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged)
+    flagged.length === 0 ? check("entryFlags", "No tag entry is marked external (whole tags)", "pass", `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`) : check("entryFlags", "No tag entry is marked external (whole tags)", "refuse", `${flagged.length} tag entr${flagged.length === 1 ? "y has" : "ies have"} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged)
   );
+  const regionsLabel = "BSP, model data and tag data are inside the file";
+  let headerOnlyCrc = null;
   try {
-    report.newCrc32 = computeCacheCrc32(view, ceCrcRegions(view, header, tagIndex));
-    checks.push(check("regions", "BSP, model data and tag data are inside the file", "pass", `New CRC32 ${hex(report.newCrc32)} (was ${hex(report.previousCrc32)}).`));
+    headerOnlyCrc = computeCacheCrc32(view, ceCrcRegions(view, header, tagIndex));
   } catch (err) {
-    checks.push(check("regions", "BSP, model data and tag data are inside the file", "refuse", err.message));
+    checks.push(check("regions", regionsLabel, "refuse", err.message));
+  }
+  checks.push(tagDataOutsideCheck(header, tagIndex));
+  const scan = scanPerAssetData(view, header, tagIndex);
+  const counts = countExternal(scan);
+  report.externalData = { bitmaps: counts.bitmap, sounds: counts.sound };
+  if (counts.bitmap.count + counts.sound.count === 0 && scan.blocked.length === 0) {
+    report.newCrc32 = headerOnlyCrc;
+    report.estimatedOutputSize = buffer.length;
+    if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", `New CRC32 ${hex(headerOnlyCrc)} (was ${hex(report.previousCrc32)}).`));
+    checks.push(check("externalData", "Bitmap and sound data is inside the map", "pass", "No bitmap image or sound permutation keeps its data in a resource file."));
+  } else {
+    if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", "The new CRC32 is computed after the bitmap and sound data is copied in."));
+    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length, report);
   }
   checks.push(scriptCheck(view, header, tagIndex));
   if (full) {
@@ -36380,6 +36709,104 @@ function runChecks(buffer, full) {
     );
   }
   return done(parsed);
+}
+var fmtBytes = (n) => `${n.toLocaleString("en-US")} bytes`;
+var EXTERNAL_DATA_LABEL = "Bitmap and sound data is inside the map";
+function externalDataChecks(checks, view, scan, counts, resources, sourceSize, report) {
+  const summary = `${counts.bitmap.count} bitmap image(s) (${fmtBytes(counts.bitmap.bytes)}) and ${counts.sound.count} sound permutation(s) (${fmtBytes(counts.sound.bytes)})`;
+  if (scan.blocked.length > 0) {
+    checks.push(check("externalData", EXTERNAL_DATA_LABEL, "refuse", "Some bitmap or sound data can't be read, so it is not known whether it is inside the map. The map is not converted.", scan.blocked));
+    return null;
+  }
+  const needed = [];
+  if (counts.bitmap.count > 0) needed.push("bitmaps");
+  if (counts.sound.count > 0) needed.push("sounds");
+  const neededText = needed.map((k) => `${k}.map`).join(" and ");
+  const tables = {};
+  const fileErrors = [];
+  for (const kind of needed) {
+    const file = resources[kind];
+    if (!file) continue;
+    const read = readResourceTable(file, kind);
+    if (read.ok) tables[kind] = read.table;
+    else fileErrors.push(read.error);
+  }
+  const plan = planExternalImport(view, scan, tables);
+  report.estimatedOutputSize = sourceSize + plan.bytesAdded;
+  const missing = needed.filter((k) => !resources[k]);
+  if (missing.length > 0) {
+    checks.push(
+      check(
+        "externalData",
+        EXTERNAL_DATA_LABEL,
+        "refuse",
+        `${summary} of this map are stored in the source game's ${neededText}, which Custom Edition does not have. Converting needs those files from the game the map came from (for HaloMD maps: HaloMD's own bitmaps.map and sounds.map). Missing: ${missing.map((k) => `${k}.map`).join(", ")}.`
+      )
+    );
+    return null;
+  }
+  checks.push(check("externalData", EXTERNAL_DATA_LABEL, "info", `${summary} are copied in from the supplied ${neededText}.`));
+  const lines = [...fileErrors];
+  let usable = fileErrors.length === 0;
+  for (const kind of needed) {
+    const table = tables[kind];
+    if (!table) continue;
+    const total = kind === "bitmaps" ? counts.bitmap.count : counts.sound.count;
+    const bad = plan.unmatched[kind];
+    if (bad.length > 0) {
+      usable = false;
+      lines.push(`${table.label}: ${bad.length} of ${total} ranges this map needs are not entries of this file, so it is not the ${kind}.map this map was built with.`, ...bad.slice(0, 20));
+    } else {
+      lines.push(`${table.label}: all ${total} ranges this map needs are entries of this file.`);
+    }
+  }
+  const filesLabel = "The resource files match this map";
+  checks.push(
+    usable ? check("resourceFiles", filesLabel, "pass", "Every external bitmap and sound range of this map is an entry of the supplied files.", lines) : check("resourceFiles", filesLabel, "refuse", "The supplied resource files are not the ones this map was built with, or can't be read. Choose the bitmaps.map and sounds.map of the game the map came from.", lines)
+  );
+  if (plan.rawRegionProblem) checks.push(check("outputSize", "Room for the copied data", "refuse", plan.rawRegionProblem));
+  if (!usable || plan.rawRegionProblem) return null;
+  if (plan.nameMismatches.length > 0) {
+    checks.push(
+      check("resourceNames", "Resource names match the tags", "warn", `${plan.nameMismatches.length} range(s) are stored under another tag's name in the resource file (for example a modded tag reusing stock data). The bytes are copied as they are.`, plan.nameMismatches)
+    );
+  }
+  if (plan.sizeMismatches.length > 0) {
+    checks.push(
+      check(
+        "bitmapSizes",
+        "Bitmap sizes match their format",
+        "warn",
+        `${plan.sizeMismatches.length} bitmap image(s) have a stored size that differs from what their width, height and format give. They are copied by their stored size, which equals the resource entry.`,
+        plan.sizeMismatches
+      )
+    );
+  }
+  checks.push(check("outputSize", "Estimated output size", "info", `${fmtBytes(sourceSize + plan.bytesAdded)} (${plan.assets.length} ranges copied, +${fmtBytes(plan.bytesAdded)}).`));
+  return plan;
+}
+function tagDataOutsideCheck(header, tagIndex) {
+  const label = "Tag data pointer outside the tag data";
+  const known = new Set(getAllTagGroupNames());
+  const start = header.tagDataOffset;
+  const end = header.tagDataOffset + header.tagDataSize;
+  const lines = [];
+  for (const e of tagIndex.entries) {
+    if (e.isExternal || e.primaryClassName === "scenario_structure_bsp") continue;
+    const structName = e.primaryClassName && known.has(e.primaryClassName) ? getGroupStructName(e.primaryClassName) : null;
+    const size = structName ? resolveStruct(structName).totalSize : 1;
+    const at = resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    if (at < start || at + size > end) lines.push(`#${e.index} ${e.path}.${e.primaryClassName}: its ${size}-byte data starts at file offset ${at}; the tag data is ${start} to ${end}.`);
+  }
+  if (lines.length === 0) return check("tagDataOutside", label, "pass", "Every tag's data is inside the tag data.");
+  return check(
+    "tagDataOutside",
+    label,
+    "warn",
+    `${lines.length} tag(s) point at data that is not entirely inside the tag data, so the game reads whatever follows in memory. HaloMD runs this map; whether Custom Edition does is unverified. Nothing is changed.`,
+    lines,
+    true
+  );
 }
 function validationCheck(view, header, tagIndex) {
   const known = new Set(getAllTagGroupNames());
@@ -36519,22 +36946,67 @@ function injectAfterwardsCheck(view, header, tagIndex) {
     );
   }
 }
-function preflightRetailConversion(buffer) {
-  return runChecks(buffer, true).report;
+function preflightRetailConversion(buffer, resources = {}) {
+  return runChecks(buffer, true, resources).report;
 }
+var ACKNOWLEDGEMENTS = [
+  { id: "scripts", option: "acknowledgeScripts", text: "scripts that may call the wrong function in Custom Edition" },
+  { id: "tagDataOutside", option: "acknowledgeTagDataOutside", text: "tags whose data pointer is outside the tag data" }
+];
 function convertRetailToCustomEdition(source, options) {
-  const { report } = runChecks(source, false);
+  const { report, parsed } = runChecks(source, false, options.resources);
   if (!report.canConvert) {
     const reasons = report.checks.filter((c) => c.status === "refuse").map((c) => c.message);
     throw new ConversionRefusedError(`This map can't be converted. ${reasons.join(" ")}`);
   }
-  if (report.requiresAcknowledgement && !options.acknowledgeScripts) {
-    throw new ConversionRefusedError("This map has scripts that may call the wrong function in Custom Edition. Confirm that you understand this before converting.", "ACKNOWLEDGEMENT_REQUIRED");
+  const unacknowledged = ACKNOWLEDGEMENTS.filter((a) => report.checks.some((c) => c.id === a.id && c.requiresAcknowledgement) && !options[a.option]);
+  if (unacknowledged.length > 0) {
+    throw new ConversionRefusedError(`This map has ${unacknowledged.map((a) => a.text).join(" and ")}. Confirm that you understand this before converting.`, "ACKNOWLEDGEMENT_REQUIRED");
   }
-  const out = Buffer.from(source);
+  let out;
+  let imported = null;
+  const plan = parsed?.importPlan ?? null;
+  if (plan) {
+    try {
+      const result = importExternalData(source, plan, options.resources ?? {}, { onProgress: options.onProgress, shouldCancel: options.shouldCancel });
+      out = result.buffer;
+      imported = { rangesCopied: result.rangesCopied, bytesAdded: result.bytesAdded, insertAt: result.insertAt, warnings: [...plan.nameMismatches, ...plan.sizeMismatches] };
+    } catch (err) {
+      if (err instanceof RawDataAppendCancelledError) throw new ConversionRefusedError("Converting was cancelled. Nothing was written.", "CANCELLED");
+      throw err;
+    }
+  } else {
+    out = Buffer.from(source);
+  }
   out.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
-  return { buffer: out, report };
+  return { buffer: out, report, imported };
+}
+
+// ../core/src/map/write-map.ts
+var import_crypto2 = require("crypto");
+var baseName = (p) => p.split(/[\\/]/).pop() ?? p;
+function describeMapWriteError(err, targetPath, stillOpenNote = "your changes are still open in the app") {
+  const code = err?.code;
+  const name = baseName(targetPath);
+  const unchanged = `${name} on disk was not changed, and ${stillOpenNote}.`;
+  if (code === "ENOSPC") return `There is not enough free disk space to save ${name}. ${unchanged} Free some space, or use File > Save As to save to another drive.`;
+  if (code === "EBUSY" || code === "EPERM" || code === "EACCES" || code === "EROFS")
+    return `${name} could not be written: the file is in use by another program (for example OpenCE or Halo), or the file or its folder is read-only. ${unchanged} Close the other program and try again, or use File > Save As.`;
+  if (code === "ENOENT") return `The folder for ${name} no longer exists. ${unchanged}`;
+  return `Could not save ${name}: ${err instanceof Error ? err.message : String(err)}. ${unchanged}`;
+}
+function writeFinalizedMap(map, outputPath, ops, stillOpenNote) {
+  const finalized = finalizeForSave(map, { fileName: baseName(outputPath) });
+  const tempPath = `${outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
+  try {
+    ops.writeFileSync(tempPath, finalized.buffer);
+    ops.renameSync(tempPath, outputPath);
+  } catch (err) {
+    ops.removeIfExists(tempPath);
+    throw Object.assign(new Error(describeMapWriteError(err, outputPath, stillOpenNote)), { code: "WRITE_FAILED" });
+  }
+  return finalized;
 }
 
 // electron/map-file-rules.ts
@@ -36719,7 +37191,7 @@ function runGetDependencies(task) {
 function runExtractTags(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   const cancelCtl = makeCancelController(task.requestId);
-  const tempPath = `${task.outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
+  const tempPath = `${task.outputPath}.tmp-${(0, import_crypto3.randomUUID)()}`;
   try {
     progress(task.requestId, "Walking dependencies", 5);
     const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
@@ -36797,27 +37269,8 @@ function runPlanInject(task) {
   }
 }
 var TAG_FILE_CHECKSUM_WARNING = "The header checksum (CRC32) and the internal map name were updated. The separate tag-file checksum (tag data header +0x8) was not recalculated; whether the game checks it is unverified.";
-function describeMapWriteError(err, targetPath, stillOpenNote = "your changes are still open in the app") {
-  const code = err?.code;
-  const name = path.basename(targetPath);
-  const unchanged = `${name} on disk was not changed, and ${stillOpenNote}.`;
-  if (code === "ENOSPC") return `There is not enough free disk space to save ${name}. ${unchanged} Free some space, or use File > Save As to save to another drive.`;
-  if (code === "EBUSY" || code === "EPERM" || code === "EACCES" || code === "EROFS")
-    return `${name} could not be written: the file is in use by another program (for example OpenCE or Halo), or the file or its folder is read-only. ${unchanged} Close the other program and try again, or use File > Save As.`;
-  if (code === "ENOENT") return `The folder for ${name} no longer exists. ${unchanged}`;
-  return `Could not save ${name}: ${err instanceof Error ? err.message : String(err)}. ${unchanged}`;
-}
-function writeFinalizedMap(map, outputPath, stillOpenNote) {
-  const finalized = finalizeForSave(map, { fileName: path.basename(outputPath) });
-  const tempPath = `${outputPath}.tmp-${(0, import_crypto2.randomUUID)()}`;
-  try {
-    mapFs.writeFileSync(tempPath, finalized.buffer);
-    mapFs.renameSync(tempPath, outputPath);
-  } catch (err) {
-    removeTempFile(tempPath);
-    throw Object.assign(new Error(describeMapWriteError(err, outputPath, stillOpenNote)), { code: "WRITE_FAILED" });
-  }
-  return finalized;
+function writeFinalizedMap2(map, outputPath, stillOpenNote) {
+  return writeFinalizedMap(map, outputPath, { writeFileSync: mapFs.writeFileSync, renameSync: mapFs.renameSync, removeIfExists: removeTempFile }, stillOpenNote);
 }
 function isOpenMapPath(outputPath) {
   return !!currentMap && path.resolve(outputPath).toLowerCase() === path.resolve(currentMap.filePath).toLowerCase();
@@ -36867,7 +37320,7 @@ function runSaveMap(task) {
   }
   try {
     progress(task.requestId, "Writing map", 40);
-    saved(task.requestId, target, writeFinalizedMap(currentMap.buffer, target));
+    saved(task.requestId, target, writeFinalizedMap2(currentMap.buffer, target));
   } catch (err) {
     sendWriteError(task.requestId, err);
   }
@@ -36877,7 +37330,7 @@ function runSaveMapAs(task) {
   if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "You cannot overwrite the open map with Save As. Use File > Save, or choose a different file name.");
   try {
     progress(task.requestId, "Writing map", 40);
-    saved(task.requestId, task.outputPath, writeFinalizedMap(currentMap.buffer, task.outputPath));
+    saved(task.requestId, task.outputPath, writeFinalizedMap2(currentMap.buffer, task.outputPath));
   } catch (err) {
     sendWriteError(task.requestId, err);
   }
@@ -36906,7 +37359,7 @@ function runConvertMap(task) {
     const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts });
     if (inspectCustomEditionMap(converted.buffer).status !== "ok") throw new Error("The converted map could not be read back as a Custom Edition map; nothing was written.");
     progress(task.requestId, "Writing map", 60);
-    const finalized = writeFinalizedMap(converted.buffer, task.outputPath, "the source map was not changed");
+    const finalized = writeFinalizedMap2(converted.buffer, task.outputPath, "the source map was not changed");
     currentMap = reparse(task.outputPath, finalized.buffer, false, diskStatOf(task.outputPath));
     progress(task.requestId, "Done", 100);
     sendResult(task.requestId, {

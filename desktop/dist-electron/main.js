@@ -33717,6 +33717,12 @@ function scenarioNameFromFileName(fileName) {
   return { name, warnings };
 }
 
+// ../core/src/map/convert/resource-files.ts
+var MAX_PATHS_BLOCK = 64 * 1024 * 1024;
+
+// ../core/src/map/convert/externalize-in.ts
+var MAX_BLOCKS_PER_LIST = 1 << 20;
+
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
