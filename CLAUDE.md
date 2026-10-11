@@ -19,6 +19,7 @@ The real project lives in `core/` and `desktop/`. **`backend/` (FastAPI/Mongo), 
   - Label status as "verified by tests", "same-reader", "verified in mock preview", or "unverified". Nothing is "done" until the user confirms it on Windows and in OpenCE.
 - `memory/PRD.md` holds the milestone status table and the log of approved decisions. Check it before re-asking something. It is the source of truth. The README's status section is only a summary.
 - `memory/demo-converter.md` holds the converter research notes. Read it before any converter work.
+- `memory/opence-notes.md` holds OpenCE's checks (tested build, pinned commit). Optional local read-only OpenCE clone: `C:\temp\OpenCE-src` (never committed).
 
 ## Working style (Claude Code)
 
