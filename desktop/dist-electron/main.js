@@ -33727,6 +33727,9 @@ var MAX_BLOCKS_PER_LIST = 1 << 20;
 var PARTS_HAVE_LOCAL_NODES = 1 << 1;
 var MAXIMUM_COMPRESSIBLE_COMPONENT = Math.fround(1.005);
 
+// ../core/src/map/convert/tag-data-repairs.ts
+var TAG_DATA_REPAIR_IDS = ["alignTagData", "scriptSyntaxData", "tagRootOutside"];
+
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
@@ -34046,7 +34049,7 @@ function defaultConvertOutputPath(sourcePath) {
   const stem = path7.basename(sourcePath).replace(/\.map$/i, "");
   return path7.join(dir, `${stem}_ce.map`);
 }
-var REPAIR_IDS = ["scriptSyntaxData", "tagRootOutside"];
+var REPAIR_IDS = TAG_DATA_REPAIR_IDS;
 function sanitizeRepairChoice(value) {
   const out = {};
   if (!value || typeof value !== "object") return out;

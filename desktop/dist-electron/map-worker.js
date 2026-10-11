@@ -34438,20 +34438,20 @@ function validateStructInstance(buffer, tagIndex, structName, fileOffset, fileOf
       validateDependency(value.value, classes, tagIndex, fieldContext, errors);
     } else if (value.kind === "reflexive") {
       stats.reflexivesChecked++;
-      const { count, pointerLow } = value.value;
-      if (count === 0) continue;
+      const { count: count2, pointerLow } = value.value;
+      if (count2 === 0) continue;
       const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
       if (!childStructName) continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const childBaseOffset = resolvePointer(pointerLow, fileOffsetAnchor, baseMemoryAddress);
-      if (childBaseOffset < 0 || childBaseOffset + count * childSize > buffer.length) {
+      if (childBaseOffset < 0 || childBaseOffset + count2 * childSize > buffer.length) {
         errors.push(
-          `${fieldContext}: reflexive of ${count}x "${childStructName}" at file offset ${childBaseOffset} is out of bounds of the file.`
+          `${fieldContext}: reflexive of ${count2}x "${childStructName}" at file offset ${childBaseOffset} is out of bounds of the file.`
         );
         continue;
       }
-      stats.elementsBoundsChecked += count;
-      const fullyValidateCount = Math.min(count, MAX_ELEMENTS_FULLY_VALIDATED_PER_REFLEXIVE);
+      stats.elementsBoundsChecked += count2;
+      const fullyValidateCount = Math.min(count2, MAX_ELEMENTS_FULLY_VALIDATED_PER_REFLEXIVE);
       for (let i = 0; i < fullyValidateCount; i++) {
         validateStructInstance(
           buffer,
@@ -34472,11 +34472,11 @@ function locateStructureBsp(buffer, tagIndex, scenarioFileOffset, scenarioFileOf
   const decodedScenario = decodeStruct(buffer, scenarioFileOffset, "Scenario");
   const bspsField = decodedScenario.get("structure bsps");
   if (!bspsField || bspsField.kind !== "reflexive") return null;
-  const { count, pointerLow } = bspsField.value;
-  if (count === 0) return null;
+  const { count: count2, pointerLow } = bspsField.value;
+  if (count2 === 0) return null;
   const childSize = resolveStruct("ScenarioBSP").totalSize;
   const arrayOffset = scenarioFileOffsetAnchor + (pointerLow - scenarioBaseMemoryAddress);
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < count2; i++) {
     const entryOffset = arrayOffset + i * childSize;
     const decoded = decodeStruct(buffer, entryOffset, "ScenarioBSP");
     const dep = decoded.get("structure bsp");
@@ -34963,12 +34963,12 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
   }
 }
 function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
-  const walk = walkDependencies(buffer, header, tagIndex, rootIndices, options);
+  const walk2 = walkDependencies(buffer, header, tagIndex, rootIndices, options);
   const extractableWalked = [];
   const notExtracted = [];
   const notExtractedByOriginal = /* @__PURE__ */ new Map();
   const knownGroups = new Set(getAllTagGroupNames());
-  for (const t of walk.tags) {
+  for (const t of walk2.tags) {
     const def = knownGroups.has(t.group) ? getGroupDefinition(t.group) : null;
     if (def && def.extractable === false) {
       const entry = {
@@ -35072,7 +35072,7 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
     }
   });
   options.onProgress?.(extractableWalked.length, extractableWalked.length);
-  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...walk.warnings, ...extraWarnings] };
+  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...walk2.warnings, ...extraWarnings] };
 }
 
 // ../core/src/map/container.ts
@@ -35189,7 +35189,7 @@ var UnwalkableTagError = class extends Error {
     this.name = "UnwalkableTagError";
   }
 };
-function collectTagDataPointers(buffer, layout) {
+function collectTagDataPointers(buffer, layout, options = {}) {
   const { tagDataOffset, tagDataSize, baseMemoryAddress } = layout;
   const tagDataEnd = tagDataOffset + tagDataSize;
   const fileOf = (pointer) => tagDataOffset + (pointer - baseMemoryAddress | 0);
@@ -35205,6 +35205,12 @@ function collectTagDataPointers(buffer, layout) {
     seenSites.add(at);
     sites.push({ kind, at, value: buffer.readUInt32LE(at), tagIndex });
   };
+  const tolerate = (pointer) => {
+    if (seenSites.has(pointer.at)) return;
+    seenSites.add(pointer.at);
+    options.tolerated?.push(pointer);
+  };
+  const stalePath = (pathPointer) => options.tolerate?.staleReferencePaths === true && !inTagData(pathPointer, 1);
   for (const e of layout.entries) {
     const group = e.primaryClassName ?? "(unknown)";
     const fail = (reason) => {
@@ -35226,7 +35232,12 @@ function collectTagDataPointers(buffer, layout) {
     if (UNCERTAIN_GROUPS.includes(group)) fail("this group has no reliable field layout");
     const rootStruct = e.primaryClassName ? getGroupStructName(e.primaryClassName) : null;
     if (!rootStruct) fail("there is no definition for this group");
-    const walk = (structName, pointer, where) => {
+    if (options.tolerate?.rootsOutsideTagData && !inTagData(dataPointer, resolveStruct(rootStruct).totalSize)) {
+      options.tolerated?.push({ kind: "rootOutsideTagData", tagIndex: e.index, at: entryAt + 20, value: dataPointer, where: `${e.path} root` });
+      addSite("tagData", entryAt + 20, e.index);
+      continue;
+    }
+    const walk2 = (structName, pointer, where) => {
       const size = resolveStruct(structName).totalSize;
       if (!inTagData(pointer, size)) fail(`${where} is outside the tag data`);
       const at = fileOf(pointer);
@@ -35242,6 +35253,10 @@ function collectTagDataPointers(buffer, layout) {
         if (value.kind === "dependency") {
           const pathPointer = value.value.pathPointer >>> 0;
           if (pathPointer === 0) continue;
+          if (stalePath(pathPointer)) {
+            tolerate({ kind: "staleReferencePath", tagIndex: e.index, at: fieldAt + 4, value: pathPointer, where: fieldWhere });
+            continue;
+          }
           if (!inTagData(pathPointer, 1)) fail(`${fieldWhere} has a path pointer outside the tag data`);
           addSite("referencePath", fieldAt + 4, e.index);
         } else if (value.kind === "reflexive" && field.def.type === "TagReflexive") {
@@ -35256,7 +35271,7 @@ function collectTagDataPointers(buffer, layout) {
           const childSize = resolveStruct(childStruct).totalSize;
           if (!inTagData(pointer2, value.value.count * childSize)) fail(`${fieldWhere} (${value.value.count} blocks) is outside the tag data`);
           addSite("reflexive", fieldAt + 4, e.index);
-          for (let i = 0; i < value.value.count; i++) walk(childStruct, pointer2 + i * childSize >>> 0, `${fieldWhere}[${i}]`);
+          for (let i = 0; i < value.value.count; i++) walk2(childStruct, pointer2 + i * childSize >>> 0, `${fieldWhere}[${i}]`);
         } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset") {
           if (field.def.externalFileOffset) continue;
           const pointer2 = value.value.pointerLow >>> 0;
@@ -35273,16 +35288,16 @@ function collectTagDataPointers(buffer, layout) {
       }
     };
     addSite("tagData", entryAt + 20, e.index);
-    walk(rootStruct, dataPointer, e.path);
+    walk2(rootStruct, dataPointer, e.path);
   }
-  collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite);
+  collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, (pathPointer) => stalePath(pathPointer), tolerate);
   return sites;
 }
 function basicNumber(decoded, name) {
   const v = decoded.get(name);
   return v?.kind === "basic" && typeof v.value === "number" ? v.value : void 0;
 }
-function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite) {
+function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, stalePath = () => false, tolerate = () => void 0) {
   const scenarioStruct = getGroupStructName("scenario");
   const bspStruct = getGroupStructName("scenario_structure_bsp");
   if (!scenarioStruct || !bspStruct) return;
@@ -35313,7 +35328,7 @@ function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite) {
         return at >= bspStart && at + length <= bspStart + bspSize && at + length <= buffer.length;
       };
       const visited = /* @__PURE__ */ new Set();
-      const walk = (structName, pointer, where) => {
+      const walk2 = (structName, pointer, where) => {
         const size = resolveStruct(structName).totalSize;
         if (!inBsp(pointer, size)) fail(`${where} is outside the BSP data`);
         const at = bspStart + (pointer - bspAddress | 0);
@@ -35327,6 +35342,10 @@ function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite) {
           if (value.kind === "dependency") {
             const pathPointer = value.value.pathPointer >>> 0;
             if (pathPointer === 0) continue;
+            if (stalePath(pathPointer)) {
+              tolerate({ kind: "staleReferencePath", tagIndex: name.index, at: at + field.offset + 4, value: pathPointer, where: `${where}.${field.name}` });
+              continue;
+            }
             if (!inTagData(pathPointer, 1)) fail(`${where}.${field.name} has a path pointer outside the tag data`);
             addSite("bspReferencePath", at + field.offset + 4, name.index);
           } else if (value.kind === "reflexive" && field.def.type === "TagReflexive" && value.value.count > 0) {
@@ -35335,11 +35354,11 @@ function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite) {
             const childSize = resolveStruct(childStruct).totalSize;
             const childPointer = value.value.pointerLow >>> 0;
             if (!inBsp(childPointer, value.value.count * childSize)) fail(`${where}.${field.name} (${value.value.count} blocks) is outside the BSP data`);
-            for (let i = 0; i < value.value.count; i++) walk(childStruct, childPointer + i * childSize >>> 0, `${where}.${field.name}[${i}]`);
+            for (let i = 0; i < value.value.count; i++) walk2(childStruct, childPointer + i * childSize >>> 0, `${where}.${field.name}[${i}]`);
           }
         }
       };
-      walk(bspStruct, buffer.readUInt32LE(bspStart), name.path);
+      walk2(bspStruct, buffer.readUInt32LE(bspStart), name.path);
     }
   }
 }
@@ -36005,20 +36024,20 @@ function verifyEmbeddedData(buffer, header, tagIndex) {
     }
     checkedIndices.push(e.index);
   }
-  const walk = checkedIndices.length > 0 ? walkDependencies(buffer, header, tagIndex, checkedIndices) : { tags: [], externalTags: [], warnings: [] };
-  for (const t of [...walk.tags, ...walk.externalTags]) {
+  const walk2 = checkedIndices.length > 0 ? walkDependencies(buffer, header, tagIndex, checkedIndices) : { tags: [], externalTags: [], warnings: [] };
+  for (const t of [...walk2.tags, ...walk2.externalTags]) {
     if (t.status !== "ok") {
       blockedTags.push({ tagPath: t.path, group: t.group, reason: `Unexpected tag status "${t.status}" for a bitmap/sound tag - treated as unrecognized, not guessed.` });
     }
   }
-  for (const w of walk.warnings) {
+  for (const w of walk2.warnings) {
     if (w.kind === "invalidReflexive") {
       const entry = candidates.find((e) => e.index === w.originalIndex);
       blockedTags.push({ tagPath: entry?.path ?? `tag #${w.originalIndex}`, group: entry?.primaryClassName ?? "", reason: `${w.message} Not guessed.` });
     }
   }
   const assets = [];
-  for (const w of walk.warnings) {
+  for (const w of walk2.warnings) {
     if (w.kind !== "embeddedRawData" && w.kind !== "externalData") continue;
     const entry = candidates.find((e) => e.index === w.originalIndex);
     const fileOffset = w.fileOffset ?? 0;
@@ -36195,7 +36214,7 @@ function findReferenceIdentityIssues(buffer, header, tagIndex) {
   const entryPathPointer = (index) => buffer.readUInt32LE(arrayAt + index * TAG_ENTRY_SIZE + 16);
   const issues = [];
   const visited = /* @__PURE__ */ new Set();
-  const walk = (structName, at, anchor, base, context) => {
+  const walk2 = (structName, at, anchor, base, context) => {
     const resolved = resolveStruct(structName);
     if (!isRangeInBuffer(at, resolved.totalSize, buffer.length)) return;
     const key = `${structName}@${at}`;
@@ -36223,7 +36242,7 @@ function findReferenceIdentityIssues(buffer, header, tagIndex) {
         const size = resolveStruct(child).totalSize;
         const first = resolvePointer(value.value.pointerLow, anchor, base);
         if (!isRangeInBuffer(first, value.value.count * size, buffer.length)) continue;
-        for (let i = 0; i < value.value.count; i++) walk(child, first + i * size, anchor, base, `${context}.${field.name}[${i}]`);
+        for (let i = 0; i < value.value.count; i++) walk2(child, first + i * size, anchor, base, `${context}.${field.name}[${i}]`);
       }
     }
   };
@@ -36238,9 +36257,9 @@ function findReferenceIdentityIssues(buffer, header, tagIndex) {
     if (group === "scenario_structure_bsp") {
       if (scenarioAt === null) continue;
       const bsp = locateStructureBsp(buffer, tagIndex, scenarioAt, header.tagDataOffset, tagIndex.baseMemoryAddress, entry.tagId);
-      if (bsp) walk(structName, bsp.fileOffset, bsp.fileOffsetAnchor, bsp.baseMemoryAddress, `${entry.path}.${group}`);
+      if (bsp) walk2(structName, bsp.fileOffset, bsp.fileOffsetAnchor, bsp.baseMemoryAddress, `${entry.path}.${group}`);
     } else {
-      walk(structName, resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress), header.tagDataOffset, tagIndex.baseMemoryAddress, `${entry.path}.${group}`);
+      walk2(structName, resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress), header.tagDataOffset, tagIndex.baseMemoryAddress, `${entry.path}.${group}`);
     }
   }
   return issues;
@@ -36306,20 +36325,20 @@ function readResourceTable(file, kind) {
   const type = header.readUInt32LE(0);
   const pathsOffset = header.readUInt32LE(4);
   const tableOffset = header.readUInt32LE(8);
-  const count = header.readUInt32LE(12);
+  const count2 = header.readUInt32LE(12);
   if (type !== RESOURCE_MAP_TYPE_BY_KIND[kind]) {
     const actual = Object.keys(RESOURCE_MAP_TYPE_BY_KIND).find((k) => RESOURCE_MAP_TYPE_BY_KIND[k] === type);
     return { ok: false, error: actual ? `${file.label} is a ${actual}.map resource file, not a ${name}.` : `${file.label} is not a resource map (type ${type}).` };
   }
-  if (count === 0 || tableOffset + count * ENTRY_SIZE > file.size) return { ok: false, error: `${file.label}: the resource table is empty or runs past the end of the file.` };
+  if (count2 === 0 || tableOffset + count2 * ENTRY_SIZE > file.size) return { ok: false, error: `${file.label}: the resource table is empty or runs past the end of the file.` };
   if (pathsOffset < HEADER_SIZE || pathsOffset > tableOffset || tableOffset - pathsOffset > MAX_PATHS_BLOCK) {
     return { ok: false, error: `${file.label}: the resource names block is not where a ${name} has it.` };
   }
-  const table = file.read(tableOffset, count * ENTRY_SIZE);
+  const table = file.read(tableOffset, count2 * ENTRY_SIZE);
   const paths = file.read(pathsOffset, tableOffset - pathsOffset);
   const entries = [];
   const byRange = /* @__PURE__ */ new Map();
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < count2; i++) {
     const pathAt = table.readUInt32LE(i * ENTRY_SIZE);
     const size = table.readUInt32LE(i * ENTRY_SIZE + 4);
     const dataOffset = table.readUInt32LE(i * ENTRY_SIZE + 8);
@@ -36371,7 +36390,7 @@ function scanPerAssetData(view, header, tagIndex) {
   const visited = /* @__PURE__ */ new Set();
   const bsps = structureBspsOf(view, header, tagIndex);
   const bspEnd = bsps.reduce((end, b) => Math.max(end, b.start + b.size), CACHE_HEADER_SIZE);
-  const walk = (structName, at, anchor, base, tag, path2, indices) => {
+  const walk2 = (structName, at, anchor, base, tag, path2, indices) => {
     const resolved = resolveStruct(structName);
     if (!isRangeInBuffer(at, resolved.totalSize, view.length)) {
       if (structMayHoldAssets(structName)) blocked.push(`${tag.path}: ${path2 || structName} is outside the file, so its bitmap or sound data can't be checked.`);
@@ -36421,7 +36440,7 @@ function scanPerAssetData(view, header, tagIndex) {
       }
       const childSize = resolveStruct(field.def.struct).totalSize;
       const first = resolvePointer(value.value.pointerLow >>> 0, anchor, base);
-      for (let i = 0; i < value.value.count; i++) walk(field.def.struct, first + i * childSize, anchor, base, tag, `${childPath}[${i}]`, [...indices, i]);
+      for (let i = 0; i < value.value.count; i++) walk2(field.def.struct, first + i * childSize, anchor, base, tag, `${childPath}[${i}]`, [...indices, i]);
     }
   };
   for (const e of tagIndex.entries) {
@@ -36436,9 +36455,9 @@ function scanPerAssetData(view, header, tagIndex) {
         blocked.push(`${e.path}: this BSP is not in the scenario's "structure bsps" list, so it can't be read.`);
         continue;
       }
-      walk(structName, resolvePointer(view.readUInt32LE(bsp.start), bsp.start, bsp.address), bsp.start, bsp.address, tag, "", []);
+      walk2(structName, resolvePointer(view.readUInt32LE(bsp.start), bsp.start, bsp.address), bsp.start, bsp.address, tag, "", []);
     } else {
-      walk(structName, resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress), header.tagDataOffset, tagIndex.baseMemoryAddress, tag, "", []);
+      walk2(structName, resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress), header.tagDataOffset, tagIndex.baseMemoryAddress, tag, "", []);
     }
   }
   return { assets, blocked, bspEnd };
@@ -36660,9 +36679,9 @@ function checkTagDataExtents(buffer, header, tagIndex) {
         if (id !== NULL_TAG_ID6) referenceCounts.set(id, (referenceCounts.get(id) ?? 0) + 1);
       } else if (value.kind === "reflexive" && field.def.type === "TagReflexive" && value.value.count !== 0 && field.def.struct) {
         const size = resolveStruct(field.def.struct).totalSize;
-        const count = value.value.count >>> 0;
-        if (checkBlock(r, tagI, `${path2}[${count} x ${size}]`, field.name, false, value.value.pointerLow, count * size)) {
-          children.push({ struct: field.def.struct, pointer: value.value.pointerLow >>> 0, count, size, where: path2 });
+        const count2 = value.value.count >>> 0;
+        if (checkBlock(r, tagI, `${path2}[${count2} x ${size}]`, field.name, false, value.value.pointerLow, count2 * size)) {
+          children.push({ struct: field.def.struct, pointer: value.value.pointerLow >>> 0, count: count2, size, where: path2 });
         }
       } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size !== 0) {
         checkBlock(r, tagI, path2, field.name, false, value.value.pointerLow, value.value.size >>> 0);
@@ -36986,9 +37005,9 @@ function planTagDataRepairs(view, header, tagIndex, extents) {
       const at = fileOf(address);
       const maximum = headerReadable ? view.readInt16LE(at + DATA_ARRAY_MAXIMUM_COUNT) : -1;
       const elementSize = headerReadable ? view.readInt16LE(at + DATA_ARRAY_ELEMENT_SIZE) : -1;
-      const count = headerReadable ? view.readInt16LE(at + DATA_ARRAY_COUNT) : -1;
-      const consistent = headerReadable && elementSize === SCRIPT_NODE_SIZE && maximum > 0 && count >= 0 && count <= maximum && size === DATA_ARRAY_HEADER_SIZE + maximum * elementSize;
-      const used = consistent ? DATA_ARRAY_HEADER_SIZE + count * SCRIPT_NODE_SIZE : -1;
+      const count2 = headerReadable ? view.readInt16LE(at + DATA_ARRAY_COUNT) : -1;
+      const consistent = headerReadable && elementSize === SCRIPT_NODE_SIZE && maximum > 0 && count2 >= 0 && count2 <= maximum && size === DATA_ARRAY_HEADER_SIZE + maximum * elementSize;
+      const used = consistent ? DATA_ARRAY_HEADER_SIZE + count2 * SCRIPT_NODE_SIZE : -1;
       const where = `${scenario.path}.scenario script syntax data`;
       const plan = (required, details) => repairs.push({
         id: "scriptSyntaxData",
@@ -37006,24 +37025,24 @@ function planTagDataRepairs(view, header, tagIndex, extents) {
         const violation = extents.violations[violationIndex];
         const free = extents.freeTagDataBytesAt(address, size);
         if (!consistent) {
-          unrepairable.push(`${violation.text}. Its script node table header can't be read as a script node array (${maximum} slots of ${elementSize} bytes, ${count} in use, ${fmt(size)} bytes declared), so it is not known which bytes are its own.`);
+          unrepairable.push(`${violation.text}. Its script node table header can't be read as a script node array (${maximum} slots of ${elementSize} bytes, ${count2} in use, ${fmt(size)} bytes declared), so it is not known which bytes are its own.`);
         } else if (used > free) {
-          unrepairable.push(`${violation.text}. Its header and ${count} used script node(s) take ${fmt(used)} bytes, but only ${fmt(free)} bytes from its start belong to it alone, so its scripts can't be recovered.`);
+          unrepairable.push(`${violation.text}. Its header and ${count2} used script node(s) take ${fmt(used)} bytes, but only ${fmt(free)} bytes from its start belong to it alone, so its scripts can't be recovered.`);
         } else {
           plan(true, [
             violation.text,
-            `Only the first ${fmt(free)} of its ${fmt(size)} bytes are its own; the rest belongs to other tags. ${count} of ${maximum} node slots are used (${fmt(used)} bytes with the header), so everything in use fits.`,
+            `Only the first ${fmt(free)} of its ${fmt(size)} bytes are its own; the rest belongs to other tags. ${count2} of ${maximum} node slots are used (${fmt(used)} bytes with the header), so everything in use fits.`,
             `New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes copied, the rest zero (a zeroed slot is a free slot).`
           ]);
         }
       } else if (!aligned && consistent) {
         plan(true, [
           `${where} starts at ${hex2(address)}, which is not 4-aligned from the tag data start. OpenCE stops loading at "the scenario's script data is missing or damaged; its scripts won't run" (a blue screen).`,
-          `${count} of ${maximum} node slots are used. New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes (${fmt(used)} bytes) copied, the rest zero (a zeroed slot is a free slot).`
+          `${count2} of ${maximum} node slots are used. New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes (${fmt(used)} bytes) copied, the rest zero (a zeroed slot is a free slot).`
         ]);
       } else if (!aligned) {
         unrepairable.push(
-          `${where} starts at ${hex2(address)}, which is not 4-aligned, so OpenCE stops loading at "the scenario's script data is missing or damaged". Its header can't be read as a script node array (${maximum} slots of ${elementSize} bytes, ${count} in use, ${fmt(size)} bytes declared), so it is not moved.`
+          `${where} starts at ${hex2(address)}, which is not 4-aligned, so OpenCE stops loading at "the scenario's script data is missing or damaged". Its header can't be read as a script node array (${maximum} slots of ${elementSize} bytes, ${count2} in use, ${fmt(size)} bytes declared), so it is not moved.`
         );
       }
     }
@@ -37106,6 +37125,182 @@ function repairBytesAdded(tagDataSize, repairs) {
   return end - tagDataSize;
 }
 
+// ../core/src/map/convert/align-tag-data.ts
+var ALIGNMENT2 = 4;
+var TagDataAlignmentError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "TagDataAlignmentError";
+  }
+};
+var hex3 = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+var zeroCounts2 = () => ({ checked: 0, unaligned: 0, byRemainder: [0, 0, 0, 0] });
+var count = (c, offset) => {
+  const r = (offset % ALIGNMENT2 + ALIGNMENT2) % ALIGNMENT2;
+  c.checked++;
+  c.byRemainder[r]++;
+  if (r !== 0) c.unaligned++;
+};
+var MAX_EXAMPLES = 20;
+var TAG_DATA_FILE_SIZE_OFFSET2 = 8;
+var TAG_DATA_SIZE_OFFSET3 = 20;
+var TAG_DATA_TAG_DATA_OFFSET2 = 16;
+var REFLEXIVE_COUNT_BEFORE_POINTER = 4;
+var DATA_SIZE_BEFORE_POINTER = 12;
+function walk(buffer, header, tagIndex) {
+  const tolerated = [];
+  const sites = collectTagDataPointers(buffer, tagDataLayoutOf(header, tagIndex), { tolerate: { staleReferencePaths: true, rootsOutsideTagData: true }, tolerated });
+  return { sites, tolerated };
+}
+function countBspBlocks(buffer, header, tagIndex, counts, examples) {
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scenarioStruct = getGroupStructName("scenario");
+  const bspStruct = getGroupStructName("scenario_structure_bsp");
+  if (!scenario || scenario.isExternal || !scenarioStruct || !bspStruct) return;
+  const base = tagIndex.baseMemoryAddress;
+  const scenarioAt = header.tagDataOffset + (scenario.tagDataPointerOrResourceIndex - base);
+  const bsps = decodeStruct(buffer, scenarioAt, scenarioStruct).get("structure bsps");
+  const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === "structure bsps");
+  const elementStruct = field?.def.type === "TagReflexive" ? field.def.struct : void 0;
+  if (bsps?.kind !== "reflexive" || !elementStruct) return;
+  const elementSize = resolveStruct(elementStruct).totalSize;
+  for (let b = 0; b < bsps.value.count; b++) {
+    const element = decodeStruct(buffer, header.tagDataOffset + (bsps.value.pointerLow + b * elementSize - base), elementStruct);
+    const num = (name) => {
+      const v = element.get(name);
+      return v?.kind === "basic" ? Number(v.value) >>> 0 : 0;
+    };
+    const start = num("bsp start");
+    const size = num("bsp size");
+    const address = num("bsp address");
+    const inBsp = (pointer, length) => {
+      const at = start + (pointer - address | 0);
+      return at >= start && at + length <= start + size && at + length <= buffer.length;
+    };
+    const visited = /* @__PURE__ */ new Set();
+    const visit = (structName, pointer) => {
+      const structSize = resolveStruct(structName).totalSize;
+      if (!inBsp(pointer, structSize)) return;
+      const at = start + (pointer - address | 0);
+      const key = `${structName}@${at}`;
+      if (visited.has(key)) return;
+      visited.add(key);
+      const decoded = decodeStruct(buffer, at, structName);
+      for (const f of resolveStruct(structName).fields) {
+        const v = decoded.get(f.name);
+        if (!v || f.def.nonCached || v.kind !== "reflexive" || f.def.type !== "TagReflexive" || v.value.count <= 0 || !f.def.struct) continue;
+        const child = f.def.struct;
+        const childSize = resolveStruct(child).totalSize;
+        const childPointer = v.value.pointerLow >>> 0;
+        count(counts, childPointer - address);
+        if ((childPointer - address) % ALIGNMENT2 !== 0 && examples.length < MAX_EXAMPLES) examples.push(`structure BSP ${b} ${structName}.${f.name}: ${v.value.count} block(s) at ${hex3(childPointer)}, ${(childPointer - address) % ALIGNMENT2} mod 4 from the BSP address`);
+        if (!inBsp(childPointer, v.value.count * childSize)) continue;
+        for (let i = 0; i < v.value.count; i++) visit(child, childPointer + i * childSize >>> 0);
+      }
+    };
+    if (size >= 4 && start + 4 <= buffer.length) visit(bspStruct, buffer.readUInt32LE(start));
+  }
+}
+function measure(buffer, header, tagIndex, walked) {
+  const base = tagIndex.baseMemoryAddress;
+  const report = { blocks: zeroCounts2(), bspBlocks: zeroCounts2(), roots: zeroCounts2(), dataBlocks: zeroCounts2(), examples: [] };
+  const skipped = new Set(walked.tolerated.filter((t) => t.kind === "rootOutsideTagData").map((t) => t.tagIndex));
+  const name = (i) => tagIndex.entries[i]?.path ?? `#${i}`;
+  for (const s of walked.sites) {
+    const offset = s.value - base;
+    if (s.kind === "reflexive") {
+      if (buffer.readInt32LE(s.at - REFLEXIVE_COUNT_BEFORE_POINTER) <= 0) continue;
+      count(report.blocks, offset);
+      if (offset % ALIGNMENT2 !== 0 && report.examples.length < MAX_EXAMPLES) report.examples.push(`#${s.tagIndex} ${name(s.tagIndex)}: block at ${hex3(s.value)}, ${offset % ALIGNMENT2} mod 4`);
+    } else if (s.kind === "tagData") {
+      if (!skipped.has(s.tagIndex)) count(report.roots, offset);
+    } else if (s.kind === "dataBlock") {
+      if (buffer.readInt32LE(s.at - DATA_SIZE_BEFORE_POINTER) > 0) count(report.dataBlocks, offset);
+    }
+  }
+  countBspBlocks(buffer, header, tagIndex, report.bspBlocks, report.examples);
+  return report;
+}
+function measureBlockAlignment(buffer, header, tagIndex) {
+  return measure(buffer, header, tagIndex, walk(buffer, header, tagIndex));
+}
+function planTagDataAlignment(buffer, header, tagIndex) {
+  const empty = { tagPath: 0, tagData: 0, reflexive: 0, dataBlock: 0, referencePath: 0, bspReferencePath: 0 };
+  const plan = { report: { blocks: zeroCounts2(), bspBlocks: zeroCounts2(), roots: zeroCounts2(), dataBlocks: zeroCounts2(), examples: [] }, needed: false, insertAt: 0, bytes: 0, remainder: 0, pointersToMove: { ...empty }, tolerated: [], problems: [] };
+  let walked;
+  try {
+    walked = walk(buffer, header, tagIndex);
+  } catch (err) {
+    if (err instanceof UnwalkableTagError) {
+      plan.problems.push(`${err.message} OpenCE's block reads can't be checked or fixed without walking every tag.`);
+      return plan;
+    }
+    throw err;
+  }
+  plan.tolerated = walked.tolerated;
+  plan.report = measure(buffer, header, tagIndex, walked);
+  const { blocks, roots, dataBlocks, bspBlocks } = plan.report;
+  plan.needed = blocks.unaligned + roots.unaligned + dataBlocks.unaligned > 0;
+  if (bspBlocks.unaligned > 0) plan.problems.push(`${bspBlocks.unaligned} block(s) inside the structure BSP(s) are not 4-aligned from the BSP address. Moving BSP data is not part of this repair.`);
+  if (!plan.needed) return plan;
+  const base = tagIndex.baseMemoryAddress >>> 0;
+  const tds = header.tagDataSize;
+  const tdo = header.tagDataOffset;
+  const remainders = [0, 1, 2, 3].filter((r) => blocks.byRemainder[r] + roots.byRemainder[r] + dataBlocks.byRemainder[r] > 0);
+  if (remainders.length !== 1) {
+    plan.problems.push(`The tag data's roots and blocks start at different remainders mod 4 (${remainders.join(", ")}), so no single shift aligns them; a per-block re-layout is not supported.`);
+    return plan;
+  }
+  plan.remainder = remainders[0];
+  plan.bytes = (ALIGNMENT2 - plan.remainder) % ALIGNMENT2;
+  const isPath = (k) => k === "tagPath" || k === "referencePath" || k === "bspReferencePath";
+  const inTagData = (v) => v >= base && v - base < tds;
+  let pathEnd = TAG_DATA_HEADER_PC_SIZE + tagIndex.tagCount * 32;
+  for (const s of walked.sites) {
+    if (!isPath(s.kind) || !inTagData(s.value)) continue;
+    let end = tdo + (s.value - base);
+    while (end < tdo + tds && buffer[end] !== 0) end++;
+    pathEnd = Math.max(pathEnd, end + 1 - tdo);
+  }
+  plan.insertAt = pathEnd;
+  const early = walked.sites.filter((s) => !isPath(s.kind) && s.value !== 0 && inTagData(s.value) && s.value - base < pathEnd);
+  if (early.length > 0) plan.problems.push(`${early.length} block(s) start before the end of the tag path strings (${hex3(base + pathEnd)}), e.g. ${hex3(early[0].value)} in #${early[0].tagIndex}; the strings and the tags are interleaved, so one insertion can't align them.`);
+  const fileLength = buffer.readUInt32LE(TAG_DATA_FILE_SIZE_OFFSET2);
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  let limit = base + CE_TAG_SPACE_SIZE;
+  if (scenario && !scenario.isExternal && inTagData(scenario.tagDataPointerOrResourceIndex >>> 0)) {
+    const lowest = bspAddresses(buffer, header, tagIndex, tdo + (scenario.tagDataPointerOrResourceIndex - base))[0];
+    if (lowest !== void 0) limit = Math.min(limit, lowest);
+  }
+  if (tdo + tds !== fileLength) plan.problems.push(`The tag data (file offset ${tdo}, ${tds} bytes) is not the last block of the file (${fileLength} bytes), so it can't grow.`);
+  else if (base + tds + plan.bytes > limit) plan.problems.push(`The aligned tag data would end at ${hex3(base + tds + plan.bytes)}, past ${hex3(limit)} (the lowest structure BSP address or the end of the tag space).`);
+  for (const s of walked.sites) if (s.value >= base + pathEnd && s.value < base + tds) plan.pointersToMove[s.kind]++;
+  return plan;
+}
+function applyTagDataAlignment(map, expected) {
+  const header = parseCacheFileHeader(map);
+  const tagIndex = parseTagIndex(map, header);
+  const plan = planTagDataAlignment(map, header, tagIndex);
+  if (plan.problems.length > 0) throw new TagDataAlignmentError(`The tag data can't be aligned: ${plan.problems.join(" ")} Nothing was written.`);
+  if (!plan.needed || plan.insertAt !== expected.insertAt || plan.bytes !== expected.bytes) {
+    throw new TagDataAlignmentError(`The tag data alignment differs from the pre-flight plan (${plan.bytes} bytes at ${plan.insertAt}, planned ${expected.bytes} at ${expected.insertAt}). Nothing was written.`);
+  }
+  const base = tagIndex.baseMemoryAddress >>> 0;
+  const tdo = map.readUInt32LE(TAG_DATA_TAG_DATA_OFFSET2);
+  const tds = map.readUInt32LE(TAG_DATA_SIZE_OFFSET3);
+  if (map.readUInt32LE(TAG_DATA_FILE_SIZE_OFFSET2) !== map.length || tdo + tds !== map.length) throw new TagDataAlignmentError("The tag data is not the last block of the file. Nothing was written.");
+  const cut = tdo + plan.insertAt;
+  const out = Buffer.alloc(map.length + plan.bytes);
+  map.copy(out, 0, 0, cut);
+  map.copy(out, cut + plan.bytes, cut);
+  const sites = collectTagDataPointers(map, tagDataLayoutOf(header, tagIndex), { tolerate: { staleReferencePaths: true, rootsOutsideTagData: true }, tolerated: [] });
+  const outOffset = (at) => at < cut ? at : at + plan.bytes;
+  const counts = applyPointerShift(sites, { from: base + plan.insertAt >>> 0, to: base + tds >>> 0, delta: plan.bytes }, (at, value) => out.writeUInt32LE(value, outOffset(at)));
+  out.writeUInt32LE(out.length, TAG_DATA_FILE_SIZE_OFFSET2);
+  out.writeUInt32LE(tds + plan.bytes, TAG_DATA_SIZE_OFFSET3);
+  return { buffer: out, plan, moved: counts.totalRebased };
+}
+
 // ../core/src/map/convert/retail-to-ce.ts
 var VERSION_OFFSET = 4;
 var FILE_SIZE_OFFSET2 = 8;
@@ -37139,7 +37334,7 @@ var MAX_DETAILS = 50;
 function check(id, label, status, message, details = [], requiresAcknowledgement = false, repair) {
   return { id, label, status, message, details: details.slice(0, MAX_DETAILS), requiresAcknowledgement, ...repair ? { repair } : {} };
 }
-var hex3 = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
+var hex4 = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
 function runChecks(buffer, full, resources = {}) {
   const checks = [];
   const report = {
@@ -37194,11 +37389,11 @@ function runChecks(buffer, full, resources = {}) {
   );
   if (!isConvertibleRetailLayout(layout)) {
     checks.push(
-      check("tagDataAddress", "Tag data at the Custom Edition address", "refuse", `The tag array pointer gives base ${layout.inferredBase === null ? "unreadable" : hex3(layout.inferredBase)}, not 0x40440000. Moving tag data (a pointer rebase) is not part of this converter.`)
+      check("tagDataAddress", "Tag data at the Custom Edition address", "refuse", `The tag array pointer gives base ${layout.inferredBase === null ? "unreadable" : hex4(layout.inferredBase)}, not 0x40440000. Moving tag data (a pointer rebase) is not part of this converter.`)
     );
     return done(null);
   }
-  checks.push(check("tagDataAddress", "Tag data at the Custom Edition address", "pass", `Tag array pointer ${hex3(CE_TAG_ARRAY_ADDRESS)} (base 0x40440000).`));
+  checks.push(check("tagDataAddress", "Tag data at the Custom Edition address", "pass", `Tag array pointer ${hex4(CE_TAG_ARRAY_ADDRESS)} (base 0x40440000).`));
   if (declaredSize !== buffer.length) return done(null);
   let parsed;
   try {
@@ -37206,7 +37401,7 @@ function runChecks(buffer, full, resources = {}) {
     view2.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
     const header2 = parseCacheFileHeader(view2);
     const tagIndex2 = parseTagIndex(view2, header2);
-    parsed = { header: header2, tagIndex: tagIndex2, view: view2, importPlan: null, repairPlan: null };
+    parsed = { header: header2, tagIndex: tagIndex2, view: view2, importPlan: null, repairPlan: null, alignment: null, requiredRepairBytes: 0 };
   } catch (err) {
     checks.push(check("regions", "Tag index can be read", "refuse", `The tag index can't be read: ${err.message}`));
     return done(null);
@@ -37219,7 +37414,7 @@ function runChecks(buffer, full, resources = {}) {
     const at = arrayAt + e.index * TAG_ENTRY_SIZE;
     const w18 = buffer.readUInt32LE(at + 24);
     const w1c = buffer.readUInt32LE(at + 28);
-    if (w18 !== 0 || w1c !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex3(w18)}, +0x1C = ${hex3(w1c)}`);
+    if (w18 !== 0 || w1c !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex4(w18)}, +0x1C = ${hex4(w1c)}`);
   }
   checks.push(
     flagged.length === 0 ? check("entryFlags", "No tag entry is marked external (whole tags)", "pass", `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`) : check("entryFlags", "No tag entry is marked external (whole tags)", "refuse", `${flagged.length} tag entr${flagged.length === 1 ? "y has" : "ies have"} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged)
@@ -37231,19 +37426,22 @@ function runChecks(buffer, full, resources = {}) {
   } catch (err) {
     checks.push(check("regions", regionsLabel, "refuse", err.message));
   }
-  parsed.repairPlan = tagDataChecks(checks, view, header, tagIndex, report);
+  const tagData = tagDataChecks(checks, view, header, tagIndex, report);
+  parsed.repairPlan = tagData.plan;
+  parsed.alignment = tagData.alignment;
+  parsed.requiredRepairBytes = tagData.requiredBytes;
   const scan = scanPerAssetData(view, header, tagIndex);
   const counts = countExternal(scan);
   report.externalData = { bitmaps: counts.bitmap, sounds: counts.sound };
   if (counts.bitmap.count + counts.sound.count === 0 && scan.blocked.length === 0) {
-    report.newCrc32 = parsed.repairPlan?.repairs.length ? null : headerOnlyCrc;
-    report.estimatedOutputSize = buffer.length + requiredRepairBytes(header, parsed.repairPlan);
-    if (headerOnlyCrc !== null && report.newCrc32 !== null) checks.push(check("regions", regionsLabel, "pass", `New CRC32 ${hex3(headerOnlyCrc)} (was ${hex3(report.previousCrc32)}).`));
+    report.newCrc32 = parsed.repairPlan?.repairs.length || parsed.alignment ? null : headerOnlyCrc;
+    report.estimatedOutputSize = buffer.length + parsed.requiredRepairBytes;
+    if (headerOnlyCrc !== null && report.newCrc32 !== null) checks.push(check("regions", regionsLabel, "pass", `New CRC32 ${hex4(headerOnlyCrc)} (was ${hex4(report.previousCrc32)}).`));
     else if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", "The new CRC32 is computed after the tag data repairs."));
     checks.push(check("externalData", "Bitmap and sound data is inside the map", "pass", "No bitmap image or sound permutation keeps its data in a resource file."));
   } else {
     if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", "The new CRC32 is computed after the bitmap and sound data is copied in."));
-    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + requiredRepairBytes(header, parsed.repairPlan), report);
+    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + parsed.requiredRepairBytes, report);
   }
   checks.push(modelPartsCheck(view, header, tagIndex));
   checks.push(scriptCheck(view, header, tagIndex));
@@ -37256,7 +37454,7 @@ function runChecks(buffer, full, resources = {}) {
       check("scenarioName", "Internal map name", "info", `The internal name is "${report.scenarioName}". It is set from the output file name when the converted map is saved, so the two always match.`)
     );
     checks.push(
-      check("tagFileChecksum", "Tag-file checksum left unchanged", "info", `The tag data header's tag-file checksum (${hex3(tagIndex.tagChecksum)}) is kept, as File > Save does. Whether the game checks it is unverified; maps saved this way load in OpenCE.`)
+      check("tagFileChecksum", "Tag-file checksum left unchanged", "info", `The tag data header's tag-file checksum (${hex4(tagIndex.tagChecksum)}) is kept, as File > Save does. Whether the game checks it is unverified; maps saved this way load in OpenCE.`)
     );
   }
   return done(parsed);
@@ -37336,10 +37534,13 @@ function externalDataChecks(checks, view, scan, counts, resources, sourceSize, r
   checks.push(check("outputSize", "Estimated output size", "info", `${fmtBytes(sourceSize + plan.bytesAdded)} (${plan.assets.length} ranges copied, +${fmtBytes(plan.bytesAdded)}).`));
   return plan;
 }
-function requiredRepairBytes(header, plan) {
-  return plan ? repairBytesAdded(header.tagDataSize, plan.repairs.filter((r) => r.required)) : 0;
-}
 var REPAIR_ROWS = {
+  alignTagData: {
+    id: "repairAlignTagData",
+    label: "Repair: align the tag data",
+    required: "OpenCE needs this repair: it skips every block that is not 4-aligned without a message, so this map's Ogg Vorbis sounds (player deaths, the announcer, the plasma overheat) play as noise and its weapon HUD is drawn twice too large with the wrong meter channels. The repair inserts zero bytes after the tag names and moves every pointer past them, so every tag and block starts 4-aligned, as in Custom Edition maps. Path strings, BSPs and model data don't move. Convert stays off while this is unticked.",
+    optional: ""
+  },
   scriptSyntaxData: {
     id: "repairScriptSyntaxData",
     label: "Repair: move the script data to its own block",
@@ -37353,28 +37554,74 @@ var REPAIR_ROWS = {
     optional: ""
   }
 };
+var ALIGNMENT_LABEL = "Tag blocks are 4-aligned (OpenCE skips unaligned blocks)";
+var fmtCounts = (unaligned, checked) => `${unaligned.toLocaleString("en-US")} of ${checked.toLocaleString("en-US")}`;
 function tagDataChecks(checks, view, header, tagIndex, report) {
-  const extents = checkTagDataExtents(view, header, tagIndex);
-  const plan = planTagDataRepairs(view, header, tagIndex, extents);
+  const alignment = planTagDataAlignment(view, header, tagIndex);
+  const canAlign = alignment.needed && alignment.problems.length === 0;
+  let laid = { view, header, tagIndex };
+  if (canAlign) {
+    const alignedView = applyTagDataAlignment(view, alignment).buffer;
+    const alignedHeader = parseCacheFileHeader(alignedView);
+    laid = { view: alignedView, header: alignedHeader, tagIndex: parseTagIndex(alignedView, alignedHeader) };
+  }
+  const extents = checkTagDataExtents(laid.view, laid.header, laid.tagIndex);
+  const plan = planTagDataRepairs(laid.view, laid.header, laid.tagIndex, extents);
+  const { blocks, bspBlocks, roots, dataBlocks } = alignment.report;
+  const uncovered = alignment.tolerated.filter((t) => t.kind === "rootOutsideTagData" && !plan.repairs.some((r) => r.id === "tagRootOutside" && r.tagIndex === t.tagIndex)).map((t) => `#${t.tagIndex} ${t.where} lies outside the tag data and no repair replaces it, so its blocks can't be aligned.`);
+  const tolerated = alignment.tolerated.map(
+    (t) => t.kind === "staleReferencePath" ? `${t.where}: path pointer ${hex4(t.value)} is outside the tag data (a stale leftover; the game never follows it), left as it is.` : `${t.where}: outside the tag data; replaced by the repair below, not moved.`
+  );
+  const scope = `${blocks.checked.toLocaleString("en-US")} blocks in the tag data and ${bspBlocks.checked.toLocaleString("en-US")} in the structure BSP(s) checked the way OpenCE reads them`;
+  if (alignment.problems.length > 0 || uncovered.length > 0) {
+    checks.push(check("tagBlockAlignment", ALIGNMENT_LABEL, "refuse", `${scope}. OpenCE skips unaligned blocks, and this map's can't be aligned here, so the map is not converted.`, [...alignment.problems, ...uncovered]));
+  } else if (!alignment.needed) {
+    checks.push(check("tagBlockAlignment", ALIGNMENT_LABEL, "pass", `${scope}: every block, tag and data block starts 4-aligned.`));
+  } else {
+    checks.push(
+      check(
+        "tagBlockAlignment",
+        ALIGNMENT_LABEL,
+        "warn",
+        `${scope}: ${fmtCounts(blocks.unaligned, blocks.checked)} tag data blocks (and ${fmtCounts(roots.unaligned, roots.checked)} tags, ${fmtCounts(dataBlocks.unaligned, dataBlocks.checked)} data blocks) start ${alignment.remainder} mod 4. OpenCE skips such blocks without a message (its sound conversion and HUD passes don't run on them). Fixed by the required repair below.`,
+        [...alignment.report.examples.slice(0, 5), ...tolerated]
+      )
+    );
+    report.repairs.push({ id: "alignTagData", required: true, tagPath: "(all tags)", bytesAdded: alignment.bytes });
+    const row = REPAIR_ROWS.alignTagData;
+    const moved = Object.values(alignment.pointersToMove).reduce((a, b) => a + b, 0);
+    checks.push(
+      check(
+        "repairAlignTagData",
+        row.label,
+        "warn",
+        `${row.required} Adds ${fmtBytes(alignment.bytes)}.`,
+        [`Inserts ${alignment.bytes} zero byte(s) at ${hex4(tagIndex.baseMemoryAddress + alignment.insertAt)} (the end of the tag names) and moves ${moved.toLocaleString("en-US")} pointers past it by ${alignment.bytes}.`],
+        false,
+        { id: "alignTagData", required: true }
+      )
+    );
+  }
   const label = "Tag blocks are inside the tag data and don't overlap";
-  const scope = `${extents.blocksChecked.toLocaleString("en-US")} blocks in ${extents.tagsChecked} tags and ${extents.bspsChecked} structure BSP(s) checked the way OpenCE checks them`;
+  const extentScope = `${extents.blocksChecked.toLocaleString("en-US")} blocks in ${extents.tagsChecked} tags and ${extents.bspsChecked} structure BSP(s) checked the way OpenCE checks them`;
   const problems = extents.violations.length;
   if (plan.unrepairable.length > 0) {
     checks.push(
-      check("tagDataExtents", label, "refuse", `${scope}: ${problems} problem(s). OpenCE refuses this map, and ${plan.unrepairable.length} problem(s) can't be repaired here, so the map is not converted.`, plan.unrepairable)
+      check("tagDataExtents", label, "refuse", `${extentScope}: ${problems} problem(s). OpenCE refuses this map, and ${plan.unrepairable.length} problem(s) can't be repaired here, so the map is not converted.`, plan.unrepairable)
     );
   } else if (problems === 0) {
-    checks.push(check("tagDataExtents", label, "pass", `${scope}: no problems.`));
+    checks.push(check("tagDataExtents", label, "pass", `${extentScope}: no problems.`));
   } else {
-    checks.push(check("tagDataExtents", label, "warn", `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
+    checks.push(check("tagDataExtents", label, "warn", `${extentScope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
   }
   plan.repairs.forEach((r, i) => {
     const row = REPAIR_ROWS[r.id];
-    const bytes = repairBytesAdded(header.tagDataSize, plan.repairs.slice(0, i + 1)) - repairBytesAdded(header.tagDataSize, plan.repairs.slice(0, i));
+    const bytes = repairBytesAdded(laid.header.tagDataSize, plan.repairs.slice(0, i + 1)) - repairBytesAdded(laid.header.tagDataSize, plan.repairs.slice(0, i));
     report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
     checks.push(check(row.id, row.label, r.required ? "warn" : "info", `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
   });
-  return plan;
+  const requiredBytes = (canAlign ? alignment.bytes : 0) + repairBytesAdded(laid.header.tagDataSize, plan.repairs.filter((r) => r.required));
+  return { plan, alignment: canAlign ? alignment : null, requiredBytes };
 }
 function validationCheck(view, header, tagIndex) {
   const known = new Set(getAllTagGroupNames());
@@ -37428,7 +37675,7 @@ function referenceIdentityCheck(view, header, tagIndex) {
     label,
     "warn",
     `${issues.length} reference${issues.length === 1 ? "" : "s"} point${issues.length === 1 ? "s" : ""} at a tag with an outdated tag ID or path pointer, most likely left over from the demo version of this map. The Custom Edition sample maps have none of these. They are converted unchanged. If the converted map crashes, or scenery or sounds are missing in OpenCE, check these first.`,
-    issues.map((i) => `${i.context}: tag ID ${hex3(i.tagId)} (tag entry ${i.entryTagId === null ? "missing" : hex3(i.entryTagId)}), path pointer ${hex3(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? "missing" : hex3(i.entryPathPointer)})`)
+    issues.map((i) => `${i.context}: tag ID ${hex4(i.tagId)} (tag entry ${i.entryTagId === null ? "missing" : hex4(i.entryTagId)}), path pointer ${hex4(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? "missing" : hex4(i.entryPathPointer)})`)
   );
 }
 function requiredTagsCheck(header, tagIndex) {
@@ -37475,12 +37722,12 @@ function scriptCheck(view, header, tagIndex) {
     return check("scripts", label, "warn", "The scenario tag is outside the file, so its scripts were not checked.", [], true);
   }
   const decoded = decodeStruct(view, at, scenarioStruct);
-  const count = (name) => {
+  const count2 = (name) => {
     const v = decoded.get(name);
     return v?.kind === "reflexive" ? v.value.count : 0;
   };
-  const scripts = count("scripts");
-  const globals = count("globals");
+  const scripts = count2("scripts");
+  const globals = count2("globals");
   if (scripts === 0 && globals === 0) return check("scripts", label, "pass", "The scenario has no scripts and no script globals, so no script function numbers are involved.");
   const syntax = decoded.get("script syntax data");
   const unreadable = () => check("scripts", label, "warn", `The scenario has ${scripts} script(s) and ${globals} global(s), but its script node table could not be read. Some script functions are numbered differently in demo and Custom Edition; nothing is remapped.`, [], true);
@@ -37550,7 +37797,11 @@ function convertRetailToCustomEdition(source, options) {
     throw new ConversionRefusedError(`This map has ${unacknowledged.map((a) => a.text).join(" and ")}. Confirm that you understand this before converting.`, "ACKNOWLEDGEMENT_REQUIRED");
   }
   const repairPlan = parsed?.repairPlan ?? null;
-  const missingRepairs = (repairPlan?.repairs ?? []).filter((r) => r.required && !options.repairs?.[r.id]);
+  const alignment = parsed?.alignment ?? null;
+  const missingRepairs = [
+    ...alignment && !options.repairs?.alignTagData ? [{ id: "alignTagData", tagPath: "all tags" }] : [],
+    ...(repairPlan?.repairs ?? []).filter((r) => r.required && !options.repairs?.[r.id])
+  ];
   if (missingRepairs.length > 0) {
     throw new ConversionRefusedError(
       `OpenCE refuses this map without these repairs: ${missingRepairs.map((r) => `${REPAIR_ROWS[r.id].label} (${r.tagPath})`).join("; ")}. Tick them to convert.`,
@@ -37574,6 +37825,12 @@ function convertRetailToCustomEdition(source, options) {
   }
   out.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
+  let aligned = null;
+  if (alignment) {
+    const result = applyTagDataAlignment(out, alignment);
+    out = result.buffer;
+    aligned = { insertAt: alignment.insertAt, bytes: alignment.bytes, pointersMoved: result.moved, tolerated: alignment.tolerated.length };
+  }
   let repairs = [];
   const chosen = (repairPlan?.repairs ?? []).filter((r) => options.repairs?.[r.id]);
   if (repairPlan && chosen.length > 0) {
@@ -37582,7 +37839,8 @@ function convertRetailToCustomEdition(source, options) {
     repairs = applied.applied;
   }
   verifyOutputExtents(out);
-  return { buffer: out, report, imported, repairs };
+  verifyOutputAlignment(out);
+  return { buffer: out, report, imported, alignment: aligned, repairs };
 }
 function verifyOutputExtents(out) {
   let violations;
@@ -37597,6 +37855,18 @@ function verifyOutputExtents(out) {
       `The converted map still has tag data problems OpenCE would refuse, so nothing was written: ${violations.slice(0, 5).join("; ")}${violations.length > 5 ? ` (and ${violations.length - 5} more)` : ""}.`
     );
   }
+}
+function verifyOutputAlignment(out) {
+  let problem = null;
+  try {
+    const header = parseCacheFileHeader(out);
+    const r = measureBlockAlignment(out, header, parseTagIndex(out, header));
+    const unaligned = r.blocks.unaligned + r.bspBlocks.unaligned + r.roots.unaligned + r.dataBlocks.unaligned;
+    if (unaligned > 0) problem = `${unaligned} block(s) are not 4-aligned (${r.examples.slice(0, 3).join("; ")})`;
+  } catch (err) {
+    problem = `its blocks can't be walked: ${err.message}`;
+  }
+  if (problem) throw new ConversionRefusedError(`The converted map would still have blocks OpenCE skips, so nothing was written: ${problem}.`);
 }
 
 // ../core/src/map/write-map.ts
@@ -37763,14 +38033,14 @@ function runGetDependencies(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   const cancelCtl = makeCancelController(task.requestId);
   try {
-    const walk = walkDependencies(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
+    const walk2 = walkDependencies(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
       signal: cancelCtl.signal,
       onProgress: (visited, queued) => progress(task.requestId, `Walking dependencies (${visited} visited, ${queued} queued)`, Math.min(95, 10 + visited))
     });
     const sizes = sizeByIndex(currentMap.header, currentMap.tagIndex);
     const extractableTags = [];
     const notExtractedTags = [];
-    for (const t of walk.tags) {
+    for (const t of walk2.tags) {
       const def = getGroupDefinition(t.group);
       if (def.extractable === false) {
         notExtractedTags.push({
@@ -37784,14 +38054,14 @@ function runGetDependencies(task) {
         extractableTags.push({ originalIndex: t.originalIndex, path: t.path, group: t.group, status: t.status, estimatedSize: sizes.get(t.originalIndex) ?? null, requiredBy: t.requiredBy });
       }
     }
-    const externalTags = walk.externalTags.map((t) => ({ originalIndex: t.originalIndex, path: t.path, group: t.group, status: t.status, estimatedSize: null, requiredBy: t.requiredBy }));
+    const externalTags = walk2.externalTags.map((t) => ({ originalIndex: t.originalIndex, path: t.path, group: t.group, status: t.status, estimatedSize: null, requiredBy: t.requiredBy }));
     const totalEstimatedSize = extractableTags.reduce((sum, t) => sum + (t.estimatedSize ?? 0), 0);
     const summary = {
       requestedOriginalIndices: task.originalIndices,
       extractableTags,
       notExtractedTags,
       externalTags,
-      warnings: walk.warnings.map(toWarningInfo),
+      warnings: walk2.warnings.map(toWarningInfo),
       totalEstimatedSize,
       allExcluded: extractableTags.length === 0 && notExtractedTags.length > 0
     };
