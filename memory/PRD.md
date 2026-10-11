@@ -23,7 +23,7 @@ needs re-verification / unverified / blocked)
 | `gbxmodel` model geometry capture/relocation | **Stage 1 (capture) same-reader-verified; Stage 2 (injection) design-verified, NOT built/wired** | `gbxmodel-geometry.test.ts` (100% captured, 0 blocked, bloodgulch+coldsnap), `gbxmodel-combined-insertion-design.test.ts` (field table + 665-part no-patch proof) — see "gbxmodel geometry — Stage 1 capture" below |
 | Sound relocation | **same-reader-verified, bounds-only** | No deterministic size formula for compressed audio exists (stated, not guessed) - a corrupt/truncated embedded sound could still pass the bounds check. |
 | Header `crc32` on save (File > Save, File > Save As) | **verified by tests; a finalized SWAP map loads in OpenCE (user-confirmed 2026-10-11)** | Recomputed by `finalizeForSave` on every save (branch `fix/swap-load-failure`); reproduces the stored crc32 of all 5 CE sample maps. |
-| In-memory Inject, File > Save / Save As / Discard Changes, backup prompt on open | **verified by tests; Electron UI and OpenCE unverified** | Branch `feat/inject-in-memory-save` (see "In-memory inject and File > Save" in Decisions). Inject writes nothing; Save overwrites the opened file atomically; Save As writes a new file that becomes the open map. Independent ADD audits pass on the in-memory buffer and on the saved file (`map-worker.inject-save.test.ts`). Needs the user's click-through on Windows and an OpenCE load of a map written by File > Save. |
+| In-memory Inject, File > Save / Save As / Discard Changes, backup prompt on open, unsaved-changes prompt, `.bak` handling | **verified by tests; works on Windows and the saved map loads in OpenCE (user-confirmed 2026-10-11)** | Branch `feat/inject-in-memory-save` (see "In-memory inject and File > Save" in Decisions). Inject writes nothing; Save overwrites the opened file atomically (the one permitted exception to "never overwrite the source map", stated in RULES.md and CLAUDE.md); Save As writes a new file that becomes the open map. Independent ADD audits pass on the in-memory buffer and on the saved file (`map-worker.inject-save.test.ts`). The unsaved-changes prompt's logic is tested (`save-map.test.ts`); the real Electron dialog was only exercised by hand. |
 | Sub-header `tagFileChecksums` (tag data +0x8) after injection | **not recalculated; map still loads in OpenCE (user-confirmed 2026-10-11)** | Left unchanged on purpose. The SWAP map above kept the source's stale value and loads in OpenCE, so OpenCE does not reject it at load. Whether anything else (other loaders, netgame checks) validates it is unverified. The save result still says so. |
 
 ### Windows check to move "M4 extraction" to verified (no OpenCE needed)
@@ -67,7 +67,11 @@ needs re-verification / unverified / blocked)
     Save and Save As therefore only ever write uncompressed maps. Recompress (reads the file on
     disk) is refused while there are unsaved changes.
   - Status: verified by tests (worker on real map copies in a temp folder; flows with injected
-    deps; component tests). Not run by me: the Electron UI, OpenCE.
+    deps; component tests).
+  - **Confirmed (user, 2026-10-11, Windows):** in-memory Inject, File > Save, File > Save As,
+    Discard Changes, the backup prompt on open, the unsaved-changes prompt and the `.bak`
+    handling all worked, and the map written by File > Save loads in OpenCE. The unsaved-changes
+    dialog's logic is covered by tests; the real dialog was only exercised by hand.
 - 2026-10-11: **ADD tag-array growth (branch `fix/add-tag-array-growth`, user-approved fix (1)
   with conditions).**
   - **Evidence (user, `bg_add1.map` vs bloodgulch.map):** header correct (scenario name bg_add1,
@@ -178,6 +182,10 @@ needs re-verification / unverified / blocked)
      spread; swap a vehicle or scenery palette entry.
   4. M7b: block add, delete and resize, then the scenario placement work (Forge-style).
   Paused until after this: embedded relocation, gbxmodel geometry stage 2, full M6 export.
+  **Progress (2026-10-11):** task 1 is done (swap load failure, the ADD tag-array growth fix
+  and real Save As, all user-confirmed in OpenCE), and so is the in-memory Inject / File > Save
+  work (branch `feat/inject-in-memory-save`, user-confirmed on Windows and in OpenCE). **Next:
+  task 2, the converter, Phase 1** (retail-layout, version 7).
 - 2026-10-11: **Swap load failure (branch `fix/swap-load-failure`, user-approved with
   conditions).** The user's SWAP of `globals\globals` with dependencies into bloodgulch (1037
   swapped, 50 gbxmodels blocked) showed a blank blue screen in OpenCE; the original with only the
