@@ -154,7 +154,9 @@ then a control test: stock PC/bloodgulch and HaloMD/bloodgulch converted the sam
   - `effects\debris objects\forerunner dark structure\forerunner dark structure` (#2574; 1 node,
     1 shader, 2 geometries of 1 part): geometry 0 part 0 has 70 vertices, and 2 of its 104 strip
     indices are 70 and 71 (strip positions 100 and 102). Geometry 1 part 0 has 44 vertices, and 33 of
-    its 66 strip indices are 225 to 575 (the in-range ones go up to 16).
+    its 66 strip indices are out of range: positions 0-31 hold 221 to 586, position 59 holds 11565
+    (corrected 2026-10-12 by `convert/model-part-check.ts` and its raw walker; the earlier "225 to
+    575" was wrong).
   - Its strips and vertices are the last in the model data and overlap no other part's, so the indices
     themselves are wrong (not misplaced data). On Halo PC such indices read neighbouring vertices
     (garbage triangles, no crash), which is why HaloMD runs the map.

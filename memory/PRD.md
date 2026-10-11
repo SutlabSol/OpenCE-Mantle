@@ -63,6 +63,12 @@ needs re-verification / unverified / blocked)
     the model, part and bad indices, using OpenCE's `custom_edition_model_part_verify` rules; it must
     find 0 on the 5 CE maps and on heh_2, crossing and barrier (they load). Option 2 (an opt-in repair
     of the 35 indices) stays a later, separate decision.
+    **Built:** `convert/model-part-check.ts`, checklist row "Models pass OpenCE's part check"
+    (`modelParts`, refuse), `?mock=convert-model-parts`. Verified by tests: 0 problems on the 5 CE maps,
+    heh_2, crossing, barrier (and HaloMD/PC bloodgulch, b30, ui); theisland_3 exactly #2574's two parts;
+    a raw walker (no schema) agrees on part counts and bad indices; one mutation test per rule. The
+    model-level node count is included (SOURCES.md "Converter: model part check"); the 44-64-node
+    local-nodes path is untested (no sample model has 44+ nodes).
   - **Roadmap change (user):** Xbox and MCC conversion are off the active roadmap. Xbox: OpenCE plays
     Xbox maps natively. MCC: reportedly an OpenCE fork plays Halo CE MCC maps (unverified; OpenCE PR #241
     adds version 13). Mac full-version maps: optional, later, same path as Phase 1b. **The goal is now
@@ -93,7 +99,7 @@ needs re-verification / unverified / blocked)
   - **Open: theisland_3 model.** OpenCE's `custom_edition_model_part_verify` refuses a part whose strip
     indices reach past its vertex count. `effects\debris objects\forerunner dark structure\forerunner
     dark structure` (#2574, used only by the pelican explosion's debris object) has 2 such
-    indices in geometry 0 (70, 71 of 70 vertices) and 33 in geometry 1 (225-575 of 44). 0 failing
+    indices in geometry 0 (70, 71 of 70 vertices) and 33 in geometry 1 (221-586 and one 11565, of 44; corrected 2026-10-12). 0 failing
     parts in the 5 CE maps and every other HaloMD map. Options proposed, no decision yet.
 - 2026-10-11: **OpenCE findings and tag data repairs (user-approved plan, decisions and conditions).**
   - **OpenCE findings (read in OpenCE's code, scratch clone C:\temp\OpenCE-src at 6399ed9; addresses from
