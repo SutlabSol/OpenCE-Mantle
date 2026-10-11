@@ -36558,6 +36558,365 @@ function importExternalData(source, plan, files, hooks = {}) {
   return { buffer, rangesCopied: plan.assets.length, bytesAdded: shift, insertAt: layout.insertAt };
 }
 
+// ../core/src/map/convert/extent-check.ts
+var hex = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+var BSP_HEADER_SIZE = 24;
+var NULL_TAG_ID6 = 4294967295;
+var Claims = class {
+  constructor(base, size) {
+    this.base = base;
+    this.size = size;
+    this.starts = [];
+    this.ends = [];
+    this.labels = [];
+    this.bytes = new Uint8Array(size);
+  }
+  contains(address, size) {
+    const offset = address - this.base;
+    return offset >= 0 && offset <= this.size && size >= 0 && size <= this.size - offset;
+  }
+  /** Claims [address, address + size); returns the label of the first byte already claimed, or null. */
+  claim(address, size, label) {
+    const offset = address - this.base;
+    for (let i = offset; i < offset + size; i++) {
+      if (this.bytes[i]) return this.ownerOf(i);
+    }
+    this.bytes.fill(1, offset, offset + size);
+    this.starts.push(offset);
+    this.ends.push(offset + size);
+    this.labels.push(label);
+    return null;
+  }
+  ownerOf(offset) {
+    for (let k = 0; k < this.starts.length; k++) if (offset >= this.starts[k] && offset < this.ends[k]) return this.labels[k];
+    return "(unknown)";
+  }
+  freeBytesAt(address, limit) {
+    const offset = address - this.base;
+    if (offset < 0 || offset >= this.size) return 0;
+    let end = Math.min(this.size, offset + limit);
+    for (let k = 0; k < this.starts.length; k++) {
+      if (this.starts[k] <= offset && this.ends[k] > offset) return 0;
+      if (this.starts[k] > offset && this.starts[k] < end) end = this.starts[k];
+    }
+    return end - offset;
+  }
+};
+function checkTagDataExtents(buffer, header, tagIndex) {
+  const base = tagIndex.baseMemoryAddress >>> 0;
+  const tagDataOffset = header.tagDataOffset;
+  const tagDataSize = Math.max(0, Math.min(header.tagDataSize, buffer.length - tagDataOffset));
+  const tagData = new Claims(base, tagDataSize);
+  const known = new Set(getAllTagGroupNames());
+  const violations = [];
+  const referenceCounts = /* @__PURE__ */ new Map();
+  const tagsWithoutDefinition = [];
+  let blocksChecked = 0;
+  let tagsChecked = 0;
+  let bspsChecked = 0;
+  const entryName = (i) => {
+    if (i < 0) return "the map";
+    const e = tagIndex.entries[i];
+    return e ? `#${i} ${e.path}.${e.primaryClassName ?? "?"}` : `#${i}`;
+  };
+  const checkBlock = (r, tagI, field, fieldName, isRoot, address, size) => {
+    blocksChecked++;
+    const e = tagIndex.entries[tagI];
+    const label = `${entryName(tagI)} ${field}`;
+    const fail = (kind, overlaps) => {
+      const where = r.kind === "bsp" ? "the structure BSP" : "the tag data";
+      violations.push({
+        kind,
+        region: r.kind,
+        tagIndex: tagI,
+        tagPath: e?.path ?? "",
+        group: e?.primaryClassName ?? null,
+        isRoot,
+        field,
+        fieldName,
+        address: address >>> 0,
+        size,
+        overlaps,
+        text: kind === "outside" ? `${entryName(tagI)} ${field}: ${size} bytes at ${hex(address)}, outside ${where} (${hex(r.claims.base)} to ${hex(r.claims.base + r.claims.size)})` : `${entryName(tagI)} ${field}: ${size} bytes at ${hex(address)} overlap ${overlaps}`
+      });
+      return false;
+    };
+    if (!r.claims.contains(address >>> 0, size)) return fail("outside", null);
+    const owner = r.claims.claim(address >>> 0, size, label);
+    return owner === null ? true : fail("overlap", owner);
+  };
+  const fileOf = (r, address) => r.fileStart + ((address >>> 0) - r.claims.base);
+  const walkElement = (r, tagI, structName, address, where) => {
+    const at = fileOf(r, address);
+    const struct = resolveStruct(structName);
+    const decoded = decodeStruct(buffer, at, structName);
+    const children = [];
+    for (const field of struct.fields) {
+      const value = decoded.get(field.name);
+      if (!value || field.def.nonCached) continue;
+      const path2 = where ? `${where}.${field.name}` : field.name;
+      if (value.kind === "dependency") {
+        const id = value.value.tagId >>> 0;
+        if (id !== NULL_TAG_ID6) referenceCounts.set(id, (referenceCounts.get(id) ?? 0) + 1);
+      } else if (value.kind === "reflexive" && field.def.type === "TagReflexive" && value.value.count !== 0 && field.def.struct) {
+        const size = resolveStruct(field.def.struct).totalSize;
+        const count = value.value.count >>> 0;
+        if (checkBlock(r, tagI, `${path2}[${count} x ${size}]`, field.name, false, value.value.pointerLow, count * size)) {
+          children.push({ struct: field.def.struct, pointer: value.value.pointerLow >>> 0, count, size, where: path2 });
+        }
+      } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size !== 0) {
+        checkBlock(r, tagI, path2, field.name, false, value.value.pointerLow, value.value.size >>> 0);
+      }
+    }
+    for (const c of children) {
+      for (let i = 0; i < c.count; i++) walkElement(r, tagI, c.struct, c.pointer + i * c.size, `${c.where}[${i}]`);
+    }
+  };
+  const tagRegion = { claims: tagData, kind: "tagData", fileStart: tagDataOffset };
+  checkBlock(tagRegion, -1, "tag data header", null, false, base, TAG_DATA_HEADER_PC_SIZE);
+  checkBlock(tagRegion, -1, "tag instances", null, false, base + TAG_DATA_HEADER_PC_SIZE, tagIndex.entries.length * TAG_ENTRY_SIZE);
+  const roots = [];
+  for (const e of tagIndex.entries) {
+    if (e.isExternal || e.primaryClassName === "scenario_structure_bsp") continue;
+    const structName = e.primaryClassName && known.has(e.primaryClassName) ? getGroupStructName(e.primaryClassName) : null;
+    if (!structName) {
+      tagsWithoutDefinition.push(entryName(e.index));
+      continue;
+    }
+    tagsChecked++;
+    const address = e.tagDataPointerOrResourceIndex >>> 0;
+    if (checkBlock(tagRegion, e.index, "root", null, true, address, resolveStruct(structName).totalSize)) roots.push({ index: e.index, struct: structName, address });
+  }
+  for (const root of roots) walkElement(tagRegion, root.index, root.struct, root.address, "");
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scenarioStruct = getGroupStructName("scenario");
+  const bspStruct = getGroupStructName("scenario_structure_bsp");
+  if (scenario && scenarioStruct && bspStruct && roots.some((r) => r.index === scenario.index)) {
+    const scenarioAt = fileOf(tagRegion, scenario.tagDataPointerOrResourceIndex);
+    const bsps = decodeStruct(buffer, scenarioAt, scenarioStruct).get("structure bsps");
+    const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === "structure bsps");
+    const elementStruct = field?.def.type === "TagReflexive" ? field.def.struct : void 0;
+    if (bsps?.kind === "reflexive" && elementStruct && violations.every((v) => !(v.tagIndex === scenario.index && v.fieldName === "structure bsps"))) {
+      const elementSize = resolveStruct(elementStruct).totalSize;
+      for (let b = 0; b < bsps.value.count; b++) {
+        const element = decodeStruct(buffer, fileOf(tagRegion, bsps.value.pointerLow + b * elementSize), elementStruct);
+        const num = (n) => {
+          const v = element.get(n);
+          return v?.kind === "basic" ? Number(v.value) >>> 0 : 0;
+        };
+        const ref = element.get("structure bsp");
+        const bspTag = ref?.kind === "dependency" ? ref.value.tagId & 65535 : scenario.index;
+        const start = num("bsp start");
+        const size = num("bsp size");
+        const address = num("bsp address");
+        if (start + size > buffer.length || size < BSP_HEADER_SIZE) {
+          violations.push({ kind: "outside", region: "bsp", tagIndex: bspTag, tagPath: tagIndex.entries[bspTag]?.path ?? "", group: "scenario_structure_bsp", isRoot: true, field: "structure bsp", fieldName: null, address, size, overlaps: null, text: `${entryName(bspTag)}: the structure BSP (${size} bytes at file offset ${start}) is not inside the file` });
+          continue;
+        }
+        bspsChecked++;
+        const bspRegion = { claims: new Claims(address, size), kind: "bsp", fileStart: start };
+        checkBlock(bspRegion, bspTag, "structure bsp header", null, false, address, BSP_HEADER_SIZE);
+        const rootAddress = buffer.readUInt32LE(start);
+        if (checkBlock(bspRegion, bspTag, "root", null, true, rootAddress, resolveStruct(bspStruct).totalSize)) walkElement(bspRegion, bspTag, bspStruct, rootAddress, "");
+      }
+    }
+  }
+  return {
+    violations,
+    blocksChecked,
+    tagsChecked,
+    bspsChecked,
+    tagsWithoutDefinition,
+    referenceCounts,
+    freeTagDataBytesAt: (address, limit) => tagData.freeBytesAt(address >>> 0, limit)
+  };
+}
+
+// ../core/src/map/convert/tag-data-repairs.ts
+var TagDataRepairError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "TagDataRepairError";
+  }
+};
+var DATA_ARRAY_HEADER_SIZE = 56;
+var DATA_ARRAY_MAXIMUM_COUNT = 32;
+var DATA_ARRAY_ELEMENT_SIZE = 34;
+var DATA_ARRAY_COUNT = 46;
+var SCRIPT_NODE_SIZE = 20;
+var TAG_DATA_FILE_SIZE_OFFSET = 8;
+var TAG_DATA_SIZE_OFFSET2 = 20;
+var TAG_DATA_TAG_DATA_OFFSET = 16;
+var DATA_FIELD_POINTER = 12;
+var ENTRY_DATA_POINTER = 20;
+var ALIGNMENT = 4;
+var hex2 = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+var padTo = (offset) => (ALIGNMENT - offset % ALIGNMENT) % ALIGNMENT;
+var fmt = (n) => n.toLocaleString("en-US");
+function bspAddresses(view, header, tagIndex, scenarioAt) {
+  const scenarioStruct = getGroupStructName("scenario");
+  const bsps = decodeStruct(view, scenarioAt, scenarioStruct).get("structure bsps");
+  const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === "structure bsps");
+  const elementStruct = field?.def.type === "TagReflexive" ? field.def.struct : void 0;
+  if (bsps?.kind !== "reflexive" || !elementStruct) return [];
+  const size = resolveStruct(elementStruct).totalSize;
+  const out = [];
+  for (let i = 0; i < bsps.value.count; i++) {
+    const at = header.tagDataOffset + (bsps.value.pointerLow + i * size - tagIndex.baseMemoryAddress);
+    const address = decodeStruct(view, at, elementStruct).get("bsp address");
+    if (address?.kind === "basic") out.push(Number(address.value) >>> 0);
+  }
+  return out.sort((a, b) => a - b);
+}
+function planTagDataRepairs(view, header, tagIndex, extents) {
+  const base = tagIndex.baseMemoryAddress >>> 0;
+  const tdo = header.tagDataOffset;
+  const tds = header.tagDataSize;
+  const repairs = [];
+  const unrepairable = [];
+  const notes = [];
+  const inTagData = (address, size) => address >= base && address - base + size <= tds;
+  const fileOf = (address) => tdo + (address - base);
+  const handled = /* @__PURE__ */ new Set();
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scenarioStruct = getGroupStructName("scenario");
+  const scenarioSize = resolveStruct(scenarioStruct).totalSize;
+  const scenarioPointer = scenario ? scenario.tagDataPointerOrResourceIndex >>> 0 : 0;
+  const scenarioReadable = !!scenario && !scenario.isExternal && scenario.primaryClassName === "scenario" && inTagData(scenarioPointer, scenarioSize);
+  let limitAddress = base + CE_TAG_SPACE_SIZE;
+  if (scenarioReadable) {
+    const scenarioAt = fileOf(scenarioPointer);
+    const lowest = bspAddresses(view, header, tagIndex, scenarioAt)[0];
+    if (lowest !== void 0) limitAddress = Math.min(limitAddress, lowest);
+    const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === "script syntax data");
+    const syntax = decodeStruct(view, scenarioAt, scenarioStruct).get("script syntax data");
+    const violationIndex = extents.violations.findIndex((v) => v.tagIndex === scenario.index && v.fieldName === "script syntax data" && !v.isRoot);
+    if (syntax?.kind === "tagDataOffset" && syntax.value.size > 0) {
+      const address = syntax.value.pointerLow >>> 0;
+      const size = syntax.value.size >>> 0;
+      const aligned = (address - base) % ALIGNMENT === 0;
+      const headerReadable = inTagData(address, DATA_ARRAY_HEADER_SIZE);
+      const at = fileOf(address);
+      const maximum = headerReadable ? view.readInt16LE(at + DATA_ARRAY_MAXIMUM_COUNT) : -1;
+      const elementSize = headerReadable ? view.readInt16LE(at + DATA_ARRAY_ELEMENT_SIZE) : -1;
+      const count = headerReadable ? view.readInt16LE(at + DATA_ARRAY_COUNT) : -1;
+      const consistent = headerReadable && elementSize === SCRIPT_NODE_SIZE && maximum > 0 && count >= 0 && count <= maximum && size === DATA_ARRAY_HEADER_SIZE + maximum * elementSize;
+      const used = consistent ? DATA_ARRAY_HEADER_SIZE + count * SCRIPT_NODE_SIZE : -1;
+      const where = `${scenario.path}.scenario script syntax data`;
+      const plan = (required, details) => repairs.push({
+        id: "scriptSyntaxData",
+        required,
+        tagIndex: scenario.index,
+        tagPath: scenario.path,
+        pointerAddress: scenarioPointer + field.offset + DATA_FIELD_POINTER,
+        oldPointer: address,
+        blockSize: size,
+        copyBytes: used,
+        details
+      });
+      if (violationIndex >= 0) {
+        handled.add(violationIndex);
+        const violation = extents.violations[violationIndex];
+        const free = extents.freeTagDataBytesAt(address, size);
+        if (!consistent) {
+          unrepairable.push(`${violation.text}. Its script node table header can't be read as a script node array (${maximum} slots of ${elementSize} bytes, ${count} in use, ${fmt(size)} bytes declared), so it is not known which bytes are its own.`);
+        } else if (used > free) {
+          unrepairable.push(`${violation.text}. Its header and ${count} used script node(s) take ${fmt(used)} bytes, but only ${fmt(free)} bytes from its start belong to it alone, so its scripts can't be recovered.`);
+        } else {
+          plan(true, [
+            violation.text,
+            `Only the first ${fmt(free)} of its ${fmt(size)} bytes are its own; the rest belongs to other tags. ${count} of ${maximum} node slots are used (${fmt(used)} bytes with the header), so everything in use fits.`,
+            `New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes copied, the rest zero (a zeroed slot is a free slot).`
+          ]);
+        }
+      } else if (!aligned && consistent && count > 0) {
+        plan(false, [
+          `${where} starts at ${hex2(address)}, which is not 4-aligned from the tag data start, so OpenCE runs none of this map's scripts (${count} node slots used).`,
+          `Moving it to a 4-aligned block at the end of the tag data (${fmt(size)} bytes: header and used nodes copied, rest zero) lets OpenCE read it.`
+        ]);
+      } else if (!aligned) {
+        notes.push(`${where} starts at ${hex2(address)}, which is not 4-aligned, so OpenCE reports "the scenario's script data is missing or damaged". It has no used script nodes, so no script is lost and nothing needs to change.`);
+      }
+    }
+  }
+  extents.violations.forEach((v, i) => {
+    if (handled.has(i) || !v.isRoot || v.region !== "tagData" || v.kind !== "outside" || v.tagIndex < 0) return;
+    handled.add(i);
+    const entry = tagIndex.entries[v.tagIndex];
+    const references = extents.referenceCounts.get(entry.tagId >>> 0) ?? 0;
+    if (references > 0) {
+      unrepairable.push(`${v.text}. ${references} reference(s) name this tag, so a zeroed replacement would be used by the game; it is not repaired.`);
+      return;
+    }
+    repairs.push({
+      id: "tagRootOutside",
+      required: true,
+      tagIndex: v.tagIndex,
+      tagPath: entry.path,
+      pointerAddress: base + TAG_DATA_HEADER_PC_SIZE + v.tagIndex * TAG_ENTRY_SIZE + ENTRY_DATA_POINTER,
+      oldPointer: v.address,
+      blockSize: v.size,
+      copyBytes: 0,
+      details: [
+        v.text,
+        `No reference names this tag with its full tag ID, so nothing reads its values.`,
+        `New block: a zeroed ${entry.primaryClassName} struct (${fmt(v.size)} bytes, its schema size) at the end of the tag data (4-aligned).`
+      ]
+    });
+  });
+  extents.violations.forEach((v, i) => {
+    if (!handled.has(i)) unrepairable.push(`${v.text}. No repair covers this problem.`);
+  });
+  if (repairs.length > 0) {
+    const fileLength = view.readUInt32LE(TAG_DATA_FILE_SIZE_OFFSET);
+    let end = tds;
+    for (const r of repairs) end += padTo(end) + r.blockSize;
+    const problem = tdo + tds !== fileLength ? `The tag data (file offset ${fmt(tdo)}, ${fmt(tds)} bytes) is not the last block of the file (${fmt(fileLength)} bytes), so nothing can be added after it.` : base + end > limitAddress ? `The repaired tag data would end at ${hex2(base + end)}, past ${hex2(limitAddress)} (the lowest structure BSP address, or the end of the tag space), where the game loads the BSP.` : null;
+    if (problem) {
+      for (const r of repairs) if (r.required) unrepairable.push(`${r.details[0]}. ${problem}`);
+      repairs.length = 0;
+    }
+  }
+  return { repairs, unrepairable, notes, baseMemoryAddress: base, limitAddress };
+}
+function applyTagDataRepairs(map, plan, repairs) {
+  if (repairs.length === 0) return { buffer: Buffer.from(map), applied: [] };
+  const base = plan.baseMemoryAddress >>> 0;
+  const tdo = map.readUInt32LE(TAG_DATA_TAG_DATA_OFFSET);
+  const tds = map.readUInt32LE(TAG_DATA_SIZE_OFFSET2);
+  if (map.readUInt32LE(TAG_DATA_FILE_SIZE_OFFSET) !== map.length || tdo + tds !== map.length) {
+    throw new TagDataRepairError("The tag data is not the last block of the file, so the repairs were not applied. Nothing was written.");
+  }
+  const blocks = [];
+  let end = tds;
+  for (const r of repairs) {
+    const padding = padTo(end);
+    blocks.push({ at: end + padding, repair: r, padding });
+    end += padding + r.blockSize;
+  }
+  if (base + end > plan.limitAddress) throw new TagDataRepairError(`The repaired tag data would end at ${hex2(base + end)}, past ${hex2(plan.limitAddress)}, where the game loads the structure BSP. Nothing was written.`);
+  const out = Buffer.alloc(tdo + end);
+  map.copy(out, 0, 0, map.length);
+  const applied = [];
+  for (const { at, repair: r, padding } of blocks) {
+    const pointerAt = tdo + (r.pointerAddress - base);
+    const current = out.readUInt32LE(pointerAt);
+    if (current !== r.oldPointer >>> 0) throw new TagDataRepairError(`${r.tagPath}: the pointer at ${hex2(r.pointerAddress)} is ${hex2(current)}, not ${hex2(r.oldPointer)} as planned. Nothing was written.`);
+    if (r.copyBytes > 0) map.copy(out, tdo + at, tdo + (r.oldPointer - base), tdo + (r.oldPointer - base) + r.copyBytes);
+    const newPointer = base + at >>> 0;
+    out.writeUInt32LE(newPointer, pointerAt);
+    applied.push({ id: r.id, tagIndex: r.tagIndex, tagPath: r.tagPath, oldPointer: r.oldPointer >>> 0, newPointer, padding, blockSize: r.blockSize, copied: r.copyBytes, bytesAppended: padding + r.blockSize });
+  }
+  out.writeUInt32LE(out.length, TAG_DATA_FILE_SIZE_OFFSET);
+  out.writeUInt32LE(end, TAG_DATA_SIZE_OFFSET2);
+  return { buffer: out, applied };
+}
+function repairBytesAdded(tagDataSize, repairs) {
+  let end = tagDataSize;
+  for (const r of repairs) end += padTo(end) + r.blockSize;
+  return end - tagDataSize;
+}
+
 // ../core/src/map/convert/retail-to-ce.ts
 var VERSION_OFFSET = 4;
 var FILE_SIZE_OFFSET2 = 8;
@@ -36588,10 +36947,10 @@ var ConversionRefusedError = class extends Error {
   }
 };
 var MAX_DETAILS = 50;
-function check(id, label, status, message, details = [], requiresAcknowledgement = false) {
-  return { id, label, status, message, details: details.slice(0, MAX_DETAILS), requiresAcknowledgement };
+function check(id, label, status, message, details = [], requiresAcknowledgement = false, repair) {
+  return { id, label, status, message, details: details.slice(0, MAX_DETAILS), requiresAcknowledgement, ...repair ? { repair } : {} };
 }
-var hex = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
+var hex3 = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
 function runChecks(buffer, full, resources = {}) {
   const checks = [];
   const report = {
@@ -36605,7 +36964,8 @@ function runChecks(buffer, full, resources = {}) {
     previousCrc32: null,
     newCrc32: null,
     externalData: null,
-    estimatedOutputSize: null
+    estimatedOutputSize: null,
+    repairs: []
   };
   const done = (parsed2) => {
     report.canConvert = !checks.some((c) => c.status === "refuse");
@@ -36645,11 +37005,11 @@ function runChecks(buffer, full, resources = {}) {
   );
   if (!isConvertibleRetailLayout(layout)) {
     checks.push(
-      check("tagDataAddress", "Tag data at the Custom Edition address", "refuse", `The tag array pointer gives base ${layout.inferredBase === null ? "unreadable" : hex(layout.inferredBase)}, not 0x40440000. Moving tag data (a pointer rebase) is not part of this converter.`)
+      check("tagDataAddress", "Tag data at the Custom Edition address", "refuse", `The tag array pointer gives base ${layout.inferredBase === null ? "unreadable" : hex3(layout.inferredBase)}, not 0x40440000. Moving tag data (a pointer rebase) is not part of this converter.`)
     );
     return done(null);
   }
-  checks.push(check("tagDataAddress", "Tag data at the Custom Edition address", "pass", `Tag array pointer ${hex(CE_TAG_ARRAY_ADDRESS)} (base 0x40440000).`));
+  checks.push(check("tagDataAddress", "Tag data at the Custom Edition address", "pass", `Tag array pointer ${hex3(CE_TAG_ARRAY_ADDRESS)} (base 0x40440000).`));
   if (declaredSize !== buffer.length) return done(null);
   let parsed;
   try {
@@ -36657,7 +37017,7 @@ function runChecks(buffer, full, resources = {}) {
     view2.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
     const header2 = parseCacheFileHeader(view2);
     const tagIndex2 = parseTagIndex(view2, header2);
-    parsed = { header: header2, tagIndex: tagIndex2, view: view2, importPlan: null };
+    parsed = { header: header2, tagIndex: tagIndex2, view: view2, importPlan: null, repairPlan: null };
   } catch (err) {
     checks.push(check("regions", "Tag index can be read", "refuse", `The tag index can't be read: ${err.message}`));
     return done(null);
@@ -36670,7 +37030,7 @@ function runChecks(buffer, full, resources = {}) {
     const at = arrayAt + e.index * TAG_ENTRY_SIZE;
     const w18 = buffer.readUInt32LE(at + 24);
     const w1c = buffer.readUInt32LE(at + 28);
-    if (w18 !== 0 || w1c !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex(w18)}, +0x1C = ${hex(w1c)}`);
+    if (w18 !== 0 || w1c !== 0) flagged.push(`#${e.index} ${e.path}.${e.primaryClassName}: +0x18 = ${hex3(w18)}, +0x1C = ${hex3(w1c)}`);
   }
   checks.push(
     flagged.length === 0 ? check("entryFlags", "No tag entry is marked external (whole tags)", "pass", `All ${tagIndex.tagCount} tag entries have 0 at +0x18 and +0x1C, so every tag is inside the map.`) : check("entryFlags", "No tag entry is marked external (whole tags)", "refuse", `${flagged.length} tag entr${flagged.length === 1 ? "y has" : "ies have"} a nonzero word at +0x18 or +0x1C. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged)
@@ -36682,18 +37042,19 @@ function runChecks(buffer, full, resources = {}) {
   } catch (err) {
     checks.push(check("regions", regionsLabel, "refuse", err.message));
   }
-  checks.push(tagDataOutsideCheck(header, tagIndex));
+  parsed.repairPlan = tagDataChecks(checks, view, header, tagIndex, report);
   const scan = scanPerAssetData(view, header, tagIndex);
   const counts = countExternal(scan);
   report.externalData = { bitmaps: counts.bitmap, sounds: counts.sound };
   if (counts.bitmap.count + counts.sound.count === 0 && scan.blocked.length === 0) {
-    report.newCrc32 = headerOnlyCrc;
-    report.estimatedOutputSize = buffer.length;
-    if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", `New CRC32 ${hex(headerOnlyCrc)} (was ${hex(report.previousCrc32)}).`));
+    report.newCrc32 = parsed.repairPlan?.repairs.length ? null : headerOnlyCrc;
+    report.estimatedOutputSize = buffer.length + requiredRepairBytes(header, parsed.repairPlan);
+    if (headerOnlyCrc !== null && report.newCrc32 !== null) checks.push(check("regions", regionsLabel, "pass", `New CRC32 ${hex3(headerOnlyCrc)} (was ${hex3(report.previousCrc32)}).`));
+    else if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", "The new CRC32 is computed after the tag data repairs."));
     checks.push(check("externalData", "Bitmap and sound data is inside the map", "pass", "No bitmap image or sound permutation keeps its data in a resource file."));
   } else {
     if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", "The new CRC32 is computed after the bitmap and sound data is copied in."));
-    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length, report);
+    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + requiredRepairBytes(header, parsed.repairPlan), report);
   }
   checks.push(scriptCheck(view, header, tagIndex));
   if (full) {
@@ -36705,7 +37066,7 @@ function runChecks(buffer, full, resources = {}) {
       check("scenarioName", "Internal map name", "info", `The internal name is "${report.scenarioName}". It is set from the output file name when the converted map is saved, so the two always match.`)
     );
     checks.push(
-      check("tagFileChecksum", "Tag-file checksum left unchanged", "info", `The tag data header's tag-file checksum (${hex(tagIndex.tagChecksum)}) is kept, as File > Save does. Whether the game checks it is unverified; maps saved this way load in OpenCE.`)
+      check("tagFileChecksum", "Tag-file checksum left unchanged", "info", `The tag data header's tag-file checksum (${hex3(tagIndex.tagChecksum)}) is kept, as File > Save does. Whether the game checks it is unverified; maps saved this way load in OpenCE.`)
     );
   }
   return done(parsed);
@@ -36785,28 +37146,45 @@ function externalDataChecks(checks, view, scan, counts, resources, sourceSize, r
   checks.push(check("outputSize", "Estimated output size", "info", `${fmtBytes(sourceSize + plan.bytesAdded)} (${plan.assets.length} ranges copied, +${fmtBytes(plan.bytesAdded)}).`));
   return plan;
 }
-function tagDataOutsideCheck(header, tagIndex) {
-  const label = "Tag data pointer outside the tag data";
-  const known = new Set(getAllTagGroupNames());
-  const start = header.tagDataOffset;
-  const end = header.tagDataOffset + header.tagDataSize;
-  const lines = [];
-  for (const e of tagIndex.entries) {
-    if (e.isExternal || e.primaryClassName === "scenario_structure_bsp") continue;
-    const structName = e.primaryClassName && known.has(e.primaryClassName) ? getGroupStructName(e.primaryClassName) : null;
-    const size = structName ? resolveStruct(structName).totalSize : 1;
-    const at = resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
-    if (at < start || at + size > end) lines.push(`#${e.index} ${e.path}.${e.primaryClassName}: its ${size}-byte data starts at file offset ${at}; the tag data is ${start} to ${end}.`);
+function requiredRepairBytes(header, plan) {
+  return plan ? repairBytesAdded(header.tagDataSize, plan.repairs.filter((r) => r.required)) : 0;
+}
+var REPAIR_ROWS = {
+  scriptSyntaxData: {
+    id: "repairScriptSyntaxData",
+    label: "Repair: move the script data to its own block",
+    required: "OpenCE refuses this map: the scenario's script data overlaps other tags. The repair gives it a block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked.",
+    optional: "OpenCE runs none of this map's scripts because the script data is not 4-aligned. The repair moves it to an aligned block at the end of the tag data. Optional: the map loads either way."
+  },
+  tagRootOutside: {
+    id: "repairTagRootOutside",
+    label: "Repair: give the tag outside the tag data a zeroed struct",
+    required: "OpenCE refuses this map: a tag's data starts outside the tag data. The repair adds a zeroed struct of that tag's size at the end of the tag data and points the tag at it. Nothing references the tag, so its values are never used. Convert stays off while this is unticked.",
+    optional: ""
   }
-  if (lines.length === 0) return check("tagDataOutside", label, "pass", "Every tag's data is inside the tag data.");
-  return check(
-    "tagDataOutside",
-    label,
-    "warn",
-    `${lines.length} tag(s) point at data that is not entirely inside the tag data, so the game reads whatever follows in memory. HaloMD runs this map; whether Custom Edition does is unverified. Nothing is changed.`,
-    lines,
-    true
-  );
+};
+function tagDataChecks(checks, view, header, tagIndex, report) {
+  const extents = checkTagDataExtents(view, header, tagIndex);
+  const plan = planTagDataRepairs(view, header, tagIndex, extents);
+  const label = "Tag blocks are inside the tag data and don't overlap";
+  const scope = `${extents.blocksChecked.toLocaleString("en-US")} blocks in ${extents.tagsChecked} tags and ${extents.bspsChecked} structure BSP(s) checked the way OpenCE checks them`;
+  const problems = extents.violations.length;
+  if (problems === 0) checks.push(check("tagDataExtents", label, "pass", `${scope}: no problems.`));
+  else if (plan.unrepairable.length > 0) {
+    checks.push(
+      check("tagDataExtents", label, "refuse", `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these, and ${plan.unrepairable.length} can't be repaired here, so the map is not converted.`, plan.unrepairable)
+    );
+  } else {
+    checks.push(check("tagDataExtents", label, "warn", `${scope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
+  }
+  for (const r of plan.repairs) {
+    const row = REPAIR_ROWS[r.id];
+    const bytes = repairBytesAdded(header.tagDataSize, [r]);
+    report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
+    checks.push(check(row.id, row.label, r.required ? "warn" : "info", `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
+  }
+  if (plan.notes.length > 0) checks.push(check("scriptDataAlignment", "Script data alignment", "info", plan.notes[0], plan.notes.slice(1)));
+  return plan;
 }
 function validationCheck(view, header, tagIndex) {
   const known = new Set(getAllTagGroupNames());
@@ -36860,7 +37238,7 @@ function referenceIdentityCheck(view, header, tagIndex) {
     label,
     "warn",
     `${issues.length} reference${issues.length === 1 ? "" : "s"} point${issues.length === 1 ? "s" : ""} at a tag with an outdated tag ID or path pointer, most likely left over from the demo version of this map. The Custom Edition sample maps have none of these. They are converted unchanged. If the converted map crashes, or scenery or sounds are missing in OpenCE, check these first.`,
-    issues.map((i) => `${i.context}: tag ID ${hex(i.tagId)} (tag entry ${i.entryTagId === null ? "missing" : hex(i.entryTagId)}), path pointer ${hex(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? "missing" : hex(i.entryPathPointer)})`)
+    issues.map((i) => `${i.context}: tag ID ${hex3(i.tagId)} (tag entry ${i.entryTagId === null ? "missing" : hex3(i.entryTagId)}), path pointer ${hex3(i.pathPointer)} (tag entry ${i.entryPathPointer === null ? "missing" : hex3(i.entryPathPointer)})`)
   );
 }
 function requiredTagsCheck(header, tagIndex) {
@@ -36950,8 +37328,7 @@ function preflightRetailConversion(buffer, resources = {}) {
   return runChecks(buffer, true, resources).report;
 }
 var ACKNOWLEDGEMENTS = [
-  { id: "scripts", option: "acknowledgeScripts", text: "scripts that may call the wrong function in Custom Edition" },
-  { id: "tagDataOutside", option: "acknowledgeTagDataOutside", text: "tags whose data pointer is outside the tag data" }
+  { id: "scripts", option: "acknowledgeScripts", text: "scripts that may call the wrong function in Custom Edition" }
 ];
 function convertRetailToCustomEdition(source, options) {
   const { report, parsed } = runChecks(source, false, options.resources);
@@ -36962,6 +37339,14 @@ function convertRetailToCustomEdition(source, options) {
   const unacknowledged = ACKNOWLEDGEMENTS.filter((a) => report.checks.some((c) => c.id === a.id && c.requiresAcknowledgement) && !options[a.option]);
   if (unacknowledged.length > 0) {
     throw new ConversionRefusedError(`This map has ${unacknowledged.map((a) => a.text).join(" and ")}. Confirm that you understand this before converting.`, "ACKNOWLEDGEMENT_REQUIRED");
+  }
+  const repairPlan = parsed?.repairPlan ?? null;
+  const missingRepairs = (repairPlan?.repairs ?? []).filter((r) => r.required && !options.repairs?.[r.id]);
+  if (missingRepairs.length > 0) {
+    throw new ConversionRefusedError(
+      `OpenCE refuses this map without these repairs: ${missingRepairs.map((r) => `${REPAIR_ROWS[r.id].label} (${r.tagPath})`).join("; ")}. Tick them to convert.`,
+      "REPAIR_REQUIRED"
+    );
   }
   let out;
   let imported = null;
@@ -36980,7 +37365,29 @@ function convertRetailToCustomEdition(source, options) {
   }
   out.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
-  return { buffer: out, report, imported };
+  let repairs = [];
+  const chosen = (repairPlan?.repairs ?? []).filter((r) => options.repairs?.[r.id]);
+  if (repairPlan && chosen.length > 0) {
+    const applied = applyTagDataRepairs(out, repairPlan, chosen);
+    out = applied.buffer;
+    repairs = applied.applied;
+  }
+  verifyOutputExtents(out);
+  return { buffer: out, report, imported, repairs };
+}
+function verifyOutputExtents(out) {
+  let violations;
+  try {
+    const header = parseCacheFileHeader(out);
+    violations = checkTagDataExtents(out, header, parseTagIndex(out, header)).violations.map((v) => v.text);
+  } catch (err) {
+    violations = [`The converted map can't be read back: ${err.message}`];
+  }
+  if (violations.length > 0) {
+    throw new ConversionRefusedError(
+      `The converted map still has tag data problems OpenCE would refuse, so nothing was written: ${violations.slice(0, 5).join("; ")}${violations.length > 5 ? ` (and ${violations.length - 5} more)` : ""}.`
+    );
+  }
 }
 
 // ../core/src/map/write-map.ts
@@ -37356,7 +37763,7 @@ function runConvertMap(task) {
     progress(task.requestId, "Reading file", 10);
     const source = fs.readFileSync(task.sourcePath);
     progress(task.requestId, "Converting the header", 40);
-    const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts });
+    const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts, repairs: task.repairs ?? {} });
     if (inspectCustomEditionMap(converted.buffer).status !== "ok") throw new Error("The converted map could not be read back as a Custom Edition map; nothing was written.");
     progress(task.requestId, "Writing map", 60);
     const finalized = writeFinalizedMap2(converted.buffer, task.outputPath, "the source map was not changed");

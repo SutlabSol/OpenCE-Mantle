@@ -34042,8 +34042,15 @@ function defaultConvertOutputPath(sourcePath) {
   const stem = path7.basename(sourcePath).replace(/\.map$/i, "");
   return path7.join(dir, `${stem}_ce.map`);
 }
+var REPAIR_IDS = ["scriptSyntaxData", "tagRootOutside"];
+function sanitizeRepairChoice(value) {
+  const out = {};
+  if (!value || typeof value !== "object") return out;
+  for (const id of REPAIR_IDS) if (value[id] === true) out[id] = true;
+  return out;
+}
 var cancelled2 = () => ({ ok: false, code: "CANCELLED", message: "Convert was cancelled." });
-async function convertMapFlow(deps, acknowledgeScripts) {
+async function convertMapFlow(deps, acknowledgeScripts, repairs = {}) {
   const sourcePath = deps.getSourcePath();
   if (!sourcePath) return { ok: false, code: "NO_SOURCE", message: "Choose a map to convert first." };
   if (!await deps.confirmUnsavedChanges()) return cancelled2();
@@ -34064,7 +34071,7 @@ async function convertMapFlow(deps, acknowledgeScripts) {
   if (!await deps.confirmScenarioName(target)) return cancelled2();
   deps.log("info", `Converting ${sourcePath} to a Custom Edition map: ${target}`);
   try {
-    const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts);
+    const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts, repairs);
     if (result.ok) {
       const hex2 = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
       deps.log("info", `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex2(result.previousCrc32)} -> ${hex2(result.crc32)}. ${path7.basename(sourcePath)} was not changed.`);
@@ -34654,15 +34661,15 @@ var convertMapDeps = {
   confirmOverwrite: saveMapAsDeps.confirmOverwrite,
   confirmScenarioName,
   showError: showErrorBox,
-  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts) => sendWorkerRequest(
-    { type: "convertMap", sourcePath, outputPath, acknowledgeScripts },
+  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts, repairs) => sendWorkerRequest(
+    { type: "convertMap", sourcePath, outputPath, acknowledgeScripts, repairs },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "convertMap", stage, percent })
   ).promise,
   log: sendLog
 };
-async function runConvertMap(acknowledgeScripts) {
-  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true);
+async function runConvertMap(acknowledgeScripts, repairs) {
+  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true, sanitizeRepairChoice(repairs));
   if (result.ok) {
     addRecentMap(result.outputPath);
     currentMapPath = result.outputPath;
@@ -34781,7 +34788,7 @@ import_electron3.app.whenReady().then(() => {
   registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
   import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());
   import_electron3.ipcMain.handle("map:convertPreflight", (_e, source) => convertPreflightFlow(source));
-  import_electron3.ipcMain.handle("map:convert", (_e, acknowledgeScripts) => runConvertMap(acknowledgeScripts));
+  import_electron3.ipcMain.handle("map:convert", (_e, acknowledgeScripts, repairs) => runConvertMap(acknowledgeScripts, repairs));
   import_electron3.ipcMain.handle("app:openContainingFolder", (_e, filePath) => {
     if (typeof filePath === "string" && filePath) import_electron3.shell.showItemInFolder(filePath);
   });
