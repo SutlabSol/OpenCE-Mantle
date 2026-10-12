@@ -389,3 +389,18 @@ against real bytes in the sample maps, not inferred.
   l.85-91); its structs call +0x18/+0x1C `unused[2]` (source/cache/cache_files.c l.163, tag_validate.c
   l.100, menu_tags.c l.140) and nothing reads `unused`. Decision A: +0x1C is an info row, never refused
   or rewritten; +0x18 stays strict.
+
+## Converter: bitmaps OpenCE can draw, fog values, scenario lookup, block overlap (2026-10-12, item C)
+
+- BitmapData offsets used raw by `bitmap-check.ts` (= schema, asserted by a test; = OpenCE `struct
+  bitmap_data`, source/bitmaps/bitmap_group.h l.29): width 0x4, height 0x6, depth 0x8, type 0xA, format
+  0xC, flags 0xE, mipmap count 0x14, pixel data size 0x1C. Flag bits (bitmaps.c): 0 power of two,
+  1 compressed, 2 palettized, 3 swizzled, 4 linear, 5 v16u16, 6 allocated, 7 cached; 0x100 (the external
+  bit this repo clears on copy-in) is past the 8 defined bits, so `bitmap_verify` would reject it.
+  Bits per pixel: `bitmap_format_bits_per_pixel_table`.
+- Sky fog densities: "outdoor fog maximum density" 0x6C, "indoor fog maximum density" 0x8C (schema,
+  asserted by a test). OpenCE: scenario.c l.1525-1542 (atmospheric), structures.c l.1075 (planar).
+- Scenario: the entry `scenarioTagId & 0xFFFF` whose tag ID equals the full scenario ID, as OpenCE
+  (cache_file_formats.c l.2270-2295). A wrong salt means no scenario.
+- `ExtentViolation.pointerAddress` / `blockStruct`: the address of the field's pointer word (block list
+  +4, data field +12) and the element struct, recorded for tag data blocks so `blockOverlap` can move one.

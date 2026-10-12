@@ -42,6 +42,25 @@ needs re-verification / unverified / blocked)
 | Converter Phase 2: Mac demo maps (v6) -> CE 609 | **stage 1 confirmed in OpenCE (user, 2026-10-12); stage 2 (mods) verified by tests, unverified in OpenCE; no GUI** | Branch `feat/demo-converter-phase2` (see "Converter Phase 2" in Decisions). Developer script only. Stage 3 (GUI) not started. |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-12: **Item C built (verified by tests; unverified in OpenCE).** Commits 52390b1, 1f99beb, 0e38679.
+  1. "Bitmaps OpenCE can draw" (`convert/bitmap-check.ts`, refuses): mirror of `custom_edition_bitmap_drawable`
+     (rules: opence-notes "Phase 2 mods in OpenCE"), on the flags the output will have (external bit cleared);
+     the converted map is checked again before it is returned. 0 problems on the CE maps' internal bitmaps,
+     PC / HaloMD / Mac demo stock, heh_2, crossing, barrier, theisland_3, Zombiemod; TrueInfectionV2 refused
+     (#3849 bitmap 0, 43,960 of 174,776 bytes). Independent test: raw bitmap list and own size formula.
+  2. "Fog densities and colours in sky and fog tags are 0 to 1" (`convert/fog-color-check.ts`, info only):
+     Zombiemod outdoor fog maximum density 5, TrueInfectionV2 1.5, others none. A release build logs the
+     asserts and carries on; any other build stops at the first (`cseries.h`: HALO_RELEASE vs
+     display_assert + system_exit).
+  3. Scenario by the tag data header's full scenario ID (`convert/scenario-tag.ts`), a renamed group read as a
+     scenario and left as it is (info row "Scenario found by the tag data header"); unknown groups refused by
+     name ("Every tag has a known group"); required repair `blockOverlap` for an overlapping block list whose
+     elements hold only values and pointer-based data blocks (moved with its data, today's bytes; data
+     pointers rewritten in the copy only), with the info row "Data another tag wrote over"; other overlaps
+     refused. The Inject row still warns for a renamed scenario (the app's reader doesn't read it as one).
+     **HaloMD yoyorastv2_1** (developer script, HaloMD resource files, output `yoyorastv2_1_ce.map`):
+     168,146,813 bytes (the estimate 168,146,759 + the 54-byte moved block), CRC32 0x21515932; tag #0 keeps
+     'ztpt'; #2919's strings block now at 0x40D79428; #2920 unchanged.
 - 2026-10-12: **OpenCE results for the Phase 2 mods, bitmap and fog research, yoyorastv2_1, flamethrower.**
   Code citations: `memory/opence-notes.md` "Phase 2 mods in OpenCE". Research only; nothing changed.
   - **Zombiemod loads and plays** (user). The release build logs thousands of EXCEPTION asserts
