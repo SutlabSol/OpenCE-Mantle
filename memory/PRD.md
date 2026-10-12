@@ -42,6 +42,25 @@ needs re-verification / unverified / blocked)
 | Converter Phase 2: Mac demo maps (v6) -> CE 609 | **stage 1 confirmed in OpenCE (user, 2026-10-12); stage 2 (mods) verified by tests, unverified in OpenCE; no GUI** | Branch `feat/demo-converter-phase2` (see "Converter Phase 2" in Decisions). Developer script only. Stage 3 (GUI) not started. |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-12: **yoyorastv2_1 in OpenCE (user, build 185) and research.** Details: opence-notes "yoyorastv2_1".
+  - Converts (developer script, HaloMD resource files): 168,146,813 bytes, CRC32 0x21515932. Loads ("local
+    machine is loaded & ready to play", scenario regrouped, 811 bitmaps and 1,198 sound ranges checked, 8
+    script calls renumbered), then **halts at script run**: "EXCEPTION halt ... hs_library_internal_runtime.h,
+    #80: *argument_count<LONG_BITS". Also "checksum mismatched"; four sounds cut to 4 MiB by OpenCE.
+  - Cause: `hs_evaluate_begin_random` (hs_runtime.c l.2370-2400) asserts fewer than 32 arguments; the map's
+    continuous script #48 "randomize teleport" has `begin_random` with exactly 32 `begin` arguments (node
+    1986). Its bit vector is one 32-bit long, so 32 fit: the assert is one stricter than the memory it
+    guards. "EXCEPTION halt" with a stack walk is printed only by a build without HALO_RELEASE; a release
+    build logs "EXCEPTION assert ... (release build)" and carries on (cseries.c l.360-445). Our script data,
+    string data and scenario struct are byte-identical to the source. No other sample map has a
+    begin_random of 32+ (coldsnap / b30 have long `begin` calls, which have no such limit).
+  - Checksum: OpenCE sums the BSPs packed from 0x800, the model data, and the tag data **after** it regroups
+    the scenario (cache_file_formats.c l.2270-2318), so a renamed scenario always reads as mismatched:
+    OpenCE's value for this output is 0xCF40652D (ours, over the file, 0x21515932). Joining compares the
+    stored header values of host and joiner (custom_edition_cache.c l.640-648), so it is only a warning.
+  - **Proposed, not built:** a row "Scripts OpenCE can run": refuse a begin_random with 33+ arguments
+    (overruns its bit vector in every build), warn at exactly 32 (a non-release build halts); no faithful
+    repair (splitting changes the random order and needs new nodes and strings).
 - 2026-10-12: **Item C built (verified by tests; unverified in OpenCE).** Commits 52390b1, 1f99beb, 0e38679.
   1. "Bitmaps OpenCE can draw" (`convert/bitmap-check.ts`, refuses): mirror of `custom_edition_bitmap_drawable`
      (rules: opence-notes "Phase 2 mods in OpenCE"), on the flags the output will have (external bit cleared);

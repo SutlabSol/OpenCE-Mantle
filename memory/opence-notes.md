@@ -289,3 +289,29 @@ announcer and plasma overheat sounds; normal ammo icons and meters.
   maximum densities); it calls `real_argb_color_to_pixel32` (source/bitmaps/bitmaps_inlines.h: assert 89
   valid colour, 188 "verify == result"). The HUD meter caller clamps (an OpenCE port fix). Zombiemod's
   sky `outdoor fog maximum density` is 5.0.
+
+## yoyorastv2_1 (HaloMD) in OpenCE (user, build 185; code read at 6399ed9, 2026-10-12)
+
+- Converted with the developer script and HaloMD's resource files: 168,146,813 bytes, CRC32 0x21515932
+  (scenario #0 keeps the group 'ztpt'; #2919's strings block moved). Loads ("scenario regrouped", 811
+  bitmaps, 1,198 sound ranges, "8 script calls ... given this build's index", "local machine is loaded &
+  ready to play"), then halts: "EXCEPTION halt in c:\halo\source\hs\hs_library_internal_runtime.h,#80:
+  *argument_count<LONG_BITS" after two "object_create ... already exists" warnings and a stack dump.
+- **The halt**: `hs_evaluate_begin_random` (source/hs/hs_runtime.c l.2370-2400) counts the call's
+  arguments, asserts `< LONG_BITS` (32), and keeps "already evaluated" flags in `BIT_VECTOR_SIZE_IN_BYTES`
+  (one 32-bit long for up to 32). Script #48 "randomize teleport" (type 2) has begin_random with exactly 32
+  `begin` arguments (node 1986): it fits the vector; only the assert fails. 33+ would overrun the stack slot.
+- **Which build**: "EXCEPTION halt" plus a stack walk comes from `display_assert` / `cseries_match_assert`
+  without HALO_RELEASE (source/cseries/cseries.c l.150-161, 430-445). With HALO_RELEASE the same assert is
+  logged as "EXCEPTION assert ... (release build)" and the game carries on (`release_assert_failed`). The
+  Zombiemod log ("failed N times") was a release build; this one was not.
+- **Checksum**: `custom_edition_cache_load` sums the structure BSPs as packed from 0x800 by size
+  (`structure_bsps_verify`, "OpenSauce's CalculateChecksum"), the model data, then the tag data as loaded,
+  which by then has the regrouped scenario (l.2270-2286 run before l.2300-2318). Renamed scenario -> always
+  "mismatched". Computed for this output: 0xCF40652D. Joiners compare the host's stored header value with
+  theirs (`custom_edition_cache_present`, custom_edition_cache.c l.640-648), so the warning doesn't block play.
+- **Stack dump**: printed by `stack_walk_with_context` (source/cseries/stack_walk_windows.c) as absolute
+  addresses without the module base; tools/symbolize_crash.py reads only "crash:" lines. Symbolising needs
+  the exact halo.exe and its halo.pdb (the release's halo-windows-<config>.zip and
+  halo-windows-<config>-symbols.zip) and llvm-symbolizer, run by hand on address - ImageBase (valid only if
+  halo.exe was not relocated in that run).
