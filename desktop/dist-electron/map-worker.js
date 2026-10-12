@@ -37384,6 +37384,108 @@ function repairBytesAdded(tagDataSize, repairs) {
   return end - tagDataSize;
 }
 
+// ../core/src/map/convert/script-run-check.ts
+var MAXIMUM_RANDOM_ARGUMENTS = 32;
+var NONE = 4294967295;
+var FLAG_PRIMITIVE = 1;
+var FLAG_SCRIPT_CALL = 2;
+var NODE_FLAGS = 6;
+var NODE_NEXT = 8;
+var NODE_STRING = 12;
+var NODE_DATA = 16;
+function checkScriptsOpenCECanRun(view, header, tagIndex) {
+  const report = { findings: [], randomCalls: 0, hasScripts: false };
+  const scenario = scenarioEntryOf(tagIndex);
+  const scenarioStruct = getGroupStructName("scenario");
+  if (!scenario) return report;
+  const at = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(at, resolveStruct(scenarioStruct).totalSize, view.length)) return report;
+  const decoded = decodeStruct(view, at, scenarioStruct);
+  const syntax = decoded.get("script syntax data");
+  const strings = decoded.get("script string data");
+  if (syntax?.kind !== "tagDataOffset" || syntax.value.size < DATA_ARRAY_HEADER_SIZE) return report;
+  const tableAt = resolvePointer(syntax.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(tableAt, syntax.value.size, view.length)) return report;
+  const used = view.readInt16LE(tableAt + DATA_ARRAY_COUNT);
+  if (used <= 0 || DATA_ARRAY_HEADER_SIZE + used * SCRIPT_NODE_SIZE > syntax.value.size) return report;
+  report.hasScripts = true;
+  let stringsAt = -1;
+  let stringBytes = 0;
+  if (strings?.kind === "tagDataOffset" && strings.value.size > 0) {
+    stringsAt = resolvePointer(strings.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    stringBytes = isRangeInBuffer(stringsAt, strings.value.size, view.length) ? strings.value.size : 0;
+  }
+  const node = (i) => tableAt + DATA_ARRAY_HEADER_SIZE + i * SCRIPT_NODE_SIZE;
+  const nameAt = (offset) => {
+    if (offset < 0 || offset >= stringBytes) return null;
+    const end = view.indexOf(0, stringsAt + offset);
+    return end >= 0 && end < stringsAt + stringBytes ? view.toString("latin1", stringsAt + offset, end) : null;
+  };
+  const scriptOf = scriptOwners(view, header, tagIndex, decoded, scenarioStruct, used, node);
+  for (let i = 0; i < used; i++) {
+    const n = node(i);
+    if (view.readUInt16LE(n) === 0) continue;
+    if (view.readUInt16LE(n + NODE_FLAGS) & (FLAG_PRIMITIVE | FLAG_SCRIPT_CALL)) continue;
+    const child = view.readUInt32LE(n + NODE_DATA) & 65535;
+    if (child >= used) continue;
+    const functionName = nameAt(view.readInt32LE(node(child) + NODE_STRING));
+    if (functionName !== "begin_random") continue;
+    report.randomCalls++;
+    let count2 = 0;
+    let next = view.readUInt32LE(node(child) + NODE_NEXT);
+    const seen = /* @__PURE__ */ new Set();
+    let ends = true;
+    while (next !== NONE) {
+      const k = next & 65535;
+      if (k >= used || seen.has(k)) {
+        ends = false;
+        break;
+      }
+      seen.add(k);
+      count2++;
+      next = view.readUInt32LE(node(k) + NODE_NEXT);
+    }
+    const script = scriptOf.get(i) ?? null;
+    const where = `${script === null ? "no script (a global or unused node)" : `script "${script}"`}, node ${i}`;
+    if (!ends) {
+      report.findings.push({ node: i, script, functionName, argumentCount: null, severity: "refuse", text: `${where}: begin_random's argument list never ends; OpenCE would never finish counting it` });
+    } else if (count2 > MAXIMUM_RANDOM_ARGUMENTS) {
+      report.findings.push({ node: i, script, functionName, argumentCount: count2, severity: "refuse", text: `${where}: begin_random with ${count2} arguments; OpenCE keeps one bit per argument in 32 bits, so more than 32 overrun its memory` });
+    } else if (count2 === MAXIMUM_RANDOM_ARGUMENTS) {
+      report.findings.push({ node: i, script, functionName, argumentCount: count2, severity: "warn", text: `${where}: begin_random with 32 arguments; OpenCE asserts fewer than 32 (they still fit its 32 bits)` });
+    }
+  }
+  return report;
+}
+function scriptOwners(view, header, tagIndex, scenario, scenarioStruct, used, node) {
+  const owners = /* @__PURE__ */ new Map();
+  const scripts = scenario.get("scripts");
+  const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === "scripts");
+  const elementStruct = field?.def.type === "TagReflexive" ? field.def.struct : void 0;
+  if (scripts?.kind !== "reflexive" || !elementStruct) return owners;
+  const element = resolveStruct(elementStruct);
+  const rootField = element.fields.find((f) => /root expression/.test(f.name));
+  if (!rootField) return owners;
+  for (let s = 0; s < scripts.value.count; s++) {
+    const at = resolvePointer(scripts.value.pointerLow + s * element.totalSize >>> 0, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(at, element.totalSize, view.length)) break;
+    const end = view.indexOf(0, at);
+    const name = view.toString("latin1", at, end >= at && end < at + 32 ? end : at + 32);
+    const stack = [view.readUInt32LE(at + rootField.offset)];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (id === NONE) continue;
+      const i = id & 65535;
+      if (i >= used || owners.has(i)) continue;
+      owners.set(i, name);
+      const n = node(i);
+      stack.push(view.readUInt32LE(n + NODE_NEXT));
+      if (!(view.readUInt16LE(n + NODE_FLAGS) & FLAG_PRIMITIVE)) stack.push(view.readUInt32LE(n + NODE_DATA));
+    }
+  }
+  return owners;
+}
+
 // ../core/src/map/convert/align-tag-data.ts
 var ALIGNMENT2 = 4;
 var TagDataAlignmentError = class extends Error {
@@ -37741,6 +37843,7 @@ function runChecks(buffer, full, resources = {}, origin) {
   checks.push(drawableBitmapsCheck(view, header, tagIndex));
   checks.push(fogAndColorsCheck(view, header, tagIndex));
   checks.push(scriptCheck(view, header, tagIndex));
+  checks.push(scriptsRunCheck(view, header, tagIndex));
   if (full) {
     checks.push(validationCheck(view, header, tagIndex));
     checks.push(referenceIdentityCheck(view, header, tagIndex));
@@ -38060,6 +38163,36 @@ function fogAndColorsCheck(view, header, tagIndex) {
     `${found.length} value(s) in sky or fog tags are outside 0 to 1. OpenCE draws the fog with them as they are: its release build logs an assertion exception each time and carries on (Zombiemod logs thousands), while a debug build stops at the first one. They are left as the map has them.`,
     found.map((f) => f.text)
   );
+}
+function scriptsRunCheck(view, header, tagIndex) {
+  const label = "Scripts OpenCE can run";
+  let report;
+  try {
+    report = checkScriptsOpenCECanRun(view, header, tagIndex);
+  } catch (err) {
+    return check("scriptsRun", label, "refuse", `The scripts can't be read: ${err.message}`);
+  }
+  const refused = report.findings.filter((f) => f.severity === "refuse");
+  if (refused.length > 0) {
+    return check(
+      "scriptsRun",
+      label,
+      "refuse",
+      `${refused.length} script call(s) can't run in OpenCE (it would write past its memory or never finish), so the map is not converted. Changing the scripts is not done here.`,
+      report.findings.map((f) => f.text)
+    );
+  }
+  if (report.findings.length > 0) {
+    return check(
+      "scriptsRun",
+      label,
+      "warn",
+      `${report.findings.length} begin_random call(s) have exactly 32 arguments. They run, but OpenCE asserts fewer than 32: its release build logs the assertion and carries on; a debug build halts there. Left as they are.`,
+      report.findings.map((f) => f.text)
+    );
+  }
+  if (!report.hasScripts) return check("scriptsRun", label, "pass", "The scenario has no script nodes to run.");
+  return check("scriptsRun", label, "pass", `${report.randomCalls} begin_random call(s), each with fewer than 32 arguments.`);
 }
 function scriptCheck(view, header, tagIndex) {
   const label = "Script calls name their functions (OpenCE looks them up by name)";
