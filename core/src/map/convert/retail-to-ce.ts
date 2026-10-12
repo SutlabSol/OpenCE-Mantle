@@ -18,6 +18,7 @@ import { RawDataAppendCancelledError } from '../raw-data-region';
 import { checkTagDataExtents } from './extent-check';
 import { checkModelParts } from './model-part-check';
 import { checkDrawableBitmaps } from './bitmap-check';
+import { parseTagIndexForConversion, renamedScenarioOf, unknownGroupEntries } from './scenario-tag';
 import { findFogAndColorValuesOutOfRange } from './fog-color-check';
 import { applyTagDataAlignment, measureBlockAlignment, planTagDataAlignment } from './align-tag-data';
 import type { TagDataAlignmentPlan } from './align-tag-data';
@@ -87,6 +88,8 @@ export type ConversionCheckId =
   | 'tagDataAddress'
   | 'entryFlags'
   | 'entryUnusedWord'
+  | 'unknownGroups'
+  | 'scenarioGroup'
   | 'regions'
   | 'validation'
   | 'referenceIdentity'
@@ -103,6 +106,8 @@ export type ConversionCheckId =
   | 'repairAlignTagData'
   | 'repairScriptSyntaxData'
   | 'repairTagRootOutside'
+  | 'repairBlockOverlap'
+  | 'overwrittenData'
   | 'externalData'
   | 'resourceFiles'
   | 'resourceNames'
@@ -276,7 +281,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     const view = Buffer.from(buffer);
     view.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
     const header = parseCacheFileHeader(view);
-    const tagIndex = parseTagIndex(view, header);
+    const tagIndex = parseTagIndexForConversion(view, header);
     parsed = { header, tagIndex, view, importPlan: null, repairPlan: null, alignment: null, requiredRepairBytes: 0 };
   } catch (err) {
     checks.push(check('regions', 'Tag index can be read', 'refuse', `The tag index can't be read: ${(err as Error).message}`));
@@ -302,6 +307,31 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     flagged.length === 0
       ? check('entryFlags', 'No tag entry is marked external (whole tags)', 'pass', `All ${tagIndex.tagCount} tag entries have 0 at +0x18, so every tag is inside the map.`)
       : check('entryFlags', 'No tag entry is marked external (whole tags)', 'refuse', `${flagged.length} tag entr${flagged.length === 1 ? 'y has' : 'ies have'} a nonzero word at +0x18. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged),
+  );
+  // Decision C (PRD 2026-10-12): the scenario is the tag the header's scenario ID names; a renamed group
+  // is read as a scenario and left as it is. A tag of a group this build doesn't know is refused by name.
+  const renamed = renamedScenarioOf(parseTagIndex(view, header));
+  if (renamed) {
+    checks.push(
+      check(
+        'scenarioGroup',
+        'Scenario found by the tag data header',
+        'info',
+        `The scenario is #${renamed.index} "${renamed.path}", named by the tag data header's scenario ID, but its group is "${renamed.primaryClassName}" (map protection renames it). It is read as a scenario, as OpenCE does when it loads the map (OpenCE gives it the scenario group back), and its group is left as it is.`,
+      ),
+    );
+  }
+  const unknown = unknownGroupEntries(tagIndex);
+  checks.push(
+    unknown.length === 0
+      ? check('unknownGroups', 'Every tag has a known group', 'pass', `All ${tagIndex.tagCount} tags have a group this build knows.`)
+      : check(
+          'unknownGroups',
+          'Every tag has a known group',
+          'refuse',
+          `${unknown.length} tag(s) have a group this build doesn't know. OpenCE loads such a tag without reading it, but the converter can't tell whether its data holds pointers that must move, so the map is not converted.`,
+          unknown.map((e) => `#${e.index} ${e.path} (group "${e.primaryClassName}")`),
+        ),
   );
   if (unusedWord.length > 0) {
     checks.push(
@@ -351,7 +381,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     checks.push(validationCheck(view, header, tagIndex));
     checks.push(referenceIdentityCheck(view, header, tagIndex));
     checks.push(requiredTagsCheck(header, tagIndex));
-    checks.push(injectAfterwardsCheck(view, header, tagIndex));
+    checks.push(injectAfterwardsCheck(view, header));
     checks.push(
       check('scenarioName', 'Internal map name', 'info', `The internal name is "${report.scenarioName}". It is set from the output file name when the converted map is saved, so the two always match.`),
     );
@@ -473,6 +503,13 @@ const REPAIR_ROWS: Record<TagDataRepairId, { id: ConversionCheckId; label: strin
       "OpenCE refuses this map without this repair: the scenario's script data overlaps other tags or is not 4-aligned, and OpenCE stops loading at \"the scenario's script data is missing or damaged\" (a blue screen). The repair gives it a 4-aligned block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked.",
     optional: '',
   },
+  blockOverlap: {
+    id: 'repairBlockOverlap',
+    label: "Repair: move a block that overlaps another tag",
+    required:
+      "OpenCE refuses this map without this repair: a block of this tag shares bytes with another tag. The repair copies the block and its data blocks, as they are today, to the end of the tag data and points the tag at the copy; the other tag keeps its bytes. Convert stays off while this is unticked.",
+    optional: '',
+  },
   tagRootOutside: {
     id: 'repairTagRootOutside',
     label: 'Repair: give the tag outside the tag data a zeroed struct',
@@ -508,7 +545,7 @@ function tagDataChecks(
   if (canAlign) {
     const alignedView = applyTagDataAlignment(view, alignment).buffer;
     const alignedHeader = parseCacheFileHeader(alignedView);
-    laid = { view: alignedView, header: alignedHeader, tagIndex: parseTagIndex(alignedView, alignedHeader) };
+    laid = { view: alignedView, header: alignedHeader, tagIndex: parseTagIndexForConversion(alignedView, alignedHeader) };
   }
   const extents = checkTagDataExtents(laid.view, laid.header, laid.tagIndex);
   const plan = planTagDataRepairs(laid.view, laid.header, laid.tagIndex, extents);
@@ -575,6 +612,18 @@ function tagDataChecks(
     report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
     checks.push(check(row.id, row.label, r.required ? 'warn' : 'info', `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
   });
+  const overwritten = plan.repairs.filter((r) => r.overwritten && r.overwritten.length > 0);
+  if (overwritten.length > 0) {
+    checks.push(
+      check(
+        'overwrittenData',
+        'Data another tag wrote over',
+        'info',
+        `In ${overwritten.length} tag(s), another tag was written over part of a block, so its original contents (for example the text of a string list) are gone. The repair above copies the bytes as they are today; it can't bring the original back.`,
+        overwritten.flatMap((r) => r.overwritten!.map((o) => `#${r.tagIndex} ${r.tagPath}: ${o}`)),
+      ),
+    );
+  }
   const requiredBytes = (canAlign ? alignment.bytes : 0) + repairBytesAdded(laid.header.tagDataSize, plan.repairs.filter((r) => r.required));
   return { plan, alignment: canAlign ? alignment : null, requiredBytes };
 }
@@ -837,10 +886,11 @@ function scriptCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex):
   );
 }
 
-function injectAfterwardsCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
+function injectAfterwardsCheck(view: Buffer, header: CacheFileHeader): ConversionCheck {
   const label = 'Inject Tags can add tags to the converted map';
   try {
-    collectTagDataPointers(view, tagDataLayoutOf(header, tagIndex));
+    // The app's own reader (Inject does not read a renamed scenario as a scenario).
+    collectTagDataPointers(view, tagDataLayoutOf(header, parseTagIndex(view, header)));
     return check('injectAfterwards', label, 'pass', 'Every pointer in the map can be followed.');
   } catch (err) {
     if (!(err instanceof UnwalkableTagError)) throw err;
@@ -973,7 +1023,7 @@ function verifyOutputExtents(out: Buffer): void {
   let violations: string[];
   try {
     const header = parseCacheFileHeader(out);
-    violations = checkTagDataExtents(out, header, parseTagIndex(out, header)).violations.map((v) => v.text);
+    violations = checkTagDataExtents(out, header, parseTagIndexForConversion(out, header)).violations.map((v) => v.text);
   } catch (err) {
     violations = [`The converted map can't be read back: ${(err as Error).message}`];
   }
@@ -989,7 +1039,7 @@ function verifyOutputBitmaps(out: Buffer): void {
   let problems: string[];
   try {
     const header = parseCacheFileHeader(out);
-    problems = checkDrawableBitmaps(out, header, parseTagIndex(out, header)).problems.map((p) => p.text);
+    problems = checkDrawableBitmaps(out, header, parseTagIndexForConversion(out, header)).problems.map((p) => p.text);
   } catch (err) {
     problems = [`its bitmaps can't be read: ${(err as Error).message}`];
   }
@@ -1004,7 +1054,7 @@ function verifyOutputAlignment(out: Buffer): void {
   let problem: string | null = null;
   try {
     const header = parseCacheFileHeader(out);
-    const r = measureBlockAlignment(out, header, parseTagIndex(out, header));
+    const r = measureBlockAlignment(out, header, parseTagIndexForConversion(out, header));
     const unaligned = r.blocks.unaligned + r.bspBlocks.unaligned + r.roots.unaligned + r.dataBlocks.unaligned;
     if (unaligned > 0) problem = `${unaligned} block(s) are not 4-aligned (${r.examples.slice(0, 3).join('; ')})`;
   } catch (err) {

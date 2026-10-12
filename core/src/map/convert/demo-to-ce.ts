@@ -129,6 +129,7 @@ export function normalizeDemoMap(source: Buffer): DemoNormalizationResult {
   );
 
   const arrayAt = tdo + TAG_DATA_HEADER_PC_SIZE;
+  const scenarioTagId = source.readUInt32LE(tdo + 0x4);
   const entries: TagDataLayout['entries'][number][] = [];
   for (let i = 0; i < tagCount; i++) {
     const at = arrayAt + i * TAG_ENTRY_SIZE;
@@ -137,7 +138,9 @@ export function normalizeDemoMap(source: Buffer): DemoNormalizationResult {
     entries.push({
       index: i,
       path: pathAt >= tdo && pathAt < tdo + tds ? readCStringWithin(source, pathAt, tdo + tds) : `(tag #${i})`,
-      primaryClassName: lookupTagClass(fourcc)?.name ?? fourCCToString(fourcc),
+      // The scenario is the tag the header's scenario ID names (full ID), read as a scenario whatever its
+      // group (`scenario-tag.ts`); its group in the file is left as it is.
+      primaryClassName: i === (scenarioTagId & 0xffff) && source.readUInt32LE(at + 0xc) === scenarioTagId ? 'scenario' : (lookupTagClass(fourcc)?.name ?? fourCCToString(fourcc)),
       // Same rule as the CE reader (`parseTagIndex`): +0x18 == 1 means "in a resource map".
       isExternal: source.readUInt32LE(at + 0x18) === 1,
     });

@@ -166,7 +166,9 @@ try {
     const what =
       r.id === 'scriptSyntaxData'
         ? `script syntax data of #${r.tagIndex} ${r.tagPath} moved to its own block (${r.copied.toLocaleString('en-US')} bytes copied: header and used nodes; rest zero)`
-        : `tag #${r.tagIndex} ${r.tagPath} given a zeroed ${r.blockSize}-byte root struct (tag entry +0x14)`;
+        : r.id === 'blockOverlap'
+          ? `a block of #${r.tagIndex} ${r.tagPath} that overlapped another tag moved, with its data blocks, to ${r.blockSize.toLocaleString('en-US')} bytes of its own (today's bytes copied)`
+          : `tag #${r.tagIndex} ${r.tagPath} given a zeroed ${r.blockSize}-byte root struct (tag entry +0x14)`;
     console.log(`    - ${r.id}: ${what}`);
     console.log(`      pointer ${hex(r.oldPointer)} -> ${hex(r.newPointer)}; appended ${r.bytesAppended.toLocaleString('en-US')} bytes (${r.padding} padding + ${r.blockSize.toLocaleString('en-US')} block)`);
   }

@@ -30,6 +30,13 @@ import type { ExtentReport } from './extent-check';
  *   tagRootOutside: a tag whose root struct lies (partly) outside the tag data gets a zeroed struct
  *     of its group's schema size. Only when no reference names that tag with its full tag ID, so
  *     nothing reads the zeroed values (required: OpenCE refuses the map).
+ *   blockOverlap (PRD 2026-10-12, item C): a block list that overlaps another tag's bytes is moved,
+ *     with its data blocks, to the end of the tag data: today's bytes are copied (what the other tag
+ *     wrote over stays as it is: the original contents are lost), the data pointers are rewritten in
+ *     the new copy only, and the field's block pointer points at it. Only for a block whose elements
+ *     hold plain values and pointer-based data blocks (no block lists, tag references, runtime
+ *     pointers or file-offset data), so nothing else points into it. Any other overlap is refused.
+ *     Seen: HaloMD yoyorastv2_1 #2919 var_kill_penalty strings[2 x 20] overlaps #2920's root.
  *
  * Layout rules: the tag data must be the last block of the file and every new byte must stay below
  * the lowest structure BSP address (OpenCE `cache_file_formats.c`, `structure_bsps_verify`: a BSP
@@ -40,9 +47,9 @@ import type { ExtentReport } from './extent-check';
  */
 
 /** `alignTagData` is planned and applied by `align-tag-data.ts` (Phase 1c), before the others. */
-export type TagDataRepairId = 'alignTagData' | 'scriptSyntaxData' | 'tagRootOutside';
+export type TagDataRepairId = 'alignTagData' | 'scriptSyntaxData' | 'tagRootOutside' | 'blockOverlap';
 /** Every repair id, for code that must accept exactly these (the main process's sanitizer). */
-export const TAG_DATA_REPAIR_IDS: readonly TagDataRepairId[] = ['alignTagData', 'scriptSyntaxData', 'tagRootOutside'];
+export const TAG_DATA_REPAIR_IDS: readonly TagDataRepairId[] = ['alignTagData', 'scriptSyntaxData', 'tagRootOutside', 'blockOverlap'];
 
 export interface PlannedTagDataRepair {
   id: TagDataRepairId;
@@ -59,6 +66,21 @@ export interface PlannedTagDataRepair {
   copyBytes: number;
   /** Plain-language evidence for the dialog. */
   details: string[];
+  /**
+   * blockOverlap only: what goes into the new block, at `offset` from its start (copied from `from`, a
+   * memory address, today's bytes), and where in the new block the pointer to each piece is written.
+   */
+  pieces?: RepairPiece[];
+  /** blockOverlap only: the parts whose bytes other tags wrote over (their original contents are lost). */
+  overwritten?: string[];
+}
+
+export interface RepairPiece {
+  from: number;
+  size: number;
+  offset: number;
+  /** Offset in the new block of the 32-bit pointer to this piece (null for the block itself). */
+  pointerOffset: number | null;
 }
 
 export interface TagDataRepairPlan {
@@ -236,6 +258,60 @@ export function planTagDataRepairs(view: Buffer, header: Pick<CacheFileHeader, '
     });
   });
 
+  // --- a block that overlaps another tag and holds no pointers but its own data blocks ---
+  extents.violations.forEach((v, i) => {
+    if (handled.has(i) || v.kind !== 'overlap' || v.region !== 'tagData' || v.isRoot || !v.blockStruct || v.pointerAddress === null) return;
+    const element = resolveStruct(v.blockStruct);
+    const offending = element.fields.filter(
+      (f) => f.def.type === 'TagReflexive' || f.def.type === 'TagDependency' || f.def.type === 'Pointer' || (f.def.type === 'TagDataOffset' && (f.def.externalFileOffset || f.def.nonCached)),
+    );
+    if (offending.length > 0 || v.size % element.totalSize !== 0) return; // refused below: not this narrow case
+    handled.add(i);
+    const count = v.size / element.totalSize;
+    const dataFields = element.fields.filter((f) => f.def.type === 'TagDataOffset');
+    const pieces: RepairPiece[] = [{ from: v.address, size: v.size, offset: 0, pointerOffset: null }];
+    const overwritten: string[] = [`${v.field}: ${fmt(v.size)} bytes at ${hex(v.address)} share bytes with ${v.overlaps}`];
+    let end = v.size;
+    let problem: string | null = null;
+    for (let k = 0; k < count && !problem; k++) {
+      for (const f of dataFields) {
+        const fieldAt = fileOf(v.address + k * element.totalSize + f.offset);
+        const size = view.readUInt32LE(fieldAt);
+        const pointer = view.readUInt32LE(fieldAt + DATA_FIELD_POINTER);
+        if (size === 0) continue;
+        if (!inTagData(pointer, size)) {
+          problem = `${v.text}. Its element ${k} "${f.name}" (${fmt(size)} bytes at ${hex(pointer)}) is outside the tag data, so the block is not moved.`;
+          break;
+        }
+        end += padTo(end);
+        pieces.push({ from: pointer, size, offset: end, pointerOffset: k * element.totalSize + f.offset + DATA_FIELD_POINTER });
+        if (extents.freeTagDataBytesAt(pointer, size) < size) overwritten.push(`${v.fieldName}[${k}].${f.name}: ${fmt(size)} bytes at ${hex(pointer)} share bytes with another tag`);
+        end += size;
+      }
+    }
+    if (problem) {
+      unrepairable.push(problem);
+      return;
+    }
+    repairs.push({
+      id: 'blockOverlap',
+      required: true,
+      tagIndex: v.tagIndex,
+      tagPath: v.tagPath,
+      pointerAddress: v.pointerAddress,
+      oldPointer: v.address,
+      blockSize: end,
+      copyBytes: 0,
+      pieces,
+      overwritten,
+      details: [
+        v.text,
+        `Its ${count} element(s) hold only values and data blocks (no block lists or tag references), so nothing else points into it and it can be moved whole.`,
+        `New block: ${fmt(end)} bytes at the end of the tag data (4-aligned): the block and its ${pieces.length - 1} data block(s), today's bytes copied; its data pointers are rewritten in the new copy only.`,
+      ],
+    });
+  });
+
   extents.violations.forEach((v, i) => {
     if (!handled.has(i)) unrepairable.push(`${v.text}. No repair covers this problem.`);
   });
@@ -290,6 +366,16 @@ export function applyTagDataRepairs(map: Buffer, plan: Pick<TagDataRepairPlan, '
     const current = out.readUInt32LE(pointerAt);
     if (current !== r.oldPointer >>> 0) throw new TagDataRepairError(`${r.tagPath}: the pointer at ${hex(r.pointerAddress)} is ${hex(current)}, not ${hex(r.oldPointer)} as planned. Nothing was written.`);
     if (r.copyBytes > 0) map.copy(out, tdo + at, tdo + (r.oldPointer - base), tdo + (r.oldPointer - base) + r.copyBytes);
+    for (const piece of r.pieces ?? []) {
+      const from = tdo + (piece.from - base);
+      map.copy(out, tdo + at + piece.offset, from, from + piece.size);
+    }
+    for (const piece of r.pieces ?? []) {
+      if (piece.pointerOffset === null) continue;
+      const pointerInCopy = tdo + at + piece.pointerOffset;
+      if (out.readUInt32LE(pointerInCopy) !== piece.from >>> 0) throw new TagDataRepairError(`${r.tagPath}: a data pointer in the moved block is not ${hex(piece.from)} as planned. Nothing was written.`);
+      out.writeUInt32LE((base + at + piece.offset) >>> 0, pointerInCopy);
+    }
     const newPointer = (base + at) >>> 0;
     out.writeUInt32LE(newPointer, pointerAt);
     applied.push({ id: r.id, tagIndex: r.tagIndex, tagPath: r.tagPath, oldPointer: r.oldPointer >>> 0, newPointer, padding, blockSize: r.blockSize, copied: r.copyBytes, bytesAppended: padding + r.blockSize });

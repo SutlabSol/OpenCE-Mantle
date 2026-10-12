@@ -1,12 +1,12 @@
 import { CE_TAG_SPACE_SIZE, TAG_DATA_HEADER_PC_SIZE } from '../../constants/cache-file';
 import { parseCacheFileHeader } from '../header';
 import type { CacheFileHeader } from '../header';
-import { parseTagIndex } from '../tag-index';
 import type { TagIndex } from '../tag-index';
 import { decodeStruct, getGroupStructName, resolveStruct } from '../definitions/engine';
 import { applyPointerShift, collectTagDataPointers, tagDataLayoutOf, UnwalkableTagError } from '../pointer-rebase';
 import type { TagDataPointerKind, TagDataPointerSite, ToleratedPointer } from '../pointer-rebase';
 import { bspAddresses } from './tag-data-repairs';
+import { parseTagIndexForConversion } from './scenario-tag';
 
 /**
  * Converter Phase 1c: align the tag data (PRD 2026-10-12 "Research: the sound and HUD glitches" and
@@ -253,7 +253,7 @@ export function planTagDataAlignment(buffer: Buffer, header: CacheFileHeader, ta
  */
 export function applyTagDataAlignment(map: Buffer, expected: Pick<TagDataAlignmentPlan, 'insertAt' | 'bytes'>): { buffer: Buffer; plan: TagDataAlignmentPlan; moved: number } {
   const header = parseCacheFileHeader(map);
-  const tagIndex = parseTagIndex(map, header);
+  const tagIndex = parseTagIndexForConversion(map, header);
   const plan = planTagDataAlignment(map, header, tagIndex);
   if (plan.problems.length > 0) throw new TagDataAlignmentError(`The tag data can't be aligned: ${plan.problems.join(' ')} Nothing was written.`);
   if (!plan.needed || plan.insertAt !== expected.insertAt || plan.bytes !== expected.bytes) {

@@ -155,6 +155,7 @@ describe('Phase 2: MacDemo/bloodgulch.map with the Mac demo resource files (in m
       padding: 'pass',
       tagDataAddress: 'pass',
       entryFlags: 'pass',
+      unknownGroups: 'pass',
       tagBlockAlignment: 'pass',
       tagDataExtents: 'pass',
       regions: 'pass',

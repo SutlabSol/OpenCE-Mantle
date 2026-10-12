@@ -46,6 +46,10 @@ export interface ExtentViolation {
   fieldName: string | null;
   /** Memory address and byte count of the block. */
   address: number;
+  /** Memory address of the 32-bit pointer that points at this block (in the tag data), when it is a field's. */
+  pointerAddress: number | null;
+  /** The element struct of a block list (null for a data field or a root). */
+  blockStruct: string | null;
   size: number;
   /** What the first already-claimed byte belongs to (overlaps only). */
   overlaps: string | null;
@@ -142,7 +146,7 @@ export function checkTagDataExtents(buffer: Buffer, header: Pick<CacheFileHeader
   }
 
   /** Checks and claims one block; records a violation and returns false when it fails. */
-  const checkBlock = (r: Region, tagI: number, field: string, fieldName: string | null, isRoot: boolean, address: number, size: number): boolean => {
+  const checkBlock = (r: Region, tagI: number, field: string, fieldName: string | null, isRoot: boolean, address: number, size: number, pointerAddress: number | null = null, blockStruct: string | null = null): boolean => {
     blocksChecked++;
     const e = tagIndex.entries[tagI];
     const label = `${entryName(tagI)} ${field}`;
@@ -159,6 +163,8 @@ export function checkTagDataExtents(buffer: Buffer, header: Pick<CacheFileHeader
         fieldName,
         address: address >>> 0,
         size,
+        pointerAddress: r.kind === 'tagData' && pointerAddress !== null ? pointerAddress >>> 0 : null,
+        blockStruct,
         overlaps,
         text:
           kind === 'outside'
@@ -190,11 +196,11 @@ export function checkTagDataExtents(buffer: Buffer, header: Pick<CacheFileHeader
       } else if (value.kind === 'reflexive' && field.def.type === 'TagReflexive' && value.value.count !== 0 && field.def.struct) {
         const size = resolveStruct(field.def.struct).totalSize;
         const count = value.value.count >>> 0;
-        if (checkBlock(r, tagI, `${path}[${count} x ${size}]`, field.name, false, value.value.pointerLow, count * size)) {
+        if (checkBlock(r, tagI, `${path}[${count} x ${size}]`, field.name, false, value.value.pointerLow, count * size, address + field.offset + 4, field.def.struct)) {
           children.push({ struct: field.def.struct, pointer: value.value.pointerLow >>> 0, count, size, where: path });
         }
       } else if (value.kind === 'tagDataOffset' && field.def.type === 'TagDataOffset' && !field.def.externalFileOffset && value.value.size !== 0) {
-        checkBlock(r, tagI, path, field.name, false, value.value.pointerLow, value.value.size >>> 0);
+        checkBlock(r, tagI, path, field.name, false, value.value.pointerLow, value.value.size >>> 0, address + field.offset + 12);
       }
     }
     for (const c of children) {
@@ -244,7 +250,7 @@ export function checkTagDataExtents(buffer: Buffer, header: Pick<CacheFileHeader
         const size = num('bsp size');
         const address = num('bsp address');
         if (start + size > buffer.length || size < BSP_HEADER_SIZE) {
-          violations.push({ kind: 'outside', region: 'bsp', tagIndex: bspTag, tagPath: tagIndex.entries[bspTag]?.path ?? '', group: 'scenario_structure_bsp', isRoot: true, field: 'structure bsp', fieldName: null, address, size, overlaps: null, text: `${entryName(bspTag)}: the structure BSP (${size} bytes at file offset ${start}) is not inside the file` });
+          violations.push({ kind: 'outside', region: 'bsp', tagIndex: bspTag, tagPath: tagIndex.entries[bspTag]?.path ?? '', group: 'scenario_structure_bsp', isRoot: true, field: 'structure bsp', fieldName: null, address, size, pointerAddress: null, blockStruct: null, overlaps: null, text: `${entryName(bspTag)}: the structure BSP (${size} bytes at file offset ${start}) is not inside the file` });
           continue;
         }
         bspsChecked++;
