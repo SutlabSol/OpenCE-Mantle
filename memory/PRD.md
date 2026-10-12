@@ -39,7 +39,7 @@ needs re-verification / unverified / blocked)
 
 | Converter Phase 1: retail layout (v7, HaloMD) -> CE 609 | **verified by tests; unverified on Windows and in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1" in Decisions). heh_2 and theisland_3 convert with CRC32 0xD1C331E9 / 0x0A5AFEA5, only header bytes change, output reads with the CE reader. Independent check: node:zlib CRC over regions read from raw bytes. The stale demo-era references are warned about, not fixed. **Blue-screens in OpenCE (user, 2026-10-11): heh_2_ce and crossing_ce.** Cause: their bitmap and sound data is external (per asset) in the retail resource files, which CE does not have. A header-only conversion is valid only for maps whose data is all internal. Fix planned as Phase 1b (see "Converter: per-asset external data" in Decisions). |
 | Converter Phase 1b: v7 maps with external bitmap/sound data, using the source game's resource files | **core built, verified by tests (independent); no GUI yet; unverified in OpenCE** | Branch `feat/demo-converter-phase1` (see "Converter Phase 1b, Stage 2" in Decisions). Developer script `core/scripts/convert-external.ts` converts heh_2, theisland_3, crossing, barrier with HaloMD's bitmaps.map / sounds.map. Without resource files these maps are now refused (the header-only output blue-screened). Stage 3 (GUI) not started. **Tag data repairs** (see "OpenCE findings and tag data repairs" in Decisions): built, verified by tests (independent byte checks; the output re-check is same-reader); repair rows in the Convert dialog verified in component tests and `?mock=convert-repairs` only; **In progress.** OpenCE build 185, debug and release (user, 2026-10-12): **heh_2_ce, crossing_ce and barrier_ce load and play.** The glitches seen before Phase 1c (garbled one-off sounds, HUD) had one cause, unaligned tag blocks; **with Phase 1c (current code) all three load and play and OpenCE's sound conversion and HUD passes run** (user, 2026-10-12; see "Phase 1c confirmed in OpenCE" in Decisions). theisland_3 is refused at OpenCE's model part check (one HaloMD model with bad strip indices); decided: a blocking checklist row (option 1). |
-| Converter Phase 2: Mac demo maps (v6) -> CE 609 | **stage 1 (stock demo bloodgulch) built, verified by tests; unverified in OpenCE; no GUI** | Branch `feat/demo-converter-phase2` (see "Converter Phase 2" in Decisions). Developer script only. Stage 2 (mods) and stage 3 (GUI) not started. |
+| Converter Phase 2: Mac demo maps (v6) -> CE 609 | **stage 1 confirmed in OpenCE (user, 2026-10-12); stage 2 (mods) verified by tests, unverified in OpenCE; no GUI** | Branch `feat/demo-converter-phase2` (see "Converter Phase 2" in Decisions). Developer script only. Stage 3 (GUI) not started. |
 
 ## Decisions (user-approved — point here instead of re-explaining)
 - 2026-10-12: **Converter Phase 2: Mac demo maps (true demo layout, v6) (user-approved plan, in stages).**
@@ -91,6 +91,24 @@ needs re-verification / unverified / blocked)
     same-reader: per-kind counts, pre-flight rows, CE reader read-back. Mutation check: skipping the BSP
     data blocks fails 6 tests. Phase 1 tests changed on purpose: +0x1C is no longer refused; the ui.map
     script row passes without acknowledgement.
+  - **Stage 1 confirmed in OpenCE (user, 2026-10-12):** bloodgulch_demo plays with no issues found; clean
+    sounds and HUD. Seen: the flamethrower did not spawn although its tag is in the map, probably the
+    scenario's placements; not investigated (a separate check).
+  - **Pointer count, stock bloodgulch (21,334):** tag data 20,771 (paths 2,410, data 2,409, reflexives
+    6,982, data blocks 2,052, reference paths 6,918) + BSP space 468 (header 1, reflexives 386, data blocks
+    81) + the scenario's `bsp address` 1 + BSP reference paths 94. The prototype's 21,238 = its 7,368
+    reflexives (6,982 + the BSP's 386) and 2,133 data blocks (2,052 + 81) + paths, data and references;
+    21,238 + bsp address 1 + BSP header 1 + BSP reference paths 94 = 21,334. The tag array pointer is
+    rewritten too (not counted): 21,335 changed words = 20,773 in the tag data + 562 in the BSP.
+  - **Stage 2 built (verified by tests; unverified in OpenCE):** tests only, no code change
+    (`convert-demo-mods.real-map.test.ts`). Zombiemod 118,787,881 B / 0x9C98E7D0 and TrueInfectionV2
+    162,786,612 / 0x45689D04 convert (script data repair; 12 / 8 junk netgame references tolerated, left as
+    they are; +0x1C kept); MGMWeaponCollab refused (decision B + 3 sound ranges at 90.8 MB, past the end of
+    the 79.9 MB stock sounds.map); ParanoiaV2 refused (decision C); ui 29,146,822 / 0xCBABF9E8 and b30
+    170,964,588 / 0x27DD7F80 measure-only (b30 only with OPENCE_SLOW_TESTS=1). Pointers moved: Zombiemod
+    33,074, TrueInfectionV2 42,078, ui 10,314, b30 37,727 (2 BSPs). Noise to address in the GUI stage:
+    Zombiemod's "Resource names match the tags" row lists 5,957 protected names (the developer script
+    prints them all as warnings).
 - 2026-10-12: **Phase 1c confirmed in OpenCE (user, OpenCE build 185).** Details: `memory/opence-notes.md`
   "Results in OpenCE".
   - heh_2, crossing and barrier converted with the current code (Phase 1c alignment plus the required
