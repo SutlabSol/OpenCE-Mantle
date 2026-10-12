@@ -1,16 +1,14 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
-import * as path from 'path';
-import { createHash } from 'crypto';
 import { classifyMapLayout } from '../src/map/convert/classify';
 import { convertDemoToCustomEdition, DEMO_TO_CE_DELTA, normalizeDemoMap, preflightDemoConversion, readDemoHeader } from '../src/map/convert/demo-to-ce';
 import type { DemoNormalization } from '../src/map/convert/demo-to-ce';
 import { ConversionRefusedError } from '../src/map/convert/retail-to-ce';
-import type { RandomAccessFile } from '../src/map/convert/resource-files';
 import { finalizeForSave } from '../src/map/finalize-map';
 import { inspectCustomEditionMap } from '../src/map/open-map';
 import { readSampleMap, sampleIn, sampleMapPath, skippableTest } from './helpers/sample-maps';
 import { rawBspRegions, rawCrc } from './helpers/raw-map';
+import { bytesOutside, CE_BASE, changedWords, DEMO_BASE, MACDEMO, MACDEMO_RES, rawDemo, sha256, TAG_SPACE, withResources } from './helpers/demo-map';
 
 /**
  * Converter Phase 2 (true demo layout, version 6 -> Custom Edition 609), stage 1: the stock Mac demo
@@ -24,58 +22,12 @@ import { rawBspRegions, rawCrc } from './helpers/raw-map';
  * per-kind numbers), the pre-flight rows and the read-back with the CE reader.
  */
 
-const DEMO_BG = sampleIn('macDemo', 'bloodgulch.map');
-const DEMO_UI = sampleIn('macDemo', 'ui.map');
+const DEMO_BG = MACDEMO.bloodgulch;
+const DEMO_UI = MACDEMO.ui;
 const PC_BG = sampleIn('pc', 'bloodgulch.map');
-const RES = { bitmaps: sampleIn('macDemo', 'bitmaps.map'), sounds: sampleIn('macDemo', 'sounds.map') };
+const RES = MACDEMO_RES;
 const HALOMD_RES = { bitmaps: sampleIn('haloMD', 'bitmaps.map'), sounds: sampleIn('haloMD', 'sounds.map') };
-const MODS = ['bloodgulch-MGMWeaponCollab.map', 'bloodgulch-ParanoiaV2.map', 'bloodgulch-TrueInfectionV2.map', 'bloodgulch-Zombiemod.map'].map((f) => sampleIn('macDemo', f));
-
-const DEMO_BASE = 0x4bf10000;
-const CE_BASE = 0x40440000;
-const TAG_SPACE = 23 * 1024 * 1024;
-
-function openReadOnly(file: string): RandomAccessFile & { close(): void } {
-  const fd = fs.openSync(file, 'r');
-  return {
-    label: path.basename(file),
-    size: fs.fstatSync(fd).size,
-    read(offset: number, length: number) {
-      const buf = Buffer.alloc(length);
-      const n = fs.readSync(fd, buf, 0, length, offset);
-      return n === length ? buf : buf.subarray(0, n);
-    },
-    close: () => fs.closeSync(fd),
-  };
-}
-
-function withResources<T>(files: { bitmaps: string; sounds: string }, run: (r: { bitmaps: RandomAccessFile; sounds: RandomAccessFile }) => T): T {
-  const bitmaps = openReadOnly(sampleMapPath(files.bitmaps));
-  const sounds = openReadOnly(sampleMapPath(files.sounds));
-  try {
-    return run({ bitmaps, sounds });
-  } finally {
-    bitmaps.close();
-    sounds.close();
-  }
-}
-
-const sha256 = (b: Buffer) => createHash('sha256').update(b).digest('hex');
-/** Raw demo header fields (memory/demo-converter.md). */
-const rawDemo = (b: Buffer) => ({ tdo: b.readUInt32LE(0x5ec), tds: b.readUInt32LE(0x2c4) });
-/** Word offsets (4-aligned from `start`) where a and b differ, inside [start, end). */
-function changedWords(a: Buffer, b: Buffer, start: number, end: number): number[] {
-  const out: number[] = [];
-  for (let at = start; at + 4 <= end; at += 4) if (a.readUInt32LE(at) !== b.readUInt32LE(at)) out.push(at);
-  return out;
-}
-/** Every changed byte lies inside one of `words` (so nothing changed between pointer words, at any alignment). */
-function bytesOutside(a: Buffer, b: Buffer, start: number, end: number, words: number[]): number {
-  const covered = new Set(words);
-  let n = 0;
-  for (let i = start; i < end; i++) if (a[i] !== b[i] && !covered.has(start + Math.floor((i - start) / 4) * 4)) n++;
-  return n;
-}
+const MODS = [MACDEMO.mgm, MACDEMO.paranoia, MACDEMO.trueInfection, MACDEMO.zombiemod];
 
 describe('Phase 2: MacDemo/bloodgulch.map with the Mac demo resource files (in memory)', () => {
   const gate = skippableTest([DEMO_BG, RES.bitmaps, RES.sounds]);
