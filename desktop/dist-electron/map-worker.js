@@ -36668,7 +36668,7 @@ function checkTagDataExtents(buffer, header, tagIndex) {
     const e = tagIndex.entries[i];
     return e ? `#${i} ${e.path}.${e.primaryClassName ?? "?"}` : `#${i}`;
   };
-  const checkBlock = (r, tagI, field, fieldName, isRoot, address, size) => {
+  const checkBlock = (r, tagI, field, fieldName, isRoot, address, size, pointerAddress = null, blockStruct = null) => {
     blocksChecked++;
     const e = tagIndex.entries[tagI];
     const label = `${entryName(tagI)} ${field}`;
@@ -36685,6 +36685,8 @@ function checkTagDataExtents(buffer, header, tagIndex) {
         fieldName,
         address: address >>> 0,
         size,
+        pointerAddress: r.kind === "tagData" && pointerAddress !== null ? pointerAddress >>> 0 : null,
+        blockStruct,
         overlaps,
         text: kind === "outside" ? `${entryName(tagI)} ${field}: ${size} bytes at ${hex(address)}, outside ${where} (${hex(r.claims.base)} to ${hex(r.claims.base + r.claims.size)})` : `${entryName(tagI)} ${field}: ${size} bytes at ${hex(address)} overlap ${overlaps}`
       });
@@ -36710,11 +36712,11 @@ function checkTagDataExtents(buffer, header, tagIndex) {
       } else if (value.kind === "reflexive" && field.def.type === "TagReflexive" && value.value.count !== 0 && field.def.struct) {
         const size = resolveStruct(field.def.struct).totalSize;
         const count2 = value.value.count >>> 0;
-        if (checkBlock(r, tagI, `${path2}[${count2} x ${size}]`, field.name, false, value.value.pointerLow, count2 * size)) {
+        if (checkBlock(r, tagI, `${path2}[${count2} x ${size}]`, field.name, false, value.value.pointerLow, count2 * size, address + field.offset + 4, field.def.struct)) {
           children.push({ struct: field.def.struct, pointer: value.value.pointerLow >>> 0, count: count2, size, where: path2 });
         }
       } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size !== 0) {
-        checkBlock(r, tagI, path2, field.name, false, value.value.pointerLow, value.value.size >>> 0);
+        checkBlock(r, tagI, path2, field.name, false, value.value.pointerLow, value.value.size >>> 0, address + field.offset + 12);
       }
     }
     for (const c of children) {
@@ -36759,7 +36761,7 @@ function checkTagDataExtents(buffer, header, tagIndex) {
         const size = num("bsp size");
         const address = num("bsp address");
         if (start + size > buffer.length || size < BSP_HEADER_SIZE2) {
-          violations.push({ kind: "outside", region: "bsp", tagIndex: bspTag, tagPath: tagIndex.entries[bspTag]?.path ?? "", group: "scenario_structure_bsp", isRoot: true, field: "structure bsp", fieldName: null, address, size, overlaps: null, text: `${entryName(bspTag)}: the structure BSP (${size} bytes at file offset ${start}) is not inside the file` });
+          violations.push({ kind: "outside", region: "bsp", tagIndex: bspTag, tagPath: tagIndex.entries[bspTag]?.path ?? "", group: "scenario_structure_bsp", isRoot: true, field: "structure bsp", fieldName: null, address, size, pointerAddress: null, blockStruct: null, overlaps: null, text: `${entryName(bspTag)}: the structure BSP (${size} bytes at file offset ${start}) is not inside the file` });
           continue;
         }
         bspsChecked++;
@@ -36969,6 +36971,171 @@ function checkModelParts(buffer, header, tagIndex) {
   return { problems, modelsChecked, partsChecked };
 }
 
+// ../core/src/map/convert/bitmap-check.ts
+var BITMAP_SIGNATURE = 1651078253;
+var DEFINED_FLAG_BITS = 255;
+var FLAG_COMPRESSED = 2;
+var FLAG_LINEAR = 16;
+var FLAG_EXTERNAL = 256;
+var TYPE_2D = 0;
+var TYPE_3D = 1;
+var TYPE_CUBE_MAP = 2;
+var FORMAT_DXT1 = 14;
+var FORMAT_DXT5 = 16;
+var BITS_PER_PIXEL = [8, 8, 8, 16, 0, 0, 16, 0, 16, 16, 32, 32, 0, 0, 4, 8, 8, 8];
+var DRAWABLE_FORMATS = /* @__PURE__ */ new Set([0, 1, 2, 3, 6, 8, 9, 10, 11]);
+var DRAWABLE_IF_NOT_LINEAR = /* @__PURE__ */ new Set([14, 15, 16, 17]);
+var MAXIMUM_WIDTH = 3e4;
+var MAXIMUM_HEIGHT = 3e4;
+var MAXIMUM_DEPTH = 256;
+var powerOfTwo = (v) => v > 0 && (v & v - 1) === 0;
+var floorLog2 = (v) => v > 0 ? 31 - Math.clz32(v) : -1;
+function requiredPixelDataSize(v) {
+  let pixels = 0;
+  for (let level = 0; level <= v.mipmapCount; level++) {
+    let width = Math.max(v.width >> level, 1);
+    let height = Math.max(v.height >> level, 1);
+    const depth = Math.max(v.depth >> level, 1);
+    if (v.flags & FLAG_COMPRESSED) {
+      width += -width & 3;
+      height += -height & 3;
+    }
+    pixels += width * height * depth * (v.type === TYPE_CUBE_MAP ? 6 : 1);
+  }
+  return Math.floor(pixels * BITS_PER_PIXEL[v.format] / 8);
+}
+function bitmapDrawProblems(v) {
+  const reasons = [];
+  if (v.signature !== BITMAP_SIGNATURE) reasons.push(`its signature is 0x${v.signature.toString(16)}, not 'bitm'`);
+  if (v.flags & ~DEFINED_FLAG_BITS) reasons.push(`its flags 0x${v.flags.toString(16)} use bits past the 8 defined ones`);
+  if (v.type < 0 || v.type > TYPE_CUBE_MAP) reasons.push(`type ${v.type} does not exist`);
+  if (v.format < 0 || v.format >= BITS_PER_PIXEL.length) reasons.push(`format ${v.format} does not exist`);
+  if (!(v.width > 0 && v.width <= MAXIMUM_WIDTH)) reasons.push(`width ${v.width} is out of range`);
+  if (!(v.height > 0 && v.height <= MAXIMUM_HEIGHT)) reasons.push(`height ${v.height} is out of range`);
+  if (!(v.depth > 0 && v.depth <= MAXIMUM_DEPTH && (v.depth === 1 || v.type === TYPE_3D))) reasons.push(`depth ${v.depth} is not valid for type ${v.type}`);
+  const maximumMipmaps = floorLog2(Math.max(v.width, v.height, v.depth));
+  if (v.mipmapCount < 0 || v.mipmapCount > maximumMipmaps) reasons.push(`${v.mipmapCount} mipmaps, at most ${maximumMipmaps} for its size`);
+  const verified = reasons.length === 0;
+  const linear = (v.flags & FLAG_LINEAR) !== 0;
+  if (!DRAWABLE_FORMATS.has(v.format) && !(DRAWABLE_IF_NOT_LINEAR.has(v.format) && !linear)) reasons.push(`format ${v.format}${linear ? " (linear)" : ""} has no texture format in this build`);
+  const compressedFormat = v.format >= FORMAT_DXT1 && v.format <= FORMAT_DXT5;
+  if ((v.flags & FLAG_COMPRESSED) !== 0 !== compressedFormat) reasons.push(`its compressed flag does not match format ${v.format}`);
+  if (linear ? v.type !== TYPE_2D : !(powerOfTwo(v.width) && powerOfTwo(v.height) && powerOfTwo(v.depth))) {
+    reasons.push(linear ? `it is linear but not 2D (type ${v.type})` : `${v.width}x${v.height}x${v.depth} is not a power of two in every dimension`);
+  }
+  if (v.type === TYPE_CUBE_MAP && v.width !== v.height) reasons.push(`a cube map must be square (${v.width}x${v.height})`);
+  if (verified) {
+    const needed = requiredPixelDataSize(v);
+    if (v.pixelsSize < needed) reasons.push(`it has ${v.pixelsSize.toLocaleString("en-US")} bytes of pixels; its size and ${v.mipmapCount} mipmaps need ${needed.toLocaleString("en-US")}`);
+  }
+  return reasons;
+}
+var BITMAP_DATA_OFFSETS = { width: 4, height: 6, depth: 8, type: 10, format: 12, flags: 14, mipmapCount: 20, pixelsSize: 28 };
+function checkDrawableBitmaps(buffer, header, tagIndex, options = {}) {
+  const report = { problems: [], tagsChecked: 0, bitmapsChecked: 0 };
+  const bitmapSize = resolveStruct("BitmapData").totalSize;
+  const groupSize = resolveStruct("Bitmap").totalSize;
+  for (const e of tagIndex.entries) {
+    if (e.primaryClassName !== "bitmap" || e.isExternal) continue;
+    const root = resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(root, groupSize, buffer.length)) continue;
+    report.tagsChecked++;
+    const list = decodeStruct(buffer, root, "Bitmap").get("bitmap data");
+    if (list?.kind !== "reflexive") continue;
+    for (let i = 0; i < list.value.count; i++) {
+      const at = resolveTagDataPointer(list.value.pointerLow + i * bitmapSize >>> 0, header, tagIndex.baseMemoryAddress);
+      if (!isRangeInBuffer(at, bitmapSize, buffer.length)) break;
+      const flags = buffer.readUInt16LE(at + BITMAP_DATA_OFFSETS.flags);
+      const values = {
+        signature: buffer.readUInt32LE(at),
+        width: buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.width),
+        height: buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.height),
+        depth: buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.depth),
+        type: buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.type),
+        format: buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.format),
+        flags: options.ignoreExternalBit ? flags & ~FLAG_EXTERNAL : flags,
+        mipmapCount: buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.mipmapCount),
+        pixelsSize: buffer.readInt32LE(at + BITMAP_DATA_OFFSETS.pixelsSize)
+      };
+      report.bitmapsChecked++;
+      const reasons = bitmapDrawProblems(values);
+      if (reasons.length === 0) continue;
+      report.problems.push({
+        tagIndex: e.index,
+        tagPath: e.path,
+        bitmapIndex: i,
+        values,
+        reasons,
+        text: `#${e.index} ${e.path}: bitmap ${i} (type ${values.type}, format ${values.format}, ${values.width}x${values.height}x${values.depth}, flags 0x${values.flags.toString(16).toUpperCase()}): ${reasons.join("; ")}`
+      });
+    }
+  }
+  return report;
+}
+
+// ../core/src/map/convert/scenario-tag.ts
+function scenarioEntryOf(tagIndex) {
+  const entry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  return entry && entry.tagId >>> 0 === tagIndex.scenarioTagId >>> 0 && !entry.isExternal ? entry : null;
+}
+function renamedScenarioOf(tagIndex) {
+  const entry = scenarioEntryOf(tagIndex);
+  return entry && entry.primaryClassName !== "scenario" ? entry : null;
+}
+function readScenarioAsScenario(tagIndex) {
+  const renamed = renamedScenarioOf(tagIndex);
+  if (!renamed) return tagIndex;
+  return { ...tagIndex, entries: tagIndex.entries.map((e) => e.index === renamed.index ? { ...e, primaryClassName: "scenario" } : e) };
+}
+function parseTagIndexForConversion(buffer, header = parseCacheFileHeader(buffer)) {
+  return readScenarioAsScenario(parseTagIndex(buffer, header));
+}
+function unknownGroupEntries(tagIndex) {
+  return tagIndex.entries.filter((e) => !e.primaryClassName || !lookupTagClassByName(e.primaryClassName));
+}
+
+// ../core/src/map/convert/fog-color-check.ts
+var GROUPS = ["sky", "fog"];
+var outside = (v) => !(v >= 0 && v <= 1);
+function findFogAndColorValuesOutOfRange(buffer, header, tagIndex) {
+  const found = [];
+  const base = tagIndex.baseMemoryAddress;
+  for (const e of tagIndex.entries) {
+    const group = e.primaryClassName;
+    if (!group || !GROUPS.includes(group) || e.isExternal) continue;
+    const structName = getGroupStructName(group);
+    if (!structName) continue;
+    const visited = /* @__PURE__ */ new Set();
+    const walk2 = (name, pointer, where) => {
+      const st = resolveStruct(name);
+      const at = resolveTagDataPointer(pointer, header, base);
+      if (!isRangeInBuffer(at, st.totalSize, buffer.length) || visited.has(at)) return;
+      visited.add(at);
+      const decoded = decodeStruct(buffer, at, name);
+      for (const field of st.fields) {
+        if (field.def.nonCached) continue;
+        const label = where ? `${where}.${field.name}` : field.name;
+        const components = field.def.type === "ColorARGB" ? 4 : field.def.type === "ColorRGB" ? 3 : /maximum density$/.test(field.name) ? 1 : 0;
+        if (components > 0) {
+          const values = Array.from({ length: components }, (_, i) => buffer.readFloatLE(at + field.offset + i * 4));
+          if (values.some(outside)) {
+            const shown = values.map((v) => Number.isFinite(v) ? String(Math.round(v * 1e3) / 1e3) : String(v)).join(", ");
+            found.push({ tagIndex: e.index, tagPath: e.path, group, field: label, values, text: `#${e.index} ${e.path}.${group}: ${label} = ${shown}` });
+          }
+          continue;
+        }
+        const value = decoded.get(field.name);
+        if (value?.kind === "reflexive" && field.def.type === "TagReflexive" && field.def.struct) {
+          const size = resolveStruct(field.def.struct).totalSize;
+          for (let i = 0; i < value.value.count; i++) walk2(field.def.struct, value.value.pointerLow + i * size >>> 0, `${label}[${i}]`);
+        }
+      }
+    };
+    walk2(structName, e.tagDataPointerOrResourceIndex >>> 0, "");
+  }
+  return found;
+}
+
 // ../core/src/map/convert/tag-data-repairs.ts
 var TagDataRepairError = class extends Error {
   constructor(message) {
@@ -37103,6 +37270,58 @@ function planTagDataRepairs(view, header, tagIndex, extents) {
     });
   });
   extents.violations.forEach((v, i) => {
+    if (handled.has(i) || v.kind !== "overlap" || v.region !== "tagData" || v.isRoot || !v.blockStruct || v.pointerAddress === null) return;
+    const element = resolveStruct(v.blockStruct);
+    const offending = element.fields.filter(
+      (f) => f.def.type === "TagReflexive" || f.def.type === "TagDependency" || f.def.type === "Pointer" || f.def.type === "TagDataOffset" && (f.def.externalFileOffset || f.def.nonCached)
+    );
+    if (offending.length > 0 || v.size % element.totalSize !== 0) return;
+    handled.add(i);
+    const count2 = v.size / element.totalSize;
+    const dataFields = element.fields.filter((f) => f.def.type === "TagDataOffset");
+    const pieces = [{ from: v.address, size: v.size, offset: 0, pointerOffset: null }];
+    const overwritten = [`${v.field}: ${fmt(v.size)} bytes at ${hex2(v.address)} share bytes with ${v.overlaps}`];
+    let end = v.size;
+    let problem = null;
+    for (let k = 0; k < count2 && !problem; k++) {
+      for (const f of dataFields) {
+        const fieldAt = fileOf(v.address + k * element.totalSize + f.offset);
+        const size = view.readUInt32LE(fieldAt);
+        const pointer = view.readUInt32LE(fieldAt + DATA_FIELD_POINTER);
+        if (size === 0) continue;
+        if (!inTagData(pointer, size)) {
+          problem = `${v.text}. Its element ${k} "${f.name}" (${fmt(size)} bytes at ${hex2(pointer)}) is outside the tag data, so the block is not moved.`;
+          break;
+        }
+        end += padTo(end);
+        pieces.push({ from: pointer, size, offset: end, pointerOffset: k * element.totalSize + f.offset + DATA_FIELD_POINTER });
+        if (extents.freeTagDataBytesAt(pointer, size) < size) overwritten.push(`${v.fieldName}[${k}].${f.name}: ${fmt(size)} bytes at ${hex2(pointer)} share bytes with another tag`);
+        end += size;
+      }
+    }
+    if (problem) {
+      unrepairable.push(problem);
+      return;
+    }
+    repairs.push({
+      id: "blockOverlap",
+      required: true,
+      tagIndex: v.tagIndex,
+      tagPath: v.tagPath,
+      pointerAddress: v.pointerAddress,
+      oldPointer: v.address,
+      blockSize: end,
+      copyBytes: 0,
+      pieces,
+      overwritten,
+      details: [
+        v.text,
+        `Its ${count2} element(s) hold only values and data blocks (no block lists or tag references), so nothing else points into it and it can be moved whole.`,
+        `New block: ${fmt(end)} bytes at the end of the tag data (4-aligned): the block and its ${pieces.length - 1} data block(s), today's bytes copied; its data pointers are rewritten in the new copy only.`
+      ]
+    });
+  });
+  extents.violations.forEach((v, i) => {
     if (!handled.has(i)) unrepairable.push(`${v.text}. No repair covers this problem.`);
   });
   if (repairs.length > 0) {
@@ -37141,6 +37360,16 @@ function applyTagDataRepairs(map, plan, repairs) {
     const current = out.readUInt32LE(pointerAt);
     if (current !== r.oldPointer >>> 0) throw new TagDataRepairError(`${r.tagPath}: the pointer at ${hex2(r.pointerAddress)} is ${hex2(current)}, not ${hex2(r.oldPointer)} as planned. Nothing was written.`);
     if (r.copyBytes > 0) map.copy(out, tdo + at, tdo + (r.oldPointer - base), tdo + (r.oldPointer - base) + r.copyBytes);
+    for (const piece of r.pieces ?? []) {
+      const from = tdo + (piece.from - base);
+      map.copy(out, tdo + at + piece.offset, from, from + piece.size);
+    }
+    for (const piece of r.pieces ?? []) {
+      if (piece.pointerOffset === null) continue;
+      const pointerInCopy = tdo + at + piece.pointerOffset;
+      if (out.readUInt32LE(pointerInCopy) !== piece.from >>> 0) throw new TagDataRepairError(`${r.tagPath}: a data pointer in the moved block is not ${hex2(piece.from)} as planned. Nothing was written.`);
+      out.writeUInt32LE(base + at + piece.offset >>> 0, pointerInCopy);
+    }
     const newPointer = base + at >>> 0;
     out.writeUInt32LE(newPointer, pointerAt);
     applied.push({ id: r.id, tagIndex: r.tagIndex, tagPath: r.tagPath, oldPointer: r.oldPointer >>> 0, newPointer, padding, blockSize: r.blockSize, copied: r.copyBytes, bytesAppended: padding + r.blockSize });
@@ -37309,7 +37538,7 @@ function planTagDataAlignment(buffer, header, tagIndex) {
 }
 function applyTagDataAlignment(map, expected) {
   const header = parseCacheFileHeader(map);
-  const tagIndex = parseTagIndex(map, header);
+  const tagIndex = parseTagIndexForConversion(map, header);
   const plan = planTagDataAlignment(map, header, tagIndex);
   if (plan.problems.length > 0) throw new TagDataAlignmentError(`The tag data can't be aligned: ${plan.problems.join(" ")} Nothing was written.`);
   if (!plan.needed || plan.insertAt !== expected.insertAt || plan.bytes !== expected.bytes) {
@@ -37431,7 +37660,7 @@ function runChecks(buffer, full, resources = {}, origin) {
     const view2 = Buffer.from(buffer);
     view2.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
     const header2 = parseCacheFileHeader(view2);
-    const tagIndex2 = parseTagIndex(view2, header2);
+    const tagIndex2 = parseTagIndexForConversion(view2, header2);
     parsed = { header: header2, tagIndex: tagIndex2, view: view2, importPlan: null, repairPlan: null, alignment: null, requiredRepairBytes: 0 };
   } catch (err) {
     checks.push(check("regions", "Tag index can be read", "refuse", `The tag index can't be read: ${err.message}`));
@@ -37451,6 +37680,27 @@ function runChecks(buffer, full, resources = {}, origin) {
   }
   checks.push(
     flagged.length === 0 ? check("entryFlags", "No tag entry is marked external (whole tags)", "pass", `All ${tagIndex.tagCount} tag entries have 0 at +0x18, so every tag is inside the map.`) : check("entryFlags", "No tag entry is marked external (whole tags)", "refuse", `${flagged.length} tag entr${flagged.length === 1 ? "y has" : "ies have"} a nonzero word at +0x18. Custom Edition would read those tags as external (in bitmaps/sounds/loc.map), so the map is not converted.`, flagged)
+  );
+  const renamed = renamedScenarioOf(parseTagIndex(view, header));
+  if (renamed) {
+    checks.push(
+      check(
+        "scenarioGroup",
+        "Scenario found by the tag data header",
+        "info",
+        `The scenario is #${renamed.index} "${renamed.path}", named by the tag data header's scenario ID, but its group is "${renamed.primaryClassName}" (map protection renames it). It is read as a scenario, as OpenCE does when it loads the map (OpenCE gives it the scenario group back), and its group is left as it is.`
+      )
+    );
+  }
+  const unknown = unknownGroupEntries(tagIndex);
+  checks.push(
+    unknown.length === 0 ? check("unknownGroups", "Every tag has a known group", "pass", `All ${tagIndex.tagCount} tags have a group this build knows.`) : check(
+      "unknownGroups",
+      "Every tag has a known group",
+      "refuse",
+      `${unknown.length} tag(s) have a group this build doesn't know. OpenCE loads such a tag without reading it, but the converter can't tell whether its data holds pointers that must move, so the map is not converted.`,
+      unknown.map((e) => `#${e.index} ${e.path} (group "${e.primaryClassName}")`)
+    )
   );
   if (unusedWord.length > 0) {
     checks.push(
@@ -37488,12 +37738,14 @@ function runChecks(buffer, full, resources = {}, origin) {
     parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + parsed.requiredRepairBytes, report);
   }
   checks.push(modelPartsCheck(view, header, tagIndex));
+  checks.push(drawableBitmapsCheck(view, header, tagIndex));
+  checks.push(fogAndColorsCheck(view, header, tagIndex));
   checks.push(scriptCheck(view, header, tagIndex));
   if (full) {
     checks.push(validationCheck(view, header, tagIndex));
     checks.push(referenceIdentityCheck(view, header, tagIndex));
     checks.push(requiredTagsCheck(header, tagIndex));
-    checks.push(injectAfterwardsCheck(view, header, tagIndex));
+    checks.push(injectAfterwardsCheck(view, header));
     checks.push(
       check("scenarioName", "Internal map name", "info", `The internal name is "${report.scenarioName}". It is set from the output file name when the converted map is saved, so the two always match.`)
     );
@@ -37591,6 +37843,12 @@ var REPAIR_ROWS = {
     required: `OpenCE refuses this map without this repair: the scenario's script data overlaps other tags or is not 4-aligned, and OpenCE stops loading at "the scenario's script data is missing or damaged" (a blue screen). The repair gives it a 4-aligned block of its own at the end of the tag data, with its header and used script nodes copied and the rest zero. Convert stays off while this is unticked.`,
     optional: ""
   },
+  blockOverlap: {
+    id: "repairBlockOverlap",
+    label: "Repair: move a block that overlaps another tag",
+    required: "OpenCE refuses this map without this repair: a block of this tag shares bytes with another tag. The repair copies the block and its data blocks, as they are today, to the end of the tag data and points the tag at the copy; the other tag keeps its bytes. Convert stays off while this is unticked.",
+    optional: ""
+  },
   tagRootOutside: {
     id: "repairTagRootOutside",
     label: "Repair: give the tag outside the tag data a zeroed struct",
@@ -37607,7 +37865,7 @@ function tagDataChecks(checks, view, header, tagIndex, report) {
   if (canAlign) {
     const alignedView = applyTagDataAlignment(view, alignment).buffer;
     const alignedHeader = parseCacheFileHeader(alignedView);
-    laid = { view: alignedView, header: alignedHeader, tagIndex: parseTagIndex(alignedView, alignedHeader) };
+    laid = { view: alignedView, header: alignedHeader, tagIndex: parseTagIndexForConversion(alignedView, alignedHeader) };
   }
   const extents = checkTagDataExtents(laid.view, laid.header, laid.tagIndex);
   const plan = planTagDataRepairs(laid.view, laid.header, laid.tagIndex, extents);
@@ -37664,6 +37922,18 @@ function tagDataChecks(checks, view, header, tagIndex, report) {
     report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
     checks.push(check(row.id, row.label, r.required ? "warn" : "info", `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
   });
+  const overwritten = plan.repairs.filter((r) => r.overwritten && r.overwritten.length > 0);
+  if (overwritten.length > 0) {
+    checks.push(
+      check(
+        "overwrittenData",
+        "Data another tag wrote over",
+        "info",
+        `In ${overwritten.length} tag(s), another tag was written over part of a block, so its original contents (for example the text of a string list) are gone. The repair above copies the bytes as they are today; it can't bring the original back.`,
+        overwritten.flatMap((r) => r.overwritten.map((o) => `#${r.tagIndex} ${r.tagPath}: ${o}`))
+      )
+    );
+  }
   const requiredBytes = (canAlign ? alignment.bytes : 0) + repairBytesAdded(laid.header.tagDataSize, plan.repairs.filter((r) => r.required));
   return { plan, alignment: canAlign ? alignment : null, requiredBytes };
 }
@@ -37761,6 +38031,36 @@ var SCRIPT_NODE_FLAG_SCRIPT_CALL = 2;
 var SCRIPT_NODE_FLAG_GLOBAL = 4;
 var SCRIPT_NODE_TYPE_FUNCTION_NAME = 2;
 var SCRIPT_ENGINE_GLOBAL_BIT = 32768;
+function drawableBitmapsCheck(view, header, tagIndex) {
+  const label = "Bitmaps OpenCE can draw";
+  let report;
+  try {
+    report = checkDrawableBitmaps(view, header, tagIndex, { ignoreExternalBit: true });
+  } catch (err) {
+    return check("drawableBitmaps", label, "refuse", `The bitmaps can't be read: ${err.message}`);
+  }
+  const scope = `${report.bitmapsChecked.toLocaleString("en-US")} bitmaps in ${report.tagsChecked} bitmap tags`;
+  if (report.problems.length === 0) return check("drawableBitmaps", label, "pass", `${scope}: OpenCE can draw every one.`);
+  return check(
+    "drawableBitmaps",
+    label,
+    "refuse",
+    `${scope}: ${report.problems.length} can't be drawn by OpenCE, which then stops loading the map ("cannot be drawn by this build", then "game_load() failed"), so the map is not converted. The missing data is not in the file, so this can't be repaired here.`,
+    report.problems.map((p) => p.text)
+  );
+}
+function fogAndColorsCheck(view, header, tagIndex) {
+  const label = "Fog densities and colours in sky and fog tags are 0 to 1";
+  const found = findFogAndColorValuesOutOfRange(view, header, tagIndex);
+  if (found.length === 0) return check("fogAndColors", label, "pass", "Every fog maximum density and colour in the sky and fog tags is between 0 and 1.");
+  return check(
+    "fogAndColors",
+    label,
+    "info",
+    `${found.length} value(s) in sky or fog tags are outside 0 to 1. OpenCE draws the fog with them as they are: its release build logs an assertion exception each time and carries on (Zombiemod logs thousands), while a debug build stops at the first one. They are left as the map has them.`,
+    found.map((f) => f.text)
+  );
+}
 function scriptCheck(view, header, tagIndex) {
   const label = "Script calls name their functions (OpenCE looks them up by name)";
   const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
@@ -37847,10 +38147,10 @@ function scriptCheck(view, header, tagIndex) {
     [...functions.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([n, c]) => `${n}: ${c} call(s)`)
   );
 }
-function injectAfterwardsCheck(view, header, tagIndex) {
+function injectAfterwardsCheck(view, header) {
   const label = "Inject Tags can add tags to the converted map";
   try {
-    collectTagDataPointers(view, tagDataLayoutOf(header, tagIndex));
+    collectTagDataPointers(view, tagDataLayoutOf(header, parseTagIndex(view, header)));
     return check("injectAfterwards", label, "pass", "Every pointer in the map can be followed.");
   } catch (err) {
     if (!(err instanceof UnwalkableTagError)) throw err;
@@ -37926,13 +38226,14 @@ function convertRetailLayout(source, options, origin) {
   }
   verifyOutputExtents(out);
   verifyOutputAlignment(out);
+  verifyOutputBitmaps(out);
   return { buffer: out, report, imported, alignment: aligned, repairs };
 }
 function verifyOutputExtents(out) {
   let violations;
   try {
     const header = parseCacheFileHeader(out);
-    violations = checkTagDataExtents(out, header, parseTagIndex(out, header)).violations.map((v) => v.text);
+    violations = checkTagDataExtents(out, header, parseTagIndexForConversion(out, header)).violations.map((v) => v.text);
   } catch (err) {
     violations = [`The converted map can't be read back: ${err.message}`];
   }
@@ -37942,11 +38243,21 @@ function verifyOutputExtents(out) {
     );
   }
 }
+function verifyOutputBitmaps(out) {
+  let problems;
+  try {
+    const header = parseCacheFileHeader(out);
+    problems = checkDrawableBitmaps(out, header, parseTagIndexForConversion(out, header)).problems.map((p) => p.text);
+  } catch (err) {
+    problems = [`its bitmaps can't be read: ${err.message}`];
+  }
+  if (problems.length > 0) throw new ConversionRefusedError(`The converted map has bitmaps OpenCE can't draw, so nothing was written: ${problems.slice(0, 3).join("; ")}.`);
+}
 function verifyOutputAlignment(out) {
   let problem = null;
   try {
     const header = parseCacheFileHeader(out);
-    const r = measureBlockAlignment(out, header, parseTagIndex(out, header));
+    const r = measureBlockAlignment(out, header, parseTagIndexForConversion(out, header));
     const unaligned = r.blocks.unaligned + r.bspBlocks.unaligned + r.roots.unaligned + r.dataBlocks.unaligned;
     if (unaligned > 0) problem = `${unaligned} block(s) are not 4-aligned (${r.examples.slice(0, 3).join("; ")})`;
   } catch (err) {

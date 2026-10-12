@@ -33728,7 +33728,7 @@ var PARTS_HAVE_LOCAL_NODES = 1 << 1;
 var MAXIMUM_COMPRESSIBLE_COMPONENT = Math.fround(1.005);
 
 // ../core/src/map/convert/tag-data-repairs.ts
-var TAG_DATA_REPAIR_IDS = ["alignTagData", "scriptSyntaxData", "tagRootOutside"];
+var TAG_DATA_REPAIR_IDS = ["alignTagData", "scriptSyntaxData", "tagRootOutside", "blockOverlap"];
 
 // ../core/src/map/convert/demo-to-ce.ts
 var DEMO_BASE_MEMORY_ADDRESS = 1274085376;
