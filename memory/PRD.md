@@ -58,9 +58,13 @@ needs re-verification / unverified / blocked)
     the scenario (cache_file_formats.c l.2270-2318), so a renamed scenario always reads as mismatched:
     OpenCE's value for this output is 0xCF40652D (ours, over the file, 0x21515932). Joining compares the
     stored header values of host and joiner (custom_edition_cache.c l.640-648), so it is only a warning.
-  - **Proposed, not built:** a row "Scripts OpenCE can run": refuse a begin_random with 33+ arguments
-    (overruns its bit vector in every build), warn at exactly 32 (a non-release build halts); no faithful
-    repair (splitting changes the random order and needs new nodes and strings).
+  - **Built (user-approved; verified by tests, unverified in OpenCE):** row "Scripts OpenCE can run"
+    (`convert/script-run-check.ts`): begin_random with 33+ arguments or an argument chain that never ends
+    refuses; exactly 32 warns (release logs and carries on, debug halts); names the script and node. No
+    repair (splitting changes the random order). 0 on every sample map but yoyorastv2_1 (warn). The halt
+    came from the debug build (user); yoyorastv2_1_ce is to be tested on the release build.
+  - **Next (approved, in stages):** GUI stage 3 as planned, plus: the Source files step shows each
+    rejected file's range-check result (how many ranges matched, which did not).
 - 2026-10-12: **Item C built (verified by tests; unverified in OpenCE).** Commits 52390b1, 1f99beb, 0e38679.
   1. "Bitmaps OpenCE can draw" (`convert/bitmap-check.ts`, refuses): mirror of `custom_edition_bitmap_drawable`
      (rules: opence-notes "Phase 2 mods in OpenCE"), on the flags the output will have (external bit cleared);
