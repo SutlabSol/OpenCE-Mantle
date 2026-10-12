@@ -5,7 +5,10 @@ found again. Everything below was read at the pinned commit unless marked otherw
 
 ## Version
 
-- Tested by the user: **OpenCE build 185**.
+- Tested by the user: **OpenCE build 190** since 2026-10-12 (commit 86be005acc2e42f3ea5e210e5da9c80f255e23f7, tag
+  `build-190`; its multiplayer pause menu reads "SETTINGS and END GAME", build 185's "SETTINGS"). The scratch
+  clone is checked out at build-190. Earlier results and citations in these notes were read at build 185.
+- Earlier: **OpenCE build 185**.
 - Pinned commit: **6399ed9d4ab1e6bbcd6154d56703883dfcc17c22** = tag `build-185` on
   github.com/OpenCommunityEdition/OpenCE (checked with `git ls-remote`, 2026-10-11). It was also `main`
   at that time. Every citation in PRD "OpenCE findings and tag data repairs" was read at this commit.
@@ -315,3 +318,22 @@ announcer and plasma overheat sounds; normal ammo icons and meters.
   the exact halo.exe and its halo.pdb (the release's halo-windows-<config>.zip and
   halo-windows-<config>-symbols.zip) and llvm-symbolizer, run by hand on address - ImageBase (valid only if
   halo.exe was not relocated in that run).
+
+## yoyorastv2_1: frozen menu after Escape from the postgame map selection (build 190, release; research 2026-10-12)
+
+User: after a match, Enter on the leaderboard opens map selection (works); Escape there leaves no menu, a frozen
+background and no sound, nothing logged (no "requesting a player removal", "network client disposed", "starting
+main menu music"). Fine mid-game, fine on the leaderboard, fine on heh_2 / barrier / crossing / bloodgulch_demo.
+- After a network game `ui_widgets_close_all` disposes the widget history and opens OpenCE's own
+  `pc\main_menu\multiplayer_type_select\connected\connected_map_select_wrapper` with no invoking widget
+  (source/interface/ui_widget.c l.4655-4700, port/linux/game/menu_tags.c `pc_menus_screen`). Escape there runs
+  "port map list back" (port/assets/menus/ce/main_menu.multiplayer_type_select.mp_map_select.xml l.39;
+  menu_functions.c `map_list_back`) -> `widget_instance_go_back_to_previous` (ui_widget.c l.3223): it deletes the
+  screen and, with no history entry, loads nothing and logs nothing. That matches the symptom but is the same code
+  for every map; what returns the other maps to the main menu was not found.
+- Widget handlers OpenCE leaves running nothing (function >= 102, `widget_pc_functions_clear`): yoyorastv2_1 240,
+  barrier / heh_2 / crossing / Mac demo and CE bloodgulch 242. The two: `ui\shell\multiplayer_game\pause_game  restart_game_button` (mp game options choose 163, mouse emit accept event 108), a widget the mod removed from the
+  pause menu's game options list. Every widget both maps share has identical handlers; the top pause list (which
+  OpenCE trims to resume and quit) is identical.
+- yoyorastv2_1 is the only converted map with scripts: 51 (41 continuous, 8 startup, 2 dormant); startup "cutscenes"
+  uses camera_control, cinematic_show_letterbox, cinematic_set_title. Not shown to be related.
