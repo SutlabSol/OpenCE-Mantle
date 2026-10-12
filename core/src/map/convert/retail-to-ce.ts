@@ -20,6 +20,7 @@ import { checkModelParts } from './model-part-check';
 import { checkDrawableBitmaps } from './bitmap-check';
 import { parseTagIndexForConversion, renamedScenarioOf, unknownGroupEntries } from './scenario-tag';
 import { findFogAndColorValuesOutOfRange } from './fog-color-check';
+import { checkScriptsOpenCECanRun } from './script-run-check';
 import { applyTagDataAlignment, measureBlockAlignment, planTagDataAlignment } from './align-tag-data';
 import type { TagDataAlignmentPlan } from './align-tag-data';
 import { applyTagDataRepairs, DATA_ARRAY_COUNT, DATA_ARRAY_ELEMENT_SIZE, DATA_ARRAY_HEADER_SIZE, DATA_ARRAY_MAXIMUM_COUNT, planTagDataRepairs, repairBytesAdded, SCRIPT_NODE_SIZE } from './tag-data-repairs';
@@ -95,6 +96,7 @@ export type ConversionCheckId =
   | 'referenceIdentity'
   | 'requiredTags'
   | 'scripts'
+  | 'scriptsRun'
   | 'injectAfterwards'
   | 'scenarioName'
   | 'tagFileChecksum'
@@ -376,6 +378,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
   checks.push(drawableBitmapsCheck(view, header, tagIndex));
   checks.push(fogAndColorsCheck(view, header, tagIndex));
   checks.push(scriptCheck(view, header, tagIndex));
+  checks.push(scriptsRunCheck(view, header, tagIndex));
 
   if (full) {
     checks.push(validationCheck(view, header, tagIndex));
@@ -792,6 +795,38 @@ function fogAndColorsCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagI
     `${found.length} value(s) in sky or fog tags are outside 0 to 1. OpenCE draws the fog with them as they are: its release build logs an assertion exception each time and carries on (Zombiemod logs thousands), while a debug build stops at the first one. They are left as the map has them.`,
     found.map((f) => f.text),
   );
+}
+
+/** `script-run-check.ts`: begin_random calls OpenCE can't run (refuse) or asserts on (warn). */
+function scriptsRunCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
+  const label = 'Scripts OpenCE can run';
+  let report: ReturnType<typeof checkScriptsOpenCECanRun>;
+  try {
+    report = checkScriptsOpenCECanRun(view, header, tagIndex);
+  } catch (err) {
+    return check('scriptsRun', label, 'refuse', `The scripts can't be read: ${(err as Error).message}`);
+  }
+  const refused = report.findings.filter((f) => f.severity === 'refuse');
+  if (refused.length > 0) {
+    return check(
+      'scriptsRun',
+      label,
+      'refuse',
+      `${refused.length} script call(s) can't run in OpenCE (it would write past its memory or never finish), so the map is not converted. Changing the scripts is not done here.`,
+      report.findings.map((f) => f.text),
+    );
+  }
+  if (report.findings.length > 0) {
+    return check(
+      'scriptsRun',
+      label,
+      'warn',
+      `${report.findings.length} begin_random call(s) have exactly 32 arguments. They run, but OpenCE asserts fewer than 32: its release build logs the assertion and carries on; a debug build halts there. Left as they are.`,
+      report.findings.map((f) => f.text),
+    );
+  }
+  if (!report.hasScripts) return check('scriptsRun', label, 'pass', 'The scenario has no script nodes to run.');
+  return check('scriptsRun', label, 'pass', `${report.randomCalls} begin_random call(s), each with fewer than 32 arguments.`);
 }
 
 function scriptCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
