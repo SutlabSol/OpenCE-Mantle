@@ -42,6 +42,37 @@ needs re-verification / unverified / blocked)
 | Converter Phase 2: Mac demo maps (v6) -> CE 609 | **stage 1 confirmed in OpenCE (user, 2026-10-12); stage 2 (mods) verified by tests, unverified in OpenCE; no GUI** | Branch `feat/demo-converter-phase2` (see "Converter Phase 2" in Decisions). Developer script only. Stage 3 (GUI) not started. |
 
 ## Decisions (user-approved — point here instead of re-explaining)
+- 2026-10-12: **OpenCE results for the Phase 2 mods, bitmap and fog research, yoyorastv2_1, flamethrower.**
+  Code citations: `memory/opence-notes.md` "Phase 2 mods in OpenCE". Research only; nothing changed.
+  - **Zombiemod loads and plays** (user). The release build logs thousands of EXCEPTION asserts
+    (bitmaps_inlines.h #89 x100,000, #320 "intensity>=0.0f && intensity<=1.0f" x10,000, #188 "verify ==
+    result" x10,000). Cause, measured: its sky's `outdoor fog maximum density` is 5.0; OpenCE's environment
+    fog passes it unclamped to `real_alpha_intensity_to_pixel32` (#320), whose colour conversion then fails
+    #89 / #188. Mod data, copied unchanged (TrueInfectionV2 has 1.5; stock demo, CE bloodgulch, heh_2,
+    crossing, barrier: 0 such values). Not fatal. Zombiemod's scenario has no AI (encounters, command lists
+    and the four AI reference lists all 0), so there is nothing there to differ.
+  - **TrueInfectionV2 is refused by OpenCE**: "bitmap 0 of '<protected>' (type 0, format 14, 512x512x1,
+    flags 0x83) cannot be drawn by this build" -> game_load() failed. Rule: `custom_edition_bitmap_drawable`.
+    Measured: tag #3849, DXT1 512x512 with 9 mipmaps needs 174,776 bytes of pixels; it stores 43,960 (the
+    next bitmap's pixels start right after; 43,960 matches no DXT1 mip chain). Mod data. A mirror of the
+    rule finds exactly this one bitmap in 19 maps (5 CE internal bitmaps, PC / HaloMD / MacDemo stock, the
+    HaloMD and MacDemo mods, yoyorastv2_1); every map that loads: 0.
+  - **Proposed (not built, needs approval):** a refusing row "Bitmaps OpenCE can draw" mirroring
+    `custom_edition_bitmap_drawable` on the output (the external bit 0x100 cleared, as the copy-in does).
+    No faithful repair: the missing pixels are not in the file and the intended size is unknown. A possible
+    opt-in later: zero-pad the pixels to the required size (loads; that texture draws wrong). Optional info
+    row for colours / fog densities outside [0, 1] (OpenCE asserts, not fatal); no clamp without approval.
+  - **yoyorastv2_1 (HaloMD)**: tag #0 "<zteam>" (group 'ztpt') is the scenario with its group renamed by
+    protection: the tag data header's scenario ID names it; its data reads as a scenario. OpenCE finds the
+    scenario by that ID and gives it the scenario group back; it loads a tag of an unknown group as opaque.
+    Read as the scenario (in memory), the alignment and script rows pass; left: #2919 var_kill_penalty's
+    strings block overlaps #2920's root by 4 bytes (its two strings lie inside #2920 too; the text was
+    overwritten). Plan C (approved, not started): find the scenario by the header ID; unknown groups stay
+    refused; a narrow repair moves a pointer-free overlapping block (copying today's bytes).
+  - **Flamethrower:** placed identically in MacDemo, PC, HaloMD and CE bloodgulch (weapon #1361, item
+    collection "single weapons\flame thrower", netgame equipment [35] of 37, type "all games", spawn time 0,
+    position (103.8, -109.1, 1.7)). Not a conversion difference; to compare, stock CE bloodgulch in OpenCE
+    with the same game variant.
 - 2026-10-12: **Converter Phase 2: Mac demo maps (true demo layout, v6) (user-approved plan, in stages).**
   Research: `memory/demo-converter.md` "Phase 2 research"; offsets: SOURCES.md "Converter Phase 2".
   - **Decisions.** A: a tag entry's +0x1C word is not rewritten; OpenCE reads nothing there (cited in

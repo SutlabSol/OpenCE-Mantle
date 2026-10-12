@@ -264,3 +264,28 @@ announcer and plasma overheat sounds; normal ammo icons and meters.
   122 functions differently from CE). The node count is `data_array.count` at +0x2E (source/memory/data.h).
 - **Map protection is handled by OpenCE**: it gives a protected scenario's renamed group back
   (cache_file_formats.c, "Map protection can rename the scenario's group").
+
+## Phase 2 mods in OpenCE (user, build 185; code read at 6399ed9, 2026-10-12)
+
+| Map | Result |
+| --- | --- |
+| bloodgulch_demo (stock Mac demo) | loads and plays; clean sounds and HUD |
+| Zombiemod | loads and plays; release build logs EXCEPTION asserts (below) |
+| TrueInfectionV2 | refused: "bitmap 0 of '<protected>' (type 0, format 14, 512x512x1, flags 0x83) cannot be drawn by this build" -> game_load() failed |
+
+- **"cannot be drawn by this build"**: `custom_edition_bitmaps_verify` / `custom_edition_bitmap_drawable`
+  (port/linux/game/custom_edition_bitmaps.c l.223, l.512-545), fatal at load. A bitmap passes only if
+  `bitmap_verify` (source/bitmaps/bitmaps.c l.1220: signature 'bitm', flags within the 8 defined bits
+  (so 0x100 must be clear), type 0-2, format 0-17, width / height 1-30000, depth 1-256 and 1 unless 3D,
+  0 <= mipmaps <= floor(log2(max dimension))), the format has a hardware texture (a8, y8, ay8, a8y8,
+  r5g6b5, a1r5g5b5, a4r4g4b4, x8r8g8b8, a8r8g8b8; dxt1/3/5 and p8_bump only when not linear), the
+  compressed flag (0x2) matches dxt1-5, power-of-two width / height / depth (or linear and 2D), square
+  cube maps, and `pixels_size` >= `bitmap_get_pixel_data_size` (every mip level, compressed levels padded
+  to 4x4, cube maps x6, bits per pixel from `bitmap_format_bits_per_pixel_table`).
+  TrueInfectionV2 #3849: DXT1 512x512, 9 mipmaps, needs 174,776 bytes, stores 43,960.
+- **Assert flood** (release build, not fatal): `real_alpha_intensity_to_pixel32` (source/interface/
+  hud_draw.c, asserts 0x13F / 0x140 "intensity>=0.0f && intensity<=1.0f") is called unclamped by the
+  environment fog (source/rasterizer/xbox/rasterizer_xbox_environment_fog.c l.664-669, with the fog's
+  maximum densities); it calls `real_argb_color_to_pixel32` (source/bitmaps/bitmaps_inlines.h: assert 89
+  valid colour, 188 "verify == result"). The HUD meter caller clamps (an OpenCE port fix). Zombiemod's
+  sky `outdoor fog maximum density` is 5.0.
