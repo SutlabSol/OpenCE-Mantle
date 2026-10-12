@@ -162,6 +162,7 @@ describe('Phase 2: MacDemo/bloodgulch.map with the Mac demo resource files (in m
       resourceFiles: 'pass',
       outputSize: 'info',
       modelParts: 'pass',
+      drawableBitmaps: 'pass',
       scripts: 'pass',
       validation: 'pass',
       referenceIdentity: 'pass',
