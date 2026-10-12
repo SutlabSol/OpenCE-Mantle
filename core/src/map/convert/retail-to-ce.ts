@@ -18,6 +18,7 @@ import { RawDataAppendCancelledError } from '../raw-data-region';
 import { checkTagDataExtents } from './extent-check';
 import { checkModelParts } from './model-part-check';
 import { checkDrawableBitmaps } from './bitmap-check';
+import { findFogAndColorValuesOutOfRange } from './fog-color-check';
 import { applyTagDataAlignment, measureBlockAlignment, planTagDataAlignment } from './align-tag-data';
 import type { TagDataAlignmentPlan } from './align-tag-data';
 import { applyTagDataRepairs, DATA_ARRAY_COUNT, DATA_ARRAY_ELEMENT_SIZE, DATA_ARRAY_HEADER_SIZE, DATA_ARRAY_MAXIMUM_COUNT, planTagDataRepairs, repairBytesAdded, SCRIPT_NODE_SIZE } from './tag-data-repairs';
@@ -98,6 +99,7 @@ export type ConversionCheckId =
   | 'tagDataExtents'
   | 'modelParts'
   | 'drawableBitmaps'
+  | 'fogAndColors'
   | 'repairAlignTagData'
   | 'repairScriptSyntaxData'
   | 'repairTagRootOutside'
@@ -342,6 +344,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
 
   checks.push(modelPartsCheck(view, header, tagIndex));
   checks.push(drawableBitmapsCheck(view, header, tagIndex));
+  checks.push(fogAndColorsCheck(view, header, tagIndex));
   checks.push(scriptCheck(view, header, tagIndex));
 
   if (full) {
@@ -725,6 +728,20 @@ function drawableBitmapsCheck(view: Buffer, header: CacheFileHeader, tagIndex: T
     'refuse',
     `${scope}: ${report.problems.length} can't be drawn by OpenCE, which then stops loading the map ("cannot be drawn by this build", then "game_load() failed"), so the map is not converted. The missing data is not in the file, so this can't be repaired here.`,
     report.problems.map((p) => p.text),
+  );
+}
+
+/** Information only (`fog-color-check.ts`): values OpenCE asserts on while drawing fog. Nothing is changed. */
+function fogAndColorsCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
+  const label = 'Fog densities and colours in sky and fog tags are 0 to 1';
+  const found = findFogAndColorValuesOutOfRange(view, header, tagIndex);
+  if (found.length === 0) return check('fogAndColors', label, 'pass', 'Every fog maximum density and colour in the sky and fog tags is between 0 and 1.');
+  return check(
+    'fogAndColors',
+    label,
+    'info',
+    `${found.length} value(s) in sky or fog tags are outside 0 to 1. OpenCE draws the fog with them as they are: its release build logs an assertion exception each time and carries on (Zombiemod logs thousands), while a debug build stops at the first one. They are left as the map has them.`,
+    found.map((f) => f.text),
   );
 }
 

@@ -28,4 +28,5 @@ export * from './map/convert/externalize-in';
 export * from './map/convert/extent-check';
 export * from './map/convert/model-part-check';
 export * from './map/convert/bitmap-check';
+export * from './map/convert/fog-color-check';
 export * from './map/convert/tag-data-repairs';
