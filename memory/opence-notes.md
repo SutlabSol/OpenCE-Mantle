@@ -332,7 +332,7 @@ main menu music"). Fine mid-game, fine on the leaderboard, fine on heh_2 / barri
   screen and, with no history entry, loads nothing and logs nothing. That matches the symptom but is the same code
   for every map; what returns the other maps to the main menu was not found.
 - Widget handlers OpenCE leaves running nothing (function >= 102, `widget_pc_functions_clear`): yoyorastv2_1 240,
-  barrier / heh_2 / crossing / Mac demo and CE bloodgulch 242. The two: `ui\shell\multiplayer_game\pause_game  restart_game_button` (mp game options choose 163, mouse emit accept event 108), a widget the mod removed from the
+  barrier / heh_2 / crossing / Mac demo and CE bloodgulch 242. The two: `ui\shell\multiplayer_game\pause_gameestart_game_button` (mp game options choose 163, mouse emit accept event 108), a widget the mod removed from the
   pause menu's game options list. Every widget both maps share has identical handlers; the top pause list (which
   OpenCE trims to resume and quit) is identical.
 - yoyorastv2_1 is the only converted map with scripts: 51 (41 continuous, 8 startup, 2 dormant); startup "cutscenes"
