@@ -17,6 +17,7 @@ import type { RandomAccessFile, ResourceKind, ResourceTable } from './resource-f
 import { RawDataAppendCancelledError } from '../raw-data-region';
 import { checkTagDataExtents } from './extent-check';
 import { checkModelParts } from './model-part-check';
+import { checkDrawableBitmaps } from './bitmap-check';
 import { applyTagDataAlignment, measureBlockAlignment, planTagDataAlignment } from './align-tag-data';
 import type { TagDataAlignmentPlan } from './align-tag-data';
 import { applyTagDataRepairs, DATA_ARRAY_COUNT, DATA_ARRAY_ELEMENT_SIZE, DATA_ARRAY_HEADER_SIZE, DATA_ARRAY_MAXIMUM_COUNT, planTagDataRepairs, repairBytesAdded, SCRIPT_NODE_SIZE } from './tag-data-repairs';
@@ -96,6 +97,7 @@ export type ConversionCheckId =
   | 'tagBlockAlignment'
   | 'tagDataExtents'
   | 'modelParts'
+  | 'drawableBitmaps'
   | 'repairAlignTagData'
   | 'repairScriptSyntaxData'
   | 'repairTagRootOutside'
@@ -339,6 +341,7 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
   }
 
   checks.push(modelPartsCheck(view, header, tagIndex));
+  checks.push(drawableBitmapsCheck(view, header, tagIndex));
   checks.push(scriptCheck(view, header, tagIndex));
 
   if (full) {
@@ -700,6 +703,31 @@ const SCRIPT_ENGINE_GLOBAL_BIT = 0x8000;
  * Node layout (OpenCE source/hs/hs_scenario_definitions.h, `hs_syntax_node`, 20 bytes): +0 salt,
  * +2 function index, +4 type, +6 flags, +8 next node, +12 string offset, +16 data.
  */
+/**
+ * OpenCE's bitmap check (`bitmap-check.ts`): an undrawable bitmap stops OpenCE's load ("cannot be drawn by
+ * this build", then game_load() failed), so the map is refused. Checked with the flags the output will
+ * have (the copy-in clears the external bit 0x100). PRD 2026-10-12: refuse, no repair (the missing
+ * pixels are not in the file).
+ */
+function drawableBitmapsCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
+  const label = 'Bitmaps OpenCE can draw';
+  let report: ReturnType<typeof checkDrawableBitmaps>;
+  try {
+    report = checkDrawableBitmaps(view, header, tagIndex, { ignoreExternalBit: true });
+  } catch (err) {
+    return check('drawableBitmaps', label, 'refuse', `The bitmaps can't be read: ${(err as Error).message}`);
+  }
+  const scope = `${report.bitmapsChecked.toLocaleString('en-US')} bitmaps in ${report.tagsChecked} bitmap tags`;
+  if (report.problems.length === 0) return check('drawableBitmaps', label, 'pass', `${scope}: OpenCE can draw every one.`);
+  return check(
+    'drawableBitmaps',
+    label,
+    'refuse',
+    `${scope}: ${report.problems.length} can't be drawn by OpenCE, which then stops loading the map ("cannot be drawn by this build", then "game_load() failed"), so the map is not converted. The missing data is not in the file, so this can't be repaired here.`,
+    report.problems.map((p) => p.text),
+  );
+}
+
 function scriptCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex): ConversionCheck {
   const label = 'Script calls name their functions (OpenCE looks them up by name)';
   const scenario = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];
@@ -915,6 +943,7 @@ function convertRetailLayout(source: Buffer, options: RetailConversionOptions, o
   }
   verifyOutputExtents(out);
   verifyOutputAlignment(out);
+  verifyOutputBitmaps(out);
   return { buffer: out, report, imported, alignment: aligned, repairs };
 }
 
@@ -936,6 +965,18 @@ function verifyOutputExtents(out: Buffer): void {
       `The converted map still has tag data problems OpenCE would refuse, so nothing was written: ${violations.slice(0, 5).join('; ')}${violations.length > 5 ? ` (and ${violations.length - 5} more)` : ''}.`,
     );
   }
+}
+
+/** OpenCE's bitmap check, run again on the converted map (its real flags) before anything is written. */
+function verifyOutputBitmaps(out: Buffer): void {
+  let problems: string[];
+  try {
+    const header = parseCacheFileHeader(out);
+    problems = checkDrawableBitmaps(out, header, parseTagIndex(out, header)).problems.map((p) => p.text);
+  } catch (err) {
+    problems = [`its bitmaps can't be read: ${(err as Error).message}`];
+  }
+  if (problems.length > 0) throw new ConversionRefusedError(`The converted map has bitmaps OpenCE can't draw, so nothing was written: ${problems.slice(0, 3).join('; ')}.`);
 }
 
 /**

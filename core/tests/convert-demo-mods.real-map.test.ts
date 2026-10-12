@@ -66,6 +66,8 @@ interface ConvertingCase {
   wrongIds: number;
   pathOnly: string;
   ranges: number;
+  /** Set when a later check refuses the map (the rebase itself still works). */
+  refusedBy?: 'drawableBitmaps';
 }
 
 const CONVERTING: ConvertingCase[] = [
@@ -92,11 +94,13 @@ const CONVERTING: ConvertingCase[] = [
     wrongIds: 8,
     pathOnly: '12,199',
     ranges: 0,
+    // OpenCE refused the converted map: bitmap #3849 can't be drawn (PRD 2026-10-12); the row refuses it now.
+    refusedBy: 'drawableBitmaps',
   },
 ];
 
 for (const c of CONVERTING) {
-  describe(`Phase 2 stage 2: ${c.file} converts (protected mod; in memory)`, () => {
+  describe(`Phase 2 stage 2: ${c.file} ${c.refusedBy ? `rebases, then is refused by ${c.refusedBy}` : 'converts'} (protected mod; in memory)`, () => {
     const gate = skippableTest([c.file, MACDEMO_RES.bitmaps, MACDEMO_RES.sounds]);
     let source: Buffer;
     let sourceHash = '';
@@ -123,8 +127,8 @@ for (const c of CONVERTING) {
 
     it.skipIf(gate.skip)(`pre-flight: converts with the script data repair; +0x1C info row; the path pointers protection left are one grouped line${gate.titleSuffix}`, () => {
       const report = withResources(MACDEMO_RES, (r) => preflightDemoConversion(source, r));
-      expect(report.canConvert).toBe(true);
-      expect(report.checks.filter((k) => k.status === 'refuse')).toEqual([]);
+      expect(report.canConvert).toBe(!c.refusedBy);
+      expect(report.checks.filter((k) => k.status === 'refuse').map((k) => k.id)).toEqual(c.refusedBy ? [c.refusedBy] : []);
       expect(report.repairs).toEqual([{ id: 'scriptSyntaxData', required: true, tagPath: expect.any(String), bytesAdded: 380_076 }]);
       expect(report.estimatedOutputSize).toBe(c.size);
       expect(report.checks.find((k) => k.id === 'entryFlags')?.status).toBe('pass');
@@ -137,7 +141,7 @@ for (const c of CONVERTING) {
       expect(report.checks.find((k) => k.id === 'scripts')?.status).toBe('pass');
     });
 
-    it.skipIf(gate.skip)(`converted and finalized as ${c.out}: ${c.size.toLocaleString('en-US')} bytes, CRC32 0x${c.crc.toString(16).toUpperCase()} (raw + node:zlib); +0x1C kept; source unchanged${gate.titleSuffix}`, () => {
+    it.skipIf(gate.skip || !!c.refusedBy)(`converted and finalized as ${c.out}: ${c.size.toLocaleString('en-US')} bytes, CRC32 0x${c.crc.toString(16).toUpperCase()} (raw + node:zlib); +0x1C kept; source unchanged${gate.titleSuffix}`, () => {
       const converted = withResources(MACDEMO_RES, (r) => convertDemoToCustomEdition(source, { acknowledgeScripts: false, resources: r, repairs: { scriptSyntaxData: true } }));
       expect(converted.repairs.map((r) => r.id)).toEqual(['scriptSyntaxData']);
       expect(converted.alignment).toBeNull();
@@ -152,6 +156,11 @@ for (const c of CONVERTING) {
       // Decision A: the dummy tag's +0x1C word is kept (raw tag array read).
       expect(out.readUInt32LE(out.readUInt32LE(0x10) + 0x28 + c.unusedWord.tagIndex * 0x20 + 0x1c)).toBe(c.unusedWord.value);
       expect(inspectCustomEditionMap(out).status).toBe('ok'); // same-reader
+      expect(sha256(source)).toBe(sourceHash);
+    }, 300_000);
+
+    it.skipIf(gate.skip || !c.refusedBy)(`the converter refuses it (${c.refusedBy ?? ''})${gate.titleSuffix}`, () => {
+      expect(() => withResources(MACDEMO_RES, (r) => convertDemoToCustomEdition(source, { acknowledgeScripts: false, resources: r, repairs: { scriptSyntaxData: true } }))).toThrow(ConversionRefusedError);
       expect(sha256(source)).toBe(sourceHash);
     }, 300_000);
   });
