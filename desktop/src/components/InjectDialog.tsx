@@ -26,6 +26,9 @@ export default function InjectDialog({ onClose, log }: Props) {
   const [errorMessage, setErrorMessage] = useState('');
   const [understand, setUnderstand] = useState(false);
   const [applyResult, setApplyResult] = useState<ApplyInjectResult | null>(null);
+  const [queue, setQueue] = useState<string[]>([]);
+  const [queueIndex, setQueueIndex] = useState(0);
+  const [totals, setTotals] = useState({ added: 0, swapped: 0, reused: 0 });
   const dialogRef = useRef<HTMLDivElement>(null);
   const startedRef = useRef(false);
 
@@ -43,8 +46,12 @@ export default function InjectDialog({ onClose, log }: Props) {
         onClose();
         return;
       }
+      const paths = picked.paths?.length ? picked.paths : [picked.path];
+      setQueue(paths);
+      setQueueIndex(0);
+      setTotals({ added: 0, swapped: 0, reused: 0 });
       setPhase('planning');
-      const res = await window.opence.planInject(picked.path, mode);
+      const res = await window.opence.planInject(paths[0], mode);
       if (res.ok) {
         setPlan(res.plan);
         setPhase('review');
@@ -72,7 +79,33 @@ export default function InjectDialog({ onClose, log }: Props) {
     const res = await window.opence.applyInject();
     setApplyResult(res);
     if (res.ok) {
-      log('info', `Injected ${res.addedCount} tag(s), swapped ${res.swappedCount} (${res.reusedCount} reused) into the open map (in memory, not saved yet).`);
+      const newTotals = {
+        added: totals.added + res.addedCount,
+        swapped: totals.swapped + res.swappedCount,
+        reused: totals.reused + res.reusedCount,
+      };
+      if (queue.length > 1) {
+        // A multi-container batch is reported only when it finishes; per-container progress keeps running in memory.
+        setTotals(newTotals);
+        log('info', `Injected container ${queueIndex + 1} of ${queue.length}: ${res.addedCount} added, ${res.swappedCount} swapped (${res.reusedCount} reused) - in memory, not saved yet.`);
+        if (queueIndex + 1 < queue.length) {
+          const nextIndex = queueIndex + 1;
+          setQueueIndex(nextIndex);
+          setPhase('planning');
+          const nextRes = await window.opence.planInject(queue[nextIndex], mode);
+          if (nextRes.ok) {
+            setPlan(nextRes.plan);
+            setPhase('review');
+          } else {
+            setErrorMessage(nextRes.message);
+            setPhase('plan-error');
+          }
+          return;
+        }
+        log('info', `Injected ${queue.length} containers into the open map (in memory, not saved yet).`);
+      } else {
+        log('info', `Injected ${res.addedCount} tag(s), swapped ${res.swappedCount} (${res.reusedCount} reused) into the open map (in memory, not saved yet).`);
+      }
       setPhase('result');
     } else {
       setErrorMessage(res.message);
@@ -167,7 +200,9 @@ export default function InjectDialog({ onClose, log }: Props) {
         <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
           <div data-testid="inject-result" style={{ padding: 20 }}>
             <div style={{ color: 'var(--success-text)', marginBottom: 10, fontSize: 13 }}>
-              Injected {applyResult.addedCount} tag(s), swapped {applyResult.swappedCount} ({applyResult.reusedCount} reused, not duplicated).
+              {queue.length > 1
+                ? `Injected ${queue.length} containers into the open map (${totals.added} added, ${totals.swapped} swapped, ${totals.reused} reused)`
+                : `Injected ${applyResult.addedCount} tag(s), swapped ${applyResult.swappedCount} (${applyResult.reusedCount} reused, not duplicated).`}
             </div>
             <div data-testid="inject-result-in-memory" style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
               The open map now has {applyResult.map.header.tagCount.toLocaleString()} tags. Changes are in memory - nothing has been written to disk yet. Use File &gt; Save or File &gt;
@@ -220,6 +255,11 @@ export default function InjectDialog({ onClose, log }: Props) {
   return (
     <Overlay>
       <DialogShell testid="inject-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose} wide>
+        {queue.length > 1 && (
+          <div data-testid="inject-container-step" style={{ padding: '8px 16px 0', fontSize: 11.5, color: 'var(--text-secondary)' }}>
+            Container {queueIndex + 1} of {queue.length}: <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono, monospace)' }}>{queue[queueIndex].split(/[/\\]/).pop()}</span>
+          </div>
+        )}
         <div data-testid="inject-dialog-summary" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12.5, color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
           <span>
             From &quot;{plan.sourceMapName}&quot; ({plan.mode === 'swap' ? 'swap mode' : 'add mode'}): {plan.counts.added} to add, {plan.counts.swapped} to swap, {plan.counts.reused} reused,{' '}
@@ -277,7 +317,9 @@ export default function InjectDialog({ onClose, log }: Props) {
               onClick={handleConfirm}
               style={buttonStyle(!confirmDisabledReason)}
             >
-              Inject into open map
+              {queue.length > 1 && queueIndex < queue.length - 1
+                ? 'Inject and next…'
+                : 'Inject into open map'}
             </button>
           </div>
           {confirmDisabledReason && (

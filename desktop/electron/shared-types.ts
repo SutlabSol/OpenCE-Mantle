@@ -270,7 +270,7 @@ export interface OpenceApi {
   cancelExtraction(): void;
   pickResourceMap(kind: ResourceMapKind): Promise<ResourceMapPickResult>;
   getResourceMapStatuses(): Promise<Record<ResourceMapKind, ResourceMapStatus>>;
-  pickInjectContainer(): Promise<{ path: string } | null>;
+  pickInjectContainer(): Promise<{ path: string; paths: string[] } | null>;
   planInject(containerPath: string, mode: InjectionMode): Promise<PlanInjectResult>;
   /** Applies the reviewed plan to the open map in memory. Writes nothing; File > Save / Save As do. */
   applyInject(): Promise<ApplyInjectResult>;

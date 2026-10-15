@@ -438,15 +438,15 @@ function getResourceMapStatusesFlow(): Record<ResourceMapKind, ResourceMapStatus
   };
 }
 
-async function pickInjectContainerFlow(): Promise<{ path: string } | null> {
+async function pickInjectContainerFlow(): Promise<{ path: string; paths: string[] } | null> {
   if (!mainWindow) return null;
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: 'Inject tags from...',
     filters: [{ name: 'OpenCE Tag Set', extensions: ['ocetags'] }],
-    properties: ['openFile'],
+    properties: ['openFile', 'multiSelections'],
   });
   if (canceled || filePaths.length === 0) return null;
-  return { path: filePaths[0] };
+  return { path: filePaths[0], paths: filePaths };
 }
 
 async function planInjectFlow(containerPath: string, mode: InjectionMode): Promise<PlanInjectResult> {

@@ -163,7 +163,7 @@ export function installDevMock() {
   pickConvertResource: async (kind: 'bitmaps' | 'sounds') => {
       return { path: `C:\\HaloMD\\maps\\${kind}.map` };
     },
-    pickInjectContainer: async () => ({ path: 'C:\\Users\\Dev\\Documents\\ui_ticker.ocetags' }),
+    pickInjectContainer: async () => ({ path: 'C:/mock/extracted.ocetags', paths: ['C:/mock/extracted.ocetags'] }),
     planInject: async (containerPath, mode) => {
       lastInjectMode = mode;
       await new Promise((r) => setTimeout(r, 200));

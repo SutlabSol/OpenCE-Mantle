@@ -34462,10 +34462,10 @@ async function pickInjectContainerFlow() {
   const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
     title: "Inject tags from...",
     filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }],
-    properties: ["openFile"]
+    properties: ["openFile", "multiSelections"]
   });
   if (canceled || filePaths.length === 0) return null;
-  return { path: filePaths[0] };
+  return { path: filePaths[0], paths: filePaths };
 }
 async function planInjectFlow(containerPath, mode) {
   if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "Open the target map before injecting tags into it." };
