@@ -134,9 +134,9 @@ describe('ADD keeps every existing tag intact (independent: fixed engine base, r
     }, 300_000);
   }
 
-  it.skipIf(gate.skip)(`whole-ui ADD (every non-scenario ui.map tag) into bloodgulch: 704 added, 0 bad tags${gate.titleSuffix}`, () => {
+  it.skipIf(gate.skip)(`whole-ui ADD (every non-scenario ui.map tag) into bloodgulch: 708 added (4 ui model tags unblocked in Stage 2), 0 bad tags${gate.titleSuffix}`, () => {
     const { p } = addAndAudit(ui, bg, wholeMapRoots(ui));
-    expect(p.toAdd.length).toBe(704);
+    expect(p.toAdd.length).toBe(708);
   }, 300_000);
 
   it.skipIf(gate.skip)(`control: SWAP globals with dependencies into bloodgulch (no growth): array pointer unchanged, 0 bad tags apart from the swapped ones' data${gate.titleSuffix}`, () => {

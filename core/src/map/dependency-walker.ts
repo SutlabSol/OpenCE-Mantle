@@ -293,19 +293,8 @@ function collectFromStruct(
         });
         continue;
       }
-      if (childStructName === 'GBXModelGeometryPart') {
-        // Model geometry (vertex/index data) is NOT modeled in our schema at all and is NOT
-        // carried by the container format - see PRD.md "Model geometry relocation plan". Block
-        // the WHOLE tag from injection rather than silently producing a tag whose geometry
-        // pointers are meaningless in the target map.
-        warn({
-          originalIndex: rootOriginalIndex,
-          path: `${contextPath}.${field.name}`,
-          group: '',
-          kind: 'uncapturedData',
-          message: `"${contextPath}.${field.name}" has ${value.value.count} model geometry part(s) (vertex/index data in the separate model-data region) that this tool cannot yet capture or relocate - the WHOLE tag is blocked from injection, not silently dropped.`,
-        });
-      }
+      // Note: GBXModelGeometryPart model geometry (vertex/triangle index data in the model-data
+      // region) is captured and relocated in Stage 2 (see gbxmodel-geometry.ts and tag-extractor.ts).
       const n = Math.min(value.value.count, MAX_ELEMENTS_WALKED_PER_REFLEXIVE);
       for (let i = 0; i < n; i++) {
         collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, rootOriginalIndex, enqueue, warn);

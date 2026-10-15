@@ -34762,15 +34762,6 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
         });
         continue;
       }
-      if (childStructName === "GBXModelGeometryPart") {
-        warn({
-          originalIndex: rootOriginalIndex,
-          path: `${contextPath}.${field.name}`,
-          group: "",
-          kind: "uncapturedData",
-          message: `"${contextPath}.${field.name}" has ${value.value.count} model geometry part(s) (vertex/index data in the separate model-data region) that this tool cannot yet capture or relocate - the WHOLE tag is blocked from injection, not silently dropped.`
-        });
-      }
       const n = Math.min(value.value.count, MAX_ELEMENTS_WALKED_PER_REFLEXIVE);
       for (let i = 0; i < n; i++) {
         collectFromStruct(buffer, childStructName, childBase + i * childSize, fileOffsetAnchor, baseMemoryAddress, `${contextPath}.${field.name}[${i}]`, rootPath, rootOriginalIndex, enqueue, warn);
@@ -34823,6 +34814,111 @@ function collectFromStruct(buffer, structName, fileOffset, fileOffsetAnchor, bas
       });
     }
   }
+}
+
+// ../core/src/map/gbxmodel-geometry.ts
+var VERTEX_BYTES_BY_TYPE = { 4: 68, 5: 32 };
+var PRIMITIVE_RESTART_INDEX = 65535;
+function numeric(value) {
+  if (!value) return void 0;
+  if (value.kind === "basic" || value.kind === "enum") return value.value;
+  return void 0;
+}
+function scanGbxmodelGeometryBoundaries(buffer, header, tagIndex) {
+  const geomSize = resolveStruct("GBXModelGeometry").totalSize;
+  const partSize = resolveStruct("GBXModelGeometryPart").totalSize;
+  const gbxEntries = tagIndex.entries.filter((e) => !e.isExternal && e.primaryClassName === "gbxmodel");
+  const raw = [];
+  for (const entry of gbxEntries) {
+    const fileOffset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const decoded = decodeStruct(buffer, fileOffset, "GBXModel");
+    const geometries = decoded.get("geometries");
+    if (!geometries || geometries.kind !== "reflexive" || geometries.value.count === 0) continue;
+    const geomBase = resolvePointer(geometries.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let g = 0; g < geometries.value.count; g++) {
+      const geom = decodeStruct(buffer, geomBase + g * geomSize, "GBXModelGeometry");
+      const parts = geom.get("parts");
+      if (!parts || parts.kind !== "reflexive" || parts.value.count === 0) continue;
+      const partsBase = resolvePointer(parts.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      for (let p = 0; p < parts.value.count; p++) {
+        const part = decodeStruct(buffer, partsBase + p * partSize, "GBXModelGeometryPart");
+        const vertexType = numeric(part.get("vertex type")) ?? -1;
+        const vertexCount = numeric(part.get("vertex count")) ?? 0;
+        const vertexOffset = numeric(part.get("vertex offset")) ?? 0;
+        const triangleBufferType = numeric(part.get("triangle buffer type")) ?? -1;
+        const triangleCount = numeric(part.get("triangle count")) ?? 0;
+        const triangleOffset = numeric(part.get("triangle offset")) ?? 0;
+        raw.push({
+          originalIndex: entry.index,
+          tagPath: entry.path,
+          geometryIndex: g,
+          partIndex: p,
+          vertexType,
+          vertexCount,
+          vertexAbsoluteOffset: tagIndex.modelDataFileOffset + vertexOffset,
+          vertexByteSize: vertexCount * (VERTEX_BYTES_BY_TYPE[vertexType] ?? 0),
+          triangleBufferType,
+          triangleCount,
+          triangleAbsoluteOffset: tagIndex.modelDataFileOffset + tagIndex.vertexSize + triangleOffset
+        });
+      }
+    }
+  }
+  const sortedByTriangle = [...raw].sort((a, b) => a.triangleAbsoluteOffset - b.triangleAbsoluteOffset);
+  const regionEnd = header.tagDataOffset;
+  const result = [];
+  for (let i = 0; i < sortedByTriangle.length; i++) {
+    const cur = sortedByTriangle[i];
+    const next = i + 1 < sortedByTriangle.length ? sortedByTriangle[i + 1].triangleAbsoluteOffset : regionEnd;
+    let gapIndexCount = (next - cur.triangleAbsoluteOffset) / 2;
+    let blockedReason;
+    if (!Number.isInteger(gapIndexCount) || gapIndexCount < 0) {
+      blockedReason = `triangle gap is not a whole number of 2-byte indices (${next - cur.triangleAbsoluteOffset} bytes)`;
+      gapIndexCount = 0;
+    } else if (VERTEX_BYTES_BY_TYPE[cur.vertexType] === void 0) {
+      blockedReason = `unrecognized vertex type ${cur.vertexType} (only 4=uncompressed/5=compressed are known)`;
+    } else if (cur.vertexAbsoluteOffset < tagIndex.modelDataFileOffset || cur.vertexAbsoluteOffset + cur.vertexByteSize > header.tagDataOffset) {
+      blockedReason = "vertex data resolves outside the model data region";
+    } else if (cur.triangleAbsoluteOffset < tagIndex.modelDataFileOffset || next > header.tagDataOffset) {
+      blockedReason = "triangle data resolves outside the model data region";
+    } else {
+      if (gapIndexCount > 0) {
+        const lastIndexValue = buffer.readUInt16LE(cur.triangleAbsoluteOffset + (gapIndexCount - 1) * 2);
+        if (lastIndexValue !== PRIMITIVE_RESTART_INDEX && lastIndexValue >= cur.vertexCount) gapIndexCount -= 1;
+      }
+      if (cur.triangleBufferType !== 1) {
+        blockedReason = `triangle buffer type ${cur.triangleBufferType} ("triangle strip" is the only type verified against real data") has no verified minimum-size formula`;
+      } else if (gapIndexCount < cur.triangleCount + 2) {
+        blockedReason = `triangle region (${gapIndexCount} indices after trim) is smaller than the structural minimum for ${cur.triangleCount} triangles (${cur.triangleCount + 2})`;
+      } else {
+        for (let k = 0; k < gapIndexCount; k++) {
+          const v = buffer.readUInt16LE(cur.triangleAbsoluteOffset + k * 2);
+          if (v !== PRIMITIVE_RESTART_INDEX && v >= cur.vertexCount) {
+            blockedReason = `index value ${v} at position ${k} is >= this part's own vertex count (${cur.vertexCount}) and is not the primitive-restart sentinel`;
+            break;
+          }
+        }
+      }
+    }
+    result.push({ ...cur, triangleByteSize: gapIndexCount * 2, blockedReason });
+  }
+  return result;
+}
+function captureGbxmodelGeometry(buffer, originalIndex, boundaries) {
+  const mine = boundaries.filter((b) => b.originalIndex === originalIndex).sort((a, b) => a.geometryIndex - b.geometryIndex || a.partIndex - b.partIndex);
+  const blocked = mine.find((b) => b.blockedReason);
+  if (blocked) return { blocked: true, reason: `geometry[${blocked.geometryIndex}].part[${blocked.partIndex}]: ${blocked.blockedReason}` };
+  const parts = mine.map((b) => ({
+    geometryIndex: b.geometryIndex,
+    partIndex: b.partIndex,
+    vertexType: b.vertexType,
+    vertexCount: b.vertexCount,
+    vertexBytes: Buffer.from(buffer.subarray(b.vertexAbsoluteOffset, b.vertexAbsoluteOffset + b.vertexByteSize)),
+    triangleBufferType: b.triangleBufferType,
+    triangleCount: b.triangleCount,
+    triangleBytes: Buffer.from(buffer.subarray(b.triangleAbsoluteOffset, b.triangleAbsoluteOffset + b.triangleByteSize))
+  }));
+  return { blocked: false, parts };
 }
 
 // ../core/src/map/tag-extractor.ts
@@ -34989,6 +35085,8 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
   }
   const localIndexByOriginal = /* @__PURE__ */ new Map();
   extractableWalked.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
+  const hasGbxmodels = extractableWalked.some((t) => t.group === "gbxmodel");
+  const gbxBoundaries = hasGbxmodels ? scanGbxmodelGeometryBoundaries(buffer, header, tagIndex) : [];
   const extraWarnings = [];
   const tags = extractableWalked.map((t, i) => {
     if (options.signal?.aborted) throw new OperationCancelledError();
@@ -35044,6 +35142,19 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
           message: `"${t.path}" has embedded raw data that could not be safely captured, so NONE of it was captured (never a partial relocation): ${embeddedCapture.blockedReasons.join(" ")}`
         });
       }
+      let gbxmodelGeometryParts;
+      if (t.group === "gbxmodel") {
+        const capture = captureGbxmodelGeometry(buffer, t.originalIndex, gbxBoundaries);
+        if (capture.blocked) {
+          injectionBlockers.push({
+            kind: "extractionFailed",
+            fieldPath: `${t.path}.geometries`,
+            message: `gbxmodel geometry capture failed: ${capture.reason}`
+          });
+        } else {
+          gbxmodelGeometryParts = capture.parts;
+        }
+      }
       return {
         ...common,
         structName,
@@ -35051,7 +35162,8 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
         dependencies,
         embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
         embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches,
-        injectionBlockers
+        injectionBlockers,
+        gbxmodelGeometryParts
       };
     } catch (err) {
       if (err instanceof OperationCancelledError) throw err;
@@ -35077,7 +35189,7 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
 
 // ../core/src/map/container.ts
 var OCETAGS_MAGIC = "OCETAGS";
-var OCETAGS_FORMAT_VERSION = 4;
+var OCETAGS_FORMAT_VERSION = 5;
 var OCETAGS_MIN_SUPPORTED_VERSION = 1;
 var ContainerFormatError = class extends Error {
   constructor(message) {
@@ -35133,7 +35245,17 @@ function serializeContainer(set, sourceMapName, resourceMapIdentities = {}) {
       tertiaryClassFourCC: t.tertiaryClassFourCC,
       embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
       embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p })),
-      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b }))
+      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
+      gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
+        geometryIndex: p.geometryIndex,
+        partIndex: p.partIndex,
+        vertexType: p.vertexType,
+        vertexCount: p.vertexCount,
+        vertexData: p.vertexBytes.toString("base64"),
+        triangleBufferType: p.triangleBufferType,
+        triangleCount: p.triangleCount,
+        triangleData: p.triangleBytes.toString("base64")
+      }))
     })),
     notExtracted: set.notExtracted,
     warnings: set.warnings,
@@ -35561,6 +35683,13 @@ function planInjection(mode, target, container, resourceMapConfig = {}, options 
     if (failed.length > 0) reasons.push(`This tag failed to extract and cannot be injected: ${failed.join("; ")}`);
     const uncertain = uncertainGroupByOriginal.get(t.originalIndex) ?? [];
     if (uncertain.length > 0) reasons.push(`This tag's group has no reliable field layout, so it cannot be safely relocated: ${uncertain.join("; ")}`);
+    if (t.group === "gbxmodel") {
+      if (!t.gbxmodelGeometryParts || t.gbxmodelGeometryParts.length === 0) {
+        reasons.push("This gbxmodel tag has no captured model geometry parts (re-extract to capture geometry for injection).");
+      } else if (options.allowGbxmodelGeometryRelocation === false) {
+        reasons.push("Relocation of gbxmodel geometry is disabled by options.");
+      }
+    }
     if (reasons.length === 0) {
       const depMap = checkDependencyMap(t);
       ignoredDependencyPaths.set(t, depMap.ignoredPaths);
@@ -35934,6 +36063,42 @@ function makeResolveDepTagId(t, plan, targetTagIndex) {
 function applyInjection(targetBuffer, targetHeader, targetTagIndex, container, plan, options = {}) {
   return applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, container, plan, options).buffer;
 }
+function patchGbxmodelParts(out, structOffset, baseMemoryAddress, newTagDataOffset, parts) {
+  const partsMap = /* @__PURE__ */ new Map();
+  for (const p of parts) partsMap.set(`${p.geometryIndex}:${p.partIndex}`, p);
+  const gbxResolved = resolveStruct("GBXModel");
+  const geomField = gbxResolved.fields.find((f) => f.name === "geometries");
+  if (!geomField) return;
+  const geomSize = resolveStruct("GBXModelGeometry").totalSize;
+  const partsField = resolveStruct("GBXModelGeometry").fields.find((f) => f.name === "parts");
+  if (!partsField) return;
+  const partSize = resolveStruct("GBXModelGeometryPart").totalSize;
+  const partFields = resolveStruct("GBXModelGeometryPart").fields;
+  const vOffField = partFields.find((f) => f.name === "vertex offset");
+  const triOffField = partFields.find((f) => f.name === "triangle offset");
+  const triOff2Field = partFields.find((f) => f.name === "triangle offset 2");
+  if (!vOffField || !triOffField || !triOff2Field) return;
+  const geomCount = out.readUInt32LE(structOffset + geomField.offset + 0);
+  const geomPointer = out.readUInt32LE(structOffset + geomField.offset + 4);
+  const geomBase = geomPointer - baseMemoryAddress + newTagDataOffset;
+  for (let g = 0; g < geomCount; g++) {
+    const geomOffset = geomBase + g * geomSize;
+    if (geomOffset + geomSize > out.length) break;
+    const partsCount = out.readUInt32LE(geomOffset + partsField.offset + 0);
+    const partsPointer = out.readUInt32LE(geomOffset + partsField.offset + 4);
+    const partsBase = partsPointer - baseMemoryAddress + newTagDataOffset;
+    for (let p = 0; p < partsCount; p++) {
+      const partOffset = partsBase + p * partSize;
+      if (partOffset + partSize > out.length) break;
+      const info = partsMap.get(`${g}:${p}`);
+      if (info) {
+        out.writeUInt32LE(info.vertexOffset, partOffset + vOffField.offset);
+        out.writeUInt32LE(info.triangleOffset, partOffset + triOffField.offset);
+        out.writeUInt32LE(info.triangleOffset, partOffset + triOff2Field.offset);
+      }
+    }
+  }
+}
 function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, container, plan, options = {}) {
   const addedCount = plan.toAdd.length;
   const swappedCount = plan.toSwap.length;
@@ -35957,17 +36122,51 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
   const oldStructDataOffset = arrayOffset + oldTagCount * TAG_ENTRY_SIZE;
   const oldFileLength = targetBuffer.length;
   const delta = addedCount * TAG_ENTRY_SIZE;
+  const injectedParts = [];
+  const vertexBuffers = [];
+  const triangleBuffers = [];
+  let runningV = 0;
+  let runningT = 0;
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
+    if (t.group !== "gbxmodel" || !t.gbxmodelGeometryParts) continue;
+    for (const p of t.gbxmodelGeometryParts) {
+      const vBytes = Buffer.from(p.vertexData, "base64");
+      const tBytes = Buffer.from(p.triangleData, "base64");
+      injectedParts.push({
+        tagIndex: i,
+        geometryIndex: p.geometryIndex,
+        partIndex: p.partIndex,
+        vertexOffset: targetTagIndex.vertexSize + runningV,
+        triangleOffset: targetTagIndex.modelDataSize - targetTagIndex.vertexSize + runningT
+      });
+      vertexBuffers.push(vBytes);
+      triangleBuffers.push(tBytes);
+      runningV += vBytes.length;
+      runningT += tBytes.length;
+    }
+  }
+  const newVertexBytes = Buffer.concat(vertexBuffers);
+  const insertVertexSize = newVertexBytes.length;
+  const unpaddedTriangles = Buffer.concat(triangleBuffers);
+  const padT = (4 - unpaddedTriangles.length % 4) % 4;
+  const newTriangleBytes = padT > 0 ? Buffer.concat([unpaddedTriangles, Buffer.alloc(padT, 0)]) : unpaddedTriangles;
+  const insertTriangleSize = newTriangleBytes.length;
+  const totalModelPartCount = injectedParts.length;
   const insertPos = targetTagIndex.modelDataFileOffset;
   const embeddedAssetBuffers = options.allowEmbeddedRelocation ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).map((a) => Buffer.from(a.data, "base64"))) : [];
   const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
   const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + (4 - embeddedBlobSize % 4) % 4;
+  const shiftBeforeTagData = insertSize + insertVertexSize + insertTriangleSize;
+  const posVertex = targetTagIndex.modelDataFileOffset + targetTagIndex.vertexSize;
+  const posTriangle = subHeaderOffset;
   const baseMemoryAddress = targetTagIndex.baseMemoryAddress;
   const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex)) : [];
-  const newTagDataOffset = subHeaderOffset + insertSize;
-  const newArrayOffset = arrayOffset + insertSize;
+  const newTagDataOffset = subHeaderOffset + shiftBeforeTagData;
+  const newArrayOffset = arrayOffset + shiftBeforeTagData;
   const laidOut = writeTags.map((t) => alignTagData(Buffer.from(t.data, "base64"), t.structName));
   const dataBuffers = laidOut.map((l) => l.data);
-  const { structOffsets, pathOffsets, pathBuffers, newFileLength } = layoutAppend(oldFileLength, subHeaderOffset, delta, insertSize, dataBuffers, plan.toAdd.map((t) => t.path));
+  const { structOffsets, pathOffsets, pathBuffers, newFileLength } = layoutAppend(oldFileLength, subHeaderOffset, delta, shiftBeforeTagData, dataBuffers, plan.toAdd.map((t) => t.path));
   const out = Buffer.alloc(newFileLength);
   targetBuffer.copy(out, 0, 0, insertPos);
   const assetAbsoluteOffsets = writeTags.map(() => []);
@@ -35982,16 +36181,37 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
       }
     }
   }
-  targetBuffer.copy(out, insertPos + insertSize, insertPos, oldStructDataOffset);
-  targetBuffer.copy(out, oldStructDataOffset + insertSize + delta, oldStructDataOffset, oldFileLength);
-  const outOffsetOf = (at) => at < insertPos ? at : at + insertSize + (at >= oldStructDataOffset ? delta : 0);
+  targetBuffer.copy(out, insertPos + insertSize, insertPos, posVertex);
+  if (insertVertexSize > 0) {
+    newVertexBytes.copy(out, insertPos + insertSize + targetTagIndex.vertexSize);
+  }
+  targetBuffer.copy(out, insertPos + insertSize + targetTagIndex.vertexSize + insertVertexSize, posVertex, posTriangle);
+  if (insertTriangleSize > 0) {
+    newTriangleBytes.copy(out, posTriangle + insertSize + insertVertexSize);
+  }
+  targetBuffer.copy(out, posTriangle + shiftBeforeTagData, posTriangle, oldStructDataOffset);
+  targetBuffer.copy(out, oldStructDataOffset + shiftBeforeTagData + delta, oldStructDataOffset, oldFileLength);
+  const outOffsetOf = (at) => {
+    if (at < insertPos) return at;
+    if (at < posVertex) return at + insertSize;
+    if (at < posTriangle) return at + insertSize + insertVertexSize;
+    if (at < oldStructDataOffset) return at + shiftBeforeTagData;
+    return at + shiftBeforeTagData + delta;
+  };
   const oldArrayEndAddress = baseMemoryAddress + (oldStructDataOffset - subHeaderOffset) >>> 0;
   const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: baseMemoryAddress + targetHeader.tagDataSize >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
   out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 12);
   if (insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 20);
+  if (totalModelPartCount > 0) {
+    const newModelPartCount = targetTagIndex.modelPartCount + totalModelPartCount;
+    out.writeUInt32LE(newModelPartCount, newTagDataOffset + 16);
+    out.writeUInt32LE(newModelPartCount, newTagDataOffset + 24);
+    out.writeUInt32LE(targetTagIndex.vertexSize + insertVertexSize, newTagDataOffset + 28);
+    out.writeUInt32LE(targetTagIndex.modelDataSize + insertVertexSize + insertTriangleSize, newTagDataOffset + 32);
+  }
   for (let i = 0; i < addedCount; i++) {
     const t = plan.toAdd[i];
-    const entryOffset = oldStructDataOffset + insertSize + i * TAG_ENTRY_SIZE;
+    const entryOffset = oldStructDataOffset + shiftBeforeTagData + i * TAG_ENTRY_SIZE;
     const classInfo = lookupTagClassByName(t.group);
     if (!classInfo) throw new Error(`Unknown tag group "${t.group}" - cannot write a tag index entry for it.`);
     const primaryFourCC = fourCCFromString(classInfo.groupId);
@@ -36033,8 +36253,18 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
       out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + laidOut[i].mapOffset(patch.patchOffset));
     }
   }
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
+    if (t.group === "gbxmodel") {
+      const myParts = injectedParts.filter((p) => p.tagIndex === i);
+      if (myParts.length > 0) {
+        patchGbxmodelParts(out, structOffsets[i], baseMemoryAddress, newTagDataOffset, myParts);
+      }
+    }
+  }
   out.writeUInt32LE(newFileLength, 8);
-  if (insertSize > 0) out.writeUInt32LE(newTagDataOffset, 16);
+  if (shiftBeforeTagData > 0) out.writeUInt32LE(newTagDataOffset, 16);
+  out.writeUInt32LE(newFileLength - newTagDataOffset, 20);
   out.writeUInt32LE(newFileLength - newTagDataOffset, 20);
   return { buffer: out, rebase };
 }

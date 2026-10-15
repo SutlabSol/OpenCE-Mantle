@@ -30,7 +30,7 @@ import type { WalkerWarning } from './dependency-walker';
 import type { ResourceMapIdentity } from './resource-map';
 
 export const OCETAGS_MAGIC = 'OCETAGS';
-export const OCETAGS_FORMAT_VERSION = 4;
+export const OCETAGS_FORMAT_VERSION = 5;
 export const OCETAGS_MIN_SUPPORTED_VERSION = 1;
 export const OCETAGS_EXTENSION = '.ocetags';
 
@@ -46,6 +46,20 @@ export interface OceContainerEmbeddedRawDataPatch {
   assetIndex: number;
   patchOffset: number;
   patchWidth: number;
+}
+
+/** Captured gbxmodel geometry part with vertex and triangle index bytes (base64) from the model data region (v5+). */
+export interface OceContainerGbxmodelPart {
+  geometryIndex: number;
+  partIndex: number;
+  vertexType: number;
+  vertexCount: number;
+  /** Base64-encoded vertex bytes. */
+  vertexData: string;
+  triangleBufferType: number;
+  triangleCount: number;
+  /** Base64-encoded triangle index bytes. */
+  triangleData: string;
 }
 
 export interface OceContainerTag {
@@ -64,6 +78,8 @@ export interface OceContainerTag {
   embeddedRawDataPatches?: OceContainerEmbeddedRawDataPatch[];
   /** Added in v4; undefined when read from a v1-v3 container. Non-empty = blocked from ADD/SWAP. */
   injectionBlockers?: InjectionBlocker[];
+  /** Added in v5; undefined when read from a v1-v4 container or non-gbxmodel tags. */
+  gbxmodelGeometryParts?: OceContainerGbxmodelPart[];
 }
 
 export interface OceContainerNotExtracted {
@@ -171,6 +187,16 @@ export function serializeContainer(
       embeddedRawDataAssets: t.embeddedRawDataAssets.map((a: ExtractedEmbeddedAsset) => ({ kind: a.kind, data: a.data.toString('base64') })),
       embeddedRawDataPatches: t.embeddedRawDataPatches.map((p: ExtractedEmbeddedPatch) => ({ ...p })),
       injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
+      gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
+        geometryIndex: p.geometryIndex,
+        partIndex: p.partIndex,
+        vertexType: p.vertexType,
+        vertexCount: p.vertexCount,
+        vertexData: p.vertexBytes.toString('base64'),
+        triangleBufferType: p.triangleBufferType,
+        triangleCount: p.triangleCount,
+        triangleData: p.triangleBytes.toString('base64'),
+      })),
     })),
     notExtracted: set.notExtracted,
     warnings: set.warnings,

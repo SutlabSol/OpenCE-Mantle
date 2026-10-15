@@ -35,8 +35,9 @@ function inject(mode: InjectionMode, src: AuditMap, c: OceContainer, tgt: AuditM
     ? plan.toSwap.map((s) => ({ srcIndex: c.tags[s.localIndex].originalIndex, outIndex: s.targetOriginalIndex, path: c.tags[s.localIndex].path }))
     : plan.toAdd.map((t) => ({ srcIndex: t.originalIndex, outIndex: findTag(out, t.group, t.path), path: t.path }));
   void src;
-  // No embedded relocation here: everything past the (grown) tag array's old end is appended data.
-  return { plan, out, written, appendStart: tgt.buf.length + plan.toAdd.length * 32 };
+  // Appended tag data starts after old buffer + any shift before tag data + tag array growth delta.
+  const shift = out.header.tagDataOffset - tgt.header.tagDataOffset;
+  return { plan, out, written, appendStart: tgt.buf.length + shift + plan.toAdd.length * 32 };
 }
 
 function misaligned(blocks: Block[]): string[] {
@@ -81,12 +82,20 @@ function audit(src: AuditMap, out: AuditMap, written: Written[], appendStart: nu
   };
 }
 
+/** The same container saved as format v4 (v5 gbxmodelGeometryParts removed). */
+function asV4(c: OceContainer): OceContainer {
+  const raw = JSON.parse(JSON.stringify(c));
+  raw.formatVersion = 4;
+  for (const t of raw.tags) delete t.gbxmodelGeometryParts;
+  return deserializeContainer(Buffer.from(JSON.stringify(raw), 'utf-8'));
+}
+
 /** The same container saved as format v1 (every field added since v1 removed), read back through deserializeContainer. */
 function asV1(c: OceContainer): OceContainer {
   const raw = JSON.parse(JSON.stringify(c));
   raw.formatVersion = 1;
   for (const k of ['resourceMapIdentities', 'externalResourceRefs', 'externalData']) delete raw[k];
-  for (const t of raw.tags) for (const k of ['secondaryClassFourCC', 'tertiaryClassFourCC', 'embeddedRawDataAssets', 'embeddedRawDataPatches', 'injectionBlockers']) delete t[k];
+  for (const t of raw.tags) for (const k of ['secondaryClassFourCC', 'tertiaryClassFourCC', 'embeddedRawDataAssets', 'embeddedRawDataPatches', 'injectionBlockers', 'gbxmodelGeometryParts']) delete t[k];
   return deserializeContainer(Buffer.from(JSON.stringify(raw), 'utf-8'));
 }
 
@@ -105,14 +114,16 @@ describe('tag reference path pointers in real maps (condition for writing them)'
 
 describe('injected tag data matches its source (real maps, independent audit)', () => {
   const gate = skippableTest(['bloodgulch.map']);
-  for (const version of [4, 1]) {
+  for (const version of [5, 4, 1]) {
     it.skipIf(gate.skip)(`SWAP globals with dependencies into a copy of bloodgulch.map (the map that failed to load in OpenCE), container v${version}: 0 pointers outside tag data, all pointers aligned like the source, padding zero, tree diff clean${gate.titleSuffix}`, () => {
       const m = auditMap(readSampleMap('bloodgulch.map'));
       expect(sourceMisaligned(m)).toEqual([]);
       const root = m.ti.entries.findIndex((e) => !e.isExternal && e.primaryClassName === 'globals');
       const c = container(m, [root], 'bloodgulch.map');
-      const { plan, out, written, appendStart } = inject('swap', m, version === 1 ? asV1(c) : c, m);
-      expect(plan.toSwap.length).toBe(1037); // the same run as the failing map
+      const inputContainer = version === 5 ? c : version === 4 ? asV4(c) : asV1(c);
+      const { plan, out, written, appendStart } = inject('swap', m, inputContainer, m);
+      // In v5, gbxmodel tags have model geometry captured and are swapped (1087 tags); in v1-v4 they are blocked (1037 tags)
+      expect(plan.toSwap.length).toBe(version === 5 ? 1087 : 1037);
       const r = audit(m, out, written, appendStart);
       expect(r.outside).toEqual([]);
       expect(r.misaligned).toEqual([]);

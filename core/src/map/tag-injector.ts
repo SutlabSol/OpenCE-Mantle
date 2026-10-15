@@ -207,6 +207,11 @@ export interface InjectionOptions {
    * may opt in explicitly; `map-worker.ts` (the real app) never passes this.
    */
   allowEmbeddedRelocation?: boolean;
+  /**
+   * Relocation of gbxmodel geometry parts (vertex/triangle index data in the model data region).
+   * Enabled by default (Stage 2).
+   */
+  allowGbxmodelGeometryRelocation?: boolean;
 }
 
 /**
@@ -271,6 +276,13 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
     if (failed.length > 0) reasons.push(`This tag failed to extract and cannot be injected: ${failed.join('; ')}`);
     const uncertain = uncertainGroupByOriginal.get(t.originalIndex) ?? [];
     if (uncertain.length > 0) reasons.push(`This tag's group has no reliable field layout, so it cannot be safely relocated: ${uncertain.join('; ')}`);
+    if (t.group === 'gbxmodel') {
+      if (!t.gbxmodelGeometryParts || t.gbxmodelGeometryParts.length === 0) {
+        reasons.push('This gbxmodel tag has no captured model geometry parts (re-extract to capture geometry for injection).');
+      } else if (options.allowGbxmodelGeometryRelocation === false) {
+        reasons.push('Relocation of gbxmodel geometry is disabled by options.');
+      }
+    }
     if (reasons.length === 0) {
       const depMap = checkDependencyMap(t);
       ignoredDependencyPaths.set(t, depMap.ignoredPaths);
@@ -780,6 +792,63 @@ export interface InjectionResult {
   rebase: RebaseCounts | null;
 }
 
+interface InjectedModelPartInfo {
+  tagIndex: number;
+  geometryIndex: number;
+  partIndex: number;
+  vertexOffset: number;
+  triangleOffset: number;
+}
+
+function patchGbxmodelParts(
+  out: Buffer,
+  structOffset: number,
+  baseMemoryAddress: number,
+  newTagDataOffset: number,
+  parts: InjectedModelPartInfo[],
+): void {
+  const partsMap = new Map<string, InjectedModelPartInfo>();
+  for (const p of parts) partsMap.set(`${p.geometryIndex}:${p.partIndex}`, p);
+
+  const gbxResolved = resolveStruct('GBXModel');
+  const geomField = gbxResolved.fields.find((f) => f.name === 'geometries');
+  if (!geomField) return;
+
+  const geomSize = resolveStruct('GBXModelGeometry').totalSize;
+  const partsField = resolveStruct('GBXModelGeometry').fields.find((f) => f.name === 'parts');
+  if (!partsField) return;
+
+  const partSize = resolveStruct('GBXModelGeometryPart').totalSize;
+  const partFields = resolveStruct('GBXModelGeometryPart').fields;
+  const vOffField = partFields.find((f) => f.name === 'vertex offset');
+  const triOffField = partFields.find((f) => f.name === 'triangle offset');
+  const triOff2Field = partFields.find((f) => f.name === 'triangle offset 2');
+  if (!vOffField || !triOffField || !triOff2Field) return;
+
+  const geomCount = out.readUInt32LE(structOffset + geomField.offset + 0);
+  const geomPointer = out.readUInt32LE(structOffset + geomField.offset + 4);
+  const geomBase = geomPointer - baseMemoryAddress + newTagDataOffset;
+
+  for (let g = 0; g < geomCount; g++) {
+    const geomOffset = geomBase + g * geomSize;
+    if (geomOffset + geomSize > out.length) break;
+    const partsCount = out.readUInt32LE(geomOffset + partsField.offset + 0);
+    const partsPointer = out.readUInt32LE(geomOffset + partsField.offset + 4);
+    const partsBase = partsPointer - baseMemoryAddress + newTagDataOffset;
+
+    for (let p = 0; p < partsCount; p++) {
+      const partOffset = partsBase + p * partSize;
+      if (partOffset + partSize > out.length) break;
+      const info = partsMap.get(`${g}:${p}`);
+      if (info) {
+        out.writeUInt32LE(info.vertexOffset, partOffset + vOffField.offset);
+        out.writeUInt32LE(info.triangleOffset, partOffset + triOffField.offset);
+        out.writeUInt32LE(info.triangleOffset, partOffset + triOff2Field.offset);
+      }
+    }
+  }
+}
+
 /** `applyInjection`, also returning how many existing pointers were moved. */
 export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: CacheFileHeader, targetTagIndex: TagIndex, container: OceContainer, plan: InjectionPlan, options: InjectionOptions = {}): InjectionResult {
   const addedCount = plan.toAdd.length;
@@ -810,11 +879,45 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   const oldFileLength = targetBuffer.length;
   const delta = addedCount * TAG_ENTRY_SIZE; // only brand-new entries grow the tag array
 
+  // Model geometry relocation (Stage 2): collect parts across writeTags
+  const injectedParts: InjectedModelPartInfo[] = [];
+  const vertexBuffers: Buffer[] = [];
+  const triangleBuffers: Buffer[] = [];
+
+  let runningV = 0;
+  let runningT = 0;
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
+    if (t.group !== 'gbxmodel' || !t.gbxmodelGeometryParts) continue;
+    for (const p of t.gbxmodelGeometryParts) {
+      const vBytes = Buffer.from(p.vertexData, 'base64');
+      const tBytes = Buffer.from(p.triangleData, 'base64');
+      injectedParts.push({
+        tagIndex: i,
+        geometryIndex: p.geometryIndex,
+        partIndex: p.partIndex,
+        vertexOffset: targetTagIndex.vertexSize + runningV,
+        triangleOffset: (targetTagIndex.modelDataSize - targetTagIndex.vertexSize) + runningT,
+      });
+      vertexBuffers.push(vBytes);
+      triangleBuffers.push(tBytes);
+      runningV += vBytes.length;
+      runningT += tBytes.length;
+    }
+  }
+
+  const newVertexBytes = Buffer.concat(vertexBuffers);
+  const insertVertexSize = newVertexBytes.length; // guaranteed 4-aligned (vertices are 32 or 68 bytes)
+
+  const unpaddedTriangles = Buffer.concat(triangleBuffers);
+  const padT = (4 - (unpaddedTriangles.length % 4)) % 4;
+  const newTriangleBytes = padT > 0 ? Buffer.concat([unpaddedTriangles, Buffer.alloc(padT, 0)]) : unpaddedTriangles;
+  const insertTriangleSize = newTriangleBytes.length;
+
+  const totalModelPartCount = injectedParts.length;
+
   // Embedded relocation: every unique asset across toAdd/toSwap, inserted once right before
-  // modelDataFileOffset, zero-padded to a 4-byte boundary - a harmless, defensive convention
-  // (matches invader's REQUIRED_PADDING_32_BIT), NOT a confirmed hard requirement: real
-  // coldsnap.map's own tagDataOffset/modelDataFileOffset are themselves NOT 4-aligned (both ≡ 2
-  // mod 4). Padding preserves whatever alignment the source already had either way.
+  // modelDataFileOffset, zero-padded to a 4-byte boundary
   const insertPos = targetTagIndex.modelDataFileOffset;
   const embeddedAssetBuffers: Buffer[] = options.allowEmbeddedRelocation
     ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).map((a) => Buffer.from(a.data, 'base64')))
@@ -822,22 +925,30 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
   const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + ((4 - (embeddedBlobSize % 4)) % 4);
 
+  const shiftBeforeTagData = insertSize + insertVertexSize + insertTriangleSize;
+
+  // Key boundaries in targetBuffer
+  const posVertex = targetTagIndex.modelDataFileOffset + targetTagIndex.vertexSize;
+  const posTriangle = subHeaderOffset;
+
   // The base and the array pointer never change (module doc). Existing pointers at or past the old
   // array end move by `delta`; collected from the target before anything is copied.
   const baseMemoryAddress = targetTagIndex.baseMemoryAddress;
   const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex)) : [];
-  const newTagDataOffset = subHeaderOffset + insertSize;
-  const newArrayOffset = arrayOffset + insertSize;
+  const newTagDataOffset = subHeaderOffset + shiftBeforeTagData;
+  const newArrayOffset = arrayOffset + shiftBeforeTagData;
 
   const laidOut = writeTags.map((t) => alignTagData(Buffer.from(t.data, 'base64'), t.structName));
   const dataBuffers = laidOut.map((l) => l.data);
   // Path strings only for brand-new entries - swapped entries reuse their existing path pointer.
-  const { structOffsets, pathOffsets, pathBuffers, newFileLength } = layoutAppend(oldFileLength, subHeaderOffset, delta, insertSize, dataBuffers, plan.toAdd.map((t) => t.path));
+  const { structOffsets, pathOffsets, pathBuffers, newFileLength } = layoutAppend(oldFileLength, subHeaderOffset, delta, shiftBeforeTagData, dataBuffers, plan.toAdd.map((t) => t.path));
 
   const out = Buffer.alloc(newFileLength);
-  targetBuffer.copy(out, 0, 0, insertPos); // header + BSP + rest of raw-data region, byte-for-byte, unmoved
 
-  // Per-writeTags-index, per-asset -> the asset's final absolute file offset in `out`.
+  // 1. Region before model data: header + BSP + raw data
+  targetBuffer.copy(out, 0, 0, insertPos);
+
+  // 2. Insert embedded blob if any (before modelDataFileOffset)
   const assetAbsoluteOffsets: number[][] = writeTags.map(() => []);
   if (insertSize > 0) {
     let cursor = insertPos;
@@ -849,24 +960,53 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
         cursor += bytes.length;
       }
     }
-    // [cursor, insertPos + insertSize) is the alignment pad - left zero by Buffer.alloc.
   }
 
-  targetBuffer.copy(out, insertPos + insertSize, insertPos, oldStructDataOffset); // rest of model data + sub-header + existing tag array, shifted by +insertSize ONLY (the tag-array growth insertion point is further along, handled next)
-  targetBuffer.copy(out, oldStructDataOffset + insertSize + delta, oldStructDataOffset, oldFileLength); // existing struct/path-string data, shifted by +insertSize AND +delta
+  // 3. Old vertex data (shifted by +insertSize)
+  targetBuffer.copy(out, insertPos + insertSize, insertPos, posVertex);
 
-  // File offsets in the target -> the output: unmoved before the embedded insertion point,
-  // +insertSize up to the old array end, +insertSize+delta after it.
-  const outOffsetOf = (at: number): number => (at < insertPos ? at : at + insertSize + (at >= oldStructDataOffset ? delta : 0));
+  // 4. Insert new vertex bytes (at end of vertex region)
+  if (insertVertexSize > 0) {
+    newVertexBytes.copy(out, insertPos + insertSize + targetTagIndex.vertexSize);
+  }
+
+  // 5. Old triangle data (shifted by +insertSize + insertVertexSize)
+  targetBuffer.copy(out, insertPos + insertSize + targetTagIndex.vertexSize + insertVertexSize, posVertex, posTriangle);
+
+  // 6. Insert new triangle bytes (at end of triangle region)
+  if (insertTriangleSize > 0) {
+    newTriangleBytes.copy(out, posTriangle + insertSize + insertVertexSize);
+  }
+
+  // 7. Sub-header + existing tag array (shifted by +shiftBeforeTagData)
+  targetBuffer.copy(out, posTriangle + shiftBeforeTagData, posTriangle, oldStructDataOffset);
+
+  // 8. Existing struct/path-string data (shifted by +shiftBeforeTagData + delta)
+  targetBuffer.copy(out, oldStructDataOffset + shiftBeforeTagData + delta, oldStructDataOffset, oldFileLength);
+
+  const outOffsetOf = (at: number): number => {
+    if (at < insertPos) return at;
+    if (at < posVertex) return at + insertSize;
+    if (at < posTriangle) return at + insertSize + insertVertexSize;
+    if (at < oldStructDataOffset) return at + shiftBeforeTagData;
+    return at + shiftBeforeTagData + delta;
+  };
   const oldArrayEndAddress = (baseMemoryAddress + (oldStructDataOffset - subHeaderOffset)) >>> 0;
   const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: (baseMemoryAddress + targetHeader.tagDataSize) >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
 
   out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 0x0c);
   if (insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 0x14); // modelDataFileOffset
+  if (totalModelPartCount > 0) {
+    const newModelPartCount = targetTagIndex.modelPartCount + totalModelPartCount;
+    out.writeUInt32LE(newModelPartCount, newTagDataOffset + 0x10); // modelPartCount
+    out.writeUInt32LE(newModelPartCount, newTagDataOffset + 0x18); // modelPartCountAgain
+    out.writeUInt32LE(targetTagIndex.vertexSize + insertVertexSize, newTagDataOffset + 0x1c); // vertexSize
+    out.writeUInt32LE(targetTagIndex.modelDataSize + insertVertexSize + insertTriangleSize, newTagDataOffset + 0x20); // modelDataSize
+  }
 
   for (let i = 0; i < addedCount; i++) {
     const t = plan.toAdd[i];
-    const entryOffset = oldStructDataOffset + insertSize + i * TAG_ENTRY_SIZE;
+    const entryOffset = oldStructDataOffset + shiftBeforeTagData + i * TAG_ENTRY_SIZE;
     const classInfo = lookupTagClassByName(t.group);
     if (!classInfo) throw new Error(`Unknown tag group "${t.group}" - cannot write a tag index entry for it.`);
     const primaryFourCC = fourCCFromString(classInfo.groupId);
@@ -892,8 +1032,6 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
     const entryOffset = newArrayOffset + s.targetOriginalIndex * TAG_ENTRY_SIZE; // EXISTING array slot, same relative position
     const secondary = t.secondaryClassFourCC ?? 0xffffffff;
     const tertiary = t.tertiaryClassFourCC ?? 0xffffffff;
-    // tagId (0x0c), path pointer (0x10), primary class (0x00) and isExternal (0x18) are
-    // INTENTIONALLY left unchanged - that's what makes this a swap, not a new tag.
     out.writeUInt32LE(secondary === null ? 0xffffffff : secondary, entryOffset + 0x04);
     out.writeUInt32LE(tertiary === null ? 0xffffffff : tertiary, entryOffset + 0x08);
     const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
@@ -919,8 +1057,20 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
     }
   }
 
+  // Patch gbxmodel geometry parts with their new vertex/triangle offsets
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
+    if (t.group === 'gbxmodel') {
+      const myParts = injectedParts.filter((p) => p.tagIndex === i);
+      if (myParts.length > 0) {
+        patchGbxmodelParts(out, structOffsets[i], baseMemoryAddress, newTagDataOffset, myParts);
+      }
+    }
+  }
+
   out.writeUInt32LE(newFileLength, 0x8); // decompressedFileSize
-  if (insertSize > 0) out.writeUInt32LE(newTagDataOffset, 0x10); // tagDataOffset
+  if (shiftBeforeTagData > 0) out.writeUInt32LE(newTagDataOffset, 0x10); // tagDataOffset
+  out.writeUInt32LE(newFileLength - newTagDataOffset, 0x14); // tagDataSize
   out.writeUInt32LE(newFileLength - newTagDataOffset, 0x14); // tagDataSize
   // crc32 (0x64) and the sub-header's tagFileChecksums (subHeaderOffset+0x08) are left byte-for-byte
   // as in the target map. Callers that write a file run `finalizeForSave` (finalize-map.ts), which

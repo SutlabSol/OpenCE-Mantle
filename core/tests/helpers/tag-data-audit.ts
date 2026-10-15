@@ -144,6 +144,29 @@ export function treeDiff(src: AuditMap, srcIndex: number, out: AuditMap, outInde
         if (av.value.size !== bv.value.size) diffs.push(`${p}: data size ${av.value.size} -> ${bv.value.size}`);
         else if (!inRange(out, ob, bv.value.size)) diffs.push(`${p}: data pointer outside tag data`);
         else if (!src.buf.subarray(sb, sb + av.value.size).equals(out.buf.subarray(ob, ob + bv.value.size))) diffs.push(`${p}: data bytes differ`);
+      } else if (st === 'GBXModelGeometryPart' && (f.name === 'vertex offset' || f.name === 'triangle offset' || f.name === 'triangle offset 2')) {
+        pointerBytes.fill(1, f.offset, f.offset + f.size);
+        if (f.name === 'vertex offset') {
+          const svOff = src.buf.readUInt32LE(so + f.offset);
+          const ovOff = out.buf.readUInt32LE(oo + f.offset);
+          const vCount = (a.get('vertex count') as { value: number })?.value ?? 0;
+          const vType = (a.get('vertex type') as { value: number })?.value ?? 0;
+          const bPerV = vType === 4 ? 68 : 32;
+          const sVAbs = src.ti.modelDataFileOffset + svOff;
+          const oVAbs = out.ti.modelDataFileOffset + ovOff;
+          if (!src.buf.subarray(sVAbs, sVAbs + vCount * bPerV).equals(out.buf.subarray(oVAbs, oVAbs + vCount * bPerV))) {
+            diffs.push(`${p}: vertex data differs`);
+          }
+        } else if (f.name === 'triangle offset') {
+          const stOff = src.buf.readUInt32LE(so + f.offset);
+          const otOff = out.buf.readUInt32LE(oo + f.offset);
+          const tCount = (a.get('triangle count') as { value: number })?.value ?? 0;
+          const sTAbs = src.ti.modelDataFileOffset + src.ti.vertexSize + stOff;
+          const oTAbs = out.ti.modelDataFileOffset + out.ti.vertexSize + otOff;
+          if (!src.buf.subarray(sTAbs, sTAbs + tCount * 2).equals(out.buf.subarray(oTAbs, oTAbs + tCount * 2))) {
+            diffs.push(`${p}: triangle data differs`);
+          }
+        }
       }
     }
     for (let i = 0; i < R.totalSize; i++) {

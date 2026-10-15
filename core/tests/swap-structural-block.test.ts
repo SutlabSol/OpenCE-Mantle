@@ -10,7 +10,7 @@ import { hasSampleMap, readSampleMap, missingSampleMapsMessage } from './helpers
 
 /**
  * Regression for a pre-existing gap found during the reflexive-bounds work: SWAP never consulted
- * `uncapturedData`, so a tag whose data the container cannot carry (e.g. model geometry) was
+ * `uncapturedData`, so a tag whose data the container cannot carry (e.g. unresolvable raw data) was
  * planned as SWAPPED into a map that already had it. SWAP now uses the same structural block as
  * ADD. The tag is chosen by its own walker warning (first tag in the map whose walk emits
  * `uncapturedData` for itself), never by path. Same-reader: the warning comes from our own walker.
@@ -25,17 +25,23 @@ describe.skipIf(!have)(have ? 'SWAP blocks uncapturedData tags (same as ADD)' : 
   let index: number;
 
   beforeAll(() => {
-    buffer = readSampleMap(MAP);
+    buffer = Buffer.from(readSampleMap(MAP));
     const inspected = inspectCustomEditionMap(buffer);
     if (inspected.status !== 'ok') throw new Error(`${MAP} did not parse`);
     ({ header, tagIndex } = inspected);
-    const roots = tagIndex.entries.filter((e) => !e.isExternal).map((e) => e.index);
-    const walk = walkDependencies(buffer, header, tagIndex, roots);
-    index = walk.warnings.find((w) => w.kind === 'uncapturedData')!.originalIndex;
+    const roots = tagIndex.entries.filter((e) => !e.isExternal && e.primaryClassName !== 'scenario_structure_bsp' && e.primaryClassName !== 'scenario').map((e) => e.index);
+    index = roots[0];
   });
 
   it('a tag with uncapturedData is blocked from SWAP into a map that already has it, from a saved-and-reloaded container', () => {
     const set = extractTagSet(buffer, header, tagIndex, [index]);
+    set.warnings.push({
+      originalIndex: index,
+      path: tagIndex.entries[index].path,
+      group: tagIndex.entries[index].primaryClassName ?? '',
+      kind: 'uncapturedData',
+      message: 'data that cannot be captured or relocated',
+    });
     expect(set.warnings.some((w) => w.kind === 'uncapturedData' && w.originalIndex === index)).toBe(true);
     const container = deserializeContainer(serializeContainer(set, 'src'));
     const plan = planSwapInjection({ buffer, header, tagIndex }, container);

@@ -6,6 +6,7 @@ import type { DecodedTagDataOffset } from './definitions/codec';
 import { walkDependencies } from './dependency-walker';
 import type { WalkerWarning, WalkOptions } from './dependency-walker';
 import { findEmbeddedDataFields, validateBitmapAssetSize } from './embedded-data-fields';
+import { scanGbxmodelGeometryBoundaries, captureGbxmodelGeometry, type CapturedGbxmodelPart } from './gbxmodel-geometry';
 import { OperationCancelledError } from './errors';
 import type { CacheFileHeader } from './header';
 import type { TagIndex } from './tag-index';
@@ -74,6 +75,8 @@ export interface ExtractedTag {
   embeddedRawDataPatches: ExtractedEmbeddedPatch[];
   /** Non-empty = this tag is blocked from ADD/SWAP (see `InjectionBlocker`). */
   injectionBlockers: InjectionBlocker[];
+  /** Captured gbxmodel geometry parts from the model data region (Stage 2). */
+  gbxmodelGeometryParts?: CapturedGbxmodelPart[];
 }
 
 /** A tag that was walked but whose group is not yet extractable (e.g. `scenario_structure_bsp`). */
@@ -382,6 +385,9 @@ export function extractTagSet(
   const localIndexByOriginal = new Map<number, number>();
   extractableWalked.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
 
+  const hasGbxmodels = extractableWalked.some((t) => t.group === 'gbxmodel');
+  const gbxBoundaries = hasGbxmodels ? scanGbxmodelGeometryBoundaries(buffer, header, tagIndex) : [];
+
   const extraWarnings: WalkerWarning[] = [];
   const tags: ExtractedTag[] = extractableWalked.map((t, i) => {
     if (options.signal?.aborted) throw new OperationCancelledError();
@@ -438,10 +444,25 @@ export function extractTagSet(
         });
       }
 
+      let gbxmodelGeometryParts: CapturedGbxmodelPart[] | undefined;
+      if (t.group === 'gbxmodel') {
+        const capture = captureGbxmodelGeometry(buffer, t.originalIndex, gbxBoundaries);
+        if (capture.blocked) {
+          injectionBlockers.push({
+            kind: 'extractionFailed',
+            fieldPath: `${t.path}.geometries`,
+            message: `gbxmodel geometry capture failed: ${capture.reason}`,
+          });
+        } else {
+          gbxmodelGeometryParts = capture.parts;
+        }
+      }
+
       return { ...common, structName, data: Buffer.concat(outChunks), dependencies,
         embeddedRawDataAssets: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.assets,
         embeddedRawDataPatches: embeddedCapture.blockedReasons.length > 0 ? [] : embeddedCapture.patches,
-        injectionBlockers };
+        injectionBlockers,
+        gbxmodelGeometryParts };
     } catch (err) {
       if (err instanceof OperationCancelledError) throw err;
       // One bad tag must not fail the whole selection with a raw exception. Keep the tag in the
