@@ -39169,7 +39169,7 @@ function runPlanInject(task) {
       }
     }
     progress(task.requestId, "Planning injection", 70);
-    const planResult = task.mode === "swap" ? planSwapInjection(currentMap, container, resourceMapConfig) : planAddInjection(currentMap, container, resourceMapConfig);
+    const planResult = task.mode === "swap" ? planSwapInjection(currentMap, container, resourceMapConfig, { allowEmbeddedRelocation: true }) : planAddInjection(currentMap, container, resourceMapConfig, { allowEmbeddedRelocation: true });
     if (planResult.kind === "refused") {
       currentInject = null;
       return sendError(task.requestId, "PLAN_REFUSED", planResult.reason);
@@ -39318,7 +39318,7 @@ function runApplyInject(task) {
   if (!currentInject) return sendError(task.requestId, "NO_PLAN", 'Run "Inject Tags..." and review the plan before applying it.');
   try {
     progress(task.requestId, "Applying to the open map (in memory)", 30);
-    const injected = currentInject.plan.mode === "swap" ? applySwapInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan) : applyAddInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan);
+    const injected = currentInject.plan.mode === "swap" ? applySwapInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan, { allowEmbeddedRelocation: true }) : applyAddInjection(currentMap.buffer, currentMap.header, currentMap.tagIndex, currentInject.container, currentInject.plan, { allowEmbeddedRelocation: true });
     progress(task.requestId, "Re-reading the tag index", 80);
     currentMap = reparse(currentMap.filePath, injected, true, currentMap.diskStat);
     progress(task.requestId, "Done", 100);
