@@ -12,7 +12,7 @@ import { inferBaseMemoryAddressForClassifier } from '../tag-index';
  *   - Retail layout (HaloMD, PC retail): the same standard header, version 7. Convertible (Phase 1)
  *     when its tag array sits at the CE base (0x40440000 + 0x28).
  *   - True demo layout: "Ehed" at 0x2C0, "Gfot" at 0x5F0, version 6 at 0x588 (base 0x4BF10000).
- *     Needs a pointer rebase (Phase 2), not supported yet.
+ *     Converted by the Phase 2 demo converter (the tag data is moved to 0x40440000 first).
  */
 export type MapLayout =
   | { kind: 'customEdition' }
@@ -60,7 +60,7 @@ export function describeUnsupportedLayout(layout: MapLayout): string | null {
         ? 'This is a retail-layout map (cache version 7), for example a HaloMD or Mac demo map. It can be converted to a Custom Edition (609) map with "Convert to Custom Edition...".'
         : `This is a retail-layout map (cache version 7), but its tag data is not at the Custom Edition address (base ${layout.inferredBase === null ? 'unreadable' : `0x${layout.inferredBase.toString(16).toUpperCase()}`}), so it can't be converted.`;
     case 'demo':
-      return 'This is an original Halo demo map (true demo layout, cache version 6). Converting this layout to Custom Edition is not supported yet (planned as Phase 2).';
+      return 'This is an original Halo demo map (true demo layout, cache version 6). It can be converted to a Custom Edition (609) map with "Convert to Custom Edition..." (the demo converter moves its tag data to the Custom Edition address first).';
     default:
       return null;
   }

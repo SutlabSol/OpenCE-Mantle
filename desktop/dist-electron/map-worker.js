@@ -35169,6 +35169,7 @@ function deserializeContainer(buffer) {
 }
 
 // ../core/src/map/pointer-rebase.ts
+var TAG_DATA_POINTER_KINDS = ["tagPath", "tagData", "reflexive", "dataBlock", "referencePath", "bspReferencePath"];
 function tagDataLayoutOf(header, tagIndex) {
   return {
     tagDataOffset: header.tagDataOffset,
@@ -35291,6 +35292,24 @@ function collectTagDataPointers(buffer, layout, options = {}) {
     walk2(rootStruct, dataPointer, e.path);
   }
   collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, (pathPointer) => stalePath(pathPointer), tolerate);
+  return sites;
+}
+var BSP_SPACE_POINTER_KINDS = ["bspAddress", "bspHeader", "bspReflexive", "bspDataBlock"];
+function collectBspSpacePointers(buffer, layout, options = {}) {
+  const { tagDataOffset, tagDataSize, baseMemoryAddress } = layout;
+  const fileOf = (pointer) => tagDataOffset + (pointer - baseMemoryAddress | 0);
+  const inTagData = (pointer, length) => {
+    const at = fileOf(pointer);
+    return at >= tagDataOffset && at + length <= tagDataOffset + tagDataSize && at + length <= buffer.length;
+  };
+  const sites = [];
+  const seen = /* @__PURE__ */ new Set();
+  const stalePath = (pathPointer) => options.tolerate?.staleReferencePaths === true && !inTagData(pathPointer, 1);
+  collectBspReferencePaths(buffer, layout, inTagData, fileOf, () => void 0, stalePath, () => void 0, (kind, at, tagIndex) => {
+    if (seen.has(at)) return;
+    seen.add(at);
+    sites.push({ kind, at, value: buffer.readUInt32LE(at), tagIndex });
+  });
   return sites;
 }
 var BSP_HEADER_SIZE = 24;
@@ -36230,7 +36249,7 @@ function describeUnsupportedLayout(layout) {
     case "retail":
       return isConvertibleRetailLayout(layout) ? 'This is a retail-layout map (cache version 7), for example a HaloMD or Mac demo map. It can be converted to a Custom Edition (609) map with "Convert to Custom Edition...".' : `This is a retail-layout map (cache version 7), but its tag data is not at the Custom Edition address (base ${layout.inferredBase === null ? "unreadable" : `0x${layout.inferredBase.toString(16).toUpperCase()}`}), so it can't be converted.`;
     case "demo":
-      return "This is an original Halo demo map (true demo layout, cache version 6). Converting this layout to Custom Edition is not supported yet (planned as Phase 2).";
+      return 'This is an original Halo demo map (true demo layout, cache version 6). It can be converted to a Custom Edition (609) map with "Convert to Custom Edition..." (the demo converter moves its tag data to the Custom Edition address first).';
     default:
       return null;
   }
@@ -37993,14 +38012,14 @@ function tagDataChecks(checks, view, header, tagIndex, report) {
       )
     );
     report.repairs.push({ id: "alignTagData", required: true, tagPath: "(all tags)", bytesAdded: alignment.bytes });
-    const row = REPAIR_ROWS.alignTagData;
+    const row2 = REPAIR_ROWS.alignTagData;
     const moved = Object.values(alignment.pointersToMove).reduce((a, b) => a + b, 0);
     checks.push(
       check(
         "repairAlignTagData",
-        row.label,
+        row2.label,
         "warn",
-        `${row.required} Adds ${fmtBytes(alignment.bytes)}.`,
+        `${row2.required} Adds ${fmtBytes(alignment.bytes)}.`,
         [`Inserts ${alignment.bytes} zero byte(s) at ${hex4(tagIndex.baseMemoryAddress + alignment.insertAt)} (the end of the tag names) and moves ${moved.toLocaleString("en-US")} pointers past it by ${alignment.bytes}.`],
         false,
         { id: "alignTagData", required: true }
@@ -38020,10 +38039,10 @@ function tagDataChecks(checks, view, header, tagIndex, report) {
     checks.push(check("tagDataExtents", label, "warn", `${extentScope}: ${problems} problem(s). OpenCE refuses a map with any of these; each is fixed by a required repair below.`, extents.violations.map((v) => v.text)));
   }
   plan.repairs.forEach((r, i) => {
-    const row = REPAIR_ROWS[r.id];
+    const row2 = REPAIR_ROWS[r.id];
     const bytes = repairBytesAdded(laid.header.tagDataSize, plan.repairs.slice(0, i + 1)) - repairBytesAdded(laid.header.tagDataSize, plan.repairs.slice(0, i));
     report.repairs.push({ id: r.id, required: r.required, tagPath: r.tagPath, bytesAdded: bytes });
-    checks.push(check(row.id, row.label, r.required ? "warn" : "info", `${r.required ? row.required : row.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
+    checks.push(check(row2.id, row2.label, r.required ? "warn" : "info", `${r.required ? row2.required : row2.optional} Adds ${fmtBytes(bytes)}.`, r.details, false, { id: r.id, required: r.required }));
   });
   const overwritten = plan.repairs.filter((r) => r.overwritten && r.overwritten.length > 0);
   if (overwritten.length > 0) {
@@ -38299,6 +38318,12 @@ function injectAfterwardsCheck(view, header) {
 function preflightRetailConversion(buffer, resources = {}) {
   return runChecks(buffer, true, resources).report;
 }
+function preflightRetailLayoutCopy(buffer, resources, origin) {
+  return runChecks(buffer, true, resources, origin).report;
+}
+function convertRetailLayoutCopy(copy, options, origin) {
+  return convertRetailLayout(copy, options, origin);
+}
 var ACKNOWLEDGEMENTS = [
   { id: "scripts", option: "acknowledgeScripts", text: "scripts that may call the wrong function in Custom Edition" }
 ];
@@ -38402,6 +38427,166 @@ function verifyOutputAlignment(out) {
 // ../core/src/map/convert/demo-to-ce.ts
 var DEMO_BASE_MEMORY_ADDRESS = 1274085376;
 var DEMO_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - DEMO_BASE_MEMORY_ADDRESS;
+var DEMO = {
+  scenarioType: 2,
+  head: 704,
+  tagDataSize: 708,
+  buildString: 712,
+  version: 1416,
+  scenarioName: 1420,
+  crc32: 1456,
+  fileSize: 1512,
+  tagDataOffset: 1516,
+  foot: 1520
+};
+var STD = { head: 0, version: 4, fileSize: 8, padding: 12, tagDataOffset: 16, tagDataSize: 20, scenarioName: 32, buildString: 64, scenarioType: 96, crc32: 100, foot: 2044 };
+function readDemoHeader(buffer) {
+  if (buffer.length < CACHE_FILE_HEADER_SIZE) return null;
+  if (buffer.readUInt32LE(DEMO.head) !== 1164469604 /* HEAD_DEMO */ || buffer.readUInt32LE(DEMO.foot) !== 1197895540 /* FOOT_DEMO */) return null;
+  return {
+    version: buffer.readUInt32LE(DEMO.version),
+    scenarioType: buffer.readUInt16LE(DEMO.scenarioType),
+    scenarioName: readFixedString(buffer, DEMO.scenarioName, TAG_STRING_SIZE),
+    buildString: readFixedString(buffer, DEMO.buildString, TAG_STRING_SIZE),
+    crc32: buffer.readUInt32LE(DEMO.crc32),
+    fileSize: buffer.readUInt32LE(DEMO.fileSize),
+    tagDataOffset: buffer.readUInt32LE(DEMO.tagDataOffset),
+    tagDataSize: buffer.readUInt32LE(DEMO.tagDataSize)
+  };
+}
+var hex5 = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
+var LAYOUT_LABEL = "Original Halo demo map (cache version 6)";
+var REBASE_LABEL = "Tag data moves to the Custom Edition address";
+function row(id, label, status, message, details = []) {
+  return { id, label, status, message, details: details.slice(0, 50), requiresAcknowledgement: false };
+}
+function normalizeDemoMap(source) {
+  const refuse = (id, message, details = [], earlier = []) => ({
+    ok: false,
+    rows: [...earlier, row(id, id === "demoLayout" ? LAYOUT_LABEL : REBASE_LABEL, "refuse", message, details)]
+  });
+  const layout = classifyMapLayout(source);
+  const header = readDemoHeader(source);
+  if (layout.kind !== "demo" || !header) return refuse("demoLayout", "This is not an original Halo demo map ('Ehed' header at 0x2C0).");
+  if (header.version !== 6 /* DEMO */) return refuse("demoLayout", `The demo header's cache version is ${header.version}; only version 6 can be converted.`);
+  if (header.fileSize !== source.length) return refuse("demoLayout", `The header says ${header.fileSize} bytes but the file has ${source.length}. The file may be truncated or modified.`);
+  const { tagDataOffset: tdo, tagDataSize: tds } = header;
+  if (tdo < CACHE_FILE_HEADER_SIZE || tds < TAG_DATA_HEADER_PC_SIZE || tdo + tds > source.length) return refuse("demoLayout", `The tag data (file offset ${tdo}, ${tds} bytes) is not inside the file.`);
+  if (header.scenarioType > 2) return refuse("demoLayout", `The scenario type is ${header.scenarioType}; only 0 (campaign), 1 (multiplayer) and 2 (main menu) exist.`);
+  const arrayPointer = source.readUInt32LE(tdo);
+  if (arrayPointer !== DEMO_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE) {
+    return refuse("demoLayout", `The tag array pointer is ${hex5(arrayPointer)}, not ${hex5(DEMO_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE)} (the demo address), so the tag data's base is not known.`);
+  }
+  const tagCount = source.readUInt32LE(tdo + 12);
+  if (TAG_DATA_HEADER_PC_SIZE + tagCount * TAG_ENTRY_SIZE > tds) return refuse("demoLayout", `The tag array (${tagCount} tags) doesn't fit in the tag data.`);
+  const layoutRow = row(
+    "demoLayout",
+    LAYOUT_LABEL,
+    "pass",
+    `'Ehed' header, cache version 6, build ${header.buildString}, ${tagCount} tags at ${hex5(DEMO_BASE_MEMORY_ADDRESS)}. A standard header is made from its fields and the tag data is moved to the Custom Edition address; file offsets don't change.`
+  );
+  const arrayAt = tdo + TAG_DATA_HEADER_PC_SIZE;
+  const scenarioTagId = source.readUInt32LE(tdo + 4);
+  const entries = [];
+  for (let i = 0; i < tagCount; i++) {
+    const at = arrayAt + i * TAG_ENTRY_SIZE;
+    const fourcc = source.readUInt32LE(at);
+    const pathAt = tdo + (source.readUInt32LE(at + 16) - DEMO_BASE_MEMORY_ADDRESS | 0);
+    entries.push({
+      index: i,
+      path: pathAt >= tdo && pathAt < tdo + tds ? readCStringWithin(source, pathAt, tdo + tds) : `(tag #${i})`,
+      // The scenario is the tag the header's scenario ID names (full ID), read as a scenario whatever its
+      // group (`scenario-tag.ts`); its group in the file is left as it is.
+      primaryClassName: i === (scenarioTagId & 65535) && source.readUInt32LE(at + 12) === scenarioTagId ? "scenario" : lookupTagClass(fourcc)?.name ?? fourCCToString(fourcc),
+      // Same rule as the CE reader (`parseTagIndex`): +0x18 == 1 means "in a resource map".
+      isExternal: source.readUInt32LE(at + 24) === 1
+    });
+  }
+  const tagLayout = { tagDataOffset: tdo, tagDataSize: tds, baseMemoryAddress: DEMO_BASE_MEMORY_ADDRESS, tagArrayFileOffset: arrayAt, entries };
+  const tolerated = [];
+  const tolerate = { staleReferencePaths: true, rootsOutsideTagData: true };
+  let sites;
+  try {
+    sites = [...collectTagDataPointers(source, tagLayout, { tolerate, tolerated }), ...collectBspSpacePointers(source, tagLayout, { tolerate })];
+  } catch (err) {
+    if (!(err instanceof UnwalkableTagError)) throw err;
+    return refuse("demoRebase", `The tag data can't be moved: ${err.message}`, [], [layoutRow]);
+  }
+  const spaceEnd = DEMO_BASE_MEMORY_ADDRESS + CE_TAG_SPACE_SIZE;
+  const outside2 = sites.filter((s) => s.value < DEMO_BASE_MEMORY_ADDRESS || s.value >= spaceEnd);
+  if (outside2.length > 0) {
+    return refuse(
+      "demoRebase",
+      `${outside2.length} pointer(s) lie outside the demo tag space (${hex5(DEMO_BASE_MEMORY_ADDRESS)}-${hex5(spaceEnd)}), so moving the tag data by one offset would leave them wrong.`,
+      outside2.map((s) => `${s.kind} of #${s.tagIndex} ${entries[s.tagIndex]?.path ?? ""}: ${hex5(s.value)}`),
+      [layoutRow]
+    );
+  }
+  const copy = Buffer.from(source);
+  const moved = Object.fromEntries([...TAG_DATA_POINTER_KINDS, ...BSP_SPACE_POINTER_KINDS].map((k) => [k, 0]));
+  for (const s of sites) {
+    copy.writeUInt32LE(s.value + DEMO_TO_CE_DELTA >>> 0, s.at);
+    moved[s.kind]++;
+  }
+  copy.writeUInt32LE(CE_TAG_ARRAY_ADDRESS, tdo);
+  copy.fill(0, 0, CACHE_FILE_HEADER_SIZE);
+  copy.writeUInt32LE(1751474532 /* HEAD */, STD.head);
+  copy.writeUInt32LE(7 /* RETAIL */, STD.version);
+  copy.writeUInt32LE(source.length, STD.fileSize);
+  copy.writeUInt32LE(tdo, STD.tagDataOffset);
+  copy.writeUInt32LE(tds, STD.tagDataSize);
+  writeFixedString(copy, STD.scenarioName, TAG_STRING_SIZE, header.scenarioName);
+  writeFixedString(copy, STD.buildString, TAG_STRING_SIZE, header.buildString);
+  copy.writeUInt16LE(header.scenarioType, STD.scenarioType);
+  copy.writeUInt32LE(header.crc32, STD.crc32);
+  copy.writeUInt32LE(1718579060 /* FOOT */, STD.foot);
+  const total = sites.length;
+  const rebaseRow = row(
+    "demoRebase",
+    REBASE_LABEL,
+    "pass",
+    `${total.toLocaleString("en-US")} pointers move from ${hex5(DEMO_BASE_MEMORY_ADDRESS)} to ${hex5(CE_BASE_MEMORY_ADDRESS)}, found by walking every tag and structure BSP with the tag definitions.`,
+    [
+      ...Object.entries(moved).filter(([, n]) => n > 0).map(([k, n]) => `${k}: ${n.toLocaleString("en-US")}`),
+      ...tolerated.length > 0 ? [`${tolerated.length} stale pointer(s) outside the tag data are left as they are (the game never follows them).`] : []
+    ]
+  );
+  return { ok: true, value: { buffer: copy, header, moved, tolerated }, rows: [layoutRow, rebaseRow] };
+}
+function readCStringWithin(buffer, at, end) {
+  let stop = at;
+  while (stop < end && buffer[stop] !== 0) stop++;
+  return buffer.toString("latin1", at, stop);
+}
+function refusedReport(rows, header) {
+  return {
+    canConvert: false,
+    requiresAcknowledgement: false,
+    checks: rows,
+    scenarioName: header?.scenarioName ?? null,
+    buildString: header?.buildString ?? null,
+    mapType: header?.scenarioType ?? null,
+    tagCount: null,
+    previousCrc32: header?.crc32 ?? null,
+    newCrc32: null,
+    externalData: null,
+    estimatedOutputSize: null,
+    repairs: []
+  };
+}
+function preflightDemoConversion(source, resources = {}) {
+  const normalized = normalizeDemoMap(source);
+  if (!normalized.ok) return refusedReport(normalized.rows, readDemoHeader(source));
+  return preflightRetailLayoutCopy(normalized.value.buffer, resources, { rows: normalized.rows });
+}
+function convertDemoToCustomEdition(source, options) {
+  const normalized = normalizeDemoMap(source);
+  if (!normalized.ok) {
+    throw new ConversionRefusedError(`This map can't be converted. ${normalized.rows.filter((r) => r.status === "refuse").map((r) => r.message).join(" ")}`);
+  }
+  const result = convertRetailLayoutCopy(normalized.value.buffer, options, { rows: normalized.rows });
+  return { ...result, moved: normalized.value.moved };
+}
 
 // ../core/src/map/write-map.ts
 var import_crypto2 = require("crypto");
@@ -38445,6 +38630,41 @@ var currentMap = null;
 var currentInject = null;
 var cancelledRequests = /* @__PURE__ */ new Set();
 var sink = (msg) => import_worker_threads.parentPort?.postMessage(msg);
+function openResourceReadOnly(file) {
+  if (!fs.existsSync(file)) return null;
+  const fd = fs.openSync(file, "r");
+  const size = fs.fstatSync(fd).size;
+  return {
+    file: {
+      label: file,
+      size,
+      read(offset, length) {
+        const buf = Buffer.alloc(length);
+        let done = 0;
+        while (done < length) {
+          const n = fs.readSync(fd, buf, done, length - done, offset + done);
+          if (n === 0) break;
+          done += n;
+        }
+        return done === length ? buf : buf.subarray(0, done);
+      }
+    },
+    close: () => fs.closeSync(fd)
+  };
+}
+function openConversionResources(paths) {
+  const handles = [];
+  const files = {};
+  for (const [kind, p] of Object.entries(paths)) {
+    if (!p) continue;
+    const h = openResourceReadOnly(p);
+    if (h) {
+      handles.push(h);
+      files[kind] = h.file;
+    }
+  }
+  return { files, close: () => handles.forEach((h) => h.close()) };
+}
 function __setSinkForTest(fn) {
   sink = fn;
 }
@@ -38535,7 +38755,8 @@ async function runInspect(task) {
       filePath: task.filePath,
       message: describeUnsupportedLayout(layout),
       layout: layout.kind,
-      convertible: isConvertibleRetailLayout(layout)
+      // Retail maps are convertible only at the CE base; a true demo map always converts via the Phase 2 demo converter.
+      convertible: layout.kind === "demo" ? true : isConvertibleRetailLayout(layout)
     });
   }
   const inspected = inspectCustomEditionMap(buffer);
@@ -38757,26 +38978,43 @@ function runSaveMapAs(task) {
 }
 var samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 function runConvertPreflight(task) {
+  const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
   try {
     progress(task.requestId, "Reading file", 10);
     const buffer = fs.readFileSync(task.filePath);
     progress(task.requestId, "Checking the map", 40);
-    const report = preflightRetailConversion(buffer);
+    const report = classifyMapLayout(buffer).kind === "demo" ? preflightDemoConversion(buffer, resources.files) : preflightRetailConversion(buffer, resources.files);
     progress(task.requestId, "Done", 100);
     sendResult(task.requestId, { ok: true, sourceFileName: path.basename(task.filePath), report });
   } catch (err) {
     handleTaskError(task.requestId, err);
+  } finally {
+    resources.close();
   }
 }
 function runConvertMap(task) {
   if (samePath(task.sourcePath, task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "The converted map cannot overwrite the map it was converted from. Choose a different file name or folder.");
   if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_OPEN_MAP", "The converted map cannot overwrite the map that is open in the app. Choose a different file name.");
   if (isBackupFilePath(task.outputPath)) return sendError(task.requestId, "REFUSED_BACKUP_FILE", "The converted map cannot be written as a .bak file. Choose a .map file name.");
+  const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
   try {
     progress(task.requestId, "Reading file", 10);
     const source = fs.readFileSync(task.sourcePath);
     progress(task.requestId, "Converting the header", 40);
-    const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts, repairs: task.repairs ?? {} });
+    let copyPercent = -1;
+    const convert = classifyMapLayout(source).kind === "demo" ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+    const converted = convert(source, {
+      acknowledgeScripts: task.acknowledgeScripts,
+      repairs: task.repairs ?? {},
+      resources: resources.files,
+      onProgress: (bytesDone, bytesTotal) => {
+        const percent = bytesTotal === 0 ? 100 : Math.floor(bytesDone / bytesTotal * 100);
+        if (percent >= copyPercent + 5 || percent === 100) {
+          copyPercent = percent;
+          progress(task.requestId, `Copying bitmap and sound data (${percent}%)`, 40 + Math.round(percent * 0.2));
+        }
+      }
+    });
     if (inspectCustomEditionMap(converted.buffer).status !== "ok") throw new Error("The converted map could not be read back as a Custom Edition map; nothing was written.");
     progress(task.requestId, "Writing map", 60);
     const finalized = writeFinalizedMap2(converted.buffer, task.outputPath, "the source map was not changed");
@@ -38797,6 +39035,8 @@ function runConvertMap(task) {
   } catch (err) {
     if (err instanceof ConversionRefusedError) return sendError(task.requestId, err.code, err.message);
     sendWriteError(task.requestId, err);
+  } finally {
+    resources.close();
   }
 }
 function runApplyInject(task) {

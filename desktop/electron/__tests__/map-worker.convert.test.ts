@@ -23,7 +23,7 @@ const ISLAND = gate([sampleIn('haloMD', 'theisland_3.map')]);
 const DEMO = gate([sampleIn('macDemo', 'bloodgulch.map')]);
 const CE = gate(['bloodgulch.map']);
 
-type Msg = { type: string; requestId?: string; payload?: any; code?: string; message?: string };
+type Msg = { type: string; requestId?: string; payload?: any; code?: string; message?: string; stage?: string };
 let messages: Msg[] = [];
 
 async function call<T = any>(fn: (task: any) => unknown, task: Record<string, unknown> = {}): Promise<T> {
@@ -102,10 +102,11 @@ describe('map-worker: opening maps the converter knows', () => {
     expect(__getCurrentMapForTest()).toBeNull();
   });
 
-  it.skipIf(DEMO.skip)(`the original demo layout opens as unsupported (Phase 2), not as "not a Halo map"${DEMO.suffix}`, async () => {
+  it.skipIf(DEMO.skip)(`the original demo layout (Phase 2) opens as unsupported but convertible, not as "not a Halo map"${DEMO.suffix}`, async () => {
     const result = await call(runInspect, { filePath: copyIn(sampleIn('macDemo', 'bloodgulch.map')) });
-    expect(result).toMatchObject({ status: 'unsupported', layout: 'demo', convertible: false });
-    expect(result.message).toMatch(/not supported yet/);
+    expect(result).toMatchObject({ status: 'unsupported', layout: 'demo', convertible: true });
+    expect(result.message).toMatch(/Convert to Custom Edition/);
+    expect(__getCurrentMapForTest()).toBeNull();
   });
 });
 
@@ -182,6 +183,94 @@ describe('map-worker: Convert to Custom Edition', () => {
       expect(__getCurrentMapForTest()).toBeNull();
     });
   }
+
+  it.skipIf(HEH.skip)(`heh_2.map with HaloMD's bitmaps.map and sounds.map: pre-flight passes and the convert copies the external data in${HEH.suffix}`, async () => {
+    const source = copyIn(sampleIn('haloMD', 'heh_2.map'));
+    const sourceBytes = fs.readFileSync(source);
+    const sourceStat = statOf(source);
+    const bitmaps = sampleMapPath(sampleIn('haloMD', 'bitmaps.map'));
+    const sounds = sampleMapPath(sampleIn('haloMD', 'sounds.map'));
+
+    const pre = await call(runConvertPreflight, { filePath: source, bitmapsPath: bitmaps, soundsPath: sounds });
+    expect(pre.report.canConvert).toBe(true);
+    expect(pre.report.checks.find((k: { id: string }) => k.id === 'externalData')).toMatchObject({ status: 'info' });
+    expect(pre.report.checks.find((k: { id: string }) => k.id === 'resourceFiles')).toMatchObject({ status: 'pass' });
+
+    const output = path.join(outDir, 'heh_2.map');
+    const result = await call(runConvertMap, {
+      sourcePath: source,
+      outputPath: output,
+      acknowledgeScripts: true,
+      repairs: { alignTagData: true },
+      bitmapsPath: bitmaps,
+      soundsPath: sounds,
+    });
+    expect(result).toMatchObject({ ok: true, outputPath: output, scenarioName: 'heh_2' });
+
+    const written = fs.readFileSync(output);
+    expect(written.length).toBe(70_827_478 + 2); // the core test's expected Phase 1b size + the required alignment
+    expect(written.readUInt32LE(0x64)).toBe(rawCrc(written));
+    expect(inspectCustomEditionMap(written).status).toBe('ok');
+
+    // The external-data copy reported progress to the window (onProgress -> worker progress()).
+    expect(messages.some((m) => m.type === 'progress' && /^Copying bitmap and sound data \(\d+%\)$/.test(m.stage ?? ''))).toBe(true);
+
+    // Source untouched; only the output is in the out folder.
+    expect(fs.readFileSync(source).equals(sourceBytes)).toBe(true);
+    expect(statOf(source)).toBe(sourceStat);
+    expect(fs.readdirSync(outDir)).toEqual(['heh_2.map']);
+
+    const held = __getCurrentMapForTest()!;
+    expect(held.filePath).toBe(output);
+    expect(held.modified).toBe(false);
+    expect(held.buffer.equals(written)).toBe(true);
+  });
+
+  it.skipIf(DEMO.skip)(`a true demo map (MacDemo bloodgulch.map) is convertible and converts to bloodgulch_demo.map with the Mac demo's resource files${DEMO.suffix}`, async () => {
+    const source = copyIn(sampleIn('macDemo', 'bloodgulch.map'));
+    const sourceBytes = fs.readFileSync(source);
+    const sourceStat = statOf(source);
+    const bitmaps = sampleMapPath(sampleIn('macDemo', 'bitmaps.map'));
+    const sounds = sampleMapPath(sampleIn('macDemo', 'sounds.map'));
+
+    // runInspect reports the unsupported layout as convertible (the demo converter pipeline).
+    const inspected = await call(runInspect, { filePath: source });
+    expect(inspected).toMatchObject({ status: 'unsupported', layout: 'demo', convertible: true });
+    expect('message' in inspected && inspected.message).toMatch(/original Halo demo map/);
+
+    // Step 1: the pre-flight dispatches to the demo pipeline and passes with the demo's own resource files.
+    const pre = await call(runConvertPreflight, { filePath: source, bitmapsPath: bitmaps, soundsPath: sounds });
+    expect(pre).toMatchObject({ ok: true, sourceFileName: 'bloodgulch.map', report: { canConvert: true, estimatedOutputSize: 70_828_894 } });
+    expect(pre.report.previousCrc32).toBe(0xe7e08c22);
+    expect(pre.report.checks.find((k: { id: string }) => k.id === 'demoRebase')).toMatchObject({ status: 'pass' });
+    expect(pre.report.checks.find((k: { id: string }) => k.id === 'resourceFiles')).toMatchObject({ status: 'pass' });
+
+    // Step 2: the conversion writes the CE map; it is named after the output file and reads back cleanly.
+    const output = path.join(outDir, 'bloodgulch_demo.map');
+    const result = await call(runConvertMap, { sourcePath: source, outputPath: output, acknowledgeScripts: false, bitmapsPath: bitmaps, soundsPath: sounds });
+    expect(result).toMatchObject({ ok: true, outputPath: output, scenarioName: 'bloodgulch_demo', previousCrc32: 0xe7e08c22 });
+
+    const written = fs.readFileSync(output);
+    expect(written.length).toBe(70_828_894);
+    expect(written.readUInt32LE(0x4)).toBe(609);
+    expect(written.toString('ascii', 0x40, 0x4d)).toBe('01.00.00.0609');
+    expect(written.readUInt32LE(0x64)).toBe(rawCrc(written));
+    expect(written.subarray(0x20, 0x40).equals(Buffer.concat([Buffer.from('bloodgulch_demo'), Buffer.alloc(17)]))).toBe(true);
+    expect(inspectCustomEditionMap(written).status).toBe('ok');
+
+    // The external-data copy reported progress to the window.
+    expect(messages.some((m) => m.type === 'progress' && /^Copying bitmap and sound data \(\d+%\)/.test(m.stage ?? ''))).toBe(true);
+
+    // Source untouched; only the output is in the out folder.
+    expect(fs.readFileSync(source).equals(sourceBytes)).toBe(true);
+    expect(statOf(source)).toBe(sourceStat);
+    expect(fs.readdirSync(outDir)).toEqual(['bloodgulch_demo.map']);
+
+    const held = __getCurrentMapForTest()!;
+    expect(held.filePath).toBe(output);
+    expect(held.modified).toBe(false);
+    expect(held.buffer.equals(written)).toBe(true);
+  }, 120_000);
 
   it.skipIf(HEH.skip)(`refuses to write over the source map${HEH.suffix}`, async () => {
     const source = copyIn(sampleIn('haloMD', 'heh_2.map'));

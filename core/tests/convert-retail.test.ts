@@ -100,7 +100,7 @@ describe('classifyMapLayout', () => {
   it.skipIf(demoGate.skip)(`the original demo bloodgulch is the true demo layout (Phase 2)${demoGate.titleSuffix}`, () => {
     const layout = classifyMapLayout(readSampleMap(DEMO_BG));
     expect(layout).toEqual({ kind: 'demo', version: 6 });
-    expect(describeUnsupportedLayout(layout)).toMatch(/not supported yet/);
+    expect(describeUnsupportedLayout(layout)).toMatch(/Convert to Custom Edition/);
   });
 
   it('a too-short or unknown file is not a map', () => {

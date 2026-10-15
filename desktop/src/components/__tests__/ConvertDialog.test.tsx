@@ -1,14 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import ConvertDialog from '../ConvertDialog';
-import type { OpenceApi, ConvertMapResult, ConvertPreflightResult, RetailConversionReport } from '../../../electron/shared-types';
+import type { OpenceApi, ConvertMapResult, ConvertPreflightResult, ConvertResourcePaths, RetailConversionReport } from '../../../electron/shared-types';
 import { buildMockAlignConvertReport, buildMockConvertReport, buildMockModelPartsConvertReport, buildMockRepairConvertReport } from '../../test-fixtures/dependency-fixtures';
+
+const EXTERNAL_RESOURCE_REPORT: RetailConversionReport = {
+  ...buildMockConvertReport(false),
+  externalData: { bitmaps: { count: 811, bytes: 1_000 }, sounds: { count: 0, bytes: 0 } },
+};
 
 function install(preflight: ConvertPreflightResult | null, convert: ConvertMapResult = { ok: false, code: 'CANCELLED', message: 'cancelled' }) {
   const convertPreflight = vi.fn(async () => preflight);
   const convertMap = vi.fn(async () => convert);
-  window.opence = { convertPreflight, convertMap } as unknown as OpenceApi;
-  return { convertPreflight, convertMap };
+  const pickConvertResource = vi.fn(async (kind: 'bitmaps' | 'sounds') => ({ path: `C:/mock/${kind}.map` }));
+  window.opence = { convertPreflight, convertMap, pickConvertResource } as unknown as OpenceApi;
+  return { convertPreflight, convertMap, pickConvertResource };
 }
 
 const ok = (report: RetailConversionReport): ConvertPreflightResult => ({ ok: true, sourceFileName: 'heh_2.map', report });
@@ -26,7 +32,7 @@ describe('ConvertDialog', () => {
     const button = screen.getByTestId('convert-dialog-convert') as HTMLButtonElement;
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
-    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, {}));
+    await waitFor(() => expect(convertMap).lastCalledWith(false, {}, {}));
   });
 
   it('script warning: Convert stays disabled until the acknowledgement box is ticked', async () => {
@@ -40,7 +46,7 @@ describe('ConvertDialog', () => {
     fireEvent.click(screen.getByTestId('convert-dialog-ack-checkbox'));
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
-    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(true, {}));
+    await waitFor(() => expect(convertMap).lastCalledWith(true, {}, {}));
   });
 
   it('a refused map shows why and cannot be converted', async () => {
@@ -93,7 +99,7 @@ describe('ConvertDialog', () => {
     fireEvent.click(box);
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
-    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, { alignTagData: true, scriptSyntaxData: true }));
+    await waitFor(() => expect(convertMap).lastCalledWith(false, { alignTagData: true, scriptSyntaxData: true }, {}));
   });
 
   it('the tag data alignment is a required, pre-ticked repair row after the alignment check row; unticking it turns Convert off; Convert passes it', async () => {
@@ -116,7 +122,7 @@ describe('ConvertDialog', () => {
     expect(screen.getByTestId('convert-dialog-repair-off').textContent).toMatch(/without "Repair: align the tag data"/);
     fireEvent.click(box);
     fireEvent.click(button);
-    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, { alignTagData: true }));
+    await waitFor(() => expect(convertMap).lastCalledWith(false, { alignTagData: true }, {}));
   });
 
   it('an optional repair starts unticked and never blocks Convert', async () => {
@@ -128,7 +134,7 @@ describe('ConvertDialog', () => {
     const button = screen.getByTestId('convert-dialog-convert') as HTMLButtonElement;
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
-    await waitFor(() => expect(convertMap).toHaveBeenCalledWith(false, { scriptSyntaxData: false }));
+    await waitFor(() => expect(convertMap).lastCalledWith(false, { scriptSyntaxData: false }, {}));
   });
 
   it('closes when the file dialog is cancelled (pre-flight returns null)', async () => {
@@ -147,5 +153,34 @@ describe('ConvertDialog', () => {
     await waitFor(() => expect(screen.getByTestId('convert-dialog-convert-error').textContent).toMatch(/cannot overwrite/));
     expect(onClose).not.toHaveBeenCalled();
     unmount();
+  });
+
+  it('shows a resource picker when the report has external bitmap data', async () => {
+    install(ok(EXTERNAL_RESOURCE_REPORT));
+    render(<ConvertDialog source="open" onClose={vi.fn()} log={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('convert-dialog-resources')).toBeTruthy());
+    expect(screen.queryByTestId('convert-pick-sounds')).toBeNull();
+    const row = screen.getByTestId('convert-pick-bitmaps').parentElement!;
+    expect(row.textContent).toMatch(/Source bitmaps\.map:/);
+    expect(row.textContent).toMatch(/\(not selected\)/);
+  });
+
+  it('pick a bitmap file, re-run preflight, and forward the resource paths to convertMap', async () => {
+    const { convertPreflight, convertMap, pickConvertResource } = install(ok(EXTERNAL_RESOURCE_REPORT));
+    render(<ConvertDialog source="open" onClose={vi.fn()} log={vi.fn()} />);
+    await waitFor(() => expect(screen.getByTestId('convert-dialog-resources')).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId('convert-pick-bitmaps'));
+    await waitFor(() => expect(pickConvertResource).toHaveBeenCalledWith('bitmaps'));
+    await waitFor(() => expect(convertPreflight).toHaveBeenLastCalledWith('open', { bitmaps: 'C:/mock/bitmaps.map' }));
+
+    const resourcesText = () => screen.getByTestId('convert-dialog-resources').textContent!;
+    expect(resourcesText()).toMatch('C:/mock/bitmaps.map');
+    expect(resourcesText()).not.toMatch('(not selected)');
+
+    const button = screen.getByTestId('convert-dialog-convert') as HTMLButtonElement;
+    fireEvent.click(button);
+    await waitFor(() => expect(convertMap).toBeCalledTimes(1));
+    expect((convertMap.mock.calls[0] as unknown[])[2]).toEqual({ bitmaps: 'C:/mock/bitmaps.map' });
   });
 });

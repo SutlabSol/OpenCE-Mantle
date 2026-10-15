@@ -30,6 +30,7 @@ import type {
   VerifyEmbeddedDataResult,
   ConvertPreflightResult,
   ConvertMapResult,
+  ConvertResourcePaths,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -627,8 +628,19 @@ function canSaveMap(): boolean {
   return canSaveMapAs() && currentMapModified && !isBackupFilePath(currentMapPath!);
 }
 
+/** Source-game bitmap/sound map picker for Convert (no settings persistence). Returns the selected file path; null on cancel. */
+function pickConvertResourceFlow(kind: 'bitmaps' | 'sounds'): Promise<{ path: string } | null> {
+  if (!mainWindow) return Promise.resolve(null);
+  const title = kind === 'bitmaps' ? "Choose the source game's bitmaps.map" : "Choose the source game's sounds.map";
+  return dialog.showOpenDialog(mainWindow, {
+    title,
+    filters: [{ name: 'Halo map', extensions: ['map'] }],
+    properties: ['openFile'],
+  }).then(({ canceled, filePaths }) => (canceled || filePaths.length === 0 ? null : { path: filePaths[0] }));
+}
+
 /** Convert to Custom Edition, step 1: picks the source ('open' = the map in the unsupported banner) and runs the read-only pre-flight. */
-async function convertPreflightFlow(source: unknown): Promise<ConvertPreflightResult | null> {
+async function convertPreflightFlow(source: unknown, resourcePaths?: ConvertResourcePaths): Promise<ConvertPreflightResult | null> {
   if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
   let sourcePath: string | null;
   if (source === 'open') {
@@ -645,7 +657,7 @@ async function convertPreflightFlow(source: unknown): Promise<ConvertPreflightRe
   }
   convertSourcePath = sourcePath;
   sendLog('info', `Checking ${sourcePath} for conversion to Custom Edition...`);
-  const { promise } = sendWorkerRequest<ConvertPreflightResult>({ type: 'convertPreflight', filePath: sourcePath }, sendLog, (stage, percent) =>
+  const { promise } = sendWorkerRequest<ConvertPreflightResult>({ type: 'convertPreflight', filePath: sourcePath, bitmapsPath: resourcePaths?.bitmaps, soundsPath: resourcePaths?.sounds }, sendLog, (stage, percent) =>
     mainWindow?.webContents.send('map:progress', { taskId: 'convertPreflight', stage, percent }),
   );
   try {
@@ -677,16 +689,17 @@ const convertMapDeps: ConvertMapDeps = {
   confirmOverwrite: saveMapAsDeps.confirmOverwrite,
   confirmScenarioName,
   showError: showErrorBox,
-  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts, repairs) =>
-    sendWorkerRequest<ConvertMapResult>({ type: 'convertMap', sourcePath, outputPath, acknowledgeScripts, repairs }, sendLog, (stage, percent) =>
+  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts, repairs, resourcePaths) =>
+    sendWorkerRequest<ConvertMapResult>({ type: 'convertMap', sourcePath, outputPath, acknowledgeScripts, repairs, bitmapsPath: resourcePaths?.bitmaps, soundsPath: resourcePaths?.sounds }, sendLog, (stage, percent) =>
       mainWindow?.webContents.send('map:progress', { taskId: 'convertMap', stage, percent }),
     ).promise,
   log: sendLog,
 };
 
 /** Convert to Custom Edition, step 2. The output (a new file) becomes the open map; the source is never written. */
-async function runConvertMap(acknowledgeScripts: unknown, repairs: unknown): Promise<ConvertMapResult> {
-  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true, sanitizeRepairChoice(repairs));
+async function runConvertMap(acknowledgeScripts: unknown, repairs: unknown, resourcePaths?: unknown): Promise<ConvertMapResult> {
+  const rp = resourcePaths && typeof resourcePaths === 'object' ? (resourcePaths as ConvertResourcePaths) : undefined;
+  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true, sanitizeRepairChoice(repairs), rp);
   if (result.ok) {
     addRecentMap(result.outputPath);
     currentMapPath = result.outputPath;
@@ -816,8 +829,11 @@ app.whenReady().then(() => {
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());
-  ipcMain.handle('map:convertPreflight', (_e, source: unknown) => convertPreflightFlow(source));
-  ipcMain.handle('map:convert', (_e, acknowledgeScripts: unknown, repairs: unknown) => runConvertMap(acknowledgeScripts, repairs));
+  ipcMain.handle('map:convertPreflight', (_e, source: unknown, resourcePaths?: unknown) =>
+    convertPreflightFlow(source, resourcePaths && typeof resourcePaths === 'object' ? (resourcePaths as ConvertResourcePaths) : undefined),
+  );
+  ipcMain.handle('map:convert', (_e, acknowledgeScripts: unknown, repairs: unknown, resourcePaths?: unknown) => runConvertMap(acknowledgeScripts, repairs, resourcePaths));
+  ipcMain.handle('dialog:pickConvertResource', (_e, kind: 'bitmaps' | 'sounds') => pickConvertResourceFlow(kind));
   ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
   });

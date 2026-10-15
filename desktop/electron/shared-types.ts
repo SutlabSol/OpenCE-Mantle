@@ -206,6 +206,12 @@ export type { RetailConversionReport, TagDataRepairId };
 /** The tag data repairs ticked in the Convert dialog (see `RetailConversionReport.repairs`). */
 export type ConvertRepairChoice = Partial<Record<TagDataRepairId, boolean>>;
 
+/** The source game's bitmap and sound maps (e.g. HaloMD's bitmaps.map / sounds.map), optionally chosen per convert run. */
+export interface ConvertResourcePaths {
+  bitmaps?: string;
+  sounds?: string;
+}
+
 /** Pre-flight for Convert to Custom Edition. Main keeps the source path; the renderer only gets its file name. */
 export type ConvertPreflightResult = { ok: true; sourceFileName: string; report: RetailConversionReport } | { ok: false; code: string; message: string };
 
@@ -240,8 +246,8 @@ export type WorkerRequest =
   | { type: 'saveMap'; requestId: string }
   | { type: 'saveMapAs'; requestId: string; outputPath: string }
   | { type: 'verifyEmbeddedData'; requestId: string }
-  | { type: 'convertPreflight'; requestId: string; filePath: string }
-  | { type: 'convertMap'; requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean; repairs: ConvertRepairChoice }
+  | { type: 'convertPreflight'; requestId: string; filePath: string; bitmapsPath?: string; soundsPath?: string }
+  | { type: 'convertMap'; requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean; repairs: ConvertRepairChoice; bitmapsPath?: string; soundsPath?: string }
   | { type: 'cancel'; requestId: string };
 
 export type WorkerResponse =
@@ -279,9 +285,11 @@ export interface OpenceApi {
    * Convert to Custom Edition, step 1: 'open' checks the map just opened (the unsupported banner);
    * 'pick' shows a file dialog first. null: the file dialog was cancelled.
    */
-  convertPreflight(source: 'open' | 'pick'): Promise<ConvertPreflightResult | null>;
+  convertPreflight(source: 'open' | 'pick', resourcePaths?: ConvertResourcePaths): Promise<ConvertPreflightResult | null>;
   /** Step 2: converts the map from the last pre-flight. Main shows the Save dialog and refuses the source path. */
-  convertMap(acknowledgeScripts: boolean, repairs: ConvertRepairChoice): Promise<ConvertMapResult>;
+  convertMap(acknowledgeScripts: boolean, repairs: ConvertRepairChoice, resourcePaths?: ConvertResourcePaths): Promise<ConvertMapResult>;
+  /** Source-game bitmap/sound map picker for Convert (no settings persistence). null: cancelled. */
+  pickConvertResource(kind: 'bitmaps' | 'sounds'): Promise<{ path: string } | null>;
   openContainingFolder(filePath: string): Promise<void>;
   getSettings(): Promise<AppSettings>;
   notImplemented(feature: string): void;

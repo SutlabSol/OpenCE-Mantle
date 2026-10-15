@@ -15,6 +15,7 @@ function installMockOpence(verifyEmbeddedData: () => Promise<VerifyEmbeddedDataR
     cancelExtraction: vi.fn(),
     pickResourceMap: vi.fn(async () => ({ ok: false, code: 'CANCELLED' }) as const),
     getResourceMapStatuses: vi.fn(async () => ({ bitmaps: { state: 'not-configured' }, sounds: { state: 'not-configured' }, loc: { state: 'not-configured' } }) as const),
+    pickConvertResource: vi.fn(async () => null),
     pickInjectContainer: vi.fn(async () => null),
     planInject: vi.fn(async () => ({ ok: false, code: 'NO_MAP_LOADED', message: 'mock' }) as const),
     applyInject: vi.fn(async () => ({ ok: false, code: 'NO_PLAN', message: 'mock' }) as const),

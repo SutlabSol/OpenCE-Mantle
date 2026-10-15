@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react';
-import type { ConvertPreflightResult, ConvertRepairChoice, RetailConversionReport } from '../../electron/shared-types';
+import type { ConvertPreflightResult, ConvertRepairChoice, ConvertResourcePaths, RetailConversionReport } from '../../electron/shared-types';
 
 type ConversionCheck = RetailConversionReport['checks'][number];
 
@@ -32,6 +32,7 @@ export default function ConvertDialog({ source, onClose, log }: Props) {
   const [preflight, setPreflight] = useState<ConvertPreflightResult | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [repairChoice, setRepairChoice] = useState<ConvertRepairChoice>({});
+  const [resourcePaths, setResourcePaths] = useState<ConvertResourcePaths>({});
   const [converting, setConverting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const startedRef = useRef(false);
@@ -61,7 +62,7 @@ export default function ConvertDialog({ source, onClose, log }: Props) {
     if (!canConvert) return;
     setConverting(true);
     setError(null);
-    const result = await window.opence.convertMap(acknowledged, repairChoice);
+    const result = await window.opence.convertMap(acknowledged, repairChoice, resourcePaths);
     setConverting(false);
     if (result.ok) {
       log('info', `Converted map opened: ${result.outputPath}`);
@@ -69,6 +70,15 @@ export default function ConvertDialog({ source, onClose, log }: Props) {
     } else if (result.code !== 'CANCELLED') {
       setError(result.message);
     }
+  };
+
+  const pickResource = async (kind: 'bitmaps' | 'sounds') => {
+    const res = await window.opence.pickConvertResource(kind);
+    if (!res?.path) return;
+    const updated: ConvertResourcePaths = { ...resourcePaths, [kind]: res.path };
+    setResourcePaths(updated);
+    const refreshed = await window.opence.convertPreflight(source, updated);
+    if (refreshed?.ok) setPreflight(refreshed);
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
@@ -125,6 +135,24 @@ export default function ConvertDialog({ source, onClose, log }: Props) {
                 {report.repairs.length > 0 ? ', and applies the ticked tag data repairs below' : ''}. The source file is not changed.
               </div>
             </div>
+            {(report.externalData?.bitmaps.count ?? 0) > 0 || (report.externalData?.sounds.count ?? 0) > 0 ? (
+              <div data-testid="convert-dialog-resources" style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12.5, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <span style={{ color: 'var(--text-secondary)' }}>This map stores some bitmap and sound data in the source game's resource files. Choose the files the map came from so that data can be copied in:</span>
+                {((['bitmaps', 'sounds'] as const)
+                  .filter((k) => (report.externalData![k].count ?? 0) > 0))
+                  .map((k) => (
+                    <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ color: 'var(--text-primary)', minWidth: 130 }}>{k === 'bitmaps' ? 'Source bitmaps.map:' : 'Source sounds.map:'}</span>
+                      <span style={{ flex: 1, color: resourcePaths[k] ? 'var(--text-primary)' : 'var(--text-dim)', fontFamily: 'var(--mono-font, monospace)' }}>
+                        {resourcePaths[k] ?? '(not selected)'}
+                      </span>
+                      <button data-testid={`convert-pick-${k}`} onClick={() => pickResource(k)} disabled={converting} style={buttonStyle(false, converting)}>
+                        Browse...
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            ) : null}
             <Body>
               {report.checks.map((c) => (
                 <CheckRow

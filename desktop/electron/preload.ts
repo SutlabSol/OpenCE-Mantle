@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode, OpenMapSummary, ConvertRepairChoice } from './shared-types';
+import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode, OpenMapSummary, ConvertRepairChoice, ConvertResourcePaths } from './shared-types';
 
 const api: OpenceApi = {
   openMapDialog: () => ipcRenderer.invoke('dialog:openMap'),
@@ -18,8 +18,9 @@ const api: OpenceApi = {
   saveMapAs: () => ipcRenderer.invoke('map:saveAs'),
   discardChanges: () => ipcRenderer.invoke('map:discard'),
   verifyEmbeddedData: () => ipcRenderer.invoke('tags:verifyEmbeddedData'),
-  convertPreflight: (source: 'open' | 'pick') => ipcRenderer.invoke('map:convertPreflight', source),
-  convertMap: (acknowledgeScripts: boolean, repairs: ConvertRepairChoice) => ipcRenderer.invoke('map:convert', acknowledgeScripts, repairs),
+  convertPreflight: (source: 'open' | 'pick', resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convertPreflight', source, resourcePaths),
+  convertMap: (acknowledgeScripts: boolean, repairs: ConvertRepairChoice, resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convert', acknowledgeScripts, repairs, resourcePaths),
+  pickConvertResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickConvertResource', kind),
   openContainingFolder: (filePath: string) => ipcRenderer.invoke('app:openContainingFolder', filePath),
   getSettings: () => ipcRenderer.invoke('app:getSettings'),
   notImplemented: (feature: string) => ipcRenderer.send('app:notImplemented', feature),

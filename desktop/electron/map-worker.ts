@@ -26,12 +26,14 @@ import {
   isConvertibleRetailLayout,
   preflightRetailConversion,
   convertRetailToCustomEdition,
+  preflightDemoConversion,
+  convertDemoToCustomEdition,
   ConversionRefusedError,
   AllTagsExcludedError,
   OperationCancelledError,
   ContainerFormatError,
 } from '../../core/src/index';
-import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult } from '../../core/src/index';
+import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
 export { describeMapWriteError } from '../../core/src/map/write-map';
 import type {
@@ -88,6 +90,49 @@ const cancelledRequests = new Set<string>();
 
 type Sink = (msg: { type: string; requestId?: string; [key: string]: unknown }) => void;
 let sink: Sink = (msg) => parentPort?.postMessage(msg);
+
+/**
+ * A resource map (bitmaps.map / sounds.map) opened read-only and read by offset - the worker's own
+ * `RandomAccessFile` (core has no fs; see `core/scripts/convert-external.ts` for the same helper).
+ * `null` when the path is not a file.
+ */
+function openResourceReadOnly(file: string): { file: RandomAccessFile; close: () => void } | null {
+  if (!fs.existsSync(file)) return null;
+  const fd = fs.openSync(file, 'r');
+  const size = fs.fstatSync(fd).size;
+  return {
+    file: {
+      label: file,
+      size,
+      read(offset, length) {
+        const buf = Buffer.alloc(length);
+        let done = 0;
+        while (done < length) {
+          const n = fs.readSync(fd, buf, done, length - done, offset + done);
+          if (n === 0) break;
+          done += n;
+        }
+        return done === length ? buf : buf.subarray(0, done);
+      },
+    },
+    close: () => fs.closeSync(fd),
+  };
+}
+
+/** The supplied source-game resource maps, opened read-only (an unreadable path is left out). */
+function openConversionResources(paths: Partial<Record<ResourceKind, string | undefined>>): { files: ConversionResourceFiles; close: () => void } {
+  const handles: { file: RandomAccessFile; close: () => void }[] = [];
+  const files: ConversionResourceFiles = {};
+  for (const [kind, p] of Object.entries(paths) as [ResourceKind, string | undefined][]) {
+    if (!p) continue;
+    const h = openResourceReadOnly(p);
+    if (h) {
+      handles.push(h);
+      files[kind] = h.file;
+    }
+  }
+  return { files, close: () => handles.forEach((h) => h.close()) };
+}
 
 /** Test-only hook: redirect posted messages to a capture array instead of `parentPort` (which is null outside a real worker thread). */
 export function __setSinkForTest(fn: Sink): void {
@@ -198,7 +243,8 @@ export async function runInspect(task: { requestId: string; filePath: string }) 
       filePath: task.filePath,
       message: describeUnsupportedLayout(layout)!,
       layout: layout.kind,
-      convertible: isConvertibleRetailLayout(layout),
+      // Retail maps are convertible only at the CE base; a true demo map always converts via the Phase 2 demo converter.
+      convertible: layout.kind === 'demo' ? true : isConvertibleRetailLayout(layout),
     } satisfies LoadMapResult);
   }
 
@@ -463,16 +509,21 @@ export function runSaveMapAs(task: { requestId: string; outputPath: string }) {
 const samePath = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
 /** Convert to Custom Edition, step 1: the read-only pre-flight report. Doesn't touch the held map. */
-export function runConvertPreflight(task: { requestId: string; filePath: string }) {
+export function runConvertPreflight(task: { requestId: string; filePath: string; bitmapsPath?: string; soundsPath?: string }) {
+  const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
   try {
     progress(task.requestId, 'Reading file', 10);
     const buffer = fs.readFileSync(task.filePath);
     progress(task.requestId, 'Checking the map', 40);
-    const report = preflightRetailConversion(buffer);
+    const report = classifyMapLayout(buffer).kind === 'demo'
+      ? preflightDemoConversion(buffer, resources.files)
+      : preflightRetailConversion(buffer, resources.files);
     progress(task.requestId, 'Done', 100);
     sendResult(task.requestId, { ok: true, sourceFileName: path.basename(task.filePath), report } satisfies ConvertPreflightResult);
   } catch (err) {
     handleTaskError(task.requestId, err);
+  } finally {
+    resources.close();
   }
 }
 
@@ -482,15 +533,29 @@ export function runConvertPreflight(task: { requestId: string; filePath: string 
  * path as Save As (`writeFinalizedMap`: name from the file name, CRC32, temp file + rename).
  * Afterwards the output is the open, unmodified map.
  */
-export function runConvertMap(task: { requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean; repairs?: ConvertRepairChoice }) {
+export function runConvertMap(task: { requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean; repairs?: ConvertRepairChoice; bitmapsPath?: string; soundsPath?: string }) {
   if (samePath(task.sourcePath, task.outputPath)) return sendError(task.requestId, 'REFUSED_SOURCE_PATH', 'The converted map cannot overwrite the map it was converted from. Choose a different file name or folder.');
   if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, 'REFUSED_OPEN_MAP', 'The converted map cannot overwrite the map that is open in the app. Choose a different file name.');
   if (isBackupFilePath(task.outputPath)) return sendError(task.requestId, 'REFUSED_BACKUP_FILE', 'The converted map cannot be written as a .bak file. Choose a .map file name.');
+  const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
   try {
     progress(task.requestId, 'Reading file', 10);
     const source = fs.readFileSync(task.sourcePath);
     progress(task.requestId, 'Converting the header', 40);
-    const converted = convertRetailToCustomEdition(source, { acknowledgeScripts: task.acknowledgeScripts, repairs: task.repairs ?? {} });
+    let copyPercent = -1;
+    const convert = classifyMapLayout(source).kind === 'demo' ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+    const converted = convert(source, {
+      acknowledgeScripts: task.acknowledgeScripts,
+      repairs: task.repairs ?? {},
+      resources: resources.files,
+      onProgress: (bytesDone, bytesTotal) => {
+        const percent = bytesTotal === 0 ? 100 : Math.floor((bytesDone / bytesTotal) * 100);
+        if (percent >= copyPercent + 5 || percent === 100) {
+          copyPercent = percent;
+          progress(task.requestId, `Copying bitmap and sound data (${percent}%)`, 40 + Math.round(percent * 0.2));
+        }
+      },
+    });
     if (inspectCustomEditionMap(converted.buffer).status !== 'ok') throw new Error('The converted map could not be read back as a Custom Edition map; nothing was written.');
     progress(task.requestId, 'Writing map', 60);
     const finalized = writeFinalizedMap(converted.buffer, task.outputPath, 'the source map was not changed');
@@ -511,6 +576,8 @@ export function runConvertMap(task: { requestId: string; sourcePath: string; out
   } catch (err) {
     if (err instanceof ConversionRefusedError) return sendError(task.requestId, err.code, err.message);
     sendWriteError(task.requestId, err);
+  } finally {
+    resources.close();
   }
 }
 

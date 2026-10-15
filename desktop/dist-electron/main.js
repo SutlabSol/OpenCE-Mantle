@@ -34061,7 +34061,7 @@ function sanitizeRepairChoice(value) {
   return out;
 }
 var cancelled2 = () => ({ ok: false, code: "CANCELLED", message: "Convert was cancelled." });
-async function convertMapFlow(deps, acknowledgeScripts, repairs = {}) {
+async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePaths) {
   const sourcePath = deps.getSourcePath();
   if (!sourcePath) return { ok: false, code: "NO_SOURCE", message: "Choose a map to convert first." };
   if (!await deps.confirmUnsavedChanges()) return cancelled2();
@@ -34082,7 +34082,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}) {
   if (!await deps.confirmScenarioName(target)) return cancelled2();
   deps.log("info", `Converting ${sourcePath} to a Custom Edition map: ${target}`);
   try {
-    const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts, repairs);
+    const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts, repairs, resourcePaths);
     if (result.ok) {
       const hex2 = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
       deps.log("info", `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex2(result.previousCrc32)} -> ${hex2(result.crc32)}. ${path7.basename(sourcePath)} was not changed.`);
@@ -34622,7 +34622,16 @@ function canSaveMapAs() {
 function canSaveMap() {
   return canSaveMapAs() && currentMapModified && !isBackupFilePath(currentMapPath);
 }
-async function convertPreflightFlow(source) {
+function pickConvertResourceFlow(kind) {
+  if (!mainWindow) return Promise.resolve(null);
+  const title = kind === "bitmaps" ? "Choose the source game's bitmaps.map" : "Choose the source game's sounds.map";
+  return import_electron3.dialog.showOpenDialog(mainWindow, {
+    title,
+    filters: [{ name: "Halo map", extensions: ["map"] }],
+    properties: ["openFile"]
+  }).then(({ canceled, filePaths }) => canceled || filePaths.length === 0 ? null : { path: filePaths[0] });
+}
+async function convertPreflightFlow(source, resourcePaths) {
   if (!mainWindow) return { ok: false, code: "NO_WINDOW", message: "Application window is not available." };
   let sourcePath;
   if (source === "open") {
@@ -34640,7 +34649,7 @@ async function convertPreflightFlow(source) {
   convertSourcePath = sourcePath;
   sendLog("info", `Checking ${sourcePath} for conversion to Custom Edition...`);
   const { promise } = sendWorkerRequest(
-    { type: "convertPreflight", filePath: sourcePath },
+    { type: "convertPreflight", filePath: sourcePath, bitmapsPath: resourcePaths?.bitmaps, soundsPath: resourcePaths?.sounds },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "convertPreflight", stage, percent })
   );
@@ -34672,15 +34681,16 @@ var convertMapDeps = {
   confirmOverwrite: saveMapAsDeps.confirmOverwrite,
   confirmScenarioName,
   showError: showErrorBox,
-  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts, repairs) => sendWorkerRequest(
-    { type: "convertMap", sourcePath, outputPath, acknowledgeScripts, repairs },
+  runWorkerConvert: (sourcePath, outputPath, acknowledgeScripts, repairs, resourcePaths) => sendWorkerRequest(
+    { type: "convertMap", sourcePath, outputPath, acknowledgeScripts, repairs, bitmapsPath: resourcePaths?.bitmaps, soundsPath: resourcePaths?.sounds },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "convertMap", stage, percent })
   ).promise,
   log: sendLog
 };
-async function runConvertMap(acknowledgeScripts, repairs) {
-  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true, sanitizeRepairChoice(repairs));
+async function runConvertMap(acknowledgeScripts, repairs, resourcePaths) {
+  const rp = resourcePaths && typeof resourcePaths === "object" ? resourcePaths : void 0;
+  const result = await convertMapFlow(convertMapDeps, acknowledgeScripts === true, sanitizeRepairChoice(repairs), rp);
   if (result.ok) {
     addRecentMap(result.outputPath);
     currentMapPath = result.outputPath;
@@ -34798,8 +34808,12 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
   import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());
-  import_electron3.ipcMain.handle("map:convertPreflight", (_e, source) => convertPreflightFlow(source));
-  import_electron3.ipcMain.handle("map:convert", (_e, acknowledgeScripts, repairs) => runConvertMap(acknowledgeScripts, repairs));
+  import_electron3.ipcMain.handle(
+    "map:convertPreflight",
+    (_e, source, resourcePaths) => convertPreflightFlow(source, resourcePaths && typeof resourcePaths === "object" ? resourcePaths : void 0)
+  );
+  import_electron3.ipcMain.handle("map:convert", (_e, acknowledgeScripts, repairs, resourcePaths) => runConvertMap(acknowledgeScripts, repairs, resourcePaths));
+  import_electron3.ipcMain.handle("dialog:pickConvertResource", (_e, kind) => pickConvertResourceFlow(kind));
   import_electron3.ipcMain.handle("app:openContainingFolder", (_e, filePath) => {
     if (typeof filePath === "string" && filePath) import_electron3.shell.showItemInFolder(filePath);
   });

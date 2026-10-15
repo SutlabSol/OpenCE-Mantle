@@ -89,14 +89,26 @@ describe('Convert to Custom Edition (main-process flow)', () => {
     const result = await convertMapFlow(deps, true);
     expect(result).toMatchObject({ ok: true, outputPath: 'C:\\HaloCE\\maps\\heh_2.map' });
     expect(deps.confirmScenarioName).toHaveBeenCalledWith('C:\\HaloCE\\maps\\heh_2.map');
-    expect(deps.runWorkerConvert).toHaveBeenCalledWith(SOURCE, 'C:\\HaloCE\\maps\\heh_2.map', true, {});
+    expect(deps.runWorkerConvert).toHaveBeenCalledWith(SOURCE, 'C:\\HaloCE\\maps\\heh_2.map', true, {}, undefined);
     expect(logs.some((l) => l.message.includes('0x00000000 -> 0xD1C331E9') && l.message.includes('heh_2.map was not changed'))).toBe(true);
   });
 
   it('passes the ticked tag data repairs to the worker', async () => {
     const { deps } = makeDeps('C:\\HaloCE\\maps\\theisland_3_ce.map');
     await convertMapFlow(deps, false, { scriptSyntaxData: true });
-    expect(deps.runWorkerConvert).toHaveBeenCalledWith(SOURCE, 'C:\\HaloCE\\maps\\theisland_3_ce.map', false, { scriptSyntaxData: true });
+    expect(deps.runWorkerConvert).toHaveBeenCalledWith(SOURCE, 'C:\\HaloCE\\maps\\theisland_3_ce.map', false, { scriptSyntaxData: true }, undefined);
+  });
+
+  it('passes the source bitmaps/sounds paths to the worker when provided', async () => {
+    const { deps } = makeDeps('c:\\users\\out\\heh_2_ce.map');
+    await convertMapFlow(deps, true, { alignTagData: true }, { bitmaps: 'c:/halomd/maps/bitmaps.map', sounds: 'c:/halomd/maps/sounds.map' });
+    expect(deps.runWorkerConvert).toHaveBeenCalledWith(
+      SOURCE,
+      'c:\\users\\out\\heh_2_ce.map',
+      true,
+      { alignTagData: true },
+      { bitmaps: 'c:/halomd/maps/bitmaps.map', sounds: 'c:/halomd/maps/sounds.map' },
+    );
   });
 
   it('sanitizeRepairChoice keeps only known repair ids set to exactly true', () => {

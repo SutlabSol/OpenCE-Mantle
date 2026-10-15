@@ -37,6 +37,7 @@ function installMockOpence(openResult: LoadMapResult = OK_MAP) {
     cancelExtraction: vi.fn(),
     pickResourceMap: vi.fn(async () => ({ ok: false, code: 'CANCELLED' }) as const),
     getResourceMapStatuses: vi.fn(async () => ({ bitmaps: { state: 'not-configured' }, sounds: { state: 'not-configured' }, loc: { state: 'not-configured' } }) as const),
+    pickConvertResource: vi.fn(async () => null),
     pickInjectContainer: vi.fn(async () => null),
     planInject: vi.fn(async () => ({ ok: false, code: 'NO_MAP_LOADED', message: 'mock' }) as const),
     applyInject: vi.fn(async () => ({ ok: false, code: 'NO_PLAN', message: 'mock' }) as const),
@@ -161,7 +162,7 @@ describe('App File menu: Save / Save As / Discard Changes', () => {
 
 describe('App: Convert to Custom Edition entry points', () => {
   const RETAIL: LoadMapResult = { status: 'unsupported', filePath: 'C:\HaloMD\heh_2.map', message: 'This is a retail-layout map (cache version 7).', layout: 'retail', convertible: true };
-  const DEMO: LoadMapResult = { status: 'unsupported', filePath: 'C:\HaloMD\bloodgulch.map', message: 'Not supported yet (Phase 2).', layout: 'demo', convertible: false };
+  const DEMO: LoadMapResult = { status: 'unsupported', filePath: 'C:\HaloMD\bloodgulch.map', message: 'This is an original Halo demo map (true demo layout, cache version 6). It can be converted to a Custom Edition (609) map with "Convert to Custom Edition...".', layout: 'demo', convertible: true };
 
   async function openUnsupported() {
     fireEvent.click(screen.getByTestId('menu-file'));
@@ -178,12 +179,13 @@ describe('App: Convert to Custom Edition entry points', () => {
     expect(window.opence.convertPreflight).toHaveBeenCalledWith('open');
   });
 
-  it('a version 6 (true demo) map has no Convert button', async () => {
+  it('a true demo map shows Convert in the banner; it opens the dialog on the open map', async () => {
     installMockOpence(DEMO);
     render(<App />);
     await openUnsupported();
-    expect(screen.getByTestId('unsupported-banner')).toHaveTextContent('Phase 2');
-    expect(screen.queryByTestId('unsupported-banner-convert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('unsupported-banner-convert'));
+    await waitFor(() => expect(screen.getByTestId('convert-dialog')).toBeInTheDocument());
+    expect(window.opence.convertPreflight).toHaveBeenCalledWith('open');
   });
 
   it('File > Convert to Custom Edition... is always available and asks for a file', async () => {

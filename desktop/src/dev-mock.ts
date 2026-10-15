@@ -160,6 +160,9 @@ export function installDevMock() {
       return { ok: true, status };
     },
     getResourceMapStatuses: async () => ({ ...mockResourceMapStatuses }),
+  pickConvertResource: async (kind: 'bitmaps' | 'sounds') => {
+      return { path: `C:\\HaloMD\\maps\\${kind}.map` };
+    },
     pickInjectContainer: async () => ({ path: 'C:\\Users\\Dev\\Documents\\ui_ticker.ocetags' }),
     planInject: async (containerPath, mode) => {
       lastInjectMode = mode;
