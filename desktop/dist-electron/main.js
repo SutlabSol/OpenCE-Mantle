@@ -34354,13 +34354,24 @@ async function extractTagsFlow(request) {
   const defaultDir = settings.lastExtractDir && fs6.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
   const safeName = String(request.suggestedFileName || "extracted_tags").replace(/[<>:"/\\|?*]/g, "_") || "extracted_tags";
   const defaultPath = path8.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
-  const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
-    title: "Extract tags to...",
-    defaultPath,
-    filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }]
-  });
-  if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  const resolvedTarget = path8.resolve(filePath);
+  let resolvedTarget;
+  if (request.originalIndices.length > 1) {
+    const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+      title: "Choose folder to save extracted tags to...",
+      defaultPath: defaultDir,
+      properties: ["openDirectory", "createDirectory"]
+    });
+    if (canceled || filePaths.length === 0) return { ok: false, code: "CANCELLED", message: "Extraction was cancelled." };
+    resolvedTarget = path8.resolve(filePaths[0]);
+  } else {
+    const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+      title: "Extract tags to...",
+      defaultPath,
+      filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }]
+    });
+    if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
+    resolvedTarget = path8.resolve(filePath);
+  }
   const resolvedSourceMap = path8.resolve(currentMapPath);
   const resolvedAppDir = path8.resolve(import_electron3.app.getAppPath());
   if (resolvedTarget === resolvedSourceMap) {

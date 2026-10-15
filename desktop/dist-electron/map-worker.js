@@ -38833,28 +38833,72 @@ function runExtractTags(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   const cancelCtl = makeCancelController(task.requestId);
   const tempPath = `${task.outputPath}.tmp-${(0, import_crypto3.randomUUID)()}`;
+  const pendingTemps = [];
   try {
-    progress(task.requestId, "Walking dependencies", 5);
-    const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
-      signal: cancelCtl.signal,
-      onProgress: (i, total) => progress(task.requestId, `Extracting tag ${i + 1} of ${total}`, 10 + Math.round(i / Math.max(1, total) * 70))
-    });
-    if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
-    progress(task.requestId, "Writing container file", 90);
-    const containerBuffer = serializeContainer(set, task.sourceMapName);
-    fs.writeFileSync(tempPath, containerBuffer);
-    fs.renameSync(tempPath, task.outputPath);
+    if (task.originalIndices.length === 1) {
+      progress(task.requestId, "Walking dependencies", 5);
+      const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
+        signal: cancelCtl.signal,
+        onProgress: (i, total) => progress(task.requestId, `Extracting tag ${i + 1} of ${total}`, 10 + Math.round(i / Math.max(1, total) * 70))
+      });
+      if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
+      progress(task.requestId, "Writing container file", 90);
+      const containerBuffer = serializeContainer(set, task.sourceMapName);
+      fs.writeFileSync(tempPath, containerBuffer);
+      fs.renameSync(tempPath, task.outputPath);
+      progress(task.requestId, "Done", 100);
+      sendResult(task.requestId, {
+        ok: true,
+        outputPath: task.outputPath,
+        tagCount: set.tags.length,
+        fileSizeBytes: containerBuffer.length,
+        carriedOverWarnings: set.warnings.map(toWarningInfo)
+      });
+      return;
+    }
+    const writtenFiles = [];
+    let totalTags = 0;
+    let totalBytes = 0;
+    const allWarnings = new Array();
+    for (let i = 0; i < task.originalIndices.length; i++) {
+      if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
+      const origIndex = task.originalIndices[i];
+      const entry = currentMap.tagIndex.entries[origIndex];
+      const leaf = (entry.path.split("\\").pop() ?? "tag").replace(/[^a-z0-9_-]+/gi, "_") || "tag";
+      const filename = `${leaf}.${entry.primaryClassName ?? "tag"}.ocetags`;
+      const targetFile = path.join(task.outputPath, filename);
+      progress(task.requestId, `Extracting ${i + 1} of ${task.originalIndices.length}: ${entry.path}`, Math.round(i / task.originalIndices.length * 100));
+      const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [origIndex], {
+        signal: cancelCtl.signal
+      });
+      if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
+      const buf = serializeContainer(set, task.sourceMapName);
+      const tmp = `${targetFile}.tmp-${(0, import_crypto3.randomUUID)()}`;
+      pendingTemps.push(tmp);
+      fs.writeFileSync(tmp, buf);
+      fs.renameSync(tmp, targetFile);
+      pendingTemps.pop();
+      writtenFiles.push(targetFile);
+      totalTags += set.tags.length;
+      totalBytes += buf.length;
+      allWarnings.push(...set.warnings.map(toWarningInfo));
+    }
     progress(task.requestId, "Done", 100);
     sendResult(task.requestId, {
       ok: true,
       outputPath: task.outputPath,
-      tagCount: set.tags.length,
-      fileSizeBytes: containerBuffer.length,
-      carriedOverWarnings: set.warnings.map(toWarningInfo)
+      tagCount: totalTags,
+      fileSizeBytes: totalBytes,
+      carriedOverWarnings: allWarnings,
+      outputFiles: writtenFiles
     });
+    return;
   } catch (err) {
     try {
       if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      for (const p of pendingTemps) {
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      }
     } catch {
     }
     handleTaskError(task.requestId, err);

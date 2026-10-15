@@ -325,14 +325,24 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
   const safeName = String(request.suggestedFileName || 'extracted_tags').replace(/[<>:"/\\|?*]/g, '_') || 'extracted_tags';
   const defaultPath = path.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
 
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Extract tags to...',
-    defaultPath,
-    filters: [{ name: 'OpenCE Tag Set', extensions: ['ocetags'] }],
-  });
-  if (canceled || !filePath) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
-
-  const resolvedTarget = path.resolve(filePath);
+  let resolvedTarget: string;
+  if (request.originalIndices.length > 1) {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose folder to save extracted tags to...',
+      defaultPath: defaultDir,
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (canceled || filePaths.length === 0) return { ok: false, code: 'CANCELLED', message: 'Extraction was cancelled.' };
+    resolvedTarget = path.resolve(filePaths[0]);
+  } else {
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Extract tags to...',
+      defaultPath,
+      filters: [{ name: 'OpenCE Tag Set', extensions: ['ocetags'] }],
+    });
+    if (canceled || !filePath) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
+    resolvedTarget = path.resolve(filePath);
+  }
   const resolvedSourceMap = path.resolve(currentMapPath);
   const resolvedAppDir = path.resolve(app.getAppPath());
   if (resolvedTarget === resolvedSourceMap) {

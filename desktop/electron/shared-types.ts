@@ -109,7 +109,7 @@ export interface ExtractTagsRequest {
 }
 
 export type ExtractTagsResult =
-  | { ok: true; outputPath: string; tagCount: number; fileSizeBytes: number; carriedOverWarnings: DependencyWarningInfo[] }
+  | { ok: true; outputPath: string; tagCount: number; fileSizeBytes: number; carriedOverWarnings: DependencyWarningInfo[]; outputFiles?: string[] }
   | { ok: false; code: 'CANCELLED'; message: string }
   | { ok: false; code: string; message: string };
 

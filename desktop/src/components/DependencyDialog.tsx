@@ -212,7 +212,9 @@ export default function DependencyDialog({ selectedIndices, onClose, log }: Prop
         <DialogShell testid="dependency-dialog" ref={dialogRef} onKeyDown={handleKeyDown} onClose={onClose}>
           <div data-testid="dependency-result" style={{ padding: 20 }}>
             <div style={{ color: 'var(--success-text)', marginBottom: 10, fontSize: 13 }}>
-              Extracted {result.tagCount} tag(s) ({formatSize(result.fileSizeBytes)}).
+              {result.outputFiles
+                ? `Extracted ${result.outputFiles.length} file(s) (${formatSize(result.fileSizeBytes)}, ${result.tagCount} total tags).`
+                : `Extracted ${result.tagCount} tag(s) (${formatSize(result.fileSizeBytes)}).`}
             </div>
             <div style={{ fontSize: 12, fontFamily: 'var(--mono-font)', color: 'var(--text-secondary)', wordBreak: 'break-all', marginBottom: 14 }}>{result.outputPath}</div>
             {result.carriedOverWarnings.length > 0 && (
@@ -316,7 +318,7 @@ export default function DependencyDialog({ selectedIndices, onClose, log }: Prop
               onClick={handleConfirm}
               style={buttonStyle(!confirmDisabledReason)}
             >
-              Choose location and extract
+              {selectedIndices.length > 1 ? 'Extract to folder...' : 'Extract to .ocetags'}
             </button>
           </div>
           {confirmDisabledReason && (
