@@ -34,3 +34,4 @@ export * from './map/convert/tag-data-repairs';
 export * from './map/tag-field-editor';
 export * from './map/tag-dependency-swapper';
 export * from './render/bsp-geometry';
+export * from './render/model-geometry';
