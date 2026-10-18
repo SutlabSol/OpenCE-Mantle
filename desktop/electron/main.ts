@@ -1,7 +1,7 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { OCETAGS_EXTENSION, validateResourceMapFile, scenarioNameFromFileName } from '../../core/src/index';
+import { OCETAGS_EXTENSION, validateResourceMapFile, scenarioNameFromFileName, getAllTagGroupNames, getGroupDefinition, OCETAGS_FORMAT_VERSION } from '../../core/src/index';
 import { getRecentMaps, addRecentMap } from './recent-maps';
 import { getSettings, setLastExtractDir, setResourceMapPath } from './settings';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
@@ -10,6 +10,15 @@ import { saveMapFlow, confirmUnsavedChanges, SAVE_MAP_CHANNEL, type SaveMapDeps 
 import { backupOnOpenFlow, isBackedUp } from './backup-on-open';
 import { convertMapFlow, sanitizeRepairChoice, type ConvertMapDeps } from './convert-map';
 import { isBackupFilePath, COMPRESSED_MAP_MESSAGE } from './map-file-rules';
+import {
+  sanitizeMapName,
+  countExistingOcetagsFiles,
+  getDriveFreeSpace,
+  commitStagedFiles,
+  discardStagedFiles,
+  generateBatchReportText,
+  writeManifestAndReport,
+} from './batch-extract-fs';
 import type {
   LoadMapResult,
   CompressionResult,
@@ -31,12 +40,22 @@ import type {
   ConvertPreflightResult,
   ConvertMapResult,
   ConvertResourcePaths,
+  BatchExtractMode,
+  BatchExtractPreflightResult,
+  BatchExtractResult,
+  FinalizeBatchExtractRequest,
+  BatchExtractManifest,
+  GetTagFieldsResult,
+  UpdateTagFieldResult,
+  GetDependencySlotsResult,
+  SetDependencySlotResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
 let currentMapPath: string | null = null;
 let currentMapCompressed = false;
 let currentMapScenarioName: string | null = null;
+let currentOpenMapSummary: OpenMapSummary | null = null;
 /** The worker's in-memory map has changes (Inject) not written by Save / Save As yet. */
 let currentMapModified = false;
 /** A backup exists for this open (created, kept, or already identical). False when skipped or failed. */
@@ -44,6 +63,7 @@ let currentMapBackedUp = false;
 /** No backup: the user already confirmed File > Save's overwrite during this open. */
 let overwriteConfirmed = false;
 let currentExtractRequestId: string | null = null;
+let currentBatchExtractRequestId: string | null = null;
 let currentInjectContainerPath: string | null = null;
 /** The last map opened that the converter can convert (shown in the unsupported banner). */
 let lastConvertiblePath: string | null = null;
@@ -101,6 +121,7 @@ function updateTitle() {
 
 /** After Inject / Save / Save As: main's copy of the open map's state, menu, title, and the renderer's view. */
 function setOpenMapState(map: OpenMapSummary) {
+  currentOpenMapSummary = map;
   currentMapPath = map.filePath;
   currentMapScenarioName = map.header.scenarioName;
   currentMapModified = !!map.modified;
@@ -185,6 +206,7 @@ async function loadMapAtPath(filePath: string, options: { askBackup: boolean }):
     overwriteConfirmed = false;
     lastConvertiblePath = result.status === 'unsupported' && result.convertible ? filePath : null;
     if (result.status === 'ok') {
+      currentOpenMapSummary = result;
       currentMapPath = filePath;
       currentMapCompressed = false;
       currentMapScenarioName = result.header.scenarioName;
@@ -194,6 +216,7 @@ async function loadMapAtPath(filePath: string, options: { askBackup: boolean }):
       sendLog('info', `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
       if (options.askBackup) await askBackup(filePath);
     } else if (result.status === 'compressed') {
+      currentOpenMapSummary = null;
       currentMapPath = filePath;
       currentMapCompressed = true;
       currentMapScenarioName = null;
@@ -202,6 +225,7 @@ async function loadMapAtPath(filePath: string, options: { askBackup: boolean }):
       updateTitle();
       sendLog('warn', 'This map is compressed - decompress it (Tools > Decompress Map) to browse tags. Nothing of it is held for editing.');
     } else if (result.status === 'unsupported') {
+      currentOpenMapSummary = null;
       currentMapPath = null;
       currentMapScenarioName = null;
       buildMenu();
@@ -395,6 +419,202 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
   }
 }
 
+async function batchExtractPreflightFlow(): Promise<BatchExtractPreflightResult | null> {
+  if (!mainWindow) return null;
+  if (!currentMapPath || currentMapCompressed || !currentOpenMapSummary) {
+    await showErrorBox('No map open', 'Open and decompress a map before extracting tags.');
+    return null;
+  }
+
+  const settings = getSettings();
+  const defaultDir = settings.lastExtractDir && fs.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : app.getPath('documents');
+
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose parent folder to export map to...',
+    defaultPath: defaultDir,
+    properties: ['openDirectory', 'createDirectory'],
+  });
+
+  if (canceled || filePaths.length === 0) return null;
+  const parentDir = path.resolve(filePaths[0]);
+
+  const mapName = sanitizeMapName(currentMapScenarioName ?? path.basename(currentMapPath, '.map'));
+  const targetDir = path.join(parentDir, mapName);
+
+  const resolvedSourceMap = path.resolve(currentMapPath);
+  const resolvedAppDir = path.resolve(app.getAppPath());
+  if (targetDir === resolvedSourceMap) {
+    await showErrorBox('Invalid location', 'You cannot extract into the source map file location. Choose a different folder.');
+    return null;
+  }
+  if (targetDir === resolvedAppDir || targetDir.startsWith(resolvedAppDir + path.sep)) {
+    await showErrorBox('Invalid location', 'You cannot save inside the application install directory. Choose a different folder.');
+    return null;
+  }
+
+  setLastExtractDir(parentDir);
+
+  const tags = currentOpenMapSummary.tags;
+  const knownGroups = new Set(getAllTagGroupNames());
+
+  let extractableCount = 0;
+  let externalCount = 0;
+  let blockedCount = 0;
+  let estimatedTotalBytes = 0;
+
+  for (const t of tags) {
+    if (t.isExternal) {
+      externalCount++;
+      continue;
+    }
+    if (!knownGroups.has(t.primaryClassName)) {
+      blockedCount++;
+      continue;
+    }
+    const def = getGroupDefinition(t.primaryClassName);
+    if (def.extractable === false) {
+      blockedCount++;
+      continue;
+    }
+    extractableCount++;
+    estimatedTotalBytes += t.estimatedSize ?? 0;
+  }
+
+  const existingFileCount = countExistingOcetagsFiles(targetDir);
+  const freeSpaceBytes = getDriveFreeSpace(parentDir);
+
+  return {
+    ok: true,
+    mapName,
+    scenarioName: currentMapScenarioName ?? mapName,
+    parentDir,
+    targetDir,
+    totalTags: tags.length,
+    extractableCount,
+    externalCount,
+    blockedCount,
+    estimatedTotalBytes,
+    freeSpaceBytes,
+    existingFileCount,
+  };
+}
+
+async function startBatchExtractFlow(options: { parentDir: string; mode: BatchExtractMode }): Promise<BatchExtractResult> {
+  if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+
+  const settings = getSettings();
+  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
+  for (const kind of ['bitmaps', 'sounds', 'loc'] as ResourceMapKind[]) {
+    const p = settings.resourceMaps[kind];
+    if (p) resourceMapPaths[kind] = p;
+  }
+
+  const sourceMapName = currentMapScenarioName ?? path.basename(currentMapPath, '.map');
+  sendLog('info', `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode})...`);
+
+  const { requestId, promise } = sendWorkerRequest<BatchExtractResult>(
+    {
+      type: 'batchExtract',
+      parentDir: options.parentDir,
+      sourceMapName,
+      mode: options.mode,
+      resourceMapPaths,
+    },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'batchExtract', stage, percent }),
+  );
+  currentBatchExtractRequestId = requestId;
+
+  try {
+    const result = await promise;
+    if (result.ok) {
+      sendLog(
+        'info',
+        `Batch extraction complete: ${result.summary.extractedCount} tags extracted to ${result.summary.targetDir} (${(result.summary.totalBytesWritten / 1024 / 1024).toFixed(2)} MB).`,
+      );
+    } else if (result.code === 'CANCELLED') {
+      sendLog('warn', 'Batch extraction cancelled.');
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Batch extraction failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  } finally {
+    currentBatchExtractRequestId = null;
+  }
+}
+
+function cancelBatchExtractFlow() {
+  if (currentBatchExtractRequestId) {
+    cancelWorkerRequest(currentBatchExtractRequestId, sendLog);
+  }
+}
+
+async function finalizeBatchExtractFlow(request: FinalizeBatchExtractRequest): Promise<{ ok: boolean; message?: string }> {
+  try {
+    if (request.action === 'keep') {
+      commitStagedFiles(request.stagingDir, request.targetDir);
+      if (request.summary) {
+        const manifest: BatchExtractManifest = {
+          manifestVersion: 1,
+          toolVersion: '0.1.0',
+          containerVersion: OCETAGS_FORMAT_VERSION,
+          extractedAt: new Date().toISOString(),
+          mapFileName: path.basename(currentMapPath ?? request.summary.mapName),
+          scenarioName: currentMapScenarioName ?? request.summary.mapName,
+          summary: {
+            totalTagsInMap: request.summary.totalTagsInMap,
+            extractedCount: request.summary.extractedCount,
+            skippedExistingCount: request.summary.skippedCount,
+            externalCount: request.summary.externalCount,
+            blockedCount: request.summary.blockedCount,
+            failedCount: request.summary.failedCount,
+            totalBytesWritten: request.summary.totalBytesWritten,
+          },
+          files: request.summary.tags
+            .filter((t) => t.status === 'extracted')
+            .map((t) => ({
+              path: t.path,
+              group: t.group,
+              relativePath: path.relative(request.targetDir, t.outputPath ?? ''),
+              sizeBytes: t.sizeBytes ?? 0,
+              tagCount: t.tagCount ?? 1,
+            })),
+          blocked: request.summary.tags
+            .filter((t) => t.status === 'blocked')
+            .map((t) => ({
+              path: t.path,
+              group: t.group,
+              reason: t.reason ?? 'Blocked tag',
+            })),
+          external: request.summary.tags
+            .filter((t) => t.status === 'external')
+            .map((t) => ({
+              path: t.path,
+              group: t.group,
+              reason: t.reason ?? 'External resource map tag',
+            })),
+        };
+        const reportText = generateBatchReportText(manifest);
+        writeManifestAndReport(request.targetDir, manifest, reportText);
+      }
+      sendLog('info', `Committed staged batch extraction files to ${request.targetDir}.`);
+    } else {
+      discardStagedFiles(request.stagingDir);
+      sendLog('info', 'Cleaned up cancelled batch extraction staging directory.');
+    }
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendLog('error', `Failed to finalize batch extraction: ${msg}`);
+    return { ok: false, message: msg };
+  }
+}
+
 const RESOURCE_MAP_FILTER_NAMES: Record<ResourceMapKind, string> = { bitmaps: 'bitmaps.map', sounds: 'sounds.map', loc: 'loc.map' };
 
 function readResourceMapStatus(kind: ResourceMapKind, filePath: string | null): ResourceMapStatus {
@@ -522,6 +742,72 @@ async function applyInjectFlow(): Promise<ApplyInjectResult> {
     return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
   } finally {
     currentInjectContainerPath = null;
+  }
+}
+
+async function getTagFieldsFlow(tagIndex: number): Promise<GetTagFieldsResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<GetTagFieldsResult>({ type: 'getTagFields', tagIndex }, sendLog);
+  try {
+    return await promise;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+async function updateTagFieldFlow(tagIndex: number, fieldName: string, newValue: unknown): Promise<UpdateTagFieldResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<UpdateTagFieldResult>(
+    { type: 'updateTagField', tagIndex, fieldName, newValue },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Updated "${fieldName}" in tag #${tagIndex} (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Field update failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+
+async function getDependencySlotsFlow(tagIndex: number): Promise<GetDependencySlotsResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+  const { promise } = sendWorkerRequest<GetDependencySlotsResult>({ type: 'getDependencySlots', tagIndex }, sendLog);
+  try {
+    return await promise;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+async function setDependencySlotFlow(tagIndex: number, fieldPath: string, newTagId: number | null): Promise<SetDependencySlotResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+  const { promise } = sendWorkerRequest<SetDependencySlotResult>({ type: 'setDependencySlot', tagIndex, fieldPath, newTagId }, sendLog);
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Swapped dependency "${fieldPath}" of tag #${tagIndex} (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Dependency swap failed: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
   }
 }
 
@@ -794,6 +1080,7 @@ function buildMenu() {
         { label: 'Recompress Map', click: () => recompressFlow() },
         { type: 'separator' },
         { label: 'Extract Tags...', accelerator: 'CmdOrCtrl+E', click: () => mainWindow?.webContents.send('menu:action', 'extract-tags') },
+        { label: 'Extract Whole Map...', click: () => mainWindow?.webContents.send('menu:action', 'extract-whole-map') },
         { label: 'Inject Tags...', click: () => mainWindow?.webContents.send('menu:action', 'inject-tags') },
         { label: 'Verify Embedded Data...', click: () => mainWindow?.webContents.send('menu:action', 'verify-embedded-data') },
         { type: 'separator' },
@@ -830,12 +1117,20 @@ app.whenReady().then(() => {
   ipcMain.on('tags:cancelExtract', () => {
     if (currentExtractRequestId) cancelWorkerRequest(currentExtractRequestId, sendLog);
   });
+  ipcMain.handle('tags:batchExtractPreflight', () => batchExtractPreflightFlow());
+  ipcMain.handle('tags:startBatchExtract', (_e, options: { parentDir: string; mode: BatchExtractMode }) => startBatchExtractFlow(options));
+  ipcMain.on('tags:cancelBatchExtract', () => cancelBatchExtractFlow());
+  ipcMain.handle('tags:finalizeBatchExtract', (_e, request: FinalizeBatchExtractRequest) => finalizeBatchExtractFlow(request));
   ipcMain.handle('resourceMaps:pick', (_e, kind: ResourceMapKind) => pickResourceMapFlow(kind));
   ipcMain.handle('resourceMaps:getStatuses', () => getResourceMapStatusesFlow());
   ipcMain.handle('tags:pickInjectContainer', () => pickInjectContainerFlow());
   ipcMain.handle('tags:planInject', (_e, containerPath: string, mode: InjectionMode) => planInjectFlow(containerPath, mode));
   ipcMain.handle('tags:applyInject', () => applyInjectFlow());
   ipcMain.handle('tags:verifyEmbeddedData', () => verifyEmbeddedDataFlow());
+  ipcMain.handle('tags:getFields', (_e, tagIndex: number) => getTagFieldsFlow(tagIndex));
+  ipcMain.handle('tags:updateField', (_e, tagIndex: number, fieldName: string, newValue: unknown) => updateTagFieldFlow(tagIndex, fieldName, newValue));
+  ipcMain.handle('tags:getDependencySlots', (_e, tagIndex: number) => getDependencySlotsFlow(tagIndex));
+  ipcMain.handle('tags:setDependencySlot', (_e, tagIndex: number, fieldPath: string, newTagId: number | null) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());

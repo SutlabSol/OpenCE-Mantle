@@ -24,8 +24,8 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 
 // electron/main.ts
 var import_electron3 = require("electron");
-var path8 = __toESM(require("path"));
-var fs6 = __toESM(require("fs"));
+var path9 = __toESM(require("path"));
+var fs7 = __toESM(require("fs"));
 
 // ../core/src/constants/cache-file.ts
 var CHIMERA_COMPRESSED_ENGINE_MASK = 2249850880;
@@ -194,6 +194,47 @@ function validateResourceMapFile(buffer, kind) {
   }
   return { ok: true, identity: computeResourceMapIdentity(buffer) };
 }
+
+// ../core/src/map/definitions/basic-types.ts
+var BASIC_TYPE_SIZES = {
+  int8: 1,
+  uint8: 1,
+  int16: 2,
+  uint16: 2,
+  Index: 2,
+  int32: 4,
+  uint32: 4,
+  float: 4,
+  Angle: 4,
+  Fraction: 4,
+  Pointer: 4,
+  TagFourCC: 4,
+  TagID: 4,
+  TagString: 32,
+  Point2D: 8,
+  Point2DInt: 4,
+  Point3D: 12,
+  Vector2D: 8,
+  Vector3D: 12,
+  Plane2D: 12,
+  Plane3D: 16,
+  Euler2D: 8,
+  Euler3D: 12,
+  Quaternion: 16,
+  Matrix: 36,
+  ColorRGB: 12,
+  ColorARGB: 16,
+  ColorARGBInt: 4,
+  Rectangle2D: 8,
+  /** `TagDependency<EndianType>`: fourcc(4) + path_pointer(4) + path_size(4) + tag_id(4). */
+  TagDependency: 16,
+  /** `TagReflexive<...>` block header: count(4) + pointer(8, zero/unused on disk). */
+  TagReflexive: 12,
+  /** `TagDataOffset<EndianType>`: size(4) + external/flags(4) + file_offset(4) + pointer(8). */
+  TagDataOffset: 20,
+  /** `ScenarioScriptNodeValue` union (bool/short/long/float/TagID share one 4-byte slot). */
+  ScenarioScriptNodeValue: 4
+};
 
 // ../core/src/map/definitions/groups/actor.json
 var actor_default = [
@@ -33674,8 +33715,102 @@ for (const file of ALL_DEFINITION_FILES) {
     }
   }
 }
+function basicUnitSize(type) {
+  const size = BASIC_TYPE_SIZES[type];
+  if (size === void 0) {
+    throw new DefinitionLoadError(`Unknown basic field type "${type}".`);
+  }
+  return size;
+}
+function fieldSize(structName, field) {
+  if (field.type === "TagDependency") {
+    if (!field.classes || field.classes.length === 0) {
+      throw new DefinitionLoadError(`Struct "${structName}" field "${field.name}" is a TagDependency with no "classes".`);
+    }
+    return BASIC_TYPE_SIZES.TagDependency;
+  }
+  if (field.type === "TagReflexive") {
+    if (!field.struct) {
+      throw new DefinitionLoadError(`Struct "${structName}" field "${field.name}" is a TagReflexive with no "struct".`);
+    }
+    if (!structs.has(field.struct)) {
+      throw new DefinitionLoadError(
+        `Struct "${structName}" field "${field.name}" is a TagReflexive pointing to undefined struct "${field.struct}".`
+      );
+    }
+    return BASIC_TYPE_SIZES.TagReflexive;
+  }
+  if (field.type === "TagDataOffset") {
+    return BASIC_TYPE_SIZES.TagDataOffset;
+  }
+  const enumDef = enums.get(field.type);
+  if (enumDef) return 2;
+  const bitfieldDef = bitfields.get(field.type);
+  if (bitfieldDef) return bitfieldDef.width / 8;
+  let base = basicUnitSize(field.type);
+  if (field.bounds) base *= 2;
+  if (field.count && field.count > 1) base *= field.count;
+  return base;
+}
+var structResolutionCache = /* @__PURE__ */ new Map();
+function resolveStruct(name, _visiting = /* @__PURE__ */ new Set()) {
+  const cached = structResolutionCache.get(name);
+  if (cached) return cached;
+  if (_visiting.has(name)) {
+    throw new DefinitionLoadError(`Cyclic "inherits" chain detected involving struct "${name}".`);
+  }
+  const def = structs.get(name);
+  if (!def) {
+    throw new DefinitionLoadError(`Unknown struct "${name}".`);
+  }
+  _visiting.add(name);
+  const fields = [];
+  let offset = 0;
+  if (def.inherits) {
+    const parent = resolveStruct(def.inherits, _visiting);
+    fields.push(...parent.fields);
+    offset = parent.totalSize;
+  }
+  for (const f of def.fields) {
+    if (f.kind === "pad") {
+      offset += f.size;
+      continue;
+    }
+    const size = fieldSize(name, f);
+    fields.push({ name: f.name, offset, size, def: f });
+    offset += size;
+  }
+  const totalSize = offset;
+  if (def.sizeBytes !== void 0 && def.sizeBytes !== totalSize) {
+    throw new DefinitionLoadError(
+      `Struct "${name}" computed layout size ${totalSize} bytes does not match declared size ${def.sizeBytes} bytes. This means the field list/basic type sizes used to derive this struct are wrong.`
+    );
+  }
+  const resolved = {
+    name,
+    tagClass: def.tagClass,
+    totalSize,
+    fields,
+    extractable: def.extractable,
+    notExtractableReason: def.notExtractableReason
+  };
+  structResolutionCache.set(name, resolved);
+  _visiting.delete(name);
+  return resolved;
+}
+function getAllTagGroupNames() {
+  return Array.from(tagGroupNameToStructName.keys());
+}
+function getGroupDefinition(tagGroupName) {
+  const structName = tagGroupNameToStructName.get(tagGroupName);
+  if (!structName) {
+    throw new DefinitionLoadError(`No tag group definition registered for "${tagGroupName}".`);
+  }
+  return resolveStruct(structName);
+}
 
 // ../core/src/map/container.ts
+var OCETAGS_FORMAT_VERSION = 5;
 var OCETAGS_EXTENSION = ".ocetags";
 
 // ../core/src/map/cache-crc.ts
@@ -34100,15 +34235,178 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
   }
 }
 
+// electron/batch-extract-fs.ts
+var fs6 = __toESM(require("fs"));
+var path8 = __toESM(require("path"));
+var WINDOWS_RESERVED_NAMES = /* @__PURE__ */ new Set([
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  "COM1",
+  "COM2",
+  "COM3",
+  "COM4",
+  "COM5",
+  "COM6",
+  "COM7",
+  "COM8",
+  "COM9",
+  "LPT1",
+  "LPT2",
+  "LPT3",
+  "LPT4",
+  "LPT5",
+  "LPT6",
+  "LPT7",
+  "LPT8",
+  "LPT9"
+]);
+function sanitizeMapName(mapFileNameOrPath) {
+  const base = path8.basename(mapFileNameOrPath);
+  const withoutExt = base.replace(/\.bak$/i, "").replace(/\.map$/i, "");
+  let sanitized = withoutExt.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").replace(/[. ]+$/, "").trim();
+  if (WINDOWS_RESERVED_NAMES.has(sanitized.toUpperCase())) {
+    sanitized = `_${sanitized}_`;
+  }
+  return sanitized || "exported_map";
+}
+function countExistingOcetagsFiles(targetDir) {
+  if (!fs6.existsSync(targetDir)) return 0;
+  let count = 0;
+  const queue = [targetDir];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    try {
+      const entries = fs6.readdirSync(current, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith(".")) continue;
+        const full = path8.join(current, entry.name);
+        if (entry.isDirectory()) {
+          queue.push(full);
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".ocetags")) {
+          count++;
+        }
+      }
+    } catch {
+    }
+  }
+  return count;
+}
+function getDriveFreeSpace(dirPath) {
+  try {
+    const stat = fs6.statfsSync(dirPath);
+    return stat.bavail * stat.bsize;
+  } catch {
+    return null;
+  }
+}
+function commitStagedFiles(stagingDir, targetDir) {
+  if (!fs6.existsSync(stagingDir)) return 0;
+  let count = 0;
+  const queue = [stagingDir];
+  const filesToMove = [];
+  while (queue.length > 0) {
+    const current = queue.pop();
+    let entries = [];
+    try {
+      entries = fs6.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path8.join(current, entry.name);
+      if (entry.isDirectory()) {
+        queue.push(full);
+      } else if (entry.isFile()) {
+        filesToMove.push(full);
+      }
+    }
+  }
+  for (const stagedFile of filesToMove) {
+    const rel = path8.relative(stagingDir, stagedFile);
+    const dest = path8.join(targetDir, rel);
+    fs6.mkdirSync(path8.dirname(dest), { recursive: true });
+    if (fs6.existsSync(dest)) {
+      try {
+        fs6.unlinkSync(dest);
+      } catch {
+      }
+    }
+    fs6.renameSync(stagedFile, dest);
+    count++;
+  }
+  try {
+    fs6.rmSync(stagingDir, { recursive: true, force: true });
+  } catch {
+  }
+  return count;
+}
+function discardStagedFiles(stagingDir) {
+  if (fs6.existsSync(stagingDir)) {
+    try {
+      fs6.rmSync(stagingDir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+function generateBatchReportText(manifest) {
+  const lines = [];
+  lines.push("======================================================================");
+  lines.push("OpenCE Modding Tool - Batch Map Tag Extraction Report");
+  lines.push("======================================================================");
+  lines.push(`Map:           ${manifest.mapFileName}`);
+  lines.push(`Scenario:      ${manifest.scenarioName}`);
+  lines.push(`Extracted At:  ${manifest.extractedAt}`);
+  lines.push(`Tool Version:  ${manifest.toolVersion} (Container format v${manifest.containerVersion})`);
+  lines.push("");
+  lines.push("SUMMARY:");
+  lines.push("----------------------------------------------------------------------");
+  lines.push(`Total tags in map:    ${manifest.summary.totalTagsInMap}`);
+  lines.push(`Extracted containers: ${manifest.summary.extractedCount} files (${(manifest.summary.totalBytesWritten / 1024 / 1024).toFixed(2)} MB)`);
+  lines.push(`Skipped (existing):   ${manifest.summary.skippedExistingCount}`);
+  lines.push(`External tags:        ${manifest.summary.externalCount}`);
+  lines.push(`Blocked tags:         ${manifest.summary.blockedCount}`);
+  lines.push(`Failed tags:          ${manifest.summary.failedCount}`);
+  lines.push("");
+  if (manifest.blocked.length > 0) {
+    lines.push(`BLOCKED TAGS (${manifest.blocked.length}):`);
+    lines.push("----------------------------------------------------------------------");
+    for (const b of manifest.blocked) {
+      lines.push(`- "${b.path}" (${b.group}): ${b.reason}`);
+    }
+    lines.push("");
+  }
+  if (manifest.external.length > 0) {
+    lines.push(`EXTERNAL TAGS (${manifest.external.length}):`);
+    lines.push("----------------------------------------------------------------------");
+    for (const ext of manifest.external) {
+      lines.push(`- "${ext.path}" (${ext.group}): ${ext.reason}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+function writeManifestAndReport(targetDir, manifest, reportText) {
+  fs6.mkdirSync(targetDir, { recursive: true });
+  const manifestPath = path8.join(targetDir, "manifest.json");
+  const reportPath = path8.join(targetDir, "batch-extract-report.txt");
+  fs6.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  fs6.writeFileSync(reportPath, reportText, "utf-8");
+  return { manifestPath, reportPath };
+}
+
 // electron/main.ts
 var mainWindow = null;
 var currentMapPath = null;
 var currentMapCompressed = false;
 var currentMapScenarioName = null;
+var currentOpenMapSummary = null;
 var currentMapModified = false;
 var currentMapBackedUp = false;
 var overwriteConfirmed = false;
 var currentExtractRequestId = null;
+var currentBatchExtractRequestId = null;
 var currentInjectContainerPath = null;
 var lastConvertiblePath = null;
 var convertSourcePath = null;
@@ -34124,7 +34422,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: "#15171c",
     webPreferences: {
-      preload: path8.join(__dirname, "preload.js"),
+      preload: path9.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -34133,7 +34431,7 @@ function createWindow() {
   if (isDev) {
     mainWindow.loadURL("http://localhost:5173");
   } else {
-    mainWindow.loadFile(path8.join(__dirname, "../dist/index.html"));
+    mainWindow.loadFile(path9.join(__dirname, "../dist/index.html"));
   }
   buildMenu();
   updateTitle();
@@ -34150,10 +34448,11 @@ function createWindow() {
 }
 function updateTitle() {
   if (!mainWindow) return;
-  const name = currentMapPath ? `${path8.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
+  const name = currentMapPath ? `${path9.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
   mainWindow.setTitle(`${name}OpenCE Modding Tool`);
 }
 function setOpenMapState(map) {
+  currentOpenMapSummary = map;
   currentMapPath = map.filePath;
   currentMapScenarioName = map.header.scenarioName;
   currentMapModified = !!map.modified;
@@ -34163,7 +34462,7 @@ function setOpenMapState(map) {
 }
 var unsavedChangesDeps = {
   isModified: () => currentMapModified,
-  fileName: () => currentMapPath ? path8.basename(currentMapPath) : "the open map",
+  fileName: () => currentMapPath ? path9.basename(currentMapPath) : "the open map",
   ask: async (fileName) => {
     const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
       type: "warning",
@@ -34230,6 +34529,7 @@ async function loadMapAtPath(filePath, options) {
     overwriteConfirmed = false;
     lastConvertiblePath = result.status === "unsupported" && result.convertible ? filePath : null;
     if (result.status === "ok") {
+      currentOpenMapSummary = result;
       currentMapPath = filePath;
       currentMapCompressed = false;
       currentMapScenarioName = result.header.scenarioName;
@@ -34239,6 +34539,7 @@ async function loadMapAtPath(filePath, options) {
       sendLog("info", `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
       if (options.askBackup) await askBackup(filePath);
     } else if (result.status === "compressed") {
+      currentOpenMapSummary = null;
       currentMapPath = filePath;
       currentMapCompressed = true;
       currentMapScenarioName = null;
@@ -34247,6 +34548,7 @@ async function loadMapAtPath(filePath, options) {
       updateTitle();
       sendLog("warn", "This map is compressed - decompress it (Tools > Decompress Map) to browse tags. Nothing of it is held for editing.");
     } else if (result.status === "unsupported") {
+      currentOpenMapSummary = null;
       currentMapPath = null;
       currentMapScenarioName = null;
       buildMenu();
@@ -34351,9 +34653,9 @@ async function extractTagsFlow(request) {
     return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before extracting tags." };
   }
   const settings = getSettings();
-  const defaultDir = settings.lastExtractDir && fs6.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
+  const defaultDir = settings.lastExtractDir && fs7.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
   const safeName = String(request.suggestedFileName || "extracted_tags").replace(/[<>:"/\\|?*]/g, "_") || "extracted_tags";
-  const defaultPath = path8.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
+  const defaultPath = path9.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
   let resolvedTarget;
   if (request.originalIndices.length > 1) {
     const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
@@ -34362,7 +34664,7 @@ async function extractTagsFlow(request) {
       properties: ["openDirectory", "createDirectory"]
     });
     if (canceled || filePaths.length === 0) return { ok: false, code: "CANCELLED", message: "Extraction was cancelled." };
-    resolvedTarget = path8.resolve(filePaths[0]);
+    resolvedTarget = path9.resolve(filePaths[0]);
   } else {
     const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
       title: "Extract tags to...",
@@ -34370,35 +34672,35 @@ async function extractTagsFlow(request) {
       filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }]
     });
     if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-    resolvedTarget = path8.resolve(filePath);
+    resolvedTarget = path9.resolve(filePath);
   }
-  const resolvedSourceMap = path8.resolve(currentMapPath);
-  const resolvedAppDir = path8.resolve(import_electron3.app.getAppPath());
+  const resolvedSourceMap = path9.resolve(currentMapPath);
+  const resolvedAppDir = path9.resolve(import_electron3.app.getAppPath());
   if (resolvedTarget === resolvedSourceMap) {
     return { ok: false, code: "REFUSED_SOURCE_PATH", message: "You cannot overwrite the source map file. Choose a different location." };
   }
-  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path8.sep)) {
+  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path9.sep)) {
     return { ok: false, code: "REFUSED_APP_PATH", message: "You cannot save inside the application install directory. Choose a different location." };
   }
-  if (fs6.existsSync(resolvedTarget)) {
+  if (fs7.existsSync(resolvedTarget)) {
     const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path8.basename(resolvedTarget)}" already exists.`,
+      message: `"${path9.basename(resolvedTarget)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   }
-  setLastExtractDir(path8.dirname(resolvedTarget));
+  setLastExtractDir(path9.dirname(resolvedTarget));
   sendLog("info", `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
   const { requestId, promise } = sendWorkerRequest(
     {
       type: "extractTags",
       originalIndices: request.originalIndices,
       outputPath: resolvedTarget,
-      sourceMapName: currentMapScenarioName ?? path8.basename(currentMapPath, ".map")
+      sourceMapName: currentMapScenarioName ?? path9.basename(currentMapPath, ".map")
     },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "extract", stage, percent })
@@ -34420,11 +34722,182 @@ async function extractTagsFlow(request) {
     currentExtractRequestId = null;
   }
 }
+async function batchExtractPreflightFlow() {
+  if (!mainWindow) return null;
+  if (!currentMapPath || currentMapCompressed || !currentOpenMapSummary) {
+    await showErrorBox("No map open", "Open and decompress a map before extracting tags.");
+    return null;
+  }
+  const settings = getSettings();
+  const defaultDir = settings.lastExtractDir && fs7.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
+  const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    title: "Choose parent folder to export map to...",
+    defaultPath: defaultDir,
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (canceled || filePaths.length === 0) return null;
+  const parentDir = path9.resolve(filePaths[0]);
+  const mapName = sanitizeMapName(currentMapScenarioName ?? path9.basename(currentMapPath, ".map"));
+  const targetDir = path9.join(parentDir, mapName);
+  const resolvedSourceMap = path9.resolve(currentMapPath);
+  const resolvedAppDir = path9.resolve(import_electron3.app.getAppPath());
+  if (targetDir === resolvedSourceMap) {
+    await showErrorBox("Invalid location", "You cannot extract into the source map file location. Choose a different folder.");
+    return null;
+  }
+  if (targetDir === resolvedAppDir || targetDir.startsWith(resolvedAppDir + path9.sep)) {
+    await showErrorBox("Invalid location", "You cannot save inside the application install directory. Choose a different folder.");
+    return null;
+  }
+  setLastExtractDir(parentDir);
+  const tags = currentOpenMapSummary.tags;
+  const knownGroups = new Set(getAllTagGroupNames());
+  let extractableCount = 0;
+  let externalCount = 0;
+  let blockedCount = 0;
+  let estimatedTotalBytes = 0;
+  for (const t of tags) {
+    if (t.isExternal) {
+      externalCount++;
+      continue;
+    }
+    if (!knownGroups.has(t.primaryClassName)) {
+      blockedCount++;
+      continue;
+    }
+    const def = getGroupDefinition(t.primaryClassName);
+    if (def.extractable === false) {
+      blockedCount++;
+      continue;
+    }
+    extractableCount++;
+    estimatedTotalBytes += t.estimatedSize ?? 0;
+  }
+  const existingFileCount = countExistingOcetagsFiles(targetDir);
+  const freeSpaceBytes = getDriveFreeSpace(parentDir);
+  return {
+    ok: true,
+    mapName,
+    scenarioName: currentMapScenarioName ?? mapName,
+    parentDir,
+    targetDir,
+    totalTags: tags.length,
+    extractableCount,
+    externalCount,
+    blockedCount,
+    estimatedTotalBytes,
+    freeSpaceBytes,
+    existingFileCount
+  };
+}
+async function startBatchExtractFlow(options) {
+  if (!mainWindow) return { ok: false, code: "NO_WINDOW", message: "Application window is not available." };
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const resourceMapPaths = {};
+  for (const kind of ["bitmaps", "sounds", "loc"]) {
+    const p = settings.resourceMaps[kind];
+    if (p) resourceMapPaths[kind] = p;
+  }
+  const sourceMapName = currentMapScenarioName ?? path9.basename(currentMapPath, ".map");
+  sendLog("info", `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode})...`);
+  const { requestId, promise } = sendWorkerRequest(
+    {
+      type: "batchExtract",
+      parentDir: options.parentDir,
+      sourceMapName,
+      mode: options.mode,
+      resourceMapPaths
+    },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "batchExtract", stage, percent })
+  );
+  currentBatchExtractRequestId = requestId;
+  try {
+    const result = await promise;
+    if (result.ok) {
+      sendLog(
+        "info",
+        `Batch extraction complete: ${result.summary.extractedCount} tags extracted to ${result.summary.targetDir} (${(result.summary.totalBytesWritten / 1024 / 1024).toFixed(2)} MB).`
+      );
+    } else if (result.code === "CANCELLED") {
+      sendLog("warn", "Batch extraction cancelled.");
+    }
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Batch extraction failed: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  } finally {
+    currentBatchExtractRequestId = null;
+  }
+}
+function cancelBatchExtractFlow() {
+  if (currentBatchExtractRequestId) {
+    cancelWorkerRequest(currentBatchExtractRequestId, sendLog);
+  }
+}
+async function finalizeBatchExtractFlow(request) {
+  try {
+    if (request.action === "keep") {
+      commitStagedFiles(request.stagingDir, request.targetDir);
+      if (request.summary) {
+        const manifest = {
+          manifestVersion: 1,
+          toolVersion: "0.1.0",
+          containerVersion: OCETAGS_FORMAT_VERSION,
+          extractedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          mapFileName: path9.basename(currentMapPath ?? request.summary.mapName),
+          scenarioName: currentMapScenarioName ?? request.summary.mapName,
+          summary: {
+            totalTagsInMap: request.summary.totalTagsInMap,
+            extractedCount: request.summary.extractedCount,
+            skippedExistingCount: request.summary.skippedCount,
+            externalCount: request.summary.externalCount,
+            blockedCount: request.summary.blockedCount,
+            failedCount: request.summary.failedCount,
+            totalBytesWritten: request.summary.totalBytesWritten
+          },
+          files: request.summary.tags.filter((t) => t.status === "extracted").map((t) => ({
+            path: t.path,
+            group: t.group,
+            relativePath: path9.relative(request.targetDir, t.outputPath ?? ""),
+            sizeBytes: t.sizeBytes ?? 0,
+            tagCount: t.tagCount ?? 1
+          })),
+          blocked: request.summary.tags.filter((t) => t.status === "blocked").map((t) => ({
+            path: t.path,
+            group: t.group,
+            reason: t.reason ?? "Blocked tag"
+          })),
+          external: request.summary.tags.filter((t) => t.status === "external").map((t) => ({
+            path: t.path,
+            group: t.group,
+            reason: t.reason ?? "External resource map tag"
+          }))
+        };
+        const reportText = generateBatchReportText(manifest);
+        writeManifestAndReport(request.targetDir, manifest, reportText);
+      }
+      sendLog("info", `Committed staged batch extraction files to ${request.targetDir}.`);
+    } else {
+      discardStagedFiles(request.stagingDir);
+      sendLog("info", "Cleaned up cancelled batch extraction staging directory.");
+    }
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    sendLog("error", `Failed to finalize batch extraction: ${msg}`);
+    return { ok: false, message: msg };
+  }
+}
 var RESOURCE_MAP_FILTER_NAMES = { bitmaps: "bitmaps.map", sounds: "sounds.map", loc: "loc.map" };
 function readResourceMapStatus(kind, filePath) {
   if (!filePath) return { state: "not-configured" };
   try {
-    const buffer = fs6.readFileSync(filePath);
+    const buffer = fs7.readFileSync(filePath);
     const result = validateResourceMapFile(buffer, kind);
     if (!result.ok) return { state: "missing-or-unreadable", path: filePath, error: result.error };
     return { state: "ok", path: filePath, fileSizeBytes: buffer.length, entryCount: result.identity.entryCount };
@@ -34494,7 +34967,7 @@ async function planInjectFlow(containerPath, mode) {
 async function confirmScenarioName(filePath) {
   let warnings;
   try {
-    warnings = scenarioNameFromFileName(path8.basename(filePath)).warnings;
+    warnings = scenarioNameFromFileName(path9.basename(filePath)).warnings;
   } catch (err) {
     await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message: "This file name cannot be used for a map.", detail: err.message });
     return false;
@@ -34537,6 +35010,65 @@ async function applyInjectFlow() {
     currentInjectContainerPath = null;
   }
 }
+async function getTagFieldsFlow(tagIndex) {
+  if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
+  const { promise } = sendWorkerRequest({ type: "getTagFields", tagIndex }, sendLog);
+  try {
+    return await promise;
+  } catch (err) {
+    const e = err;
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
+async function updateTagFieldFlow(tagIndex, fieldName, newValue) {
+  if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
+  const { promise } = sendWorkerRequest(
+    { type: "updateTagField", tagIndex, fieldName, newValue },
+    sendLog
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog("info", `Updated "${fieldName}" in tag #${tagIndex} (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Field update failed: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
+async function getDependencySlotsFlow(tagIndex) {
+  if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
+  const { promise } = sendWorkerRequest({ type: "getDependencySlots", tagIndex }, sendLog);
+  try {
+    return await promise;
+  } catch (err) {
+    const e = err;
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
+async function setDependencySlotFlow(tagIndex, fieldPath, newTagId) {
+  if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
+  const { promise } = sendWorkerRequest({ type: "setDependencySlot", tagIndex, fieldPath, newTagId }, sendLog);
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog("info", `Swapped dependency "${fieldPath}" of tag #${tagIndex} (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Dependency swap failed: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
 var saveMapDeps = {
   getOpenMap: () => mainWindow && currentMapPath ? { filePath: currentMapPath, compressed: currentMapCompressed, modified: currentMapModified, backedUp: currentMapBackedUp, overwriteConfirmed } : null,
   confirmOverwriteWithoutBackup: async (filePath) => {
@@ -34546,7 +35078,7 @@ var saveMapDeps = {
       defaultId: 1,
       cancelId: 1,
       noLink: true,
-      message: `Overwrite ${path8.basename(filePath)} without a backup?`,
+      message: `Overwrite ${path9.basename(filePath)} without a backup?`,
       detail: "You skipped the backup copy when you opened this map, so the current file cannot be restored afterwards. Use File > Save As to keep it."
     });
     return response === 0;
@@ -34584,7 +35116,7 @@ async function discardChangesFlow() {
     defaultId: 1,
     cancelId: 1,
     noLink: true,
-    message: `Discard all unsaved changes to ${path8.basename(currentMapPath)}?`,
+    message: `Discard all unsaved changes to ${path9.basename(currentMapPath)}?`,
     detail: "The map is reopened from the file on disk. Injected tags that were not saved are lost."
   });
   if (response !== 0) return null;
@@ -34613,7 +35145,7 @@ var saveMapAsDeps = {
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path8.basename(filePath)}" already exists.`,
+      message: `"${path9.basename(filePath)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     return response === 0;
@@ -34777,6 +35309,7 @@ function buildMenu() {
         { label: "Recompress Map", click: () => recompressFlow() },
         { type: "separator" },
         { label: "Extract Tags...", accelerator: "CmdOrCtrl+E", click: () => mainWindow?.webContents.send("menu:action", "extract-tags") },
+        { label: "Extract Whole Map...", click: () => mainWindow?.webContents.send("menu:action", "extract-whole-map") },
         { label: "Inject Tags...", click: () => mainWindow?.webContents.send("menu:action", "inject-tags") },
         { label: "Verify Embedded Data...", click: () => mainWindow?.webContents.send("menu:action", "verify-embedded-data") },
         { type: "separator" },
@@ -34810,12 +35343,20 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.on("tags:cancelExtract", () => {
     if (currentExtractRequestId) cancelWorkerRequest(currentExtractRequestId, sendLog);
   });
+  import_electron3.ipcMain.handle("tags:batchExtractPreflight", () => batchExtractPreflightFlow());
+  import_electron3.ipcMain.handle("tags:startBatchExtract", (_e, options) => startBatchExtractFlow(options));
+  import_electron3.ipcMain.on("tags:cancelBatchExtract", () => cancelBatchExtractFlow());
+  import_electron3.ipcMain.handle("tags:finalizeBatchExtract", (_e, request) => finalizeBatchExtractFlow(request));
   import_electron3.ipcMain.handle("resourceMaps:pick", (_e, kind) => pickResourceMapFlow(kind));
   import_electron3.ipcMain.handle("resourceMaps:getStatuses", () => getResourceMapStatusesFlow());
   import_electron3.ipcMain.handle("tags:pickInjectContainer", () => pickInjectContainerFlow());
   import_electron3.ipcMain.handle("tags:planInject", (_e, containerPath, mode) => planInjectFlow(containerPath, mode));
   import_electron3.ipcMain.handle("tags:applyInject", () => applyInjectFlow());
   import_electron3.ipcMain.handle("tags:verifyEmbeddedData", () => verifyEmbeddedDataFlow());
+  import_electron3.ipcMain.handle("tags:getFields", (_e, tagIndex) => getTagFieldsFlow(tagIndex));
+  import_electron3.ipcMain.handle("tags:updateField", (_e, tagIndex, fieldName, newValue) => updateTagFieldFlow(tagIndex, fieldName, newValue));
+  import_electron3.ipcMain.handle("tags:getDependencySlots", (_e, tagIndex) => getDependencySlotsFlow(tagIndex));
+  import_electron3.ipcMain.handle("tags:setDependencySlot", (_e, tagIndex, fieldPath, newTagId) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
   import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
   import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());
@@ -34842,7 +35383,7 @@ import_electron3.app.on("window-all-closed", () => {
   if (process.platform !== "darwin") import_electron3.app.quit();
 });
 import_electron3.app.on("open-file", (_event, filePath) => {
-  if (fs6.existsSync(filePath)) {
+  if (fs7.existsSync(filePath)) {
     openMapGuarded(filePath).then((r) => r && mainWindow?.webContents.send("map:loaded", r));
   }
 });

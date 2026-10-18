@@ -29,6 +29,8 @@ export function fourCCToString(value: number): string {
   );
 }
 
+export const NULL_TAG_ID = 0xffffffff;
+
 export interface TagClassInfo {
   name: string;
   groupId: string;

@@ -10,6 +10,10 @@ interface Props {
   onExtractRequested: (indices: number[]) => void;
   /** null = enabled; otherwise the tooltip/disabled reason shown on the Extract button/menu item. */
   extractDisabledReason: string | null;
+  onExtractWholeMap?: () => void;
+  canExtractWholeMap?: boolean;
+  /** Right-click "Tag Editor..." - opens the full field editor for the right-clicked tag. */
+  onEditTag?: (tag: TagEntrySummary) => void;
 }
 
 type GroupMode = 'class' | 'folder';
@@ -41,12 +45,22 @@ function smallButtonStyle(): CSSProperties {
   };
 }
 
-export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChange, onExtractRequested, extractDisabledReason }: Props) {
+export default function TagBrowser({
+  tags,
+  onFocusTag,
+  selected,
+  onSelectedChange,
+  onExtractRequested,
+  extractDisabledReason,
+  onExtractWholeMap,
+  canExtractWholeMap,
+  onEditTag,
+}: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
   const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set());
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; index: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tag: TagEntrySummary } | null>(null);
 
   // A brand new `tags` array means a different map was opened - start fully collapsed again.
   // Does NOT fire on re-renders of the same map (e.g. after closing the dependency dialog).
@@ -132,13 +146,31 @@ export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChang
   const handleRowContextMenu = (e: ReactMouseEvent, t: TagEntrySummary) => {
     e.preventDefault();
     if (!selected.has(t.index)) onSelectedChange(new Set([t.index]));
-    setContextMenu({ x: e.clientX, y: e.clientY, index: t.index });
+    setContextMenu({ x: e.clientX, y: e.clientY, tag: t });
   };
 
   const requestExtract = () => {
     if (selected.size === 0) return;
     onExtractRequested(Array.from(selected));
   };
+
+  const contextMenuTag = contextMenu ? contextMenu.tag : null;
+  const editDisabledReason = contextMenuTag
+    ? contextMenuTag.isExternal && contextMenuTag.primaryClassName !== 'sound'
+      ? 'External tag - edit via a local copy instead'
+      : null
+    : null;
+  const menuItemStyle = (disabled: boolean): CSSProperties => ({
+    display: 'block',
+    width: '100%',
+    textAlign: 'left',
+    background: 'transparent',
+    border: 'none',
+    padding: '7px 14px',
+    color: disabled ? 'var(--text-dim)' : 'var(--text-primary)',
+    fontSize: 12.5,
+    cursor: disabled ? 'default' : 'pointer',
+  });
 
   return (
     <div data-testid="hierarchy-tag-browser" style={{ width: 360, flexShrink: 0, borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--bg-panel)' }}>
@@ -182,13 +214,34 @@ export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChang
               color: selected.size && !extractDisabledReason ? '#06202c' : 'var(--text-dim)',
               border: '1px solid var(--border)',
               borderRadius: 2,
-              padding: '5px 10px',
+              padding: '5px 8px',
               fontSize: 11.5,
               whiteSpace: 'nowrap',
             }}
           >
             Extract ({selected.size})
           </button>
+          {onExtractWholeMap && (
+            <button
+              data-testid="extract-whole-map-button"
+              disabled={!canExtractWholeMap}
+              title={!canExtractWholeMap ? 'Open and decompress a map first' : 'Batch extract all tags from this map into folders'}
+              onClick={onExtractWholeMap}
+              style={{
+                flex: 1,
+                background: canExtractWholeMap ? 'var(--bg-panel-header)' : 'var(--bg-main)',
+                color: canExtractWholeMap ? 'var(--text-primary)' : 'var(--text-dim)',
+                border: '1px solid var(--border)',
+                borderRadius: 2,
+                padding: '5px 8px',
+                fontSize: 11.5,
+                whiteSpace: 'nowrap',
+                cursor: canExtractWholeMap ? 'pointer' : 'default',
+              }}
+            >
+              Extract Whole Map...
+            </button>
+          )}
         </div>
       </div>
 
@@ -273,6 +326,22 @@ export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChang
           }}
         >
           <button
+            data-testid="tag-row-context-edit"
+            disabled={!!editDisabledReason}
+            title={editDisabledReason ?? undefined}
+            onClick={() => {
+              const t = contextMenuTag;
+              setContextMenu(null);
+              if (t) {
+                focusRow(t);
+                onEditTag?.(t);
+              }
+            }}
+            style={menuItemStyle(!!editDisabledReason)}
+          >
+            Tag Editor...
+          </button>
+          <button
             data-testid="tag-row-context-extract"
             disabled={!!extractDisabledReason}
             title={extractDisabledReason ?? undefined}
@@ -280,17 +349,7 @@ export default function TagBrowser({ tags, onFocusTag, selected, onSelectedChang
               setContextMenu(null);
               requestExtract();
             }}
-            style={{
-              display: 'block',
-              width: '100%',
-              textAlign: 'left',
-              background: 'transparent',
-              border: 'none',
-              padding: '7px 14px',
-              color: extractDisabledReason ? 'var(--text-dim)' : 'var(--text-primary)',
-              fontSize: 12.5,
-              cursor: extractDisabledReason ? 'default' : 'pointer',
-            }}
+            style={menuItemStyle(!!extractDisabledReason)}
           >
             Extract (with dependencies)...
           </button>

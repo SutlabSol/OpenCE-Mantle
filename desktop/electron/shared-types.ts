@@ -1,8 +1,10 @@
-/** Shared IPC contract between main, preload, and renderer. Kept dependency-free (no Electron types). */
-
 import type { WarningKind } from '../../core/src/map/dependency-walker';
 import type { RetailConversionReport } from '../../core/src/map/convert/retail-to-ce';
 import type { TagDataRepairId } from '../../core/src/map/convert/tag-data-repairs';
+import type { TagFieldDescriptor, TagFieldsResult, TagFieldKind, TagReflexiveElement } from '../../core/src/map/tag-field-editor';
+import type { TagDependencySlot } from '../../core/src/map/tag-dependency-swapper';
+
+export type { TagFieldDescriptor, TagFieldsResult, TagFieldKind, TagReflexiveElement, TagDependencySlot };
 
 export interface MapHeaderSummary {
   scenarioName: string;
@@ -112,6 +114,101 @@ export type ExtractTagsResult =
   | { ok: true; outputPath: string; tagCount: number; fileSizeBytes: number; carriedOverWarnings: DependencyWarningInfo[]; outputFiles?: string[] }
   | { ok: false; code: 'CANCELLED'; message: string }
   | { ok: false; code: string; message: string };
+
+/* ------------------------------- Roadmap Item C: Whole Map Batch Extract ------------------------------- */
+
+export type BatchExtractMode = 'skip' | 'replace';
+
+export interface BatchExtractManifestFileEntry {
+  path: string;
+  group: string;
+  relativePath: string;
+  sizeBytes: number;
+  tagCount: number;
+}
+
+export interface BatchExtractManifestItem {
+  path: string;
+  group: string;
+  reason: string;
+}
+
+export interface BatchExtractManifest {
+  manifestVersion: 1;
+  toolVersion: string;
+  containerVersion: number;
+  extractedAt: string;
+  mapFileName: string;
+  scenarioName: string;
+  mapCrc32?: number;
+  summary: {
+    totalTagsInMap: number;
+    extractedCount: number;
+    skippedExistingCount: number;
+    externalCount: number;
+    blockedCount: number;
+    failedCount: number;
+    totalBytesWritten: number;
+  };
+  files: BatchExtractManifestFileEntry[];
+  blocked: BatchExtractManifestItem[];
+  external: BatchExtractManifestItem[];
+}
+
+export interface BatchExtractTagReport {
+  path: string;
+  group: string;
+  status: 'extracted' | 'skipped-existing' | 'blocked' | 'external' | 'failed';
+  reason?: string;
+  outputPath?: string;
+  sizeBytes?: number;
+  tagCount?: number;
+  warnings?: DependencyWarningInfo[];
+}
+
+export interface BatchExtractSummary {
+  mapName: string;
+  targetDir: string;
+  totalTagsInMap: number;
+  extractedCount: number;
+  skippedCount: number;
+  blockedCount: number;
+  externalCount: number;
+  failedCount: number;
+  totalBytesWritten: number;
+  elapsedMs: number;
+  tags: BatchExtractTagReport[];
+  manifestPath?: string;
+  reportPath?: string;
+  stagingDir?: string;
+}
+
+export interface BatchExtractPreflightResult {
+  ok: true;
+  mapName: string;
+  scenarioName: string;
+  parentDir: string;
+  targetDir: string;
+  totalTags: number;
+  extractableCount: number;
+  externalCount: number;
+  blockedCount: number;
+  estimatedTotalBytes: number;
+  freeSpaceBytes: number | null;
+  existingFileCount: number;
+}
+
+export type BatchExtractResult =
+  | { ok: true; summary: BatchExtractSummary }
+  | { ok: false; code: 'CANCELLED'; message: string; partialSummary?: BatchExtractSummary; stagingDir?: string; targetDir?: string }
+  | { ok: false; code: string; message: string };
+
+export interface FinalizeBatchExtractRequest {
+  action: 'keep' | 'delete';
+  stagingDir: string;
+  targetDir: string;
+  summary?: BatchExtractSummary;
+}
 
 export interface AppSettings {
   lastExtractDir: string | null;
@@ -248,7 +345,35 @@ export type WorkerRequest =
   | { type: 'verifyEmbeddedData'; requestId: string }
   | { type: 'convertPreflight'; requestId: string; filePath: string; bitmapsPath?: string; soundsPath?: string }
   | { type: 'convertMap'; requestId: string; sourcePath: string; outputPath: string; acknowledgeScripts: boolean; repairs: ConvertRepairChoice; bitmapsPath?: string; soundsPath?: string }
+  | {
+      type: 'batchExtract';
+      requestId: string;
+      parentDir: string;
+      sourceMapName: string;
+      mode: BatchExtractMode;
+      resourceMapPaths: Partial<Record<ResourceMapKind, string>>;
+    }
+  | { type: 'getTagFields'; requestId: string; tagIndex: number }
+  | { type: 'updateTagField'; requestId: string; tagIndex: number; fieldName: string; newValue: unknown }
+  | { type: 'getDependencySlots'; requestId: string; tagIndex: number }
+  | { type: 'setDependencySlot'; requestId: string; tagIndex: number; fieldPath: string; newTagId: number | null }
   | { type: 'cancel'; requestId: string };
+
+export type GetDependencySlotsResult =
+  | { ok: true; slots: TagDependencySlot[] }
+  | { ok: false; code: string; message: string };
+
+export type SetDependencySlotResult =
+  | { ok: true; fieldPath: string; newTagId: number; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
+
+export type GetTagFieldsResult =
+  | { ok: true; data: TagFieldsResult }
+  | { ok: false; code: string; message: string };
+
+export type UpdateTagFieldResult =
+  | { ok: true; fieldName: string; newValue: unknown; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
 
 export type WorkerResponse =
   | { type: 'ready'; info: string }
@@ -268,6 +393,10 @@ export interface OpenceApi {
   getDependencies(originalIndices: number[]): Promise<GetDependenciesResult>;
   extractTags(request: ExtractTagsRequest): Promise<ExtractTagsResult>;
   cancelExtraction(): void;
+  batchExtractPreflight(): Promise<BatchExtractPreflightResult | null>;
+  startBatchExtract(options: { parentDir: string; mode: BatchExtractMode }): Promise<BatchExtractResult>;
+  cancelBatchExtract(): void;
+  finalizeBatchExtract(request: FinalizeBatchExtractRequest): Promise<{ ok: boolean; message?: string }>;
   pickResourceMap(kind: ResourceMapKind): Promise<ResourceMapPickResult>;
   getResourceMapStatuses(): Promise<Record<ResourceMapKind, ResourceMapStatus>>;
   pickInjectContainer(): Promise<{ path: string; paths: string[] } | null>;
@@ -302,6 +431,14 @@ export interface OpenceApi {
   onMapLoaded(cb: (result: LoadMapResult) => void): () => void;
   /** The open map changed in place (Inject applied, saved, discarded): refresh it, keep the selection. */
   onMapUpdated(cb: (result: OpenMapSummary) => void): () => void;
+  /** M7a: fetch decoded fields and schema for the focused tag in the open map. */
+  getTagFields(tagIndex: number): Promise<GetTagFieldsResult>;
+  /** M7a: edit a root struct field value in memory in the open map. */
+  updateTagField(tagIndex: number, fieldName: string, newValue: unknown): Promise<UpdateTagFieldResult>;
+  /** Dependency Swapper: every dependency slot of the tag (nested blocks and null slots included). */
+  getDependencySlots(tagIndex: number): Promise<GetDependencySlotsResult>;
+  /** Dependency Swapper: point one slot at any tag of the open map (null clears it). In memory only. */
+  setDependencySlot(tagIndex: number, fieldPath: string, newTagId: number | null): Promise<SetDependencySlotResult>;
   getPathForFile(file: File): string;
 }
 

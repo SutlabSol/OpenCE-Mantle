@@ -25,6 +25,14 @@ needs re-verification / unverified / blocked)
 | Header `crc32` on save (File > Save, File > Save As) | **verified by tests; a finalized SWAP map loads in OpenCE (user-confirmed 2026-10-11)** | Recomputed by `finalizeForSave` on every save (branch `fix/swap-load-failure`); reproduces the stored crc32 of all 5 CE sample maps. |
 | In-memory Inject, File > Save / Save As / Discard Changes, backup prompt on open, unsaved-changes prompt, `.bak` handling | **verified by tests; works on Windows and the saved map loads in OpenCE (user-confirmed 2026-10-11)** | Branch `feat/inject-in-memory-save` (see "In-memory inject and File > Save" in Decisions). Inject writes nothing; Save overwrites the opened file atomically (the one permitted exception to "never overwrite the source map", stated in RULES.md and CLAUDE.md); Save As writes a new file that becomes the open map. Independent ADD audits pass on the in-memory buffer and on the saved file (`map-worker.inject-save.test.ts`). The unsaved-changes prompt's logic is tested (`save-map.test.ts`); the real Electron dialog was only exercised by hand. |
 | Roadmap Item A: Multi-tag extraction & multi-file inject | **verified by tests (2026-10-15)** | Step A1: multi-tag folder extraction with per-tag closures (`openDirectory`); Step A2: multi-container file picker, sequential planning against modified in-memory map buffer, sequential apply, and batched totals report. 116 desktop tests pass. |
+| Roadmap Item C: Batch extract of a whole open map | **verified by tests (2026-10-15)** | Extraction of all extractable tags into mirrored folders with `.ocetags` transitive closures, manifest.json, batch-extract-report.txt, skip/replace collision handling, and cancel cleanup. 132 desktop tests pass. |
+| M7a in-place tag field editor | **verified by tests (2026-10-16)** | Core tag-field-editor (schema-driven root struct decode/encode for numbers, bounds, enums, bitfields, strings, tag dependencies), worker IPC handlers, and preserved `TagFieldEditorPanel.tsx` component ready for the right-click Tag Editor dialog. |
+| M7b Right-Click Tag Editor & Nested Reflexive Field Editing | **verified by tests (2026-10-18)** | Right-click tag row context menu opens `TagEditorDialog` modal. `TagFieldEditorPanel` filters dependencies (kept in Swapper) and decodes/edits value fields. `core/src/map/tag-field-editor.ts` recursively decodes `TagReflexive` blocks (`TagReflexiveElement[]`) up to depth 8; `resolveTargetField` and `writeTagFieldValue` support dotted-path in-place mutation (e.g. `magazines[0].rounds recharged`, `triggers[0].rounds per second`) across arbitrary depths. UI renders collapsible reflexive blocks with element badges and search auto-expansion. 474 core tests and 149 desktop tests passing. |
+| Dependency Swapper (`PropertiesPalette.tsx`) | **verified by tests (2026-10-16)** | Core `tag-dependency-swapper.ts` (`listTagDependencySlots`, `setTagDependencySlot` walking root struct + nested reflexive blocks in struct order), worker IPC (`getDependencySlots`, `setDependencySlot`), and Halo Hacker Tools-style Dependency Swapper UI in `PropertiesPalette.tsx` supporting any-class swaps and `Nulled Out` slots. 468 core tests and 142 desktop tests passing. |
+| Milestone 8: 3D Scenario Viewport & Map Viewer | **planned (Phase 2)** | Read-only Three.js WebGL viewport in the Center Workspace. Decodes `sbsp` 56-byte vertex buffers, 6-byte triangle indices, lightmap UVs, and model (`gbxmodel`/`mod2`) LOD parts with UV scaling (`uScale`/`vScale`). Texture skinning pipeline with universal shader-to-bitmap resolution and DXT1/3/5 decoding from `bitmaps.map` and internal map raw data. 6-DOF fly/orbit camera navigation. |
+| Milestone 9: 3D Scenario Editing & Object Manipulation | **planned (Phase 2)** | Interactive 3D Forge-style scenario editor. Three.js `TransformControls` (translate/rotate gizmos), exact Halo Euler rotation math (`roll, -pitch, yaw`), raycast-to-BSP ground snapping (`G`), searchable scenario hierarchy outliner (Vehicles, Scenery, Spawns, Teleporters, Trigger Volumes), safe `scnr` instance and palette mutation, and full Undo/Redo stack. |
+| Milestone 10: Automated BSP Swapper & Map Rebuilder | **planned (Phase 2)** | 1-Click SP-to-MP BSP Swapper: direct `sbsp` transfer without intermediate disk dumps, recursive shader/bitmap/sky dependency copying into target, internal `sbsp` virtual pointer re-basing, automatic MP spawn & equipment relocation onto the new BSP terrain floor. Includes 1-click Map Header Repair tool for HMT-rebuilt maps (resolves `TheIsland-Ter.map` `modelDataSize` under-count). |
+| Milestone 11: OpenCE Resource Pack Mods & HEK Tag Export | **planned (Phase 2)** | "Export as OpenCE Mod..." context menu action and in-editor mod packaging. Generates ready-to-play resource packs with `mod.toml` (name, version, authors, description, format=1) and `tags/<path>.<hek_ext>` (64-byte `blam` header, Big-Endian struct reflexives, zlib-compressed bitmaps, model geometry, sounds, and unicode strings). Enables non-destructive global visual/audio/text mods that run across all maps without modifying `.map` files. |
 | Sub-header `tagFileChecksums` (tag data +0x8) after injection | **not recalculated; map still loads in OpenCE (user-confirmed 2026-10-11)** | Left unchanged on purpose. The SWAP map above kept the source's stale value and loads in OpenCE, so OpenCE does not reject it at load. Whether anything else (other loaders, netgame checks) validates it is unverified. The save result still says so. |
 
 ### Windows check to move "M4 extraction" to verified (no OpenCE needed)
@@ -661,28 +669,19 @@ needs re-verification / unverified / blocked)
     - Container format bumped to v5 (`OCETAGS_FORMAT_VERSION = 5`) storing base64 vertex and triangle data per geometry part.
     - Extractor captures model geometry parts using `scanGbxmodelGeometryBoundaries` and `captureGbxmodelGeometry`; removes unconditional `uncapturedData` warning.
     - Injector implements combined 3-region insertion ($E$ embedded raw assets, $V$ new vertex buffers, $T$ padded triangle buffers) into the model data region, updates cache & tag data headers, and patches `vertexOffset`, `triangleOffset`, and `triangleOffset2` on injected `GBXModelGeometryPart` structs.
-  - **C. Batch extract of a whole open map.** Decisions:
-    - Output: `<chosen parent folder>\<mapname>\<top-level folder of the tag path>\...`, mirroring the
-      tag path (weapons, vehicles, scenery, ...). `<mapname>` comes from the map's file name (strip
-      `.map` and `.bak`), so extracting two maps never mixes their files.
-    - Each tag file carries all its dependencies.
-    - Progress bar and Cancel. On Cancel ask: keep what has been exported, or delete everything from
-      this batch. Planned design: a staging folder inside `<mapname>`, moved into place at the end or
-      on Cancel/Keep; Cancel/Delete removes the staging folder, so nothing already on disk is lost.
-    - Re-running the same map: ask Skip existing / Replace all / Cancel, default Skip. If Skip
-      proves too large to build, fall back to a clear confirmation before replacing all existing
-      files.
-    - A small manifest per batch (tool version, container version, files), so files made by older
-      versions can be identified and offered for replacement.
-    - Blocked tags (gbxmodel geometry until B is done, BSP, uncaptured data) are listed in a report,
-      never silently skipped.
-  - **D. Open design questions (settle when planning A and C):**
-    1. File names when two tags share a path but differ in class (e.g. `halo_logo` as a
-       ui_widget_definition and as a bitmap).
-    2. Windows limits: path length, reserved names (CON, NUL, ...), case-insensitive collisions.
-    3. Estimating total output size and free disk space before starting (measure bloodgulch and
-       coldsnap).
-    4. Progress and cancel behaviour for thousands of tags.
+  - **C. Batch extract of a whole open map.** **(Completed & verified by tests, 2026-10-15)**
+    - Output layout: `<chosen parent folder>\<mapname>\<mirrored tag path folders>\<leaf>.<group>.ocetags`. `<mapname>` derived from map file name (stripping `.map` and `.bak`, sanitized for Windows).
+    - File naming: `<leaf>.<group>.ocetags` disambiguates tags sharing the same path with different classes (e.g. `halo_logo.ui_widget_definition.ocetags` and `halo_logo.bitmap.ocetags`).
+    - Staging safety: all writes occur in a `.staging-<uuid>` directory inside the map folder. Upon completion, staged files are committed into place. On Cancel, user is prompted whether to Keep or Delete; Delete removes `.staging-...` leaving the destination untouched.
+    - Re-run detection: checks existing `.ocetags` files in target folder and prompts user for "Skip existing files (recommended)" vs "Replace all existing files".
+    - Size & disk space estimation: calculates total estimated uncompressed size and queries drive free space (`fs.statfsSync`) before starting.
+    - Manifest & report: generates versioned `manifest.json` and human-readable `batch-extract-report.txt` in the output root listing all extracted, skipped, external, and blocked tags.
+    - UI: `BatchExtractDialog` with progress bar, live tag progress indicator, cancel handling, and completion summary with "Open Output Folder" button. Accessible from Tools menu and TagBrowser hierarchy header.
+  - **D. Open design questions (settled in A, B, and C):**
+    1. File names when two tags share a path but differ in class: resolved by `<leaf>.<group>.ocetags`.
+    2. Windows limits: reserved names (`CON`, `PRN`, `AUX`, etc.), illegal characters (`<>:"/\|?*`), and trailing spaces/dots sanitized in `batch-extract-fs.ts`.
+    3. Estimating total output size and free disk space before starting: calculated via `sizeByIndex` and `fs.statfsSync`.
+    4. Progress and cancel behaviour for thousands of tags: staged directory architecture with Keep vs Delete options and responsive cancellation.
 - 2026-10-11: **Swap load failure (branch `fix/swap-load-failure`, user-approved with
   conditions).** The user's SWAP of `globals\globals` with dependencies into bloodgulch (1037
   swapped, 50 gbxmodels blocked) showed a blank blue screen in OpenCE; the original with only the

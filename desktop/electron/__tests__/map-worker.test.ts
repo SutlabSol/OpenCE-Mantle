@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { inspectCustomEditionMap } from '../../../core/src/index';
-import { __setCurrentMapForTest, __setSinkForTest, __cancelForTest, runExtractTags, runSaveMapAs, type LoadedMap } from '../map-worker';
+import { __setCurrentMapForTest, __setSinkForTest, __cancelForTest, runExtractTags, runSaveMapAs, runBatchExtract, runGetTagFields, runUpdateTagField, runGetDependencySlots, runSetDependencySlot, type LoadedMap } from '../map-worker';
 
 /**
  * Not sharing `core/tests/helpers/sample-maps.ts` here: that helper uses `import.meta.url`
@@ -144,5 +144,237 @@ describe.skipIf(!haveBloodgulch)(saveTitle, () => {
     const messages = save(loadedMap.filePath.toUpperCase());
     expect(messages.find((m) => m.type === 'error')?.code).toBe('REFUSED_SOURCE_PATH');
     expect(fs.existsSync(loadedMap.filePath)).toBe(false);
+  });
+});
+
+const batchTitle = haveBloodgulch
+  ? 'map-worker whole map batch extract (Roadmap Item C)'
+  : `map-worker whole map batch extract [missing bloodgulch.map in "${SAMPLE_MAPS_DIR}"]`;
+
+describe.skipIf(!haveBloodgulch)(batchTitle, () => {
+  let loadedMap: LoadedMap;
+  let batchOutDir: string;
+
+  beforeAll(() => {
+    const buffer = fs.readFileSync(sampleMapPath('bloodgulch.map'));
+    const inspected = inspectCustomEditionMap(buffer);
+    if (inspected.status !== 'ok') throw new Error('sample map did not parse');
+    loadedMap = { filePath: sampleMapPath('bloodgulch.map'), buffer, header: inspected.header, tagIndex: inspected.tagIndex };
+    batchOutDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opence-batch-test-'));
+  });
+
+  afterEach(() => {
+    __setCurrentMapForTest(null);
+  });
+
+  it('cancels batch extraction and returns cancelled result with partial summary and staging path', () => {
+    __setCurrentMapForTest(loadedMap);
+    const messages: { type: string; [key: string]: unknown }[] = [];
+    __setSinkForTest((msg) => messages.push(msg));
+
+    const requestId = randomUUID();
+    __cancelForTest(requestId);
+
+    runBatchExtract({
+      requestId,
+      parentDir: batchOutDir,
+      sourceMapName: 'bloodgulch',
+      mode: 'replace',
+      resourceMapPaths: {},
+    });
+
+    const resultMsg = messages.find((m) => m.type === 'result') as
+      | {
+          type: string;
+          payload: { ok: boolean; code?: string; stagingDir?: string; targetDir?: string; partialSummary?: unknown };
+        }
+      | undefined;
+
+    expect(resultMsg?.payload.ok).toBe(false);
+    expect(resultMsg?.payload.code).toBe('CANCELLED');
+    expect(resultMsg?.payload.stagingDir).toBeDefined();
+    expect(resultMsg?.payload.targetDir).toBe(path.join(batchOutDir, 'bloodgulch'));
+  });
+
+  it('extracts a slice of tags in batch mode, generating correct folders, container files, manifest, and report', () => {
+    // Create a sub-map with 3 tags: 1 extractable weapon, 1 external bitmap, 1 bsp
+    const arIndex = loadedMap.tagIndex.entries.find((e) => e.path === 'weapons\\assault rifle\\assault rifle')!;
+    const bspIndex = loadedMap.tagIndex.entries.find((e) => e.primaryClassName === 'scenario_structure_bsp')!;
+    const extIndex = loadedMap.tagIndex.entries.find((e) => e.isExternal) ?? loadedMap.tagIndex.entries[0];
+
+    // Keep all slots so tag IDs resolve, but mark all non-test tags as external
+    const miniEntries = loadedMap.tagIndex.entries.map((e) => {
+      if (e.index === arIndex.index || e.index === bspIndex.index) return e;
+      return { ...e, isExternal: true };
+    });
+
+    const miniMap: LoadedMap = {
+      filePath: path.join(batchOutDir, 'bloodgulch_mini.map'),
+      buffer: loadedMap.buffer,
+      header: loadedMap.header,
+      tagIndex: {
+        ...loadedMap.tagIndex,
+        entries: miniEntries,
+      },
+    };
+
+    __setCurrentMapForTest(miniMap);
+    const messages: { type: string; [key: string]: unknown }[] = [];
+    __setSinkForTest((msg) => messages.push(msg));
+
+    const requestId = randomUUID();
+    runBatchExtract({
+      requestId,
+      parentDir: batchOutDir,
+      sourceMapName: 'bloodgulch_mini',
+      mode: 'replace',
+      resourceMapPaths: {},
+    });
+
+    const resultMsg = messages.find((m) => m.type === 'result') as
+      | {
+          type: string;
+          payload: { ok: boolean; summary: any };
+        }
+      | undefined;
+
+    expect(resultMsg?.payload.ok).toBe(true);
+    const summary = resultMsg?.payload.summary;
+    expect(summary.extractedCount).toBe(1);
+    expect(summary.blockedCount).toBe(1);
+    expect(summary.externalCount).toBe(miniEntries.length - 2);
+
+    const targetFolder = path.join(batchOutDir, 'bloodgulch_mini');
+    expect(fs.existsSync(targetFolder)).toBe(true);
+
+    const arPath = path.join(targetFolder, 'weapons', 'assault rifle', 'assault rifle.weapon.ocetags');
+    expect(fs.existsSync(arPath)).toBe(true);
+    expect(fs.existsSync(path.join(targetFolder, 'manifest.json'))).toBe(true);
+    expect(fs.existsSync(path.join(targetFolder, 'batch-extract-report.txt'))).toBe(true);
+
+    // Staging folder should be cleaned up
+    const stagingFolders = fs.readdirSync(targetFolder).filter((f) => f.startsWith('.staging'));
+    expect(stagingFolders).toEqual([]);
+
+    // Run again in 'skip' mode
+    const messages2: { type: string; [key: string]: unknown }[] = [];
+    __setSinkForTest((msg) => messages2.push(msg));
+    const requestId2 = randomUUID();
+    runBatchExtract({
+      requestId: requestId2,
+      parentDir: batchOutDir,
+      sourceMapName: 'bloodgulch_mini',
+      mode: 'skip',
+      resourceMapPaths: {},
+    });
+
+    const resultMsg2 = messages2.find((m) => m.type === 'result') as
+      | {
+          type: string;
+          payload: { ok: boolean; summary: any };
+        }
+      | undefined;
+    expect(resultMsg2?.payload.ok).toBe(true);
+    expect(resultMsg2?.payload.summary.extractedCount).toBe(0);
+    expect(resultMsg2?.payload.summary.skippedCount).toBe(1);
+  });
+
+  it('runGetTagFields returns decoded fields for weapon in loaded map', () => {
+    __setCurrentMapForTest(loadedMap);
+    const messages: { type: string; [key: string]: unknown }[] = [];
+    __setSinkForTest((msg) => messages.push(msg));
+
+    const arIndex = loadedMap.tagIndex.entries.findIndex((e) => e.path === 'weapons\\assault rifle\\assault rifle');
+    expect(arIndex).toBeGreaterThanOrEqual(0);
+
+    const requestId = randomUUID();
+    runGetTagFields({ requestId, tagIndex: arIndex });
+
+    const resultMsg = messages.find((m) => m.type === 'result') as
+      | { type: string; payload: { ok: boolean; data: any } }
+      | undefined;
+    expect(resultMsg?.payload.ok).toBe(true);
+    expect(resultMsg?.payload.data.tagPath).toBe('weapons\\assault rifle\\assault rifle');
+    expect(resultMsg?.payload.data.fields.length).toBeGreaterThan(20);
+  });
+
+  it('runUpdateTagField updates field in-place and marks map modified', () => {
+    // Work on a copy of loadedMap buffer so sample map bytes are not changed
+    const testMap: LoadedMap = {
+      ...loadedMap,
+      buffer: Buffer.from(loadedMap.buffer),
+    };
+    __setCurrentMapForTest(testMap);
+    const messages: { type: string; [key: string]: unknown }[] = [];
+    __setSinkForTest((msg) => messages.push(msg));
+
+    const arIndex = testMap.tagIndex.entries.findIndex((e) => e.path === 'weapons\\assault rifle\\assault rifle');
+    const requestId = randomUUID();
+
+    runUpdateTagField({
+      requestId,
+      tagIndex: arIndex,
+      fieldName: 'autoaim angle',
+      newValue: 0.75,
+    });
+
+    const resultMsg = messages.find((m) => m.type === 'result') as
+      | { type: string; payload: { ok: boolean; fieldName: string; newValue: unknown; map: any } }
+      | undefined;
+    expect(resultMsg?.payload.ok).toBe(true);
+    expect(resultMsg?.payload.fieldName).toBe('autoaim angle');
+    expect(resultMsg?.payload.newValue).toBe(0.75);
+    expect(resultMsg?.payload.map.modified).toBe(true);
+    expect(testMap.modified).toBe(true);
+  });
+
+  it('runGetDependencySlots lists all dependency slots including nested reflexives', () => {
+    __setCurrentMapForTest(loadedMap);
+    const messages: { type: string; [key: string]: unknown }[] = [];
+    __setSinkForTest((msg) => messages.push(msg));
+
+    const arIndex = loadedMap.tagIndex.entries.findIndex((e) => e.path === 'weapons\\assault rifle\\assault rifle');
+    expect(arIndex).toBeGreaterThanOrEqual(0);
+
+    const requestId = randomUUID();
+    runGetDependencySlots({ requestId, tagIndex: arIndex });
+
+    const resultMsg = messages.find((m) => m.type === 'result') as
+      | { type: string; payload: { ok: boolean; slots: any[] } }
+      | undefined;
+    expect(resultMsg?.payload.ok).toBe(true);
+    expect(resultMsg?.payload.slots.length).toBeGreaterThanOrEqual(30);
+    expect(resultMsg?.payload.slots.some((s) => s.fieldPath === 'triggers[0].projectile')).toBe(true);
+  });
+
+  it('runSetDependencySlot swaps projectile slot to a vehicle tag in-place and marks map modified', () => {
+    const testMap: LoadedMap = {
+      ...loadedMap,
+      buffer: Buffer.from(loadedMap.buffer),
+    };
+    __setCurrentMapForTest(testMap);
+    const messages: { type: string; [key: string]: unknown }[] = [];
+    __setSinkForTest((msg) => messages.push(msg));
+
+    const arIndex = testMap.tagIndex.entries.findIndex((e) => e.path === 'weapons\\assault rifle\\assault rifle');
+    const vehicleEntry = testMap.tagIndex.entries.find((e) => e.primaryClassName === 'vehicle');
+    expect(vehicleEntry).toBeDefined();
+
+    const requestId = randomUUID();
+    runSetDependencySlot({
+      requestId,
+      tagIndex: arIndex,
+      fieldPath: 'triggers[0].projectile',
+      newTagId: vehicleEntry!.tagId,
+    });
+
+    const resultMsg = messages.find((m) => m.type === 'result') as
+      | { type: string; payload: { ok: boolean; fieldPath: string; newTagId: number; map: any } }
+      | undefined;
+    expect(resultMsg?.payload.ok).toBe(true);
+    expect(resultMsg?.payload.fieldPath).toBe('triggers[0].projectile');
+    expect(resultMsg?.payload.newTagId).toBe(vehicleEntry!.tagId);
+    expect(resultMsg?.payload.map.modified).toBe(true);
+    expect(testMap.modified).toBe(true);
   });
 });

@@ -32,8 +32,16 @@ import {
   AllTagsExcludedError,
   OperationCancelledError,
   ContainerFormatError,
+  getAllTagGroupNames,
+  OCETAGS_FORMAT_VERSION,
+  readTagFieldValues,
+  writeTagFieldValue,
+  TagFieldEditorError,
+  listTagDependencySlots,
+  setTagDependencySlot,
+  TagDependencySwapError,
 } from '../../core/src/index';
-import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind } from '../../core/src/index';
+import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
 export { describeMapWriteError } from '../../core/src/map/write-map';
 import type {
@@ -56,7 +64,26 @@ import type {
   ConvertPreflightResult,
   ConvertMapResult,
   ConvertRepairChoice,
+  BatchExtractMode,
+  BatchExtractTagReport,
+  BatchExtractSummary,
+  BatchExtractResult,
+  BatchExtractManifest,
+  BatchExtractManifestFileEntry,
+  BatchExtractManifestItem,
+  GetTagFieldsResult,
+  UpdateTagFieldResult,
+  GetDependencySlotsResult,
+  SetDependencySlotResult,
 } from './shared-types';
+import {
+  sanitizeMapName,
+  sanitizeTagRelativePath,
+  commitStagedFiles,
+  discardStagedFiles,
+  generateBatchReportText,
+  writeManifestAndReport,
+} from './batch-extract-fs';
 import { isBackupFilePath, BACKUP_FILE_SAVE_MESSAGE } from './map-file-rules';
 
 /**
@@ -409,6 +436,279 @@ export function runExtractTags(task: { requestId: string; originalIndices: numbe
   }
 }
 
+export function runBatchExtract(task: {
+  requestId: string;
+  parentDir: string;
+  sourceMapName: string;
+  mode: BatchExtractMode;
+  resourceMapPaths: Partial<Record<ResourceMapKind, string>>;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+
+  const cancelCtl = makeCancelController(task.requestId);
+  const startTime = Date.now();
+  const mapName = sanitizeMapName(task.sourceMapName || currentMap.filePath);
+  const targetDir = path.join(task.parentDir, mapName);
+  const stagingDir = path.join(targetDir, `.staging-${randomUUID()}`);
+
+  const entries = currentMap.tagIndex.entries;
+  const knownGroups = new Set(getAllTagGroupNames());
+
+  const reports: BatchExtractTagReport[] = [];
+  const manifestFiles: BatchExtractManifestFileEntry[] = [];
+  const blockedManifest: BatchExtractManifestItem[] = [];
+  const externalManifest: BatchExtractManifestItem[] = [];
+
+  let extractedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  let totalBytesWritten = 0;
+
+  try {
+    fs.mkdirSync(targetDir, { recursive: true });
+    fs.mkdirSync(stagingDir, { recursive: true });
+
+    // Resource map identities if configured
+    const resourceMapIdentities: Partial<Record<'bitmaps' | 'sounds' | 'loc', ResourceMapIdentity>> = {};
+    for (const kind of ['bitmaps', 'sounds', 'loc'] as ResourceMapKind[]) {
+      const p = task.resourceMapPaths?.[kind];
+      if (!p) continue;
+      try {
+        if (fs.existsSync(p)) {
+          resourceMapIdentities[kind] = computeResourceMapIdentity(fs.readFileSync(p));
+        }
+      } catch {
+        /* ignore unreadable */
+      }
+    }
+
+    interface CandidateTag {
+      index: number;
+      entry: (typeof entries)[number];
+      group: string;
+      fullRelativePath: string;
+      finalDest: string;
+    }
+    const candidates: CandidateTag[] = [];
+
+    for (const entry of entries) {
+      const group = entry.primaryClassName ?? 'unknown';
+
+      if (entry.isExternal) {
+        reports.push({
+          path: entry.path,
+          group,
+          status: 'external',
+          reason: 'Tag data lives in external resource map (bitmaps.map/sounds.map/loc.map).',
+        });
+        externalManifest.push({
+          path: entry.path,
+          group,
+          reason: 'External resource map tag',
+        });
+        continue;
+      }
+
+      if (!knownGroups.has(group)) {
+        const reason = `Unrecognized tag class "${group}" - no definition registered.`;
+        reports.push({
+          path: entry.path,
+          group,
+          status: 'blocked',
+          reason,
+        });
+        blockedManifest.push({
+          path: entry.path,
+          group,
+          reason,
+        });
+        continue;
+      }
+
+      const def = getGroupDefinition(group);
+      if (def.extractable === false) {
+        const reason = def.notExtractableReason ?? `"${group}" tags are not extractable yet.`;
+        reports.push({
+          path: entry.path,
+          group,
+          status: 'blocked',
+          reason,
+        });
+        blockedManifest.push({
+          path: entry.path,
+          group,
+          reason,
+        });
+        continue;
+      }
+
+      const { fullRelativePath } = sanitizeTagRelativePath(entry.path, group);
+      const finalDest = path.join(targetDir, fullRelativePath);
+      candidates.push({
+        index: entry.index,
+        entry,
+        group,
+        fullRelativePath,
+        finalDest,
+      });
+    }
+
+    const totalExtractable = candidates.length;
+
+    for (let i = 0; i < candidates.length; i++) {
+      if (cancelledRequests.has(task.requestId)) {
+        throw new OperationCancelledError();
+      }
+
+      const candidate = candidates[i];
+      const percent = totalExtractable > 0 ? Math.round((i / totalExtractable) * 100) : 100;
+      progress(task.requestId, `Extracting ${i + 1} of ${totalExtractable}: ${candidate.entry.path}`, percent);
+
+      // In skip mode, if target file already exists, skip it
+      if (task.mode === 'skip' && fs.existsSync(candidate.finalDest)) {
+        skippedCount++;
+        reports.push({
+          path: candidate.entry.path,
+          group: candidate.group,
+          status: 'skipped-existing',
+          outputPath: candidate.finalDest,
+        });
+        continue;
+      }
+
+      try {
+        const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [candidate.index], {
+          signal: cancelCtl.signal,
+        });
+
+        if (cancelledRequests.has(task.requestId)) {
+          throw new OperationCancelledError();
+        }
+
+        const buf = serializeContainer(set, task.sourceMapName, resourceMapIdentities);
+        const stagedDest = path.join(stagingDir, candidate.fullRelativePath);
+        fs.mkdirSync(path.dirname(stagedDest), { recursive: true });
+        fs.writeFileSync(stagedDest, buf);
+
+        extractedCount++;
+        totalBytesWritten += buf.length;
+        manifestFiles.push({
+          path: candidate.entry.path,
+          group: candidate.group,
+          relativePath: candidate.fullRelativePath,
+          sizeBytes: buf.length,
+          tagCount: set.tags.length,
+        });
+        reports.push({
+          path: candidate.entry.path,
+          group: candidate.group,
+          status: 'extracted',
+          outputPath: candidate.finalDest,
+          sizeBytes: buf.length,
+          tagCount: set.tags.length,
+          warnings: set.warnings.map(toWarningInfo),
+        });
+      } catch (err) {
+        if (err instanceof OperationCancelledError) throw err;
+        failedCount++;
+        const msg = err instanceof Error ? err.message : String(err);
+        reports.push({
+          path: candidate.entry.path,
+          group: candidate.group,
+          status: 'failed',
+          reason: msg,
+        });
+        blockedManifest.push({
+          path: candidate.entry.path,
+          group: candidate.group,
+          reason: `Extraction failed: ${msg}`,
+        });
+      }
+    }
+
+    // Extraction completed without cancellation. Commit staging.
+    progress(task.requestId, 'Committing extracted files', 98);
+    commitStagedFiles(stagingDir, targetDir);
+
+    const elapsedMs = Date.now() - startTime;
+    const manifest: BatchExtractManifest = {
+      manifestVersion: 1,
+      toolVersion: '0.1.0',
+      containerVersion: OCETAGS_FORMAT_VERSION,
+      extractedAt: new Date().toISOString(),
+      mapFileName: path.basename(currentMap.filePath),
+      scenarioName: currentMap.header.scenarioName || path.basename(currentMap.filePath, '.map'),
+      summary: {
+        totalTagsInMap: entries.length,
+        extractedCount,
+        skippedExistingCount: skippedCount,
+        externalCount: externalManifest.length,
+        blockedCount: blockedManifest.length,
+        failedCount,
+        totalBytesWritten,
+      },
+      files: manifestFiles,
+      blocked: blockedManifest,
+      external: externalManifest,
+    };
+
+    const reportText = generateBatchReportText(manifest);
+    const { manifestPath, reportPath } = writeManifestAndReport(targetDir, manifest, reportText);
+
+    progress(task.requestId, 'Done', 100);
+
+    const summary: BatchExtractSummary = {
+      mapName,
+      targetDir,
+      totalTagsInMap: entries.length,
+      extractedCount,
+      skippedCount,
+      blockedCount: blockedManifest.length,
+      externalCount: externalManifest.length,
+      failedCount,
+      totalBytesWritten,
+      elapsedMs,
+      tags: reports,
+      manifestPath,
+      reportPath,
+    };
+
+    sendResult(task.requestId, { ok: true, summary } satisfies BatchExtractResult);
+  } catch (err) {
+    if (err instanceof OperationCancelledError) {
+      const elapsedMs = Date.now() - startTime;
+      const partialSummary: BatchExtractSummary = {
+        mapName,
+        targetDir,
+        totalTagsInMap: entries.length,
+        extractedCount,
+        skippedCount,
+        blockedCount: blockedManifest.length,
+        externalCount: externalManifest.length,
+        failedCount,
+        totalBytesWritten,
+        elapsedMs,
+        tags: reports,
+        stagingDir,
+      };
+      sendResult(task.requestId, {
+        ok: false,
+        code: 'CANCELLED',
+        message: 'Extraction was cancelled.',
+        partialSummary,
+        stagingDir,
+        targetDir,
+      } satisfies BatchExtractResult);
+      return;
+    }
+    discardStagedFiles(stagingDir);
+    handleTaskError(task.requestId, err);
+  } finally {
+    cancelCtl.stop();
+    cancelledRequests.delete(task.requestId);
+  }
+}
+
 function summarizePlan(containerPath: string, container: OceContainer, plan: InjectionPlan): InjectPlanSummary {
   return {
     mode: plan.mode,
@@ -673,6 +973,65 @@ export function runVerifyEmbeddedData(task: { requestId: string }) {
   }
 }
 
+/** M7a: Decodes all root-struct fields for the specified tag in the open map. */
+export function runGetTagFields(task: { requestId: string; tagIndex: number }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const data = readTagFieldValues(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
+    sendResult(task.requestId, { ok: true, data } satisfies GetTagFieldsResult);
+  } catch (err) {
+    if (err instanceof TagFieldEditorError) {
+      return sendError(task.requestId, 'TAG_FIELD_ERROR', err.message);
+    }
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** M7a: Updates a single field value in-place in the open map in memory and marks it modified. */
+export function runUpdateTagField(task: { requestId: string; tagIndex: number; fieldName: string; newValue: unknown }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = writeTagFieldValue(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.fieldName, task.newValue);
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      fieldName: res.fieldName,
+      newValue: res.newValue,
+      map: summarizeOpenMap(currentMap),
+    } satisfies UpdateTagFieldResult);
+  } catch (err) {
+    if (err instanceof TagFieldEditorError) {
+      return sendError(task.requestId, 'TAG_FIELD_ERROR', err.message);
+    }
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Dependency Swapper: lists every dependency slot of a tag (nested blocks and null slots included). */
+export function runGetDependencySlots(task: { requestId: string; tagIndex: number }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const slots = listTagDependencySlots(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
+    sendResult(task.requestId, { ok: true, slots } satisfies GetDependencySlotsResult);
+  } catch (err) {
+    if (err instanceof TagDependencySwapError) return sendError(task.requestId, 'DEPENDENCY_SLOT_ERROR', err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Dependency Swapper: rewrites one slot in the held map in memory and marks it modified. */
+export function runSetDependencySlot(task: { requestId: string; tagIndex: number; fieldPath: string; newTagId: number | null }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = setTagDependencySlot(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.fieldPath, task.newTagId);
+    currentMap.modified = true;
+    sendResult(task.requestId, { ok: true, fieldPath: res.fieldPath, newTagId: res.newTagId, map: summarizeOpenMap(currentMap) } satisfies SetDependencySlotResult);
+  } catch (err) {
+    if (err instanceof TagDependencySwapError) return sendError(task.requestId, 'DEPENDENCY_SLOT_ERROR', err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -690,6 +1049,11 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'verifyEmbeddedData') runVerifyEmbeddedData(task);
     else if (task.type === 'convertPreflight') runConvertPreflight(task);
     else if (task.type === 'convertMap') runConvertMap(task);
+    else if (task.type === 'batchExtract') runBatchExtract(task);
+    else if (task.type === 'getTagFields') runGetTagFields(task);
+    else if (task.type === 'updateTagField') runUpdateTagField(task);
+    else if (task.type === 'getDependencySlots') runGetDependencySlots(task);
+    else if (task.type === 'setDependencySlot') runSetDependencySlot(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

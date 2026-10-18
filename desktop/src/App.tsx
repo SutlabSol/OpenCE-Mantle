@@ -16,8 +16,11 @@ import DependencyDialog from './components/DependencyDialog';
 import ConfirmDialog from './components/ConfirmDialog';
 import InjectDialog from './components/InjectDialog';
 import SettingsDialog from './components/SettingsDialog';
+import TagEditorDialog from './components/TagEditorDialog';
 import VerifyEmbeddedDataDialog from './components/VerifyEmbeddedDataDialog';
 import ConvertDialog from './components/ConvertDialog';
+import BatchExtractDialog from './components/BatchExtractDialog';
+import type { BatchExtractPreflightResult } from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
 const LARGE_SELECTION_CONFIRM_THRESHOLD = 200;
@@ -31,8 +34,11 @@ export default function App() {
   const [injectDialogOpen, setInjectDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
+  const [batchExtractPreflight, setBatchExtractPreflight] = useState<BatchExtractPreflightResult | null>(null);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
+  /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
+  const [editingTag, setEditingTag] = useState<TagEntrySummary | null>(null);
   const { logs, progress, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
@@ -64,11 +70,21 @@ export default function App() {
     setSelectedTagIndices(new Set());
     setExtractSelection(null);
     setLargeSelectionConfirm(null);
+    setEditingTag(null);
+  };
+
+  const handleBatchExtract = async () => {
+    if (!canExtract) return;
+    const preflight = await window.opence.batchExtractPreflight();
+    if (preflight) {
+      setBatchExtractPreflight(preflight);
+    }
   };
 
   useEffect(() => {
     const offMenu = window.opence.onMenuAction((action) => {
       if (action === 'extract-tags') requestExtract(Array.from(selectedTagIndices));
+      else if (action === 'extract-whole-map') void handleBatchExtract();
       else if (action === 'inject-tags') setInjectDialogOpen(true);
       else if (action === 'verify-embedded-data') setVerifyDialogOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
@@ -203,6 +219,7 @@ export default function App() {
               { label: 'Decompress Map', onClick: handleDecompress, disabled: !canDecompress },
               { label: 'Recompress Map', onClick: handleRecompress, disabled: !canRecompress },
               { label: 'Extract Tags...', onClick: () => requestExtract(Array.from(selectedTagIndices)), disabled: !!extractDisabledReason },
+              { label: 'Extract Whole Map...', onClick: () => void handleBatchExtract(), disabled: !canExtract },
               { label: 'Inject Tags...', onClick: () => setInjectDialogOpen(true), disabled: !canInject },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Settings...', onClick: () => setSettingsDialogOpen(true) },
@@ -238,9 +255,12 @@ export default function App() {
               onSelectedChange={setSelectedTagIndices}
               onExtractRequested={requestExtract}
               extractDisabledReason={extractDisabledReason}
+              onExtractWholeMap={handleBatchExtract}
+              canExtractWholeMap={canExtract}
+              onEditTag={setEditingTag}
             />
             <CenterWorkspace header={mapState.header} />
-            <PropertiesPalette focusedTag={focusedTag} />
+            <PropertiesPalette focusedTag={focusedTag} allTags={mapState.tags} />
           </>
         ) : (
           <WelcomeDropZone onOpen={handleOpen} />
@@ -255,6 +275,17 @@ export default function App() {
       {settingsDialogOpen && <SettingsDialog onClose={() => setSettingsDialogOpen(false)} />}
       {verifyDialogOpen && <VerifyEmbeddedDataDialog onClose={() => setVerifyDialogOpen(false)} log={log} />}
       {convertSource && <ConvertDialog source={convertSource} onClose={() => setConvertSource(null)} log={log} />}
+      {batchExtractPreflight && (
+        <BatchExtractDialog
+          open={!!batchExtractPreflight}
+          preflight={batchExtractPreflight}
+          onClose={() => setBatchExtractPreflight(null)}
+        />
+      )}
+
+      {editingTag && mapState?.status === 'ok' && (
+        <TagEditorDialog tag={editingTag} allTags={mapState.tags} onClose={() => setEditingTag(null)} />
+      )}
 
       {largeSelectionConfirm && (
         <ConfirmDialog

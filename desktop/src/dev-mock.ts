@@ -17,6 +17,10 @@ import type {
   SaveMapAsResult,
   InjectionMode,
   ConvertMapResult,
+  GetTagFieldsResult,
+  UpdateTagFieldResult,
+  GetDependencySlotsResult,
+  SetDependencySlotResult,
 } from '../electron/shared-types';
 import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult, buildMockConvertReport, buildMockRepairConvertReport, buildMockModelPartsConvertReport, buildMockAlignConvertReport } from './test-fixtures/dependency-fixtures';
 
@@ -145,6 +149,73 @@ export function installDevMock() {
     cancelExtraction: () => {
       extractCancelled = true;
     },
+    batchExtractPreflight: async () => ({
+      ok: true,
+      mapName: 'bloodgulch',
+      scenarioName: 'levels\\test\\bloodgulch\\bloodgulch',
+      parentDir: 'C:\\Users\\Dev\\Documents',
+      targetDir: 'C:\\Users\\Dev\\Documents\\bloodgulch',
+      totalTags: 2455,
+      extractableCount: 2345,
+      externalCount: 108,
+      blockedCount: 2,
+      estimatedTotalBytes: 18_400_000,
+      freeSpaceBytes: 100_000_000_000,
+      existingFileCount: 0,
+    }),
+    startBatchExtract: async (options) => {
+      extractCancelled = false;
+      const ticks = 5;
+      for (let i = 0; i < ticks; i++) {
+        if (extractCancelled) {
+          return {
+            ok: false,
+            code: 'CANCELLED',
+            message: 'Extraction was cancelled.',
+            stagingDir: `${options.parentDir}\\bloodgulch\\.staging-mock`,
+            targetDir: `${options.parentDir}\\bloodgulch`,
+            partialSummary: {
+              mapName: 'bloodgulch',
+              targetDir: `${options.parentDir}\\bloodgulch`,
+              totalTagsInMap: 2455,
+              extractedCount: (i + 1) * 200,
+              skippedCount: 0,
+              blockedCount: 2,
+              externalCount: 108,
+              failedCount: 0,
+              totalBytesWritten: 2_000_000,
+              elapsedMs: 500,
+              tags: [],
+            },
+          };
+        }
+        await new Promise((r) => setTimeout(r, 100));
+        const percent = Math.round(((i + 1) / ticks) * 100);
+        progressListeners.forEach((cb) => cb({ taskId: 'batchExtract', stage: `Extracting tag ${(i + 1) * 450} of 2345`, percent }));
+      }
+      return {
+        ok: true,
+        summary: {
+          mapName: 'bloodgulch',
+          targetDir: `${options.parentDir}\\bloodgulch`,
+          totalTagsInMap: 2455,
+          extractedCount: 2345,
+          skippedCount: 0,
+          blockedCount: 2,
+          externalCount: 108,
+          failedCount: 0,
+          totalBytesWritten: 18_400_000,
+          elapsedMs: 1200,
+          tags: [],
+          manifestPath: `${options.parentDir}\\bloodgulch\\manifest.json`,
+          reportPath: `${options.parentDir}\\bloodgulch\\batch-extract-report.txt`,
+        },
+      };
+    },
+    cancelBatchExtract: () => {
+      extractCancelled = true;
+    },
+    finalizeBatchExtract: async () => ({ ok: true }),
     openContainingFolder: async (filePath: string) => {
       logListeners.forEach((cb) => cb({ level: 'info', message: `(mock) Would open containing folder for ${filePath}`, timestamp: Date.now() }));
     },
@@ -225,6 +296,48 @@ export function installDevMock() {
     verifyEmbeddedData: async () => {
       await fakeProgress('verifyEmbeddedData');
       return buildMockVerifyEmbeddedDataResult(scenario);
+    },
+    getTagFields: async (tagIndex: number): Promise<GetTagFieldsResult> => {
+      const tag = sampleTags.find((t) => t.index === tagIndex);
+      if (!tag) return { ok: false, code: 'NOT_FOUND', message: 'Tag not found' };
+      return {
+        ok: true,
+        data: {
+          tagIndex: tag.index,
+          tagId: tag.tagId,
+          tagPath: tag.path,
+          group: tag.primaryClassName,
+          structName: tag.primaryClassName,
+          fields: [
+            { name: 'autoaim angle', kind: 'number', type: 'Angle', offset: 0, size: 4, value: 0.125 },
+            { name: 'autoaim range', kind: 'number', type: 'float', offset: 4, size: 4, value: 15.0 },
+            { name: 'rounds per second', kind: 'bounds', type: 'float', offset: 8, size: 8, value: [5.0, 10.0] },
+            { name: 'flags', kind: 'bitfield', type: 'WeaponFlags', offset: 16, size: 4, value: 1, bitfieldFlags: ['vertical recoil', 'silenced', 'secondary trigger'], bitfieldWidth: 32 },
+            { name: 'label', kind: 'string', type: 'TagString', offset: 20, size: 32, value: 'Assault Rifle' },
+            { name: 'ready effect', kind: 'dependency', type: 'TagDependency', offset: 52, size: 16, value: 0xe1740007, dependencyClasses: ['effect', 'sound'], dependencyTarget: { tagId: 0xe1740007, path: 'sound\\sfx\\weapons\\pistol\\fire', group: 'sound' } },
+          ],
+        },
+      };
+    },
+    updateTagField: async (_tagIndex: number, fieldName: string, newValue: unknown): Promise<UpdateTagFieldResult> => {
+      if (!currentMock) return { ok: false, code: 'NO_MAP', message: 'No map open' };
+      currentMock = { ...currentMock, modified: true };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      return { ok: true, fieldName, newValue, map: currentMock };
+    },
+    getDependencySlots: async (): Promise<GetDependencySlotsResult> => ({
+      ok: true,
+      slots: [
+        { fieldPath: 'model', fieldName: 'model', allowedClasses: ['gbxmodel'], currentTagId: 0xe1740003, currentPath: 'weapons\\assault rifle\\fp\\fp', currentGroup: 'gbxmodel' },
+        { fieldPath: 'triggers[0].projectile', fieldName: 'projectile', allowedClasses: ['projectile'], currentTagId: 0xe1740007, currentPath: 'weapons\\assault rifle\\bullet', currentGroup: 'projectile' },
+        { fieldPath: 'triggers[0].firing effect', fieldName: 'firing effect', allowedClasses: ['effect'], currentTagId: 0xffffffff, currentPath: null, currentGroup: null },
+      ],
+    }),
+    setDependencySlot: async (_tagIndex: number, fieldPath: string, newTagId: number | null): Promise<SetDependencySlotResult> => {
+      if (!currentMock) return { ok: false, code: 'NO_MAP', message: 'No map open' };
+      currentMock = { ...currentMock, modified: true };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      return { ok: true, fieldPath, newTagId: newTagId ?? 0xffffffff, map: currentMock };
     },
     onProgress: (cb) => {
       progressListeners.add(cb);

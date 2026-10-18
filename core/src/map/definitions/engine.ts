@@ -214,6 +214,10 @@ export function getBitfieldDefinition(name: string): DefinitionBitfield | undefi
   return bitfields.get(name);
 }
 
+export function getEnumDefinition(name: string): DefinitionEnum | undefined {
+  return enums.get(name);
+}
+
 export function getGroupStructName(tagGroupName: string): string | null {
   return tagGroupNameToStructName.get(tagGroupName) ?? null;
 }
@@ -239,7 +243,7 @@ export function validateAllDefinitions(): { structCount: number; enumCount: numb
   };
 }
 
-function decodeValueField(buffer: Buffer, absOffset: number, field: DefinitionValueField): DecodedFieldValue {
+export function decodeValueField(buffer: Buffer, absOffset: number, field: DefinitionValueField): DecodedFieldValue {
   if (field.type === 'TagDependency') return { kind: 'dependency', value: decodeDependency(buffer, absOffset) };
   if (field.type === 'TagReflexive') return { kind: 'reflexive', value: decodeReflexive(buffer, absOffset) };
   if (field.type === 'TagDataOffset') return { kind: 'tagDataOffset', value: decodeTagDataOffset(buffer, absOffset) };
@@ -266,7 +270,7 @@ function decodeValueField(buffer: Buffer, absOffset: number, field: DefinitionVa
   return { kind: 'basic', type: field.type, value: decodeBasicUnit(buffer, absOffset, field.type) };
 }
 
-function encodeValueField(buffer: Buffer, absOffset: number, decoded: DecodedFieldValue): void {
+export function encodeValueField(buffer: Buffer, absOffset: number, decoded: DecodedFieldValue): void {
   switch (decoded.kind) {
     case 'dependency':
       encodeDependency(buffer, absOffset, decoded.value);
