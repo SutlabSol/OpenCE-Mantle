@@ -51,6 +51,8 @@ import type {
   SetDependencySlotResult,
   GetBspRenderMeshResult,
   GetBitmapTextureResult,
+  GetScenarioObjectsResult,
+  GetModelRenderGeometryResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -839,6 +841,30 @@ async function getBitmapTextureFlow(bitmapTagId: number, imageIndex?: number): P
   return promise;
 }
 
+/** Step 8.5: Extracts placed scenario objects (vehicles, scenery, spawns, weapons) from the open map. */
+async function getScenarioObjectsFlow(): Promise<GetScenarioObjectsResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const { promise } = sendWorkerRequest<GetScenarioObjectsResult>(
+    { type: 'getScenarioObjects' },
+    sendLog,
+  );
+  return promise;
+}
+
+/** Step 8.5: Extracts 3D model geometry for a gbxmodel tag. */
+async function getModelGeometryFlow(modelTagId: number, lod?: number): Promise<GetModelRenderGeometryResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const { promise } = sendWorkerRequest<GetModelRenderGeometryResult>(
+    { type: 'getModelGeometry', modelTagId, lod },
+    sendLog,
+  );
+  return promise;
+}
+
 /** Main-process side of File > Save (native menu, renderer IPC, unsaved-changes prompt). Logic lives in save-map.ts. */
 const saveMapDeps: SaveMapDeps = {
   getOpenMap: () =>
@@ -1161,6 +1187,8 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:setDependencySlot', (_e, tagIndex: number, fieldPath: string, newTagId: number | null) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
   ipcMain.handle('render:getBspMesh', (_e, bspIndex?: number) => getBspRenderMeshFlow(bspIndex));
   ipcMain.handle('render:getBitmapTexture', (_e, bitmapTagId: number, imageIndex?: number) => getBitmapTextureFlow(bitmapTagId, imageIndex));
+  ipcMain.handle('render:getScenarioObjects', () => getScenarioObjectsFlow());
+  ipcMain.handle('render:getModelGeometry', (_e, modelTagId: number, lod?: number) => getModelGeometryFlow(modelTagId, lod));
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());

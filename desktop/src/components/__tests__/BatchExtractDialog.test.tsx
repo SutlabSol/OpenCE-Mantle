@@ -55,6 +55,8 @@ describe('BatchExtractDialog', () => {
       setDependencySlot: vi.fn(),
       getBspRenderMesh: vi.fn(),
       getBitmapTexture: vi.fn(),
+      getScenarioObjects: vi.fn(),
+      getModelGeometry: vi.fn(),
       convertPreflight: vi.fn(),
       convertMap: vi.fn(),
       pickConvertResource: vi.fn(),

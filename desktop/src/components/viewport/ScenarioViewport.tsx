@@ -1,8 +1,21 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
-import type { MapHeaderSummary, BspRenderMesh } from '../../../electron/shared-types';
+import type {
+  MapHeaderSummary,
+  BspRenderMesh,
+  ScenarioPlacementsSummary,
+  ModelRenderGeometry,
+} from '../../../electron/shared-types';
 
 export type RenderMode = 'textured' | 'textured-wireframe' | 'wireframe' | 'flat';
+
+export interface VisibleLayers {
+  bsp: boolean;
+  vehicles: boolean;
+  scenery: boolean;
+  spawns: boolean;
+  items: boolean;
+}
 
 export interface ScenarioViewportProps {
   header: MapHeaderSummary;
@@ -26,6 +39,14 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [meshData, setMeshData] = useState<BspRenderMesh | null>(null);
+  const [scenarioData, setScenarioData] = useState<ScenarioPlacementsSummary | null>(null);
+  const [visibleLayers, setVisibleLayers] = useState<VisibleLayers>({
+    bsp: true,
+    vehicles: true,
+    scenery: true,
+    spawns: true,
+    items: true,
+  });
   const [renderMode, setRenderMode] = useState<RenderMode>('textured-wireframe');
   const [cameraSpeed, setCameraSpeed] = useState<number>(60);
   const [cameraPosDisplay, setCameraPosDisplay] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
@@ -36,8 +57,17 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const haloRootRef = useRef<THREE.Group | null>(null);
+  const layerGroupsRef = useRef<{
+    bsp: THREE.Group;
+    vehicles: THREE.Group;
+    scenery: THREE.Group;
+    spawns: THREE.Group;
+    items: THREE.Group;
+  } | null>(null);
   const submeshMeshesRef = useRef<{ mesh: THREE.Mesh; lines: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial }[]>([]);
+  const objectMeshesRef = useRef<{ mesh: THREE.Mesh; lines?: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial }[]>([]);
   const textureCacheRef = useRef<Map<number, Promise<THREE.Texture | null>>>(new Map());
+  const modelCacheRef = useRef<Map<number, Promise<ModelRenderGeometry | null>>>(new Map());
 
   // Camera fly controls state
   const camPosRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 10, 30));
@@ -150,30 +180,244 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     return promise;
   }, []);
 
+  // Load Scenario Objects (Step 8.5)
+  useEffect(() => {
+    let active = true;
+    window.opence.getScenarioObjects?.()
+      .then((res) => {
+        if (!active) return;
+        if (res && res.ok) {
+          setScenarioData(res.summary);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, [header.scenarioName]);
+
+  // Model geometry loader helper (Step 8.5)
+  const loadModelGeometry = useCallback((modelTagId: number): Promise<ModelRenderGeometry | null> => {
+    if (modelTagId === 0xffffffff || modelTagId === 0) return Promise.resolve(null);
+    const cache = modelCacheRef.current;
+    if (cache.has(modelTagId)) {
+      return cache.get(modelTagId)!;
+    }
+    const promise = (async () => {
+      try {
+        const res = await window.opence.getModelGeometry?.(modelTagId);
+        if (res && res.ok && res.geometry) {
+          return res.geometry;
+        }
+      } catch {
+        // Fallback to placeholder if model geometry cannot be extracted
+      }
+      return null;
+    })();
+    cache.set(modelTagId, promise);
+    return promise;
+  }, []);
+
+  const populateScenarioObjects = useCallback(
+    (summary: ScenarioPlacementsSummary, layers: NonNullable<typeof layerGroupsRef.current>) => {
+      const { vehicles, scenery, spawns, items } = layers;
+
+      const clearGroup = (group: THREE.Group) => {
+        while (group.children.length > 0) {
+          group.remove(group.children[0]);
+        }
+      };
+      clearGroup(vehicles);
+      clearGroup(scenery);
+      clearGroup(spawns);
+      clearGroup(items);
+
+      for (const item of objectMeshesRef.current) {
+        item.mesh.geometry.dispose();
+        if (item.lines) {
+          item.lines.geometry.dispose();
+          (item.lines.material as THREE.Material).dispose();
+        }
+        item.solidMat.dispose();
+      }
+      objectMeshesRef.current = [];
+
+      for (const obj of summary.objects) {
+        const objGroup = new THREE.Group();
+        objGroup.position.set(obj.position[0], obj.position[1], obj.position[2]);
+        objGroup.rotation.set(obj.rotation[2], obj.rotation[1], obj.rotation[0], 'ZYX');
+
+        let targetLayer = scenery;
+        if (obj.kind === 'vehicle') targetLayer = vehicles;
+        else if (obj.kind === 'scenery') targetLayer = scenery;
+        else if (obj.kind === 'spawn') targetLayer = spawns;
+        else if (obj.kind === 'weapon' || obj.kind === 'equipment') targetLayer = items;
+
+        if (obj.kind === 'spawn') {
+          const color = obj.teamIndex === 0 ? 0xef5350 : obj.teamIndex === 1 ? 0x42a5f5 : 0xffca28;
+          const markerGroup = new THREE.Group();
+
+          const cylGeom = new THREE.CylinderGeometry(0.3, 0.3, 1.6, 12);
+          cylGeom.rotateX(Math.PI / 2);
+          cylGeom.translate(0, 0, 0.8);
+          const cylMat = new THREE.MeshStandardMaterial({ color, roughness: 0.5 });
+          const cylMesh = new THREE.Mesh(cylGeom, cylMat);
+          markerGroup.add(cylMesh);
+
+          const coneGeom = new THREE.ConeGeometry(0.3, 0.6, 12);
+          coneGeom.rotateZ(-Math.PI / 2);
+          coneGeom.translate(0.5, 0, 1.2);
+          const coneMat = new THREE.MeshStandardMaterial({ color, roughness: 0.3 });
+          const coneMesh = new THREE.Mesh(coneGeom, coneMat);
+          markerGroup.add(coneMesh);
+
+          objGroup.add(markerGroup);
+          targetLayer.add(objGroup);
+        } else if (obj.modelTagId && obj.modelTagId !== 0xffffffff) {
+          targetLayer.add(objGroup);
+
+          loadModelGeometry(obj.modelTagId).then((modelGeom) => {
+            if (!modelGeom || modelGeom.submeshes.length === 0) {
+              if (objGroup.children.length === 0) {
+                const fbGeom = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+                fbGeom.translate(0, 0, 0.75);
+                const fbMat = new THREE.MeshStandardMaterial({
+                  color: obj.kind === 'vehicle' ? 0x42a5f5 : obj.kind === 'weapon' ? 0xffa726 : 0xab47bc,
+                  wireframe: true,
+                });
+                objGroup.add(new THREE.Mesh(fbGeom, fbMat));
+              }
+              return;
+            }
+
+            const defaultColor =
+              obj.kind === 'vehicle'
+                ? 0x3f51b5
+                : obj.kind === 'scenery'
+                  ? 0x78909c
+                  : obj.kind === 'weapon' || obj.kind === 'equipment'
+                    ? 0xff9800
+                    : 0x4caf50;
+
+            for (const submesh of modelGeom.submeshes) {
+              if (submesh.vertexCount === 0 || submesh.indices.length === 0) continue;
+
+              const geom = new THREE.BufferGeometry();
+              const interleaved = new THREE.InterleavedBuffer(submesh.vertices, 8);
+              geom.setAttribute('position', new THREE.InterleavedBufferAttribute(interleaved, 3, 0));
+              geom.setAttribute('normal', new THREE.InterleavedBufferAttribute(interleaved, 3, 3));
+              geom.setAttribute('uv', new THREE.InterleavedBufferAttribute(interleaved, 2, 6));
+              geom.setIndex(new THREE.BufferAttribute(submesh.indices, 1));
+
+              const solidMat = new THREE.MeshStandardMaterial({
+                color: defaultColor,
+                roughness: 0.65,
+                metalness: 0.15,
+                side: THREE.DoubleSide,
+              });
+
+              const mesh = new THREE.Mesh(geom, solidMat);
+              objGroup.add(mesh);
+
+              const wireframeGeom = new THREE.WireframeGeometry(geom);
+              const wireframeMat = new THREE.LineBasicMaterial({
+                color: 0x00e5ff,
+                transparent: true,
+                opacity: renderMode === 'wireframe' ? 0.9 : 0.35,
+              });
+              const lines = new THREE.LineSegments(wireframeGeom, wireframeMat);
+              lines.visible = renderMode === 'textured-wireframe' || renderMode === 'wireframe';
+              mesh.visible = renderMode !== 'wireframe';
+              mesh.add(lines);
+
+              objectMeshesRef.current.push({ mesh, lines, solidMat });
+
+              if (submesh.shaderTagId) {
+                loadTexture(submesh.shaderTagId).then((tex) => {
+                  if (tex && solidMat) {
+                    solidMat.map = tex;
+                    solidMat.color.setHex(0xffffff);
+                    solidMat.needsUpdate = true;
+                  }
+                });
+              }
+            }
+          });
+        } else {
+          const dims =
+            obj.kind === 'vehicle'
+              ? [3.5, 2.2, 1.8]
+              : obj.kind === 'weapon' || obj.kind === 'equipment'
+                ? [0.8, 0.4, 0.3]
+                : [1.5, 1.5, 2.0];
+          const boxGeom = new THREE.BoxGeometry(dims[0], dims[1], dims[2]);
+          boxGeom.translate(0, 0, dims[2] / 2);
+          const color =
+            obj.kind === 'vehicle'
+              ? 0x42a5f5
+              : obj.kind === 'weapon' || obj.kind === 'equipment'
+                ? 0xffa726
+                : 0xab47bc;
+          const boxMat = new THREE.MeshStandardMaterial({
+            color,
+            wireframe: true,
+          });
+          const boxMesh = new THREE.Mesh(boxGeom, boxMat);
+          objGroup.add(boxMesh);
+          targetLayer.add(objGroup);
+        }
+      }
+    },
+    [loadModelGeometry, loadTexture, renderMode],
+  );
+
+  // Re-populate scenario objects when scenarioData changes
+  useEffect(() => {
+    if (scenarioData && layerGroupsRef.current) {
+      populateScenarioObjects(scenarioData, layerGroupsRef.current);
+    }
+  }, [scenarioData, populateScenarioObjects]);
+
+  // Synchronize layer visibility toggles with Three.js layer groups
+  useEffect(() => {
+    if (!layerGroupsRef.current) return;
+    layerGroupsRef.current.bsp.visible = visibleLayers.bsp;
+    layerGroupsRef.current.vehicles.visible = visibleLayers.vehicles;
+    layerGroupsRef.current.scenery.visible = visibleLayers.scenery;
+    layerGroupsRef.current.spawns.visible = visibleLayers.spawns;
+    layerGroupsRef.current.items.visible = visibleLayers.items;
+  }, [visibleLayers]);
+
   // Update render mode materials
   useEffect(() => {
-    for (const item of submeshMeshesRef.current) {
+    const allMeshes = [...submeshMeshesRef.current, ...objectMeshesRef.current];
+    for (const item of allMeshes) {
       const { mesh, lines, solidMat } = item;
       switch (renderMode) {
         case 'textured':
           mesh.visible = true;
-          lines.visible = false;
+          if (lines) lines.visible = false;
           solidMat.wireframe = false;
           break;
         case 'textured-wireframe':
           mesh.visible = true;
-          lines.visible = true;
-          (lines.material as THREE.LineBasicMaterial).opacity = 0.35;
+          if (lines) {
+            lines.visible = true;
+            (lines.material as THREE.LineBasicMaterial).opacity = 0.35;
+          }
           solidMat.wireframe = false;
           break;
         case 'wireframe':
           mesh.visible = false;
-          lines.visible = true;
-          (lines.material as THREE.LineBasicMaterial).opacity = 0.9;
+          if (lines) {
+            lines.visible = true;
+            (lines.material as THREE.LineBasicMaterial).opacity = 0.9;
+          }
           break;
         case 'flat':
           mesh.visible = true;
-          lines.visible = false;
+          if (lines) lines.visible = false;
           solidMat.wireframe = false;
           break;
       }
@@ -233,6 +477,38 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     scene.add(haloRoot);
     haloRootRef.current = haloRoot;
 
+    // Layer groups under haloRoot (Step 8.5)
+    const bspGroup = new THREE.Group();
+    const vehiclesGroup = new THREE.Group();
+    const sceneryGroup = new THREE.Group();
+    const spawnsGroup = new THREE.Group();
+    const itemsGroup = new THREE.Group();
+
+    haloRoot.add(bspGroup);
+    haloRoot.add(vehiclesGroup);
+    haloRoot.add(sceneryGroup);
+    haloRoot.add(spawnsGroup);
+    haloRoot.add(itemsGroup);
+
+    bspGroup.visible = visibleLayers.bsp;
+    vehiclesGroup.visible = visibleLayers.vehicles;
+    sceneryGroup.visible = visibleLayers.scenery;
+    spawnsGroup.visible = visibleLayers.spawns;
+    itemsGroup.visible = visibleLayers.items;
+
+    const layers = {
+      bsp: bspGroup,
+      vehicles: vehiclesGroup,
+      scenery: sceneryGroup,
+      spawns: spawnsGroup,
+      items: itemsGroup,
+    };
+    layerGroupsRef.current = layers;
+
+    if (scenarioData) {
+      populateScenarioObjects(scenarioData, layers);
+    }
+
     // 6. Build meshes from BSP submeshes
     submeshMeshesRef.current = [];
     for (const submesh of meshData.submeshes) {
@@ -256,7 +532,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       });
 
       const mesh = new THREE.Mesh(geom, solidMat);
-      haloRoot.add(mesh);
+      bspGroup.add(mesh);
 
       // Wireframe overlay lines
       const wireframeGeom = new THREE.WireframeGeometry(geom);
@@ -426,12 +702,23 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       }
       submeshMeshesRef.current = [];
 
+      for (const item of objectMeshesRef.current) {
+        item.mesh.geometry.dispose();
+        if (item.lines) {
+          item.lines.geometry.dispose();
+          (item.lines.material as THREE.Material).dispose();
+        }
+        item.solidMat.dispose();
+      }
+      objectMeshesRef.current = [];
+      layerGroupsRef.current = null;
+
       renderer.dispose();
       if (canvas.parentElement) {
         canvas.parentElement.removeChild(canvas);
       }
     };
-  }, [webGLSupported, meshData, frameScene, loadTexture]);
+  }, [webGLSupported, meshData, frameScene, loadTexture, scenarioData, populateScenarioObjects]);
 
   return (
     <div
@@ -472,6 +759,52 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           <span style={{ color: 'var(--text-dim)', fontFamily: 'var(--mono-font)' }}>
             {meshData?.totalVertices.toLocaleString() ?? 0} verts / {meshData?.totalTriangles.toLocaleString() ?? 0} tris
           </span>
+        </div>
+
+        {/* Layer Visibility Toggles (Step 8.5) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-dim)', marginRight: 2 }}>Layers:</span>
+          {(
+            [
+              ['bsp', 'layer-toggle-bsp', 'BSP', null],
+              ['vehicles', 'layer-toggle-vehicles', 'Vehicles', scenarioData?.counts.vehicles],
+              ['scenery', 'layer-toggle-scenery', 'Scenery', scenarioData?.counts.scenery],
+              ['spawns', 'layer-toggle-spawns', 'Spawns', scenarioData?.counts.spawns],
+              ['items', 'layer-toggle-items', 'Items', scenarioData ? scenarioData.counts.weapons + scenarioData.counts.equipment : null],
+            ] as const
+          ).map(([layerKey, testId, label, count]) => {
+            const active = visibleLayers[layerKey];
+            return (
+              <button
+                key={layerKey}
+                data-testid={testId}
+                onClick={() => setVisibleLayers((p) => ({ ...p, [layerKey]: !p[layerKey] }))}
+                style={{
+                  background: active ? 'var(--bg-main)' : 'transparent',
+                  color: active ? 'var(--text-primary)' : 'var(--text-dim)',
+                  border: `1px solid ${active ? 'var(--accent-cyan)' : 'var(--border)'}`,
+                  borderRadius: 3,
+                  padding: '2px 7px',
+                  fontSize: 11,
+                  fontWeight: active ? 600 : 400,
+                  opacity: active ? 1 : 0.6,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+                title={`Toggle ${label} layer`}
+              >
+                <span style={{ color: active ? 'var(--accent-cyan)' : 'var(--text-dim)' }}>{active ? '✓' : '✗'}</span>
+                <span>{label}</span>
+                {count !== null && count !== undefined && (
+                  <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--mono-font)' }}>
+                    ({count})
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
         {/* Viewport Render Controls */}

@@ -36,3 +36,4 @@ export * from './map/tag-dependency-swapper';
 export * from './render/bsp-geometry';
 export * from './render/model-geometry';
 export * from './render/bitmap-textures';
+export * from './render/scenario-objects';

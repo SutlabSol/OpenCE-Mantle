@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Render-level model geometry extraction (Step 8.2): turns one `gbxmodel` tag into renderable
  * data - interleaved vertices, indexed triangle lists, per-part bounding boxes. Struct fields
  * are decoded with the tag-definition engine, then raw vertex + triangle index bytes are read
@@ -20,6 +20,8 @@ import type { DecodedFieldValue } from '../map/definitions/engine';
 export interface ModelSubmesh {
   partIndex: number;
   shaderIndex: number;
+  /** Tag ID of the shader tag referenced by this part (or 0xFFFFFFFF if unshaded). */
+  shaderTagId?: number;
   vertexCount: number;
   /** Interleaved [x, y, z, nx, ny, nz, u, v] per vertex, uScale/vScale already applied to UVs. */
   vertices: Float32Array;
@@ -181,6 +183,22 @@ export function extractModelRenderGeometry(
   const vertexBase = tagIndex.modelDataFileOffset;
   const indexBase = vertexBase + tagIndex.vertexSize;
 
+  const shaderTagIds: number[] = [];
+  const shadersReflexive = model.get('shaders');
+  if (shadersReflexive && shadersReflexive.kind === 'reflexive' && shadersReflexive.value.count > 0) {
+    const shaderRefSize = resolveStruct('ModelShaderReference').totalSize;
+    const sOffset = resolvePointer(shadersReflexive.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let s = 0; s < shadersReflexive.value.count; s++) {
+      const sStruct = decodeStruct(buffer, sOffset + s * shaderRefSize, 'ModelShaderReference');
+      const dep = sStruct.get('shader');
+      if (dep && dep.kind === 'dependency' && dep.value.tagId !== 0xffffffff) {
+        shaderTagIds.push(dep.value.tagId);
+      } else {
+        shaderTagIds.push(0xffffffff);
+      }
+    }
+  }
+
 
   const submeshes: ModelSubmesh[] = [];
   let totalVertices = 0;
@@ -256,6 +274,7 @@ export function extractModelRenderGeometry(
     submeshes.push({
       partIndex: p,
       shaderIndex,
+      shaderTagId: shaderTagIds[shaderIndex] ?? 0xffffffff,
       vertexCount,
       vertices,
       indices: new Uint16Array(indices),

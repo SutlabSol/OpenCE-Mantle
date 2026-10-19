@@ -5,8 +5,21 @@ import type { TagFieldDescriptor, TagFieldsResult, TagFieldKind, TagReflexiveEle
 import type { TagDependencySlot } from '../../core/src/map/tag-dependency-swapper';
 import type { BspRenderMesh } from '../../core/src/render/bsp-geometry';
 import type { DecodedRgbaTexture } from '../../core/src/render/bitmap-textures';
+import type { ScenarioObjectPlacement, ScenarioPlacementsSummary } from '../../core/src/render/scenario-objects';
+import type { ModelRenderGeometry } from '../../core/src/render/model-geometry';
 
-export type { TagFieldDescriptor, TagFieldsResult, TagFieldKind, TagReflexiveElement, TagDependencySlot, BspRenderMesh, DecodedRgbaTexture };
+export type {
+  TagFieldDescriptor,
+  TagFieldsResult,
+  TagFieldKind,
+  TagReflexiveElement,
+  TagDependencySlot,
+  BspRenderMesh,
+  DecodedRgbaTexture,
+  ScenarioObjectPlacement,
+  ScenarioPlacementsSummary,
+  ModelRenderGeometry,
+};
 
 export interface MapHeaderSummary {
   scenarioName: string;
@@ -361,6 +374,8 @@ export type WorkerRequest =
   | { type: 'setDependencySlot'; requestId: string; tagIndex: number; fieldPath: string; newTagId: number | null }
   | { type: 'getBspRenderMesh'; requestId: string; bspIndex?: number }
   | { type: 'getBitmapTexture'; requestId: string; bitmapTagId: number; imageIndex?: number; bitmapsPath?: string }
+  | { type: 'getScenarioObjects'; requestId: string }
+  | { type: 'getModelGeometry'; requestId: string; modelTagId: number; lod?: number }
   | { type: 'cancel'; requestId: string };
 
 export type GetBspRenderMeshResult =
@@ -369,6 +384,14 @@ export type GetBspRenderMeshResult =
 
 export type GetBitmapTextureResult =
   | { ok: true; texture: DecodedRgbaTexture }
+  | { ok: false; code: string; message: string };
+
+export type GetScenarioObjectsResult =
+  | { ok: true; summary: ScenarioPlacementsSummary }
+  | { ok: false; code: string; message: string };
+
+export type GetModelRenderGeometryResult =
+  | { ok: true; geometry: ModelRenderGeometry }
   | { ok: false; code: string; message: string };
 
 export type GetDependencySlotsResult =
@@ -455,6 +478,10 @@ export interface OpenceApi {
   getBspRenderMesh(bspIndex?: number): Promise<GetBspRenderMeshResult>;
   /** Step 8.4: Decode a bitmap or shader's diffuse texture for 3D rendering. */
   getBitmapTexture(bitmapTagId: number, imageIndex?: number): Promise<GetBitmapTextureResult>;
+  /** Step 8.5: Extract placed scenario objects (vehicles, scenery, spawns, weapons) from the open map. */
+  getScenarioObjects(): Promise<GetScenarioObjectsResult>;
+  /** Step 8.5: Extract 3D model geometry for a gbxmodel tag. */
+  getModelGeometry(modelTagId: number, lod?: number): Promise<GetModelRenderGeometryResult>;
   getPathForFile(file: File): string;
 }
 

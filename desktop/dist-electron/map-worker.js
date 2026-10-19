@@ -46,6 +46,8 @@ __export(map_worker_exports, {
   runGetBspRenderMesh: () => runGetBspRenderMesh,
   runGetDependencies: () => runGetDependencies,
   runGetDependencySlots: () => runGetDependencySlots,
+  runGetModelGeometry: () => runGetModelGeometry,
+  runGetScenarioObjects: () => runGetScenarioObjects,
   runGetTagFields: () => runGetTagFields,
   runInspect: () => runInspect,
   runPlanInject: () => runPlanInject,
@@ -39396,6 +39398,201 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
   };
 }
 
+// ../core/src/render/model-geometry.ts
+var VERTEX_TYPE_UNCOMPRESSED2 = 4;
+var UNCOMPRESSED_VERTEX_SIZE = 68;
+var TRIANGLE_BUFFER_TYPE_STRIP = 1;
+var PRIMITIVE_RESTART_INDEX2 = 65535;
+var LOD_FIELD_NAMES = ["super low", "low", "medium", "high", "super high"];
+function numeric2(value) {
+  if (!value) return void 0;
+  if (value.kind === "basic" || value.kind === "enum") return value.value;
+  return void 0;
+}
+function decodeTriangleStrip(buffer, stripFileOffset, vertexCount, triangleCount) {
+  const out = [];
+  let produced = 0;
+  let n = 0;
+  let a = 0, b = 0;
+  let w = 0;
+  while (produced < triangleCount) {
+    const readOff = stripFileOffset + w * 2;
+    if (readOff + 2 > buffer.length) break;
+    const idx = buffer.readUInt16LE(readOff);
+    w++;
+    if (idx === PRIMITIVE_RESTART_INDEX2) {
+      n = 0;
+      continue;
+    }
+    if (idx >= vertexCount) break;
+    if (n === 0) a = idx;
+    else if (n === 1) b = idx;
+    else {
+      if (n % 2 === 0) out.push(a, b, idx);
+      else out.push(b, a, idx);
+      a = b;
+      b = idx;
+    }
+    n++;
+    if (n >= 2) produced++;
+  }
+  return new Uint16Array(out);
+}
+function extractModelRenderGeometry(buffer, header, tagIndex, modelTagId, lod = 4) {
+  const entry = tagIndex.entries.find((e) => e.tagId === modelTagId);
+  if (!entry) {
+    throw new Error(`Model tag (ID: 0x${modelTagId.toString(16)}) not found in tag index.`);
+  }
+  const modelFileOffset = resolveTagDataPointer(
+    entry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const model = decodeStruct(buffer, modelFileOffset, "GBXModel");
+  const uScaleRaw = numeric2(model.get("base map u scale"));
+  const vScaleRaw = numeric2(model.get("base map v scale"));
+  const uScale = uScaleRaw && Number.isFinite(uScaleRaw) && uScaleRaw > 0 ? uScaleRaw : 1;
+  const vScale = vScaleRaw && Number.isFinite(vScaleRaw) && vScaleRaw > 0 ? vScaleRaw : 1;
+  const geoms = model.get("geometries");
+  if (!geoms || geoms.kind !== "reflexive" || geoms.value.count === 0) {
+    throw new Error(`Model "${entry.path}" has no geometries.`);
+  }
+  const geomSize = resolveStruct("GBXModelGeometry").totalSize;
+  const partSize = resolveStruct("GBXModelGeometryPart").totalSize;
+  let chosenGeomIndex = 0;
+  const regions = model.get("regions");
+  if (regions && regions.kind === "reflexive" && regions.value.count > 0) {
+    const regionSize = resolveStruct("ModelRegion").totalSize;
+    const regionFileOffset = resolvePointer(
+      regions.value.pointerLow,
+      header.tagDataOffset,
+      tagIndex.baseMemoryAddress
+    );
+    const firstRegion = decodeStruct(buffer, regionFileOffset, "ModelRegion");
+    const perms = firstRegion.get("permutations");
+    if (perms && perms.kind === "reflexive" && perms.value.count > 0) {
+      const permSize = resolveStruct("ModelRegionPermutation").totalSize;
+      const permFileOffset = resolvePointer(
+        perms.value.pointerLow,
+        header.tagDataOffset,
+        tagIndex.baseMemoryAddress
+      );
+      const firstPerm = decodeStruct(buffer, permFileOffset, "ModelRegionPermutation");
+      const lodGeomField = numeric2(firstPerm.get(LOD_FIELD_NAMES[lod] ?? "super high"));
+      if (lodGeomField !== void 0 && lodGeomField >= 0 && lodGeomField < geoms.value.count) {
+        chosenGeomIndex = lodGeomField;
+      }
+    }
+  }
+  const geomsFileOffset = resolvePointer(geoms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  const chosenGeom = decodeStruct(buffer, geomsFileOffset + chosenGeomIndex * geomSize, "GBXModelGeometry");
+  const parts = chosenGeom.get("parts");
+  if (!parts || parts.kind !== "reflexive" || parts.value.count === 0) {
+    throw new Error(`Model "${entry.path}" geometry #${chosenGeomIndex} has no parts.`);
+  }
+  const partsFileOffset = resolvePointer(parts.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  const vertexBase = tagIndex.modelDataFileOffset;
+  const indexBase = vertexBase + tagIndex.vertexSize;
+  const shaderTagIds = [];
+  const shadersReflexive = model.get("shaders");
+  if (shadersReflexive && shadersReflexive.kind === "reflexive" && shadersReflexive.value.count > 0) {
+    const shaderRefSize = resolveStruct("ModelShaderReference").totalSize;
+    const sOffset = resolvePointer(shadersReflexive.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let s = 0; s < shadersReflexive.value.count; s++) {
+      const sStruct = decodeStruct(buffer, sOffset + s * shaderRefSize, "ModelShaderReference");
+      const dep = sStruct.get("shader");
+      if (dep && dep.kind === "dependency" && dep.value.tagId !== 4294967295) {
+        shaderTagIds.push(dep.value.tagId);
+      } else {
+        shaderTagIds.push(4294967295);
+      }
+    }
+  }
+  const submeshes = [];
+  let totalVertices = 0;
+  let totalTriangles = 0;
+  for (let p = 0; p < parts.value.count; p++) {
+    const part = decodeStruct(buffer, partsFileOffset + p * partSize, "GBXModelGeometryPart");
+    const vertexType = numeric2(part.get("vertex type")) ?? -1;
+    const vertexCount = numeric2(part.get("vertex count")) ?? 0;
+    const vertexOffset = numeric2(part.get("vertex offset")) ?? 0;
+    const triangleBufferType = numeric2(part.get("triangle buffer type")) ?? -1;
+    const triangleCount = numeric2(part.get("triangle count")) ?? 0;
+    const triangleOffset = numeric2(part.get("triangle offset")) ?? 0;
+    const shaderIndex = numeric2(part.get("shader index")) ?? 0;
+    if (vertexCount === 0 || triangleCount === 0) continue;
+    if (vertexType !== VERTEX_TYPE_UNCOMPRESSED2 || triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
+    const partVertOffset = vertexBase + vertexOffset;
+    const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
+    if (partVertEnd > header.tagDataOffset) continue;
+    const partStripOffset = indexBase + triangleOffset;
+    const vertices = new Float32Array(vertexCount * 8);
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let v = 0; v < vertexCount; v++) {
+      const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
+      const x = buffer.readFloatLE(vOff + 0);
+      const y = buffer.readFloatLE(vOff + 4);
+      const z = buffer.readFloatLE(vOff + 8);
+      const nx = buffer.readFloatLE(vOff + 12);
+      const ny = buffer.readFloatLE(vOff + 16);
+      const nz = buffer.readFloatLE(vOff + 20);
+      const u = buffer.readFloatLE(vOff + 48) * uScale;
+      const vCoord = buffer.readFloatLE(vOff + 52) * vScale;
+      const o = v * 8;
+      vertices[o + 0] = x;
+      vertices[o + 1] = y;
+      vertices[o + 2] = z;
+      vertices[o + 3] = nx;
+      vertices[o + 4] = ny;
+      vertices[o + 5] = nz;
+      vertices[o + 6] = u;
+      vertices[o + 7] = vCoord;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    const raw = decodeTriangleStrip(buffer, partStripOffset, vertexCount, triangleCount);
+    const indices = [];
+    for (let t = 0; t + 2 < raw.length; t += 3) {
+      const v0 = raw[t], v1 = raw[t + 1], v2 = raw[t + 2];
+      if (v0 === v1 || v1 === v2 || v0 === v2) continue;
+      indices.push(v0, v1, v2);
+    }
+    submeshes.push({
+      partIndex: p,
+      shaderIndex,
+      shaderTagId: shaderTagIds[shaderIndex] ?? 4294967295,
+      vertexCount,
+      vertices,
+      indices: new Uint16Array(indices),
+      boundingBox: [
+        minX === Infinity ? 0 : minX,
+        minY === Infinity ? 0 : minY,
+        minZ === Infinity ? 0 : minZ,
+        maxX === -Infinity ? 0 : maxX,
+        maxY === -Infinity ? 0 : maxY,
+        maxZ === -Infinity ? 0 : maxZ
+      ]
+    });
+    totalVertices += vertexCount;
+    totalTriangles += indices.length / 3;
+  }
+  return {
+    modelTagId,
+    modelPath: entry.path,
+    lodLevel: lod,
+    uScale,
+    vScale,
+    totalVertices,
+    totalTriangles,
+    submeshes
+  };
+}
+
 // ../core/src/render/bitmap-textures.ts
 var BitmapTextureError = class extends Error {
   constructor(message) {
@@ -39876,6 +40073,248 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
     default:
       throw new UnsupportedBitmapFormatError(bitmapTagId, imageIndex, format);
   }
+}
+
+// ../core/src/render/scenario-objects.ts
+function resolveObjectModelTagId(buffer, header, tagIndex, objectTagId) {
+  if (objectTagId === 4294967295) return 4294967295;
+  const entry = tagIndex.entries[objectTagId & 65535];
+  if (!entry || entry.isExternal) return 4294967295;
+  try {
+    const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const objStruct = decodeStruct(buffer, offset, "Object");
+    const modelDep = objStruct.get("model");
+    if (modelDep && modelDep.kind === "dependency" && modelDep.value.tagId !== 4294967295) {
+      return modelDep.value.tagId;
+    }
+  } catch {
+  }
+  return 4294967295;
+}
+function parsePalette(buffer, header, tagIndex, paletteReflexive, structName) {
+  if (!paletteReflexive || paletteReflexive.count === 0) return [];
+  const palette = [];
+  const structSize = resolveStruct(structName).totalSize;
+  const baseOffset = resolvePointer(paletteReflexive.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  for (let i = 0; i < paletteReflexive.count; i++) {
+    try {
+      const decoded = decodeStruct(buffer, baseOffset + i * structSize, structName);
+      const nameDep = decoded.get("name");
+      const tagId = nameDep && nameDep.kind === "dependency" ? nameDep.value.tagId : 4294967295;
+      const entry = tagId !== 4294967295 ? tagIndex.entries[tagId & 65535] : void 0;
+      const path3 = entry ? entry.path : "";
+      const modelTagId = resolveObjectModelTagId(buffer, header, tagIndex, tagId);
+      palette.push({ tagId, path: path3, modelTagId });
+    } catch {
+      palette.push({ tagId: 4294967295, path: "", modelTagId: 4294967295 });
+    }
+  }
+  return palette;
+}
+function extractScenarioPlacements(buffer, header, tagIndex) {
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (0x${tagIndex.scenarioTagId.toString(16)}) not found in tag index.`);
+  }
+  const scenarioOffset = resolveTagDataPointer(
+    scenarioEntry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const scnr = decodeStruct(buffer, scenarioOffset, "Scenario");
+  const placements = [];
+  const counts = {
+    vehicles: 0,
+    scenery: 0,
+    bipeds: 0,
+    weapons: 0,
+    equipment: 0,
+    spawns: 0
+  };
+  const vehiclePal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get("vehicle palette")?.value,
+    "ScenarioVehiclePalette"
+  );
+  const vehiclesRef = scnr.get("vehicles")?.value;
+  if (vehiclesRef && vehiclesRef.count > 0) {
+    const vSize = resolveStruct("ScenarioVehicle").totalSize;
+    const vOffset = resolvePointer(vehiclesRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < vehiclesRef.count; i++) {
+      const item = decodeStruct(buffer, vOffset + i * vSize, "ScenarioVehicle");
+      const typeIdx = item.get("type")?.value ?? 0;
+      const nameIdx = item.get("name")?.value ?? -1;
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const rot = item.get("rotation")?.value || [0, 0, 0];
+      const pal = vehiclePal[typeIdx] || { tagId: 4294967295, path: "Vehicle", modelTagId: 4294967295 };
+      placements.push({
+        id: `vehicle-${i}`,
+        kind: "vehicle",
+        paletteIndex: typeIdx,
+        nameIndex: nameIdx,
+        objectTagId: pal.tagId,
+        objectPath: pal.path,
+        modelTagId: pal.modelTagId,
+        position: pos,
+        rotation: rot
+      });
+      counts.vehicles++;
+    }
+  }
+  const sceneryPal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get("scenery palette")?.value,
+    "ScenarioSceneryPalette"
+  );
+  const sceneryRef = scnr.get("scenery")?.value;
+  if (sceneryRef && sceneryRef.count > 0) {
+    const sSize = resolveStruct("ScenarioScenery").totalSize;
+    const sOffset = resolvePointer(sceneryRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < sceneryRef.count; i++) {
+      const item = decodeStruct(buffer, sOffset + i * sSize, "ScenarioScenery");
+      const typeIdx = item.get("type")?.value ?? 0;
+      const nameIdx = item.get("name")?.value ?? -1;
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const rot = item.get("rotation")?.value || [0, 0, 0];
+      const pal = sceneryPal[typeIdx] || { tagId: 4294967295, path: "Scenery", modelTagId: 4294967295 };
+      placements.push({
+        id: `scenery-${i}`,
+        kind: "scenery",
+        paletteIndex: typeIdx,
+        nameIndex: nameIdx,
+        objectTagId: pal.tagId,
+        objectPath: pal.path,
+        modelTagId: pal.modelTagId,
+        position: pos,
+        rotation: rot
+      });
+      counts.scenery++;
+    }
+  }
+  const bipedPal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get("biped palette")?.value,
+    "ScenarioBipedPalette"
+  );
+  const bipedsRef = scnr.get("bipeds")?.value;
+  if (bipedsRef && bipedsRef.count > 0) {
+    const bSize = resolveStruct("ScenarioBiped").totalSize;
+    const bOffset = resolvePointer(bipedsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < bipedsRef.count; i++) {
+      const item = decodeStruct(buffer, bOffset + i * bSize, "ScenarioBiped");
+      const typeIdx = item.get("type")?.value ?? 0;
+      const nameIdx = item.get("name")?.value ?? -1;
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const rot = item.get("rotation")?.value || [0, 0, 0];
+      const pal = bipedPal[typeIdx] || { tagId: 4294967295, path: "Biped", modelTagId: 4294967295 };
+      placements.push({
+        id: `biped-${i}`,
+        kind: "biped",
+        paletteIndex: typeIdx,
+        nameIndex: nameIdx,
+        objectTagId: pal.tagId,
+        objectPath: pal.path,
+        modelTagId: pal.modelTagId,
+        position: pos,
+        rotation: rot
+      });
+      counts.bipeds++;
+    }
+  }
+  const weaponPal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get("weapon palette")?.value,
+    "ScenarioWeaponPalette"
+  );
+  const weaponsRef = scnr.get("weapons")?.value;
+  if (weaponsRef && weaponsRef.count > 0) {
+    const wSize = resolveStruct("ScenarioWeapon").totalSize;
+    const wOffset = resolvePointer(weaponsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < weaponsRef.count; i++) {
+      const item = decodeStruct(buffer, wOffset + i * wSize, "ScenarioWeapon");
+      const typeIdx = item.get("type")?.value ?? 0;
+      const nameIdx = item.get("name")?.value ?? -1;
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const rot = item.get("rotation")?.value || [0, 0, 0];
+      const pal = weaponPal[typeIdx] || { tagId: 4294967295, path: "Weapon", modelTagId: 4294967295 };
+      placements.push({
+        id: `weapon-${i}`,
+        kind: "weapon",
+        paletteIndex: typeIdx,
+        nameIndex: nameIdx,
+        objectTagId: pal.tagId,
+        objectPath: pal.path,
+        modelTagId: pal.modelTagId,
+        position: pos,
+        rotation: rot
+      });
+      counts.weapons++;
+    }
+  }
+  const netgameEqRef = scnr.get("netgame equipment")?.value;
+  if (netgameEqRef && netgameEqRef.count > 0) {
+    const eqSize = resolveStruct("ScenarioNetgameEquipment").totalSize;
+    const eqOffset = resolvePointer(netgameEqRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < netgameEqRef.count; i++) {
+      const item = decodeStruct(buffer, eqOffset + i * eqSize, "ScenarioNetgameEquipment");
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const facing = item.get("facing")?.value ?? 0;
+      const itemCollDep = item.get("item collection");
+      const itmcTagId = itemCollDep && itemCollDep.kind === "dependency" ? itemCollDep.value.tagId : 4294967295;
+      const itmcEntry = itmcTagId !== 4294967295 ? tagIndex.entries[itmcTagId & 65535] : void 0;
+      placements.push({
+        id: `equipment-${i}`,
+        kind: "equipment",
+        paletteIndex: i,
+        nameIndex: -1,
+        objectTagId: itmcTagId,
+        objectPath: itmcEntry ? itmcEntry.path : "Netgame Equipment",
+        modelTagId: 4294967295,
+        position: pos,
+        rotation: [facing, 0, 0]
+      });
+      counts.equipment++;
+    }
+  }
+  const spawnsRef = scnr.get("player starting locations")?.value;
+  if (spawnsRef && spawnsRef.count > 0) {
+    const spSize = resolveStruct("ScenarioPlayerStartingLocation").totalSize;
+    const spOffset = resolvePointer(spawnsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < spawnsRef.count; i++) {
+      const item = decodeStruct(buffer, spOffset + i * spSize, "ScenarioPlayerStartingLocation");
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const facing = item.get("facing")?.value ?? 0;
+      const team = item.get("team index")?.value ?? 0;
+      placements.push({
+        id: `spawn-${i}`,
+        kind: "spawn",
+        paletteIndex: i,
+        nameIndex: -1,
+        objectTagId: 4294967295,
+        objectPath: team === 0 ? "Player Spawn (Red)" : "Player Spawn (Blue)",
+        modelTagId: 4294967295,
+        position: pos,
+        rotation: [facing, 0, 0],
+        teamIndex: team
+      });
+      counts.spawns++;
+    }
+  }
+  return {
+    scenarioTagId: tagIndex.scenarioTagId,
+    scenarioPath: scenarioEntry.path,
+    totalObjects: placements.length,
+    objects: placements,
+    counts
+  };
 }
 
 // ../core/src/map/write-map.ts
@@ -40890,6 +41329,31 @@ function runGetBitmapTexture(task) {
     sendError(task.requestId, "BITMAP_TEXTURE_ERROR", err instanceof Error ? err.message : String(err));
   }
 }
+function runGetScenarioObjects(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const summary = extractScenarioPlacements(currentMap.buffer, currentMap.header, currentMap.tagIndex);
+    sendResult(task.requestId, { ok: true, summary });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+var modelGeometryCache = /* @__PURE__ */ new Map();
+function runGetModelGeometry(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const lod = task.lod ?? 4;
+    const cacheKey = `${task.modelTagId}:${lod}`;
+    if (modelGeometryCache.has(cacheKey)) {
+      return sendResult(task.requestId, { ok: true, geometry: modelGeometryCache.get(cacheKey) });
+    }
+    const geometry = extractModelRenderGeometry(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.modelTagId, lod);
+    modelGeometryCache.set(cacheKey, geometry);
+    sendResult(task.requestId, { ok: true, geometry });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
     if (task.type === "cancel") {
@@ -40914,6 +41378,8 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "setDependencySlot") runSetDependencySlot(task);
     else if (task.type === "getBspRenderMesh") runGetBspRenderMesh(task);
     else if (task.type === "getBitmapTexture") runGetBitmapTexture(task);
+    else if (task.type === "getScenarioObjects") runGetScenarioObjects(task);
+    else if (task.type === "getModelGeometry") runGetModelGeometry(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -40942,6 +41408,8 @@ try {
   runGetBspRenderMesh,
   runGetDependencies,
   runGetDependencySlots,
+  runGetModelGeometry,
+  runGetScenarioObjects,
   runGetTagFields,
   runInspect,
   runPlanInject,

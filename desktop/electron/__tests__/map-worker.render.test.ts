@@ -9,8 +9,15 @@ import {
   __setSinkForTest,
   runGetBspRenderMesh,
   runGetBitmapTexture,
+  runGetScenarioObjects,
+  runGetModelGeometry,
 } from '../map-worker';
-import type { GetBspRenderMeshResult, GetBitmapTextureResult } from '../shared-types';
+import type {
+  GetBspRenderMeshResult,
+  GetBitmapTextureResult,
+  GetScenarioObjectsResult,
+  GetModelRenderGeometryResult,
+} from '../shared-types';
 
 const SAMPLE_MAPS_DIR = process.env.SAMPLE_MAPS_DIR
   ? path.resolve(process.env.SAMPLE_MAPS_DIR)
@@ -60,6 +67,7 @@ describe('map-worker: 3D render extraction (Step 8.4)', () => {
   it.skipIf(!hasBg)('extracts Structure BSP geometry for bloodgulch.map', async () => {
     const buf = fs.readFileSync(bgPath);
     const inspected = inspectCustomEditionMap(buf);
+    if (inspected.status !== 'ok') throw new Error('sample map did not parse');
     __setCurrentMapForTest({
       filePath: bgPath,
       buffer: buf,
@@ -87,6 +95,7 @@ describe('map-worker: 3D render extraction (Step 8.4)', () => {
   it.skipIf(!hasBg)('decodes diffuse bitmap texture from a shader or bitmap tag', async () => {
     const buf = fs.readFileSync(bgPath);
     const inspected = inspectCustomEditionMap(buf);
+    if (inspected.status !== 'ok') throw new Error('sample map did not parse');
     __setCurrentMapForTest({
       filePath: bgPath,
       buffer: buf,
@@ -110,5 +119,43 @@ describe('map-worker: 3D render extraction (Step 8.4)', () => {
     expect(texRes.texture.width).toBeGreaterThan(0);
     expect(texRes.texture.height).toBeGreaterThan(0);
     expect(texRes.texture.rgbaData.length).toBe(texRes.texture.width * texRes.texture.height * 4);
+  });
+
+  it.skipIf(!hasBg)('extracts placed scenario objects and model geometry (Step 8.5)', async () => {
+    const buf = fs.readFileSync(bgPath);
+    const inspected = inspectCustomEditionMap(buf);
+    if (inspected.status !== 'ok') throw new Error('sample map did not parse');
+    __setCurrentMapForTest({
+      filePath: bgPath,
+      buffer: buf,
+      header: inspected.header,
+      tagIndex: inspected.tagIndex,
+    });
+
+    // Extract scenario objects
+    const objectsRes = await call<GetScenarioObjectsResult>(runGetScenarioObjects);
+    expect(objectsRes.ok).toBe(true);
+    if (!objectsRes.ok) return;
+
+    expect(objectsRes.summary.totalObjects).toBeGreaterThan(0);
+    expect(objectsRes.summary.counts.vehicles).toBe(28);
+    expect(objectsRes.summary.counts.scenery).toBe(47);
+    expect(objectsRes.summary.counts.spawns).toBe(72);
+    expect(objectsRes.summary.counts.equipment).toBe(37);
+
+    // Pick a vehicle with a valid modelTagId
+    const vehicleWithModel = objectsRes.summary.objects.find((v) => v.kind === 'vehicle' && v.modelTagId !== 0xffffffff);
+    expect(vehicleWithModel).toBeDefined();
+
+    // Extract model geometry
+    const modelRes = await call<GetModelRenderGeometryResult>(runGetModelGeometry, {
+      modelTagId: vehicleWithModel!.modelTagId,
+    });
+    expect(modelRes.ok).toBe(true);
+    if (!modelRes.ok) return;
+
+    expect(modelRes.geometry.totalVertices).toBeGreaterThan(0);
+    expect(modelRes.geometry.totalTriangles).toBeGreaterThan(0);
+    expect(modelRes.geometry.submeshes.length).toBeGreaterThan(0);
   });
 });

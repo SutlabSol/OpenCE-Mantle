@@ -23,6 +23,8 @@ import type {
   SetDependencySlotResult,
   GetBspRenderMeshResult,
   GetBitmapTextureResult,
+  GetScenarioObjectsResult,
+  GetModelRenderGeometryResult,
 } from '../electron/shared-types';
 import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult, buildMockConvertReport, buildMockRepairConvertReport, buildMockModelPartsConvertReport, buildMockAlignConvertReport } from './test-fixtures/dependency-fixtures';
 
@@ -395,6 +397,98 @@ export function installDevMock() {
         },
       };
     },
+    getScenarioObjects: async (): Promise<GetScenarioObjectsResult> => ({
+      ok: true,
+      summary: {
+        scenarioTagId: 0xe1740000,
+        scenarioPath: 'levels\\test\\bloodgulch\\bloodgulch',
+        totalObjects: 3,
+        objects: [
+          {
+            id: 'vehicle-0',
+            kind: 'vehicle',
+            paletteIndex: 0,
+            nameIndex: 0,
+            objectTagId: 0xe1740004,
+            objectPath: 'vehicles\\warthog\\mp_warthog',
+            modelTagId: 0xe1740003,
+            position: [10, 10, 0],
+            rotation: [0, 0, 0],
+          },
+          {
+            id: 'scenery-0',
+            kind: 'scenery',
+            paletteIndex: 0,
+            nameIndex: 0,
+            objectTagId: 0xe1740009,
+            objectPath: 'scenery\\rocks\\rock01',
+            modelTagId: 0xe1740003,
+            position: [-15, 20, 0],
+            rotation: [0.5, 0, 0],
+          },
+          {
+            id: 'spawn-0',
+            kind: 'spawn',
+            paletteIndex: 0,
+            nameIndex: -1,
+            objectTagId: 0xffffffff,
+            objectPath: 'Player Spawn (Red)',
+            modelTagId: 0xffffffff,
+            position: [0, -30, 1],
+            rotation: [1.57, 0, 0],
+            teamIndex: 0,
+          },
+        ],
+        counts: {
+          vehicles: 1,
+          scenery: 1,
+          bipeds: 0,
+          weapons: 0,
+          equipment: 0,
+          spawns: 1,
+        },
+      },
+    }),
+    getModelGeometry: async (modelTagId: number): Promise<GetModelRenderGeometryResult> => ({
+      ok: true,
+      geometry: {
+        modelTagId,
+        modelPath: 'vehicles\\warthog\\warthog',
+        lodLevel: 4,
+        uScale: 1,
+        vScale: 1,
+        totalVertices: 8,
+        totalTriangles: 12,
+        submeshes: [
+          {
+            partIndex: 0,
+            shaderIndex: 0,
+            shaderTagId: 0xe1740008,
+            vertexCount: 8,
+            // A simple 2x2x2 cube
+            vertices: new Float32Array([
+              -1, -1, -1,  0, 0, -1,  0, 0,
+               1, -1, -1,  0, 0, -1,  1, 0,
+               1,  1, -1,  0, 0, -1,  1, 1,
+              -1,  1, -1,  0, 0, -1,  0, 1,
+              -1, -1,  1,  0, 0,  1,  0, 0,
+               1, -1,  1,  0, 0,  1,  1, 0,
+               1,  1,  1,  0, 0,  1,  1, 1,
+              -1,  1,  1,  0, 0,  1,  0, 1,
+            ]),
+            indices: new Uint16Array([
+              0, 1, 2, 0, 2, 3, // back
+              4, 6, 5, 4, 7, 6, // front
+              4, 5, 1, 4, 1, 0, // bottom
+              3, 2, 6, 3, 6, 7, // top
+              0, 3, 7, 0, 7, 4, // left
+              1, 5, 6, 1, 6, 2, // right
+            ]),
+            boundingBox: [-1, -1, -1, 1, 1, 1],
+          },
+        ],
+      },
+    }),
     onProgress: (cb) => {
       progressListeners.add(cb);
       return () => progressListeners.delete(cb);

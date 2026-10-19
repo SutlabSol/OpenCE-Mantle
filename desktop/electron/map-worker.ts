@@ -44,6 +44,8 @@ import {
   decodeBitmapTagImage,
   resolveShaderBaseBitmapTagId,
   BITM_FOURCC,
+  extractScenarioPlacements,
+  extractModelRenderGeometry,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -81,6 +83,9 @@ import type {
   SetDependencySlotResult,
   GetBspRenderMeshResult,
   GetBitmapTextureResult,
+  GetScenarioObjectsResult,
+  GetModelRenderGeometryResult,
+  ModelRenderGeometry,
 } from './shared-types';
 import {
   sanitizeMapName,
@@ -1094,6 +1099,36 @@ export function runGetBitmapTexture(task: { requestId: string; bitmapTagId: numb
   }
 }
 
+/** Step 8.5: Extracts placed scenario objects (vehicles, scenery, bipeds, weapons, spawns). */
+export function runGetScenarioObjects(task: { requestId: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const summary = extractScenarioPlacements(currentMap.buffer, currentMap.header, currentMap.tagIndex);
+    sendResult(task.requestId, { ok: true, summary } satisfies GetScenarioObjectsResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+const modelGeometryCache = new Map<string, ModelRenderGeometry>();
+
+/** Step 8.5: Extracts 3D model geometry for a gbxmodel tag. */
+export function runGetModelGeometry(task: { requestId: string; modelTagId: number; lod?: number }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const lod = task.lod ?? 4;
+    const cacheKey = `${task.modelTagId}:${lod}`;
+    if (modelGeometryCache.has(cacheKey)) {
+      return sendResult(task.requestId, { ok: true, geometry: modelGeometryCache.get(cacheKey)! } satisfies GetModelRenderGeometryResult);
+    }
+    const geometry = extractModelRenderGeometry(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.modelTagId, lod);
+    modelGeometryCache.set(cacheKey, geometry);
+    sendResult(task.requestId, { ok: true, geometry } satisfies GetModelRenderGeometryResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -1118,6 +1153,8 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'setDependencySlot') runSetDependencySlot(task);
     else if (task.type === 'getBspRenderMesh') runGetBspRenderMesh(task);
     else if (task.type === 'getBitmapTexture') runGetBitmapTexture(task);
+    else if (task.type === 'getScenarioObjects') runGetScenarioObjects(task);
+    else if (task.type === 'getModelGeometry') runGetModelGeometry(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }
