@@ -49,23 +49,29 @@ When right-clicking an object tag (such as `weapons\assault rifle\assault rifle`
   - Renders the wireframe edges of the model's UV polygons over a transparent $1024\times1024$ or $2048\times2048$ PNG. Modders can load this PNG as a top guide layer in Photoshop to paint custom skins with 100% texture alignment.
 
 ### 2.2 Ingestion & In-Place Map Embedding
-When the user clicks **"Inject Bitmap..."** with a custom PNG/JPG/TIF:
+When the user clicks **"Inject Bitmap..."** with a custom PNG/JPG/TIF/DDS:
 1. **Dimensions & Mipmap Generation**:
    - Verify dimensions are powers of two (offer auto-resampling if not).
    - Generate full mipmap chain down to $1\times1$.
+   - **Cubemaps & Volume Textures (`bitm_class_EX` / `Bitmap_Edit`, Eschaton v0.8.1)**:
+     - For **Cubemaps** (`Type == 2`), present a 6-face selector (+X, -X, +Y, -Y, +Z, -Z) and interleave/de-interleave the 6 faces per mipmap level cleanly.
+     - For **3D Volume Textures** (`Type == 3`), present a depth slice slider ($Z = 0 \dots \text{depth}-1$) per mipmap level.
+     - Decode/encode all 15 Halo bitmap formats (`0x00` A8 through `0x11` P8) plus direct `.dds` header validation (`validate_DDS` matching FourCC `DXT1`/`DXT3`/`DXT5`, dimensions, and mipmap counts).
 2. **Encoding**:
    - Encode mipmaps into target format:
      - **DXT1** (4 bits/pixel): Opaque textures or 1-bit alpha.
+     - **DXT3** (8 bits/pixel): Explicit 4-bit alpha.
      - **DXT5** (8 bits/pixel): Smooth interpolated alpha gradients.
-     - **32-bit RGBA**: Uncompressed linear pixels.
-3. **Safe In-Memory Map Embedding (No `bitmaps.map` Requirement!)**:
-   - Custom Edition supports internal embedded bitmaps in `.map` files.
+     - **32-bit ARGB / RGBA, 16-bit R5G6B5 / A1R5G5B5 / A4R4G4B4, A8Y8**: Uncompressed linear pixels.
+3. **Safe In-Memory Map Embedding (No `bitmaps.map` Requirement!) & Optional External Resource Splicing**:
+   - Custom Edition supports internal embedded bitmaps in `.map` files (`H1.Map::internalizeTag` in Eschaton v0.8.1).
    - Using `core/src/map/raw-data-region.ts` (`appendToRawDataRegion`), append the compressed mipmap data into the map's raw data region (cleanly shifting subsequent model and tag data).
-   - In the target `bitm` image header block:
-     - Update `width`, `height`, `num_mipmaps`, and `size`.
-     - Point `offset` to the new raw data offset.
-     - **Clear external bit**: `flags &= ~0x100`.
+   - In the target `bitm` image header block (`sub_bitmap_offset + 0x00..0x20`):
+     - Update `width`, `height`, `depth`, `type`, `format`, `num_mipmaps`, and `size`.
+     - Point `offset` (`+0x18`) to the new raw data offset.
+     - **Clear external bit**: `flags &= ~0x100` (`flags = flags & 0xFEFF`) and clear `CE_flag` (`+0x18` in the 32-byte tag index entry).
    - **Result**: The reskinned map is 100% self-contained and portable; other players do not need modified `bitmaps.map` files.
+   - **Optional External `bitmaps.map` Splicing (`H1SupportMap.SupportMap::inject_bitmap`)**: For advanced users building shared resource maps, support middle-splicing into `bitmaps.map` and shifting subsequent table offsets by `delta = newLength - oldLength`.
 
 ---
 
@@ -73,8 +79,8 @@ When the user clicks **"Inject Bitmap..."** with a custom PNG/JPG/TIF:
 
 ### 3.1 Audio Preview & Export
 - **In-App Player**:
-  - Decodes Halo sound permutations (PCM 16-bit or Xbox ADPCM) into standard Web Audio API buffers.
-  - Interactive controls: Play, Pause, Loop, Volume slider, Permutation browser (`Permutation 1 of 6`), Pitch range selector, and audio waveform visualizer.
+  - Decodes Halo sound permutations (`snd_class_EX` in Eschaton v0.8.1: 16-bit PCM, Xbox ADPCM 36-byte blocks -> 64 samples, or Ogg Vorbis) into standard Web Audio API buffers.
+  - Interactive controls: Play, Pause, Loop, Volume slider, Pitch Range selector (`ranges` reflexive at `snd! + 0x98`, 72-byte entries), Permutation browser (`permutations` reflexive at `pitch_range + 0x3C`, 124-byte entries), and audio waveform visualizer.
 - **Export Formats**:
   - `WAV` (16-bit uncompressed PCM at 22,050 Hz or 44,100 Hz).
   - `OGG` (Vorbis).
@@ -83,19 +89,21 @@ When the user clicks **"Inject Bitmap..."** with a custom PNG/JPG/TIF:
 
 ### 3.2 Sound Injection & Ingestion
 - User clicks **"Inject Sound..."** and picks a `.wav`, `.ogg`, or `.mp3`.
-- Web Audio / Node audio decoders convert the audio to PCM, resample to Halo's standard sample rates (22,050 Hz or 44,100 Hz, mono or stereo), and compress into:
-  - 16-bit uncompressed PCM, or
-  - Xbox ADPCM (4:1 compression ratio).
-- Appends the audio sample buffer into the map's raw data region via `appendToRawDataRegion` and updates permutation sizes/offsets in the `snd!` tag.
+- Web Audio / Node audio decoders convert the audio to PCM, resample to Halo's standard sample rates (22,050 Hz or 44,100 Hz, mono or stereo matched to `snd! + 0x06` `channel_count`), and compress into:
+  - 16-bit uncompressed PCM,
+  - Xbox ADPCM (4:1 compression ratio), or
+  - Ogg Vorbis.
+- Appends the audio sample buffer into the map's raw data region via `appendToRawDataRegion` (or internalizes external sounds via `H1.Map::internalizeTag`) and updates permutation sizes (`+0x40`), `external_bit` (`+0x44`, bit 0 cleared to `0` for internal), and raw file offsets (`+0x48`) via `snd_class_EX::update_offset`.
 
 ---
 
-## 4. 3D Model Editor (`gbxmodel` / `mod2`)
+## 4. 3D Model Editor (`gbxmodel` / `mod2`) & BSP Viewer (`sbsp`)
 
 ### 4.1 3D Preview & Exporting
 - **In-Dialog 3D Viewport**:
-  - Embedded Three.js canvas in the dialog showing the 3D model with Orbit controls.
-  - Shaded with diffuse textures if available, or clean clay/wireframe preview.
+  - Embedded Three.js canvas in the dialog showing the 3D model (`mod2`) or BSP (`sbsp`) with Orbit/Fly controls.
+  - Shaded with diffuse textures resolved through `senv`/`soso`/`schi`/`sgla`/`smet`/`spla` shader tags (`mod_2_model::load_textures` and `SBSP_header::read` in Eschaton v0.8.1), plus LOD selector (`Super High` to `Super Low`), Bones/Nodes skeleton overlay, and Marker spheres.
+  - For `sbsp` tags, includes toggles for Render Submeshes, Collision BSP wireframe, Spawn Points, and Detail Objects (`DOBC`), plus a **"Strip Implicit Detail Objects (`DOBC`) & Decals"** utility (`SBSP_header::strip_DOBC` at `sbsp + 0x1D4` and `+0x1E0`) to prevent unresolved-dependency crashes in transplanted BSPs.
 - **Export Formats**:
   - `OBJ` (+ `.mtl` material file): Universal standard for 3D modeling. Each model region/part exports as an OBJ group (`g hull`, `g turret`), with UV coordinates (`vt u v`) and vertex normals (`vn nx ny nz`).
   - `STL`: Solid triangle mesh (ideal for 3D printing).
@@ -140,11 +148,36 @@ When the user clicks **"Inject Bitmap..."** with a custom PNG/JPG/TIF:
 
 ---
 
-## 6. OpenCE Resource Pack Mods & HEK Tag Export Pipeline
+## 6. Unicode String List Editor (`ustr`) & Expanded Tag Management (from Eschaton v0.8.1)
+
+### 6.1 `ustr` Unicode String List Editor (`ustr_edit_control` / `ustr_snippit`)
+- **Binary Layout**:
+  - Root `ustr` tag contains a 12-byte reflexive (`count` at `+0x00`, `offset = readUInt32LE(0x04) - magic`) pointing to an array of 20-byte string entry headers (`ustr_snippit`).
+  - Each 20-byte entry stores:
+    - `+0x00` (`int32`): `maxLength` (byte length of the UTF-16LE string payload).
+    - `+0x04` (`int32`): `0`.
+    - `+0x08` (`int32`): `old_offset`.
+    - `+0x0C` (`uint32`): `offset` (file offset to the null-terminated UTF-16LE string payload).
+    - `+0x10` (`int32`): `0`.
+- **In-App Editor Capabilities**:
+  - Select any string index `0 .. count-1`, view and edit the UTF-16LE text in real time (e.g., custom HUD weapon pickup messages, menu text, objective strings).
+  - In-place write when `newByteLength <= maxLength`; automatic block expansion when strings grow longer or new string entries are added (`Add String` / `Delete String`).
+
+### 6.2 Expanded Tag Management (`expanded_tag_control`)
+- **Referencing Tags (Reverse Dependency Lookup)**:
+  - Lists every tag in the map that holds a dependency reference to the currently selected tag, with one-click navigation.
+- **Tag Renaming & Duplication**:
+  - In-place rename of any tag's virtual path (`weapons\assault rifle\assault rifle` -> `weapons\custom_ar\custom_ar`), plus one-click **Duplicate Tag** using collision-free tag ID generation (`0xE1740000 + n * 0x10001`).
+- **Safe Tag Deletion (`remove_tag`)**:
+  - Blocks deletion if `is_depended_on` is true (unless the user explicitly opts to null out referencing slots), removing dead tags cleanly on map rebuild.
+
+---
+
+## 7. OpenCE Resource Pack Mods & HEK Tag Export Pipeline
 
 OpenCE supports non-destructive runtime modding similar to Minecraft Resource Packs. Placing a mod folder inside `OpenCE/mods/` overrides game assets across all maps without altering compiled `.map` cache files.
 
-### 6.1 Package Layout
+### 7.1 Package Layout
 ```
 <ModName>/
 ├── mod.toml
@@ -152,7 +185,7 @@ OpenCE supports non-destructive runtime modding similar to Minecraft Resource Pa
     └── <virtual_tag_path>.<hek_extension>
 ```
 
-### 6.2 The `mod.toml` Manifest
+### 7.2 The `mod.toml` Manifest
 ```toml
 name = "Lore Accurate Weapon Names"
 version = "1.0"
@@ -161,7 +194,7 @@ description = "Updates pickup and weapon strings to lore-accurate names"
 format = 1
 ```
 
-### 6.3 Universal HEK Tag Support
+### 7.3 Universal HEK Tag Support
 OpenCE's mod loader intercepts and hot-replaces **any HEK tag class** (identified by the 64-byte `blam` header and Big-Endian struct reflexives):
 - **Textures**: `.bitmap` (e.g. `weapons/assault rifle/fp/bitmaps/assault rifle_fp.bitmap`, with zlib-compressed pixel data).
 - **Models**: `.gbxmodel` (e.g. `characters/cyborg/cyborg.gbxmodel`).
@@ -169,7 +202,8 @@ OpenCE's mod loader intercepts and hot-replaces **any HEK tag class** (identifie
 - **Strings & Text**: `.unicode_string_list` (e.g. `ui/hud/hud_item_messages.unicode_string_list` for weapon pickup notifications).
 - **Weapons & Gameplay**: `.weapon`, `.vehicle`, `.damage_effect`, etc.
 
-### 6.4 App Integration
-- **Right-Click -> "Export as OpenCE Mod..."**: In `TagBrowser`, packages the selected tag (or group) directly into a ready-to-use mod folder with `mod.toml`.
+### 7.4 App Integration
+- **Right-Click -> "Export as OpenCE Mod..."**: In `TagBrowser`, packages the selected tag (or group) directly into a ready-to-play mod folder with `mod.toml`.
 - **In-Editor "Save as OpenCE Mod"**: When editing a texture, sound, or tag values in our Tag Editor, users can export their changes as a standalone mod that applies to every map automatically.
+
 

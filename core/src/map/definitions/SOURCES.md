@@ -404,3 +404,17 @@ against real bytes in the sample maps, not inferred.
   (cache_file_formats.c l.2270-2295). A wrong salt means no scenario.
 - `ExtentViolation.pointerAddress` / `blockStruct`: the address of the field's pointer word (block list
   +4, data field +12) and the element struct, recorded for tag data blocks so `blockOverlap` can move one.
+
+## Reference: Eschaton v0.8.1 Decompiled Source & Entity (`.ent`) Plugin Schemas (2026-10-19)
+
+Complete unpacked x86 binary decompilation, 161 recovered class definitions (`Eschaton_Classes_and_Structs.h`), and 6 plugin sets for **Eschaton v0.8.1** live in `SAMPLE CODE/Eschaton V0.8.1/` (architectural deep-dive in `memory/sample-code-reference.md` Part 4):
+- **Entity (`.ent`) Plugin Sets (`SAMPLE CODE/Eschaton V0.8.1/Plugins/Sparky's Plugins/` and `Phenomena's Plugins/`)**:
+  - Provide human-authored `note` (units of measurement, e.g., `world units`, `seconds`, `[0,1]`), `info` (detailed gameplay/engine tooltips), and `<index reflexive="main:...">` cross-reflexive 16-bit index links across 78–83 Halo tag classes (`PluginLibUniversal` at `0x01294F52`).
+  - Can be used to enrich our Invader-derived `core/src/map/definitions/groups/*.json` schemas with UI tooltips, units, and `<index>` dropdown targets without altering struct sizes or byte offsets.
+- **SBSP Implicit Detail Object (`DOBC`) & Runtime Decal (`deca`) Offsets (`SBSP_header::read` at `0x017078D8`, `SBSP_DOBC_data::read` at `0x01708257`)**:
+  - `sbsp + 0x1D4`: `DOBC_reflexive` (Detail Objects; each 64-byte chunk contains 4 sub-reflexives at `+0x00` stride 36, `+0x0C` stride 32, `+0x18` stride 1, and `+0x24` stride 12).
+  - `sbsp + 0x1E0`: `decal_reflexive` (Runtime Decals; 16-byte chunks).
+  - Zeroing out `+0x1D4` and `+0x1E0` (`SBSP_header::strip_DOBC`) prevents unresolved implicit tag reference crashes when transplanting singleplayer/custom BSPs into multiplayer maps.
+- **Plugin-Free Heuristic Tag Expansion (`H1.Map::expandTag` at `0x0113CC20`)**:
+  - Uses sorted tag offset boundaries (`nextOffset - currentOffset`) and 32-bit aligned word checks (`isOffset` at `0x0113AE57`, `isReflexiveOffset` at `0x01145A5D`, `isTag` at `0x0113AFC3`) as a fallback for protected or custom-group tags lacking a known definition schema.
+

@@ -1,9 +1,10 @@
-# Decompiled Sample Code Reference (SparkEdit v3.02, HMT v3.5, HHT v5)
+# Decompiled Sample Code Reference (SparkEdit v3.02, HMT v3.5, HHT v5, Eschaton v0.8.1)
 
-This document preserves our reverse-engineering and architectural analysis of the three classic Halo modding tools in `SAMPLE CODE/`:
+This document preserves our reverse-engineering and architectural analysis of the four classic Halo modding tools in `SAMPLE CODE/`:
 1. **SparkEdit v3.02** (`SAMPLE CODE/Sparkedit V3.02/src/`) — 3D BSP & Scenario Viewer/Editor (C++ / MFC / OpenGL)
 2. **Halo Map Tools (HMT) v3.5** (`SAMPLE CODE/HMT V3.5/`) — Map Rebuilder, BSP Extractor, Model De-Crapper, Bitmap/Sound Libraries (C# / VB.NET)
 3. **Halo Hacker Tools (HHT) v5** (`SAMPLE CODE/HHT V5/`) — Dependency Swapper, `.meta`/`.data` Reflexive/Pointer Sidecar Architecture, In-Place Map/BSP Rebuilder (C#)
+4. **Eschaton v0.8.1** (`SAMPLE CODE/Eschaton V0.8.1/`) — Plugin-Free Heuristic Tag Expansion & Garbage-Collected Map Rebuilder, SBSP Replacement with DOBC/Decal Stripping, External Resource Map (`bitmaps.map`/`sounds.map`/`loc.map`) Internalizer, Dual `.ent`/`.xml` Plugin Engine (`_RWS` vs `_RWC`), and Built-in Asset Editors (REALbasic Native x86 Decompilation + 6 Plugin Sets)
 
 ---
 
@@ -361,16 +362,175 @@ Because we now have the exact `sbsp`, `scnr`, and `MapBuilder` mechanics from bo
 
 ---
 
-## Part 4: Actionable Phase 2 Build Plan & Implementation Architecture
+## Part 4: Eschaton v0.8.1 — Plugin-Free Heuristic Expansion, Map Rebuilder, SBSP Replacement & Dual `.ent`/`.xml` Plugins
 
-Synthesizing our reverse-engineering across SparkEdit v3.02, HMT v3.5, and HHT v5, this section defines the concrete engineering plan for the upcoming Phase 2 milestones in `OpenCE-Modding-Tool`.
+Eschaton v0.8.1 (by Altimit01 / Dietrich Epp, built with REALbasic 2007/2008 as a native 32-bit x86 PE executable) is the most capable standalone Halo 1 map editor and rebuilder among our sample tools. The binary in `SAMPLE CODE/Eschaton V0.8.1/` was unpacked from MoleBox Virtualization (`Eschaton_unpacked.exe`) and decompiled via Ghidra + REALbasic RTTI class-table recovery into **161 classes** (`include/Eschaton_Classes_and_Structs.h`), **12 subsystem files** (`src/01`–`src/12`), and **6 plugin sets** (`Plugins/`).
+
+### 4.1 Subsystem & Class Map (`SAMPLE CODE/Eschaton V0.8.1/`)
+
+| Subsystem File | Key Recovered Classes & Virtual Addresses | Core Responsibilities |
+| :--- | :--- | :--- |
+| `01_Runtime_and_App_Bootstrap.cpp` | `App` (`0x010DB2EE`) | Global application state, `bitmaps.map` / `sounds.map` paths, active `PluginLibUniversal` arrays, and `H1.preferences` |
+| `02_H1_Map_and_Index_Core.cpp` | `H1.Map` (`0x011346E3`), `H1.Map_Header` (`0x011C6C4B`), `H1.Map_Index_Header` (`0x011CBD20`), `H1.bsp_scenario_data` (`0x011CF745`) | Map loading (`read`), Demo (`version == 6`) + PC/Mac (`7`) + CE (`609`) + Xbox (`5`) header I/O, heuristic pointer/tag checks (`isOffset`, `isReflexiveOffset`, `isTag`), `expandMap`, `expandTag`, `addTag`, `addTags`, `writeTag`, `write`, `internalizeTag`, `replaceSBSP`, `change_name`, `remove_tag` |
+| `03_H1_Meta_Tag_and_Reflexive_Core.cpp` | `H1.Meta` (`0x011D2D31`), `H1.Meta_Expanded_Data` (`0x011D78C1`), `H1.Meta_Raw` (`0x011DA02A`), `H1.reflexive` (`0x011DBBFE`), `H1.tag_reference` (`0x011DBDE2`), `H1.Meta_Pack` (`0x011DC0C7`), `H1.vFolder` (`0x011DC35A`) | 32-byte tag index entry (`CE_flag` external resource bit at `+0x18`), expanded in-memory tag representation (raw `data` buffer + `reflexives` + `dependencies` + `raw_datas`), and virtual folder tree (`meta_class_folders` / `meta_name_folders`) |
+| `04_H1_Map_Expander_Rebuilder_and_SupportMap.cpp` | `H1.map_expander` (`0x011FEAE2`), `H1.map_writer` (`0x01201C6D`), `H1.CE_tag_replacement_thread` (`0x01206246`), `H1SupportMap.SupportMap` (`0x0149E8FB`), `H1SupportMap.SupportData` (`0x0149E1DF`) | Threaded map expansion (`expandTag` across all tags), garbage-collected map rebuilding (`write`), CE external resource internalization, and full `bitmaps.map` / `sounds.map` / `loc.map` reading, splicing, and rebuilding |
+| `05_Plugin_Parser_Ent_and_XML.cpp` | `H1.preferences` (`0x011DEA60`), `PluginLibUniversal` (`0x01294F52`), `data` (`0x012C0ABB`) | Dual Entity (`.ent`) and HMT (`.xml`) plugin parser (`refresh_as_Ent`, `refresh_as_HMT`) supporting 18 distinct field types, recursive `<struct>` reflexives, and ordered/offset-sorted field arrays |
+| `06_Meta_Editor_Controls_RWS_and_RWC.cpp` | `meta_editor_control_RWS` (`0x01451B14`), `meta_editor_control_RWC` (`0x0145BF4F`), 18 `*_editor_control_RWS` + 18 `*_editor_control_RWC` classes | Dual-mode tag editing UI: **Direct-Stream (`_RWS`)** (mutates the `.map` file `BinaryStream` directly on disk) vs. **Expanded-Container (`_RWC`)** (mutates in-memory `H1.Meta_Expanded_Data.data` `MemoryBlock` for expanded/extracted tags) |
+| `07_Dependency_Swapper_and_Tag_Pack.cpp` | `dependency_swapper_control_RW` (`0x013DDECD`), `dependency_swapper_control_EX` (`0x013F58F6`), `expanded_tag_control` (`0x013D373D`), `map_rebuild_control` (`0x013870BB`), `recursive_extract_lite_thread` (`0x012525E4`) | Dependency & LoneID swapping (stream vs. expanded), reverse-dependency lookup (`find_referencing_tags`), tag renaming (`change_name`), tag deletion (`remove_tag`), and `.meta` pack import/export |
+| `08_Bitmap_DDS_Decode_Encode_and_Import.cpp` | `bitm_class_EX` (`0x012C5D18`), `bitm_header_EX` (`0x012C4E12`), `bitm_image_info` (`0x012C287B`), `DDS_header` (`0x016CF7CC`), `Bitmap_Edit` (`0x01679725`) | Full `bitm` sub-image parser (`48`-byte `bitm_image_info`), DXT1/3/5 + 16/32-bit + P8/AY8/A8Y8 decode/encode, **Cubemap 6-face** & **3D Volume depth-slice** preview/import, and direct DDS/PNG/TGA/BMP/JPEG/PICT import/export |
+| `09_Sound_Ogg_WAV_and_Permutations.cpp` | `snd_class_EX` (`0x01379239`), `snd_header_EX` (`0x0137AF4A`), `snd_pitch_EX` (`0x0137C632`), `snd_perm_EX` (`0x0137DFE0`), `Sound_control` (`0x016AE8CF`) | Pitch-range -> permutation hierarchy (`snd_pitch_EX` -> `snd_perm_EX`), Ogg Vorbis & WAV/Xbox ADPCM extraction, and in-place / expanded permutation audio replacement (`update_offset`) |
+| `10_Model_Mod2_and_3D_Viewer.cpp` | `mod2_class` (`0x0158692A`), `mod2_header` (`0x0158616F`), `mod2_geometry` (`0x0158804A`), `mod2_part` (`0x01589701`), `mod2_vertex` (`0x0158E65B`), `Model_control` (`0x015DF568`) | `mod2` 3D geometry/submesh viewer with per-geometry/per-part visibility checkboxes, diffuse texture binding, wireframe toggle, and 6-DOF camera |
+| `11_BSP_Mesh_and_Collision_Viewer.cpp` | `BSP_display` (`0x015FFEAC`), `SBSP_class` (`0x015A25FA`), `SBSP_header` (`0x017078D8`), `SBSP_DOBC_data` (`0x01708257`), `BSP_Collision` (`0x015A4F6A`) | 3D BSP render/collision mesh viewer and **SBSP implicit DOBC/Decal reference parser** (`SBSP_header` + `SBSP_DOBC_data`) used during SBSP replacement |
+| `12_Scenario_Spawns_and_Unicode_Strings.cpp` | `Scenario_file` (`0x01641F46`), `Player_Spawn_Control` (`0x01619DDA`), `Item_Spawn_Control` (`0x0165BCFF`), `Vehicle_Spawn_Control` (`0x0166AC46`), `ustr_edit_control` (`0x016C7E2F`), `ustr_snippit` (`0x016CC72F`) | Interactive 3D scenario spawn editors (`X/Y/Z/Yaw/Pitch/Roll` + palette selectors) and `ustr` UTF-16LE Unicode string table editor |
+
+---
+
+### 4.2 Plugin-Free Heuristic Tag Expansion & Garbage-Collected Map Rebuilding
+
+#### 4.2.1 Why Eschaton's Rebuilder Surpasses HMT v3.5 and HHT v5
+- **HMT v3.5** requires batch-extracting all tags to disk with `.xml` sidecars and suffers from the `UpdateMod2` double-subtraction bug that corrupts `header.modelDataSize`.
+- **HHT v5** relies on XML plugins to know where reflexives and dependencies live when generating `.data` sidecars; if a plugin is incomplete or missing a reflexive, rebuilding corrupts the tag.
+- **Eschaton v0.8.1** uses **Plugin-Free Heuristic Tag Expansion** (`H1.Map::expandTag` at `0x0113CC20`, orchestrated across all tags by `H1.Map::expandMap` at `0x0114308D` / `H1.map_expander::Event_Run` at `0x011FF162`): it scans raw 32-bit aligned words inside each tag's metadata buffer to automatically discover every reflexive (`H1.reflexive`), tag dependency (`H1.tag_reference`), and raw data pointer (`H1.Meta_Raw`) **without needing any XML/`.ent` plugin**.
+
+#### 4.2.2 Exact Heuristic Pointer & Dependency Detection Rules (`02_H1_Map_and_Index_Core.cpp`)
+1. **Tag Size Calculation via Sorted Offset Partitioning (`H1.Map::expandMap`, `0x0114308D`)**:
+   - Halo 1 tag index entries do not store tag metadata byte sizes (`size` is 0 in memory).
+   - `expandMap` collects the file offsets of all non-external tags (plus `Header.TagIndexOffset` and `Header.decomp_len`), sorts them ascending via REALbasic's `Sortwith` (`Framework__sub_010035AC`), and computes each tag's exact contiguous metadata slice size as:
+     $$\text{tagSize}[i] = \text{nextSortedOffset} - \text{tagOffset}[i]$$
+   - Special cases:
+     - `sbsp` tags have `offset == 0` in the tag index; their true offset, size, and `bsp_magic` come from `scnr`'s Structure BSP block (`H1.bsp_scenario_data` at `scnr + 0x5A4`: `+0x18 offset`, `+0x1C size`, `+0x20 magic`, `+0x24 tagID`).
+     - In Halo Custom Edition (`version == 609`), external tags in `bitmaps.map`, `sounds.map`, or `loc.map` have `CE_flag == 1` at byte `+0x18` of the 32-byte tag index entry (`H1.Meta::read` at `0x011D2F3F`) and no local metadata slice (except `snd!` tags where `CE_flag == 0` for the metadata struct while permutation audio is external).
+2. **`H1.Map::isOffset(offset, min, max)` (`0x0113AE57`)**:
+   - Checks whether a candidate 32-bit virtual pointer (after subtracting `magic`) falls strictly within the valid metadata address range `[Header.TagIndexOffset, Header.decomp_len]` (or within a specific tag's `[tagStart, tagStart + tagSize]`).
+3. **`H1.Map::isReflexiveOffset(offset, start, size, currentPos)` (`0x01145A5D`)**:
+   - Validates a candidate 12-byte reflexive struct `(count: int32, virtualPtr: uint32, zero: int32)` at `currentPos`:
+     - `count > 0`
+     - `translatedOffset = virtualPtr - magic` satisfies `start <= translatedOffset <= start + size`
+     - `translatedOffset > currentPos` (reflexive data always follows its header in the tag stream)
+     - `zero == 0` (the 3rd 32-bit word of a Halo 1 reflexive is runtime-only and `0` on disk).
+   - Stores each discovered reflexive as an `H1.reflexive` (`+0x18 position` in tag, `+0x1C count`, `+0x20 offset` relative to tag start).
+4. **`H1.Map::isTag(fourCC_int)` (`0x0113AFC3`) & Dependency Detection**:
+   - Converts a 32-bit integer into a 4-character ASCII string and checks `this->cTagTypes` (`Dictionary*` of all valid Halo 1 FourCCs, populated in `H1.Map::Constructor` at `0x011358C7`).
+   - A 16-byte `H1.tag_reference` (`+0x00 classFourCC`, `+0x04 namePtr`, `+0x08 zero`, `+0x0C tagID`) is recognized when `isTag(word0)` is true and `word3` (`tagID`) either exists in `this->tagIDTable` (`Dictionary*` mapping `uint32 tagID -> tagIndex`) or is `0xFFFFFFFF` (null reference) with a valid `namePtr` (`isOffset(word1 - magic)`).
+   - Stores each discovered reference as an `H1.tag_reference` (`+0x18 location` relative to tag start, `+0x1C tagClass`, `+0x20 tagName` resolved from `tagIDTable`, `+0x24 loneID` boolean flag).
+5. **Class-Specific Raw Data Extraction (`H1.Meta_Raw`, `0x011DA02A`)**:
+   - For tags that own out-of-line raw data blocks (`bitm`, `snd!`, `mod2`/`mode`, `antr`, `sbsp`, `scnr`, `ustr`, `font`, `hmt `, `metr`), `expandTag` parses their class-specific raw offset/size headers and extracts the raw bytes into `H1.Meta_Expanded_Data.raw_datas` (`RBArray<H1.Meta_Raw*>*`), recording where the pointer/offset field lives in the tag metadata (`offset_offsets`) and whether it is relative (`relative_offset`) or virtual (`raw_pointer`).
+
+#### 4.2.3 Contiguous Garbage-Collected Map Rebuilding (`H1.Map::write`, `0x01165D45` & `H1.map_writer`, `0x01201C6D`)
+When rebuilding an expanded map (`H1.Map::write` / `H1.map_writer::Event_Run`):
+1. **Reserve Header & SBSP Space (`0x800` bytes + SBSPs)**:
+   - Writes the `0x800`-byte `H1.Map_Header` (`H1.Map_Header::write` at `0x011CA82F`, supporting PC/CE/Xbox and Demo's `0x588`-byte shifted header with `demo_junk`).
+   - Writes each `sbsp` tag's expanded data and raw geometry/lightmap buffers at `0x800`, recalculating `bsp_magic = bsp_base_address - bsp_file_offset` and updating `H1.bsp_scenario_data` (`write` at `0x011D15BE`).
+2. **Write Non-Indexed Raw Data Sections (Bitmaps, Sounds, Model Vertices/Indices)**:
+   - Iterates through all active tags in `this->tags` (`RBArray<H1.Meta*>*`) and writes their `H1.Meta_Raw` payloads (bitmaps, sounds, and `mod2` vertex/index buffers), recording the new file offsets and `Index_Header.Vertex_offset`, `Index_Header.Indices_offset`, `Index_Header.Model_data_size` (`H1.Map_Index_Header::write` at `0x011CDDC5`).
+3. **Write Tag Index, String Table, and Relocated Tag Metadata (`H1.Map::writeTag`, `0x01146EC6`)**:
+   - Sets `Header.TagIndexOffset` to the current stream position after model raw data.
+   - Computes the new map `magic = Index_Header.base_address - (Header.TagIndexOffset + 0x28)` (`0x40440000 - Header.TagIndexOffset` on PC/CE).
+   - Writes the 40-byte `H1.Map_Index_Header`, the 32-byte `H1.Meta` index entries (`H1.Meta::write` at `0x011D51B5`), and the null-terminated tag name strings (rebuilding every tag's `name_offset` contiguously).
+   - For each tag, `H1.Map::writeTag` writes `H1.Meta_Expanded_Data.data` while patching:
+     - Every `H1.reflexive` at `reflexive.position` with `newTagFileOffset + reflexive.offset + magic`.
+     - Every `H1.tag_reference` at `dep.location` with the target tag's current `(classFourCC, name_offset + magic, 0, targetTagID)` looked up by `(tagClass, tagName)` in `tagClassNameTable` (or `0xFFFFFFFF` if `"nulled out"`).
+     - Every `H1.Meta_Raw` pointer/offset with its newly written raw data file offset.
+   - **Automatic Garbage Collection**: Because `write` only serializes active tags in `this->tags` and their active `raw_datas` / string names, any deleted tags (`H1.Map::remove_tag`), replaced SBSPs, or orphaned raw chunks are **completely garbage-collected** with zero dead slack space!
+
+#### 4.2.4 Tag ID Generation, Tag Renaming & Safe Tag Deletion
+- **`H1.Map::new_ID` (`0x0118D9FB`)**:
+  - Starts at `0xE1740000` (initial salt `0xE174`, index `0x0000`) and increments by `0x00010001` (`(salt + 1) << 16 | (index + 1)`) until finding a `uint32` ID not present in `this->tagIDTable`.
+- **`H1.Map::change_name(tagIndex, newName)` (`0x011BD91C`) & `expanded_tag_control::change_name` (`0x013D82EC`)**:
+  - Updates `tags[tagIndex].name = newName` and updates `tagClassNameTable`.
+  - If the map is expanded, walks `tags[i].expanded_data.dependencies` across all tags in the map and updates every `H1.tag_reference` whose `(tagClass, tagName)` matched the old name, so renaming a tag never breaks references upon rebuild.
+- **`H1.Map::remove_tag(tagIndex)` (`0x011C22B8`)**:
+  - Verifies the map is expanded (`this->expanded == true`), `tagIndex != this->base_scnr`, and `tagIndex` is not an active `sbsp` in `this->bsp_data`.
+  - Walks all tags' `expanded_data.dependencies` and sets any dependency referencing the removed tag to `"nulled out"` (`0xFFFFFFFF`).
+  - Removes `tags[tagIndex]`, rebuilds `tagIDTable` and `tagClassNameTable`, and refreshes the virtual folder trees (`generate_class_folders`, `generate_name_folders`).
+- **Reverse Dependency Lookup (`expanded_tag_control::find_referencing_tags`, `0x013D89A7`)**:
+  - Scans all tags in the map to list every tag that references the currently selected tag ("Referencing Tags" listbox in the Expanded Tag Control), allowing double-click navigation directly to any parent tag.
+
+---
+
+### 4.3 SBSP Replacement & Implicit `DOBC` / `deca` Reference Stripping
+
+One of the most important discoveries in the Eschaton v0.8.1 decompilation (and documented in `Eschaton Manual.rtf` Section 7.2) is **why swapped campaign/custom SBSPs sometimes crash Halo on load** and how Eschaton solves it:
+
+1. **The Problem — Implicit `dobc` (Detail Object Collection) and `deca` (Decal) References inside `sbsp`**:
+   - Unlike normal tag dependencies (which store a 16-byte `tag_reference` with a FourCC and `tagID` discovered by `isTag`), an `sbsp` header contains reflexive blocks (`Detail Objects` and `Runtime Decals`) that implicitly depend on `dobc` and `deca` tags or scenario decal palettes. When transplanting an `sbsp` into a new map without matching `dobc`/`deca` setup, Halo crashes on load.
+2. **Eschaton's Solution (`SBSP_header` at `0x017078D8`, `SBSP_DOBC_data` at `0x01708257`, `H1.Map::replaceSBSP` at `0x0118DE23`)**:
+   - `SBSP_header::read(stream, magic)` (`0x01707ADF`) reads the `sbsp` tag header and specifically locates:
+     - `DOBC_reflexive` (`+0x1C` in `SBSP_header`): the 12-byte `Detail Objects` reflexive in the `sbsp` header (`sbsp + 0x1D4` in standard Halo 1 `sbsp` layout).
+     - `decal_reflexive` (`+0x20` in `SBSP_header`): the 12-byte `Runtime Decals` reflexive immediately following (`sbsp + 0x1E0`).
+   - `SBSP_DOBC_data::read(stream, magic)` (`0x017083B3`) parses the 4 nested reflexives inside the `Detail Objects` block (`cells`, `instances`, `counts`, `z_reference_vectors`).
+   - When `strip_DOBC` (the `"Strip Detail Objects and Decals"` option in `map_rebuild_control` / `H1.Map::replaceSBSP`) is enabled, Eschaton zeroes out the counts/offsets of `DOBC_reflexive` and `decal_reflexive` in the imported `sbsp`, making any campaign or custom BSP immediately playable after replacement!
+
+---
+
+### 4.4 External Resource Map (`bitmaps.map`, `sounds.map`, `loc.map`) Splicing & Tag Internalization
+
+Eschaton includes a standalone library class **`H1SupportMap.SupportMap`** (`classes/H1SupportMap_SupportMap.cpp`, VA `0x0149E8FB`) and **`H1.Map::internalizeTag`** (`0x011859E3`) / **`H1.CE_tag_replacement_thread`** (`0x01206246`):
+
+1. **`H1SupportMap.SupportMap` Structure (`0x0149E8FB`)**:
+   - Supports all three Halo PC / Custom Edition resource map types (`MapType`: `1 = bitmaps.map`, `2 = sounds.map`, `3 = loc.map`):
+     - `+0x00`: `int32 MapType` (`1`, `2`, or `3`)
+     - `+0x04`: `int32 PathOffset` (offset to concatenated tag name strings)
+     - `+0x08`: `int32 IndexOffset` (offset to resource index entries)
+     - `+0x0C`: `int32 IndexCount` (number of entries in the support map)
+   - Each `H1SupportMap.SupportData` entry (`0x0149E1DF`) stores `(StringOffset, Size, DataOffset, TagName, Data)` plus `Meta` (`bitm` or `snd!` header in `bitmaps.map`/`sounds.map`).
+   - Provides 5 mutation modes for resource maps:
+     - `SpliceNewData` (`0x0149FFD2`): appends new bitmap/sound payload to the support map and updates the index entry in-place.
+     - `SpliceNoString` (`0x014A4779`): injects raw data by index when the tag name string does not need to be added.
+     - `BuildOnMap` (`0x0149ECE2`) & `CreateNewMap` (`0x014A20EC`): rebuilds an entire `bitmaps.map` / `sounds.map` / `loc.map` cleanly from `SupportData` entries.
+2. **Tag Internalization (`H1.Map::internalizeTag` at `0x011859E3` & `map_internalize_thread` at `0x013CCE70`)**:
+   - Reads an externally indexed tag (`bitm`, `snd!`, `font`, `ustr`, `hmt `) from `bitmaps.map`, `sounds.map`, or `loc.map`.
+   - Copies its raw pixel/audio/locale payload into the target `.map` (either appending to the map stream or into `H1.Meta_Expanded_Data.raw_datas`), clears the external `CE_flag` bit (`meta.CE_flag = 0` at `+0x18` of the 32-byte tag index entry, and clears `bitm` flag bit `0x100` / `snd!` external flag), and patches the tag's internal data offsets so the `.map` is 100% self-contained!
+
+---
+
+### 4.5 Dual `.ent` (Entity) + `.xml` (HMT) Plugin Engine & `_RWS` vs `_RWC` Editing
+
+#### 4.5.1 `PluginLibUniversal` (`05_Plugin_Parser_Ent_and_XML.cpp`, VA `0x01294F52`)
+- Unifies Entity-style `.ent` plugins (`refresh_as_Ent` at `0x01295A47`) and HMT-style `.xml` plugins (`refresh_as_HMT` at `0x012A7AF1`) into a single recursive schema tree (`this->reflexives` is `RBArray<PluginLibUniversal*>*`).
+- Supports **18 distinct field types**, each with parallel `*_name`, `*_offset`, `*_order`, and (for enums/bitmasks/indices) `*_data` arrays:
+  - Integers & Floats: `int8`, `int16` (`short`), `int32` (`long`), `float`, `double`
+  - Bitmasks: `bitmask8`, `bitmask16`, `bitmask32`
+  - Enums / Option Lists: `id8` (`enum8`), `id16` (`enum16`), `id32` (`enum32`)
+  - Strings: `string4`, `string32`, `string128`
+  - Colors: `colorbyte` (32-bit ARGB bytes), `colorRGB` (3 floats `[0..1]`), `colorARGB` (4 floats `[0..1]`)
+  - References & Reflexives: `dependency` (16-byte tag ref), `loneID` (4-byte tag ID), `index` (`index_editor_control` — a 16-bit index dropdown populated dynamically from the chunk count of another `<struct>` reflexive in the same tag!), and `reflexive` (`<struct>`).
+- **Rich Metadata in `Sparky's Plugins` & `Phenomena's Plugins` (`SAMPLE CODE/Eschaton V0.8.1/Plugins/`)**:
+  - `.ent` elements include `name`, `offset`, `visible`, `size` (for `<struct>`), plus **`note`** (units like `"world units"`, `"seconds"`, `"0 - 1 only"`), **`info`** (detailed multi-sentence modding documentation), and **`info_img`** (diagram reference).
+  - `Sparky's Plugins` (78 `.ent` files) and `Phenomena's Plugins` (83 `.ent` files) in `SAMPLE CODE/Eschaton V0.8.1/Plugins/` provide comprehensive human-written `note` and `info` tooltips across every Halo 1 tag class that we can surface directly in our Tag Inspector UI!
+
+#### 4.5.2 `_RWS` (Direct-Stream) vs `_RWC` (Expanded-Container) Control Architecture (`06_Meta_Editor_Controls_RWS_and_RWC.cpp`)
+- Eschaton implements two parallel sets of 18 field editor controls:
+  - **`*_editor_control_RWS`**: Operates on a `FolderItem` (`BinaryStream`) + file `offset` + `reflexive_offset`, reading and writing bytes directly to the `.map` file on disk for instant, zero-rebuild edits.
+  - **`*_editor_control_RWC`**: Operates on an in-memory `MemoryBlock` (`H1.Meta_Expanded_Data.data`) + `offset` + `reflexive_offset`, allowing users to edit tags inside an expanded map or an extracted `.meta` pack before rebuilding.
+
+---
+
+### 4.6 Special Asset Editors in Eschaton v0.8.1 (`src/08`–`src/12`)
+
+1. **Bitmap Editor (`08_Bitmap_DDS_Decode_Encode_and_Import.cpp`, `bitm_class_EX`, `Bitmap_Edit`)**:
+   - Parses `bitm_header_EX` (`+0x38 offset`, `+0x3C count` of `48`-byte `bitm_image_info` entries).
+   - Supports **Cubemaps** (`type == 2`, rendering and importing all 6 cube faces in a cross/grid layout) and **3D Volume Textures** (`type == 1`, stepping through `depth` slices) in addition to 2D textures (`type == 0`) and mipmaps (`num_mipmaps`).
+   - Built-in software decoders and encoders for `A8`, `Y8`, `AY8`, `A8Y8`, `R5G6B5`, `A1R5G5B5`, `A4R4G4B4`, `X8R8G8B8`, `A8R8G8B8`, `DXT1`, `DXT3`, `DXT5`, and `P8`, enabling direct import/export of **PNG, JPEG, BMP, TGA, GIF, PICT, and DDS** without external CLI tools.
+2. **Sound Permutations Editor (`09_Sound_Ogg_WAV_and_Permutations.cpp`, `snd_class_EX`, `Sound_control`)**:
+   - Models the full 3-level Halo `snd!` hierarchy: `snd_header_EX` (`channel_count`, `compression`: `0 = 16-bit PCM`, `1 = Xbox ADPCM`, `2 = Ogg Vorbis`, `3 =IMA ADPCM`, `sample_rate` at `+0x1A`) -> `snd_pitch_EX` (pitch ranges, `72` bytes each) -> `snd_perm_EX` (individual permutations, `124` bytes each, with `size`, `offset`, `external` flag).
+   - `snd_class_EX::update_offset` (`0x01379ABB`) replaces individual permutation audio buffers in-place or via support-map splicing.
+3. **Unicode String List Editor (`12_Scenario_Spawns_and_Unicode_Strings.cpp`, `ustr_edit_control`, `ustr_snippit`)**:
+   - Parses `ustr` tags (`reflexive` at `+0x00` pointing to 20-byte string reference headers: `int32 maxLength`, `int32 zero1`, `int32 old_offset`, `int32 virtualOffset`, `int32 zero2`).
+   - Reads UTF-16LE characters (`ustr_snippit::read` at `0x016CCEC7`) up to `maxLength / 2` and allows in-place editing (`ustr_edit_control::write` at `0x016CB84D`) of HUD messages, weapon pickup text, and UI strings.
+
+---
+
+## Part 5: Actionable Phase 2 Build Plan & Implementation Architecture
+
+Synthesizing our reverse-engineering across **SparkEdit v3.02**, **HMT v3.5**, **HHT v5**, and **Eschaton v0.8.1**, this section defines the concrete engineering plan for the Phase 2 milestones in `OpenCE-Modding-Tool`.
 
 ```mermaid
 flowchart TD
     subgraph M8["Milestone 8: 3D Scenario Viewport & Map Viewer (Read-Only)"]
         M8_1["BSP Mesh & Lightmap Decoder<br/>(sbsp 56-byte vertex stride, indices, materials)"]
         M8_2["Model Geometry Loader<br/>(mod2 68-byte vertex stride, strips, uScale/vScale)"]
-        M8_3["Universal Shader->Bitmap Pipeline<br/>(bitm DXT1/3/5, bitmaps.map / internal CE reader)"]
+        M8_3["Universal Shader->Bitmap Pipeline<br/>(bitm DXT1/3/5, Cubemaps, bitmaps.map / internal CE reader)"]
         M8_4["Three.js Center Canvas & 6-DOF Fly/Orbit Camera"]
         M8_1 --> M8_4
         M8_2 --> M8_4
@@ -390,40 +550,47 @@ flowchart TD
         M9_4 --> M9_5
     end
 
-    subgraph M10["Milestone 10: Automated BSP Swapper & Map Rebuilder"]
-        M10_1["1-Click SP->MP BSP Swapper<br/>(Direct sbsp transfer, pointer re-base)"]
-        M10_2["Recursive BSP Tag/Raw Injector<br/>(Missing shdr, bitm, sky, weather, fog)"]
-        M10_3["Automated Ground-Floor Object Relocation<br/>(Auto-transfers MP spawns/flags onto new BSP)"]
-        M10_4["HMT Map Header Repair Tool<br/>(Fixes modelDataSize under-count for TheIsland-Ter.map)"]
+    subgraph M10["Milestone 10: Eschaton-Grade Map Expander, Rebuilder & BSP Swapper"]
+        M10_1["Plugin-Free Heuristic Tag Expander & GC Rebuilder<br/>(Eschaton expandMap / writeTag / write)"]
+        M10_2["1-Click SP->MP BSP Swapper + DOBC/Decal Stripper<br/>(replaceSBSP + SBSP_DOBC_data zeroing)"]
+        M10_3["SupportMap Splicer & Tag Internalizer<br/>(bitmaps.map / sounds.map / loc.map -> internal)"]
+        M10_4["Automated Ground-Floor Object Relocation & HMT Header Repair"]
         M10_1 --> M10_2
-        M10_2 --> M10_3
+        M10_2 --> M10_4
+        M10_1 --> M10_3
+    end
+
+    subgraph M11["Milestone 11: Rich .ent Tooltips, Reverse-Refs & ustr Editor"]
+        M11_1["Sparky's .ent Plugin Metadata Integration<br/>(note units, info tooltips, <index> cross-refs)"]
+        M11_2["Referencing Tags Viewer + Tag Rename & Safe Delete<br/>(find_referencing_tags, change_name, remove_tag)"]
+        M11_3["Built-in ustr Unicode String Table Editor<br/>(UTF-16LE HUD & UI string editing)"]
     end
 ```
 
-### 4.1 Milestone 8: 3D Scenario Viewport & Map Viewer (Read-Only 3D Rendering)
+### 5.1 Milestone 8: 3D Scenario Viewport & Map Viewer (Read-Only 3D Rendering)
 
-#### 4.1.1 Core Modules (`core/src/render/`)
+#### 5.1.1 Core Modules (`core/src/render/`)
 1. **`core/src/render/bsp-geometry.ts`**:
    - Parses the scenario's primary structure BSP (`scnr + 0x5A4` -> `sbsp`).
    - Decodes `surfaces` (triangle indices `uint16[3]`) and `lightmaps` submesh materials (`0x100` bytes each).
    - Extracts PC uncompressed vertices (`0x38` = 56 bytes stride: `pos[3]`, `normal[3]`, `binormal[3]`, `tangent[3]`, `uv[2]`) and the secondary lightmap UV stream (`lightmapNormal[3]`, `lightmapUV[2]`).
    - Computes submesh bounding boxes and BSP aggregate bounding boxes for frustum culling.
 2. **`core/src/render/model-geometry.ts`**:
-   - Parses `mod2` (`gbxmodel`) tags referenced by scenario object palettes.
+   - Parses `mod2` (`gbxmodel`) tags referenced by scenario object palettes (cross-referenced with SparkEdit `07_OutputPane_and_Dialogs.cpp` and Eschaton `10_Model_Mod2_and_3D_Viewer.cpp`).
    - Extracts SuperHigh LOD parts (`lodGeometryIndex[4]`), converting triangle strips (`part + 0x4C`) into standard indexed triangles (discarding degenerate triangles where `v0 == v1 || v1 == v2 || v0 == v2`).
    - Decodes uncompressed 68-byte vertices (`pos[3]`, `normal[3]`, `uv[2]`), scaling raw UV coordinates by `model.uScale` (`mod2 + 0x30`) and `model.vScale` (`mod2 + 0x34`).
 3. **`core/src/render/bitmap-textures.ts`**:
    - Implements SparkEdit's universal shader-to-bitmap resolution heuristic: scans shader tag metadata for the first `'bitm'` tag dependency to find the base diffuse texture.
-   - Decodes `bitm` pixel buffers: DXT1 (`0x0E`), DXT2/3 (`0x0F`), DXT4/5 (`0x10`), and 16/32-bit linear RGBA.
-   - Reads pixel data from external `bitmaps.map` when `(flags & 0x100) != 0` (or in Halo PC version 7), and from the internal `.map` file when embedded.
+   - Decodes `bitm` pixel buffers: DXT1 (`0x0E`), DXT2/3 (`0x0F`), DXT4/5 (`0x10`), and 16/32-bit linear RGBA, plus Cubemap 6-face and 3D Volume slice extraction per Eschaton's `bitm_class_EX`.
+   - Reads pixel data from external `bitmaps.map` when `(flags & 0x100) != 0` / `CE_flag == 1`, and from the internal `.map` file when embedded.
 
-#### 4.1.2 Desktop Viewport UI (`desktop/src/components/viewport/`)
+#### 5.1.2 Desktop Viewport UI (`desktop/src/components/viewport/`)
 - **Canvas Placement**: Embedded in the Center Workspace as a tab alongside "Overview" / "Map Info".
 - **Coordinate Conversion**:
   - Halo is Z-up, right-handed (`+X` forward, `+Y` left, `+Z` up).
   - Three.js is Y-up, right-handed (`+X` right, `+Y` up, `+Z` forward).
   - Point conversion formula: `pos_three = new THREE.Vector3(halo_x, halo_z, -halo_y)`.
-- **Camera Navigation (QoL Upgrade over SparkEdit)**:
+- **Camera Navigation (QoL Upgrade over SparkEdit & Eschaton)**:
   - **6-DOF Fly Mode**: Right-click + `WASD` flies along camera look direction; `Q`/`E` or `Space`/`Ctrl` controls elevation; Mouse wheel adjusts fly speed.
   - **Orbit Mode**: `Alt + Left-Drag` orbits around the currently focused object.
   - **Frame Selection**: Pressing `F` smoothly animates the camera to frame the focused object.
@@ -432,9 +599,9 @@ flowchart TD
 
 ---
 
-### 4.2 Milestone 9: 3D Scenario Editing Mode (Forge-Style Object Manipulation)
+### 5.2 Milestone 9: 3D Scenario Editing Mode (Forge-Style Object Manipulation)
 
-#### 4.2.1 Interactive Gizmos & Transform Controls
+#### 5.2.1 Interactive Gizmos & Transform Controls
 - **Three.js `TransformControls`**:
   - `W`: Translation gizmo (3 axis arrows + 3 planar drag handles).
   - `E`: Rotation gizmo (3 axis rings).
@@ -444,12 +611,12 @@ flowchart TD
   - When dragging rotation rings, convert Three.js rotation back to Halo's intrinsic Euler angles in radians (`roll, -pitch, yaw` per SparkEdit `FUN_00412550`).
   - Store radians directly into the instance's `rotation[3]` field at `instance + 0x14`.
 
-#### 4.2.2 Raycast-to-BSP Ground Snapping (`G` Key)
+#### 5.2.2 Raycast-to-BSP Ground Snapping (`G` Key)
 - Cast a downward ray (`-Z` in Halo coordinates) from the object's current `(x, y)` position against the loaded BSP collision / render mesh triangles.
 - Set the object's `z` position to the exact collision intersection point, ensuring zero floating or sunken vehicles/scenery/spawns.
 - Optional modifier: align the object's "up" vector with the hit triangle's surface normal (ideal for placing rocks and trees on sloped cliffs).
 
-#### 4.2.3 Scene Outliner & Multi-Select
+#### 5.2.3 Scene Outliner & Multi-Select
 - Searchable hierarchical sidebar tree listing all placed instances grouped by category:
   - **Vehicles** (`scnr + 0x240`)
   - **Scenery** (`scnr + 0x210`)
@@ -462,28 +629,46 @@ flowchart TD
 - Category visibility toggles (hide/show scenery, spawns, or collision meshes).
 - Multi-selection (`Shift + Click` or marquee drag) and full Undo/Redo (`Ctrl+Z` / `Ctrl+Y`) stack.
 
-#### 4.2.4 Safe Scenario Reflexive Expansion & Palette Cloning
-- Unlike SparkEdit's dangerous hardcoded slack-space reallocation, use our tag injector / builder awareness to safely append new instances or duplicate palette entries without corrupting adjacent tags.
+#### 5.2.4 Safe Scenario Reflexive Expansion & Palette Cloning
+- Unlike SparkEdit's dangerous hardcoded slack-space reallocation, use our Eschaton-inspired expanded-container / tag rebuilder to safely append new instances or duplicate palette entries without corrupting adjacent tags.
 
 ---
 
-### 4.3 Milestone 10: Automated BSP Swapper & Map Rebuilder
+### 5.3 Milestone 10: Eschaton-Grade Map Expander, Garbage-Collected Rebuilder & BSP Swapper
 
-#### 4.3.1 1-Click SP-to-MP BSP Swapper
-- **Direct Map-to-Map Transfer**:
-  - User chooses a source campaign map (e.g. `b30.map` with `levels\b30\b30a`) and target multiplayer map (e.g. `bloodgulch.map`).
-  - Automatically walks the source BSP's dependencies (lightmaps, materials, shaders, bitmaps, cluster skies, fog, weather) and copies all missing tags and embedded raw assets into the target map.
-  - Places the new `sbsp` block at the standard offset (`0x800`) and updates `scnr`'s `structure bsps[0]` (`scnr + 0x5A4`).
-  - Re-bases all internal `sbsp` virtual pointers across collision BSP, nodes, leaves, surfaces, lightmaps, clusters, and vertex streams.
+#### 5.3.1 Plugin-Free Heuristic Tag Expansion & Garbage-Collected Map Rebuilding
+- Port Eschaton's `H1.Map::expandMap` / `H1.Map::expandTag` / `H1.Map::write` workflow to `core/src/map/`:
+  - **Sorted-Offset Tag Size Partitioning**: Compute exact contiguous metadata bounds for every tag in the map without relying on plugins.
+  - **Heuristic Reflexive & Dependency Scanner**: Scan 4-byte aligned words using `isOffset`, `isReflexiveOffset`, and `isTag` to discover all reflexives, 16-byte tag references, and class-specific `H1.Meta_Raw` blocks (`bitm`, `snd!`, `mod2`, `sbsp`, `ustr`, `font`).
+  - **Contiguous Garbage-Collected Serialization**: Rebuild `.map` files from in-memory expanded tags (`H1.Meta_Expanded_Data`), automatically compacting dead space, allocating collision-free tag IDs (`0xE1740000 + n * 0x10001`), and recalculating `magic`, `bsp_magic`, and `modelDataSize` accurately.
 
-#### 4.3.2 Automated Ground-Floor Object Relocation
-- Solves the classic modding problem where swapping a BSP leaves all existing multiplayer spawns, flags, vehicles, and weapons floating in the void or buried underground.
-- Computes the bounding box / main floor centroid of the newly injected BSP.
-- Automatically translates all MP player spawns, CTF flags, vehicles, and weapons onto the new BSP terrain surface using our downward raycast snapper, saving modders hours of manual coordinate dragging.
+#### 5.3.2 1-Click SP-to-MP BSP Swapper with DOBC / Decal Stripping
+- **Direct Map-to-Map Transfer (`replaceSBSP`)**:
+  - User chooses a source map / extracted `.meta` pack and target `.map`.
+  - Recursively walks the source `sbsp` dependencies (lightmaps, shaders, bitmaps, cluster skies, fog, weather) and imports all missing tags and raw assets.
+  - Places the new `sbsp` block at `0x800`, updates `scnr + 0x5A4` (`H1.bsp_scenario_data`), and re-bases all internal `sbsp` virtual pointers.
+  - **Optional DOBC & Runtime Decal Stripping (`SBSP_header` / `SBSP_DOBC_data`)**: Includes a checkbox (enabled by default when transplanting SP BSPs to MP) that zeroes out the `Detail Objects` (`sbsp + 0x1D4`) and `Runtime Decals` (`sbsp + 0x1E0`) reflexives so transplanted campaign BSPs never crash due to implicit `dobc`/`deca` references.
+- **Automated Ground-Floor Object Relocation**:
+  - Automatically translates all MP player spawns, CTF flags, vehicles, and weapons onto the new BSP terrain surface using our downward `-Z` raycast snapper.
 
-#### 4.3.3 HMT Map Header Repair Tool
-- Resolves the `TheIsland-Ter.map` conversion failure:
-  > `The model data (8415232 + 7899000) is not directly followed by the tag data (17010044); this file layout is not supported.`
-- Built-in one-click diagnostic and fix: detects when `vertexDataOffset + modelDataSize < tagIndexOffset` due to HMT's double-subtraction bug in `UpdateMod2.cs` / `MapBuilder.cs`, and corrects `header.modelDataSize = tagIndexOffset - vertexDataOffset`.
-- Enables any legacy HMT-rebuilt map to convert cleanly to Halo Custom Edition.
+#### 5.3.3 External Resource Map Splicer & Tag Internalization (`H1SupportMap.SupportMap`)
+- Port `H1SupportMap.SupportMap` (`bitmaps.map` type `1`, `sounds.map` type `2`, `loc.map` type `3`) and `H1.Map::internalizeTag`:
+  - **1-Click Tag Internalizer**: Select one or more externally indexed tags (`bitm`, `snd!`, `font`, `ustr`, `hmt `) and internalize their raw data directly into the `.map` file (clearing `CE_flag` at `+0x18` and `bitm` external flag `0x100`), making custom maps 100% standalone.
+  - **Support Map Splicing**: Optionally splice new or modified textures/sounds into `bitmaps.map` or `sounds.map` (`SpliceNewData` / `BuildOnMap`).
+
+#### 5.3.4 HMT Map Header Repair Tool
+- Built-in one-click diagnostic and fix for legacy HMT-rebuilt maps (like `TheIsland-Ter.map`): detects when `vertexDataOffset + modelDataSize < tagIndexOffset` due to HMT's `UpdateMod2.cs` bug and corrects `header.modelDataSize = tagIndexOffset - vertexDataOffset`.
+
+---
+
+### 5.4 Milestone 11: Rich `.ent` Plugin Metadata, Reverse-Dependency Viewer & `ustr` Editor
+
+1. **Rich `.ent` Tooltip & `<index>` Cross-Reference Integration (`Sparky's Plugins` / `Phenomena's Plugins`)**:
+   - Enrich `core/src/map/definitions/` with the `note` (units/ranges), `info` (detailed modding descriptions), and `<index>` (dynamic cross-reflexive chunk dropdowns) from `SAMPLE CODE/Eschaton V0.8.1/Plugins/Sparky's Plugins/`.
+2. **Reverse-Dependency ("Referencing Tags") Viewer, Tag Renaming & Safe Deletion**:
+   - Add a **"Referenced By"** tab in the Tag Inspector (`find_referencing_tags`) showing every tag in the map that depends on the active tag, with 1-click navigation.
+   - Add **Rename Tag** (`change_name`) and **Delete Tag** (`remove_tag`, nulling out incoming references to `0xFFFFFFFF`) with automatic reference updates across the map.
+3. **Built-in `ustr` Unicode String List Editor (`ustr_edit_control` / `ustr_snippit`)**:
+   - Dedicated editor for `ustr` (`unicode_string_list`) tags that decodes UTF-16LE string entries (`maxLength`, `offset`) into an editable list so modders can customize HUD messages, weapon pickup prompts, and multiplayer game-mode text directly.
+
 

@@ -20,6 +20,7 @@ The real project lives in `core/` and `desktop/`. **`backend/` (FastAPI/Mongo), 
 - `memory/PRD.md` holds the milestone status table and the log of approved decisions. Check it before re-asking something. It is the source of truth. The README's status section is only a summary.
 - `memory/demo-converter.md` holds the converter research notes. Read it before any converter work.
 - `memory/opence-notes.md` holds OpenCE's checks (tested build, pinned commit). Optional local read-only OpenCE clone: `C:\temp\OpenCE-src` (never committed).
+- `memory/sample-code-reference.md` and `memory/asset-editors-plan.md` hold the complete architectural analysis and Phase 2 implementation plans derived from the decompiled reference tools in `SAMPLE CODE/` (**HMT v3.5**, **HHT v5**, **SparkEdit v3.02**, and **Eschaton v0.8.1**).
 
 ## Working style (Claude Code)
 
