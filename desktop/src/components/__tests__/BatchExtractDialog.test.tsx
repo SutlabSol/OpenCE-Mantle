@@ -53,6 +53,8 @@ describe('BatchExtractDialog', () => {
       updateTagField: vi.fn(),
       getDependencySlots: vi.fn(),
       setDependencySlot: vi.fn(),
+      getBspRenderMesh: vi.fn(),
+      getBitmapTexture: vi.fn(),
       convertPreflight: vi.fn(),
       convertMap: vi.fn(),
       pickConvertResource: vi.fn(),

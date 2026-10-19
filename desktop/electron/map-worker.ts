@@ -40,6 +40,10 @@ import {
   listTagDependencySlots,
   setTagDependencySlot,
   TagDependencySwapError,
+  extractBspRenderMesh,
+  decodeBitmapTagImage,
+  resolveShaderBaseBitmapTagId,
+  BITM_FOURCC,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -75,6 +79,8 @@ import type {
   UpdateTagFieldResult,
   GetDependencySlotsResult,
   SetDependencySlotResult,
+  GetBspRenderMeshResult,
+  GetBitmapTextureResult,
 } from './shared-types';
 import {
   sanitizeMapName,
@@ -1032,6 +1038,62 @@ export function runSetDependencySlot(task: { requestId: string; tagIndex: number
   }
 }
 
+let cachedBitmapsMap: { filePath: string; mtimeMs: number; buffer: Buffer } | null = null;
+function getBitmapsBuffer(bitmapsPath?: string): Buffer | undefined {
+  let resolved = bitmapsPath;
+  if (!resolved && currentMap?.filePath) {
+    const candidate = path.join(path.dirname(currentMap.filePath), 'bitmaps.map');
+    if (fs.existsSync(candidate)) {
+      resolved = candidate;
+    }
+  }
+  if (!resolved || !fs.existsSync(resolved)) return undefined;
+  try {
+    const stat = fs.statSync(resolved);
+    if (cachedBitmapsMap && cachedBitmapsMap.filePath === resolved && cachedBitmapsMap.mtimeMs === stat.mtimeMs) {
+      return cachedBitmapsMap.buffer;
+    }
+    const buffer = fs.readFileSync(resolved);
+    cachedBitmapsMap = { filePath: resolved, mtimeMs: stat.mtimeMs, buffer };
+    return buffer;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Step 8.4: Extracts 3D Structure BSP render mesh for the open map. */
+export function runGetBspRenderMesh(task: { requestId: string; bspIndex?: number }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const mesh = extractBspRenderMesh(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.bspIndex);
+    sendResult(task.requestId, { ok: true, mesh } satisfies GetBspRenderMeshResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Step 8.4: Decodes a bitmap or resolves and decodes a shader's diffuse texture for 3D rendering. */
+export function runGetBitmapTexture(task: { requestId: string; bitmapTagId: number; imageIndex?: number; bitmapsPath?: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    let tagId = task.bitmapTagId;
+    const entry = currentMap.tagIndex.entries.find((e) => e.tagId === tagId);
+    if (entry && entry.primaryClassFourCC !== BITM_FOURCC) {
+      const resolvedId = resolveShaderBaseBitmapTagId(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId);
+      if (resolvedId !== null) {
+        tagId = resolvedId;
+      } else {
+        return sendError(task.requestId, 'NO_DIFFUSE_BITMAP', `Shader tag 0x${tagId.toString(16)} does not reference a diffuse bitmap.`);
+      }
+    }
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+    const texture = decodeBitmapTagImage(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId, task.imageIndex ?? 0, externalBitmaps);
+    sendResult(task.requestId, { ok: true, texture } satisfies GetBitmapTextureResult);
+  } catch (err) {
+    sendError(task.requestId, 'BITMAP_TEXTURE_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -1054,6 +1116,8 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'updateTagField') runUpdateTagField(task);
     else if (task.type === 'getDependencySlots') runGetDependencySlots(task);
     else if (task.type === 'setDependencySlot') runSetDependencySlot(task);
+    else if (task.type === 'getBspRenderMesh') runGetBspRenderMesh(task);
+    else if (task.type === 'getBitmapTexture') runGetBitmapTexture(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

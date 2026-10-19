@@ -42,6 +42,8 @@ __export(map_worker_exports, {
   runConvertMap: () => runConvertMap,
   runConvertPreflight: () => runConvertPreflight,
   runExtractTags: () => runExtractTags,
+  runGetBitmapTexture: () => runGetBitmapTexture,
+  runGetBspRenderMesh: () => runGetBspRenderMesh,
   runGetDependencies: () => runGetDependencies,
   runGetDependencySlots: () => runGetDependencySlots,
   runGetTagFields: () => runGetTagFields,
@@ -39216,6 +39218,666 @@ function setTagDependencySlot(buffer, header, tagIndex, tagEntryIndex, fieldPath
   return { fieldPath, newTagId: target.tagId };
 }
 
+// ../core/src/render/bsp-geometry.ts
+function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (ID: 0x${tagIndex.scenarioTagId.toString(16)}) not found in tag index.`);
+  }
+  const scenarioFileOffset = resolveTagDataPointer(
+    scenarioEntry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const decodedScenario = decodeStruct(buffer, scenarioFileOffset, "Scenario");
+  const bspsField = decodedScenario.get("structure bsps");
+  if (!bspsField || bspsField.kind !== "reflexive" || bspsField.value.count === 0) {
+    throw new Error("Scenario has no structure bsps.");
+  }
+  if (bspIndex < 0 || bspIndex >= bspsField.value.count) {
+    throw new Error(`BSP index ${bspIndex} is out of bounds (scenario has ${bspsField.value.count} BSPs).`);
+  }
+  const scenarioBspSize = resolveStruct("ScenarioBSP").totalSize;
+  const bspsArrayOffset = header.tagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+  const bspEntryOffset = bspsArrayOffset + bspIndex * scenarioBspSize;
+  const decodedBspEntry = decodeStruct(buffer, bspEntryOffset, "ScenarioBSP");
+  const bspDep = decodedBspEntry.get("structure bsp");
+  const bspTagId = bspDep && bspDep.kind === "dependency" ? bspDep.value.tagId : 4294967295;
+  const bspLocation = locateStructureBsp(
+    buffer,
+    tagIndex,
+    scenarioFileOffset,
+    header.tagDataOffset,
+    tagIndex.baseMemoryAddress,
+    bspTagId
+  );
+  if (!bspLocation) {
+    throw new Error(`Failed to locate structure BSP (tagId: 0x${bspTagId.toString(16)}).`);
+  }
+  const decodedBsp = decodeStruct(buffer, bspLocation.fileOffset, "ScenarioStructureBSP");
+  const lightmapsBitmapDep = decodedBsp.get("lightmaps bitmap");
+  const lightmapsBitmapTagId = lightmapsBitmapDep && lightmapsBitmapDep.kind === "dependency" ? lightmapsBitmapDep.value.tagId : 4294967295;
+  const boundsX = decodedBsp.get("world bounds x");
+  const boundsY = decodedBsp.get("world bounds y");
+  const boundsZ = decodedBsp.get("world bounds z");
+  const worldBounds = [
+    boundsX?.value[0] ?? 0,
+    boundsY?.value[0] ?? 0,
+    boundsZ?.value[0] ?? 0,
+    boundsX?.value[1] ?? 0,
+    boundsY?.value[1] ?? 0,
+    boundsZ?.value[1] ?? 0
+  ];
+  const surfacesField = decodedBsp.get("surfaces");
+  if (!surfacesField || surfacesField.kind !== "reflexive") {
+    throw new Error("ScenarioStructureBSP has invalid surfaces reflexive.");
+  }
+  const surfacesOffset = bspLocation.fileOffsetAnchor + (surfacesField.value.pointerLow - bspLocation.baseMemoryAddress);
+  const lightmapsField = decodedBsp.get("lightmaps");
+  if (!lightmapsField || lightmapsField.kind !== "reflexive") {
+    throw new Error("ScenarioStructureBSP has invalid lightmaps reflexive.");
+  }
+  const lightmapsOffset = bspLocation.fileOffsetAnchor + (lightmapsField.value.pointerLow - bspLocation.baseMemoryAddress);
+  const lmStructSize = resolveStruct("ScenarioStructureBSPLightmap").totalSize;
+  const matStructSize = resolveStruct("ScenarioStructureBSPMaterial").totalSize;
+  const submeshes = [];
+  let totalVertices = 0;
+  let totalTriangles = 0;
+  let submeshCounter = 0;
+  for (let lmIdx = 0; lmIdx < lightmapsField.value.count; lmIdx++) {
+    const lmOffset = lightmapsOffset + lmIdx * lmStructSize;
+    const decodedLm = decodeStruct(buffer, lmOffset, "ScenarioStructureBSPLightmap");
+    const bitmapField = decodedLm.get("bitmap");
+    const lightmapBitmapIndex = bitmapField?.value ?? -1;
+    const materialsReflexive = decodedLm.get("materials");
+    if (!materialsReflexive || materialsReflexive.kind !== "reflexive" || materialsReflexive.value.count === 0) {
+      continue;
+    }
+    const materialsOffset = bspLocation.fileOffsetAnchor + (materialsReflexive.value.pointerLow - bspLocation.baseMemoryAddress);
+    for (let matIdx = 0; matIdx < materialsReflexive.value.count; matIdx++) {
+      const matOffset = materialsOffset + matIdx * matStructSize;
+      const decodedMat = decodeStruct(buffer, matOffset, "ScenarioStructureBSPMaterial");
+      const shaderDep = decodedMat.get("shader");
+      const shaderTagId = shaderDep && shaderDep.kind === "dependency" ? shaderDep.value.tagId : 4294967295;
+      const shaderPermField = decodedMat.get("shader permutation");
+      const shaderPermutation = shaderPermField?.value ?? 0;
+      const surfStartField = decodedMat.get("surfaces");
+      const surfCountField = decodedMat.get("surface count");
+      const vertCountField = decodedMat.get("rendered vertices count");
+      const surfaceIndexStart = surfStartField?.value ?? 0;
+      const surfaceCount = surfCountField?.value ?? 0;
+      const vertexCount = vertCountField?.value ?? 0;
+      if (vertexCount === 0 || surfaceCount === 0) {
+        continue;
+      }
+      const uncompressedData = decodedMat.get("uncompressed vertices");
+      if (!uncompressedData || uncompressedData.kind !== "tagDataOffset") {
+        continue;
+      }
+      const vertPtr = uncompressedData.value.pointerLow;
+      const vertOffset = bspLocation.fileOffsetAnchor + (vertPtr - bspLocation.baseMemoryAddress);
+      const vertices = new Float32Array(vertexCount * 8);
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let v = 0; v < vertexCount; v++) {
+        const vOff = vertOffset + v * 56;
+        const x = buffer.readFloatLE(vOff + 0);
+        const y = buffer.readFloatLE(vOff + 4);
+        const z = buffer.readFloatLE(vOff + 8);
+        const nx = buffer.readFloatLE(vOff + 12);
+        const ny = buffer.readFloatLE(vOff + 16);
+        const nz = buffer.readFloatLE(vOff + 20);
+        const u = buffer.readFloatLE(vOff + 48);
+        const vCoord = buffer.readFloatLE(vOff + 52);
+        const outIdx = v * 8;
+        vertices[outIdx + 0] = x;
+        vertices[outIdx + 1] = y;
+        vertices[outIdx + 2] = z;
+        vertices[outIdx + 3] = nx;
+        vertices[outIdx + 4] = ny;
+        vertices[outIdx + 5] = nz;
+        vertices[outIdx + 6] = u;
+        vertices[outIdx + 7] = vCoord;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z;
+        if (z > maxZ) maxZ = z;
+      }
+      const lightmapUvs = new Float32Array(vertexCount * 2);
+      const lmVertOffset = vertOffset + vertexCount * 56;
+      for (let v = 0; v < vertexCount; v++) {
+        const lmvOff = lmVertOffset + v * 20;
+        const lu = buffer.readFloatLE(lmvOff + 12);
+        const lv = buffer.readFloatLE(lmvOff + 16);
+        lightmapUvs[v * 2 + 0] = lu;
+        lightmapUvs[v * 2 + 1] = lv;
+      }
+      const indices = new Uint16Array(surfaceCount * 3);
+      for (let s = 0; s < surfaceCount; s++) {
+        const sOff = surfacesOffset + (surfaceIndexStart + s) * 6;
+        indices[s * 3 + 0] = buffer.readUInt16LE(sOff + 0);
+        indices[s * 3 + 1] = buffer.readUInt16LE(sOff + 2);
+        indices[s * 3 + 2] = buffer.readUInt16LE(sOff + 4);
+      }
+      const boundingBox = [
+        minX === Infinity ? 0 : minX,
+        minY === Infinity ? 0 : minY,
+        minZ === Infinity ? 0 : minZ,
+        maxX === -Infinity ? 0 : maxX,
+        maxY === -Infinity ? 0 : maxY,
+        maxZ === -Infinity ? 0 : maxZ
+      ];
+      submeshes.push({
+        submeshIndex: submeshCounter++,
+        lightmapIndex: lmIdx,
+        lightmapBitmapIndex,
+        shaderTagId,
+        shaderPermutation,
+        vertexCount,
+        vertices,
+        lightmapUvs,
+        indices,
+        boundingBox
+      });
+      totalVertices += vertexCount;
+      totalTriangles += surfaceCount;
+    }
+  }
+  return {
+    bspIndex,
+    bspTagId,
+    lightmapsBitmapTagId,
+    worldBounds,
+    totalVertices,
+    totalTriangles,
+    submeshes
+  };
+}
+
+// ../core/src/render/bitmap-textures.ts
+var BitmapTextureError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "BitmapTextureError";
+  }
+};
+var UnsupportedBitmapFormatError = class extends BitmapTextureError {
+  constructor(bitmapTagId, imageIndex, format) {
+    super(
+      `Unsupported bitmap format ${format} (0x${format.toString(16)}) for bitm tag 0x${bitmapTagId.toString(16)} image ${imageIndex}.`
+    );
+    this.name = "UnsupportedBitmapFormatError";
+  }
+};
+var BITM_FOURCC = 1651078253;
+var BitmapFormat = {
+  A8: 0,
+  Y8: 1,
+  AY8: 2,
+  A8Y8: 3,
+  R5G6B5: 6,
+  A1R5G5B5: 8,
+  A4R4G4B4: 9,
+  X8R8G8B8: 10,
+  A8R8G8B8: 11,
+  DXT1: 14,
+  DXT3: 15,
+  DXT5: 16,
+  P8: 17
+};
+function resolveShaderBaseBitmapTagId(buffer, header, tagIndex, shaderTagId) {
+  const entry = tagIndex.entries.find((e) => e.tagId === shaderTagId);
+  if (!entry || entry.isExternal) return null;
+  const shaderOffset = resolveTagDataPointer(
+    entry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const scanLimit = Math.min(shaderOffset + 512, buffer.length - 16);
+  for (let off = shaderOffset; off <= scanLimit; off += 4) {
+    if (buffer.readUInt32LE(off) === BITM_FOURCC) {
+      const tagId = buffer.readUInt32LE(off + 12);
+      if (tagId !== 4294967295) {
+        const targetIdx = tagId & 65535;
+        if (targetIdx < tagIndex.entries.length) {
+          const target = tagIndex.entries[targetIdx];
+          if (target && target.primaryClassFourCC === BITM_FOURCC) {
+            return tagId;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+function readBitmapImageDescriptor(buffer, header, tagIndex, bitmapTagId, imageIndex = 0, externalBitmapsBuffer) {
+  const entry = tagIndex.entries.find((e) => e.tagId === bitmapTagId);
+  if (!entry) {
+    throw new BitmapTextureError(`Bitmap tag (ID: 0x${bitmapTagId.toString(16)}) not found in tag index.`);
+  }
+  if (entry.isExternal) {
+    if (!externalBitmapsBuffer) {
+      throw new BitmapTextureError(
+        `External bitmaps.map buffer is required to read external bitmap tag "${entry.path}".`
+      );
+    }
+    const resMap = parseResourceMap(externalBitmapsBuffer);
+    const resIndex = entry.tagDataPointerOrResourceIndex;
+    if (resIndex >= resMap.entries.length) {
+      throw new CorruptMapError(
+        `Bitmap tag "${entry.path}" references external resource index ${resIndex} out of bounds (count=${resMap.entries.length}).`
+      );
+    }
+    const res = resMap.entries[resIndex];
+    const tagStart2 = res.dataOffset;
+    if (tagStart2 + 108 > externalBitmapsBuffer.length) {
+      throw new CorruptMapError(`Resource entry for bitmap "${entry.path}" exceeds external buffer.`);
+    }
+    const count3 = externalBitmapsBuffer.readUInt32LE(tagStart2 + 96);
+    const ptrLow2 = externalBitmapsBuffer.readUInt32LE(tagStart2 + 100);
+    if (imageIndex >= count3) {
+      throw new BitmapTextureError(
+        `Bitmap tag "${entry.path}" has ${count3} images; requested index ${imageIndex} is out of range.`
+      );
+    }
+    const rowStart2 = tagStart2 + ptrLow2 + imageIndex * 48;
+    if (rowStart2 + 48 > externalBitmapsBuffer.length) {
+      throw new CorruptMapError(`Bitmap descriptor row exceeds external buffer.`);
+    }
+    const width2 = externalBitmapsBuffer.readUInt16LE(rowStart2 + 4);
+    const height2 = externalBitmapsBuffer.readUInt16LE(rowStart2 + 6);
+    const format2 = externalBitmapsBuffer.readUInt16LE(rowStart2 + 12);
+    const flags2 = externalBitmapsBuffer.readUInt16LE(rowStart2 + 14);
+    const pixelsOffset2 = externalBitmapsBuffer.readUInt32LE(rowStart2 + 24);
+    const pixelsSize2 = externalBitmapsBuffer.readUInt32LE(rowStart2 + 28);
+    return {
+      width: width2,
+      height: height2,
+      format: format2,
+      flags: flags2,
+      isExternal: true,
+      pixelsOffset: pixelsOffset2,
+      pixelsSize: pixelsSize2
+    };
+  }
+  const tagStart = resolveTagDataPointer(
+    entry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const count2 = buffer.readUInt32LE(tagStart + 96);
+  const ptrLow = buffer.readUInt32LE(tagStart + 100);
+  if (imageIndex >= count2) {
+    throw new BitmapTextureError(
+      `Bitmap tag "${entry.path}" has ${count2} images; requested index ${imageIndex} is out of range.`
+    );
+  }
+  const arrayOffset = header.tagDataOffset + (ptrLow - tagIndex.baseMemoryAddress);
+  const rowStart = arrayOffset + imageIndex * 48;
+  if (rowStart + 48 > buffer.length) {
+    throw new CorruptMapError(`Bitmap descriptor row exceeds map buffer.`);
+  }
+  const width = buffer.readUInt16LE(rowStart + 4);
+  const height = buffer.readUInt16LE(rowStart + 6);
+  const format = buffer.readUInt16LE(rowStart + 12);
+  const flags = buffer.readUInt16LE(rowStart + 14);
+  const pixelsOffset = buffer.readUInt32LE(rowStart + 24);
+  const pixelsSize = buffer.readUInt32LE(rowStart + 28);
+  const isExternal = (flags & 256) !== 0 || header.engine === 7;
+  return {
+    width,
+    height,
+    format,
+    flags,
+    isExternal,
+    pixelsOffset,
+    pixelsSize
+  };
+}
+function unpackRgb565(c) {
+  const r = (c >> 11 & 31) * 255 / 31;
+  const g = (c >> 5 & 63) * 255 / 63;
+  const b = (c & 31) * 255 / 31;
+  return [Math.round(r), Math.round(g), Math.round(b)];
+}
+function decodeDxt1(data, offset, width, height) {
+  const rgba = new Uint8Array(width * height * 4);
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  let src = offset;
+  for (let by = 0; by < blocksY; by++) {
+    for (let bx = 0; bx < blocksX; bx++) {
+      if (src + 8 > data.length) {
+        throw new BitmapTextureError(`DXT1 buffer truncated at block (${bx}, ${by}).`);
+      }
+      const c0 = data[src + 0] | data[src + 1] << 8;
+      const c1 = data[src + 2] | data[src + 3] << 8;
+      const code = data[src + 4] | data[src + 5] << 8 | data[src + 6] << 16 | data[src + 7] << 24;
+      src += 8;
+      const [r0, g0, b0] = unpackRgb565(c0);
+      const [r1, g1, b1] = unpackRgb565(c1);
+      let colPalette;
+      if (c0 > c1) {
+        colPalette = [
+          [r0, g0, b0, 255],
+          [r1, g1, b1, 255],
+          [Math.round((2 * r0 + r1) / 3), Math.round((2 * g0 + g1) / 3), Math.round((2 * b0 + b1) / 3), 255],
+          [Math.round((r0 + 2 * r1) / 3), Math.round((g0 + 2 * g1) / 3), Math.round((b0 + 2 * b1) / 3), 255]
+        ];
+      } else {
+        colPalette = [
+          [r0, g0, b0, 255],
+          [r1, g1, b1, 255],
+          [Math.round((r0 + r1) / 2), Math.round((g0 + g1) / 2), Math.round((b0 + b1) / 2), 255],
+          [0, 0, 0, 0]
+        ];
+      }
+      for (let py = 0; py < 4; py++) {
+        for (let px = 0; px < 4; px++) {
+          const pixelX = bx * 4 + px;
+          const pixelY = by * 4 + py;
+          if (pixelX < width && pixelY < height) {
+            const shift = (py * 4 + px) * 2;
+            const colorIdx = code >> shift & 3;
+            const [r, g, b, a] = colPalette[colorIdx];
+            const dstIdx = (pixelY * width + pixelX) * 4;
+            rgba[dstIdx + 0] = r;
+            rgba[dstIdx + 1] = g;
+            rgba[dstIdx + 2] = b;
+            rgba[dstIdx + 3] = a;
+          }
+        }
+      }
+    }
+  }
+  return rgba;
+}
+function decodeDxt3(data, offset, width, height) {
+  const rgba = new Uint8Array(width * height * 4);
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  let src = offset;
+  for (let by = 0; by < blocksY; by++) {
+    for (let bx = 0; bx < blocksX; bx++) {
+      if (src + 16 > data.length) {
+        throw new BitmapTextureError(`DXT3 buffer truncated at block (${bx}, ${by}).`);
+      }
+      const alphaBytes = [
+        data[src + 0],
+        data[src + 1],
+        data[src + 2],
+        data[src + 3],
+        data[src + 4],
+        data[src + 5],
+        data[src + 6],
+        data[src + 7]
+      ];
+      src += 8;
+      const c0 = data[src + 0] | data[src + 1] << 8;
+      const c1 = data[src + 2] | data[src + 3] << 8;
+      const code = data[src + 4] | data[src + 5] << 8 | data[src + 6] << 16 | data[src + 7] << 24;
+      src += 8;
+      const [r0, g0, b0] = unpackRgb565(c0);
+      const [r1, g1, b1] = unpackRgb565(c1);
+      const colPalette = [
+        [r0, g0, b0],
+        [r1, g1, b1],
+        [Math.round((2 * r0 + r1) / 3), Math.round((2 * g0 + g1) / 3), Math.round((2 * b0 + b1) / 3)],
+        [Math.round((r0 + 2 * r1) / 3), Math.round((g0 + 2 * g1) / 3), Math.round((b0 + 2 * b1) / 3)]
+      ];
+      for (let py = 0; py < 4; py++) {
+        for (let px = 0; px < 4; px++) {
+          const pixelX = bx * 4 + px;
+          const pixelY = by * 4 + py;
+          if (pixelX < width && pixelY < height) {
+            const linearIdx = py * 4 + px;
+            const aByte = alphaBytes[linearIdx >> 1];
+            const a4 = (linearIdx & 1) === 0 ? aByte & 15 : aByte >> 4;
+            const a = a4 | a4 << 4;
+            const shift = linearIdx * 2;
+            const colorIdx = code >> shift & 3;
+            const [r, g, b] = colPalette[colorIdx];
+            const dstIdx = (pixelY * width + pixelX) * 4;
+            rgba[dstIdx + 0] = r;
+            rgba[dstIdx + 1] = g;
+            rgba[dstIdx + 2] = b;
+            rgba[dstIdx + 3] = a;
+          }
+        }
+      }
+    }
+  }
+  return rgba;
+}
+function decodeDxt5(data, offset, width, height) {
+  const rgba = new Uint8Array(width * height * 4);
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  let src = offset;
+  for (let by = 0; by < blocksY; by++) {
+    for (let bx = 0; bx < blocksX; bx++) {
+      if (src + 16 > data.length) {
+        throw new BitmapTextureError(`DXT5 buffer truncated at block (${bx}, ${by}).`);
+      }
+      const a0 = data[src + 0];
+      const a1 = data[src + 1];
+      const aBits = BigInt(data[src + 2]) | BigInt(data[src + 3]) << 8n | BigInt(data[src + 4]) << 16n | BigInt(data[src + 5]) << 24n | BigInt(data[src + 6]) << 32n | BigInt(data[src + 7]) << 40n;
+      src += 8;
+      let alphaPalette;
+      if (a0 > a1) {
+        alphaPalette = [
+          a0,
+          a1,
+          Math.round((6 * a0 + 1 * a1) / 7),
+          Math.round((5 * a0 + 2 * a1) / 7),
+          Math.round((4 * a0 + 3 * a1) / 7),
+          Math.round((3 * a0 + 4 * a1) / 7),
+          Math.round((2 * a0 + 5 * a1) / 7),
+          Math.round((1 * a0 + 6 * a1) / 7)
+        ];
+      } else {
+        alphaPalette = [
+          a0,
+          a1,
+          Math.round((4 * a0 + 1 * a1) / 5),
+          Math.round((3 * a0 + 2 * a1) / 5),
+          Math.round((2 * a0 + 3 * a1) / 5),
+          Math.round((1 * a0 + 4 * a1) / 5),
+          0,
+          255
+        ];
+      }
+      const c0 = data[src + 0] | data[src + 1] << 8;
+      const c1 = data[src + 2] | data[src + 3] << 8;
+      const code = data[src + 4] | data[src + 5] << 8 | data[src + 6] << 16 | data[src + 7] << 24;
+      src += 8;
+      const [r0, g0, b0] = unpackRgb565(c0);
+      const [r1, g1, b1] = unpackRgb565(c1);
+      const colPalette = [
+        [r0, g0, b0],
+        [r1, g1, b1],
+        [Math.round((2 * r0 + r1) / 3), Math.round((2 * g0 + g1) / 3), Math.round((2 * b0 + b1) / 3)],
+        [Math.round((r0 + 2 * r1) / 3), Math.round((g0 + 2 * g1) / 3), Math.round((b0 + 2 * b1) / 3)]
+      ];
+      for (let py = 0; py < 4; py++) {
+        for (let px = 0; px < 4; px++) {
+          const pixelX = bx * 4 + px;
+          const pixelY = by * 4 + py;
+          if (pixelX < width && pixelY < height) {
+            const linearIdx = py * 4 + px;
+            const alphaIdx = Number(aBits >> BigInt(linearIdx * 3) & 0x07n);
+            const a = alphaPalette[alphaIdx];
+            const shift = linearIdx * 2;
+            const colorIdx = code >> shift & 3;
+            const [r, g, b] = colPalette[colorIdx];
+            const dstIdx = (pixelY * width + pixelX) * 4;
+            rgba[dstIdx + 0] = r;
+            rgba[dstIdx + 1] = g;
+            rgba[dstIdx + 2] = b;
+            rgba[dstIdx + 3] = a;
+          }
+        }
+      }
+    }
+  }
+  return rgba;
+}
+function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex = 0, externalBitmapsBuffer) {
+  const desc = readBitmapImageDescriptor(
+    buffer,
+    header,
+    tagIndex,
+    bitmapTagId,
+    imageIndex,
+    externalBitmapsBuffer
+  );
+  const srcBuffer = desc.isExternal ? externalBitmapsBuffer : buffer;
+  if (!srcBuffer) {
+    throw new BitmapTextureError(`Missing source buffer for bitmap tag 0x${bitmapTagId.toString(16)}.`);
+  }
+  if (desc.pixelsOffset + desc.pixelsSize > srcBuffer.length) {
+    throw new BitmapTextureError(
+      `Bitmap pixel data (offset 0x${desc.pixelsOffset.toString(16)}, size ${desc.pixelsSize}) exceeds buffer length (${srcBuffer.length}).`
+    );
+  }
+  const { width, height, format, pixelsOffset } = desc;
+  switch (format) {
+    case BitmapFormat.DXT1: {
+      const rgbaData = decodeDxt1(srcBuffer, pixelsOffset, width, height);
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.DXT3: {
+      const rgbaData = decodeDxt3(srcBuffer, pixelsOffset, width, height);
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.DXT5: {
+      const rgbaData = decodeDxt5(srcBuffer, pixelsOffset, width, height);
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.X8R8G8B8:
+    case BitmapFormat.A8R8G8B8: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const b = srcBuffer[src + 0];
+        const g = srcBuffer[src + 1];
+        const r = srcBuffer[src + 2];
+        const a = format === BitmapFormat.X8R8G8B8 ? 255 : srcBuffer[src + 3];
+        src += 4;
+        rgbaData[dst + 0] = r;
+        rgbaData[dst + 1] = g;
+        rgbaData[dst + 2] = b;
+        rgbaData[dst + 3] = a;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.R5G6B5: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const val = srcBuffer.readUInt16LE(src);
+        src += 2;
+        const [r, g, b] = unpackRgb565(val);
+        rgbaData[dst + 0] = r;
+        rgbaData[dst + 1] = g;
+        rgbaData[dst + 2] = b;
+        rgbaData[dst + 3] = 255;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.A1R5G5B5: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const val = srcBuffer.readUInt16LE(src);
+        src += 2;
+        const a = val & 32768 ? 255 : 0;
+        const r = Math.round((val >> 10 & 31) * 255 / 31);
+        const g = Math.round((val >> 5 & 31) * 255 / 31);
+        const b = Math.round((val & 31) * 255 / 31);
+        rgbaData[dst + 0] = r;
+        rgbaData[dst + 1] = g;
+        rgbaData[dst + 2] = b;
+        rgbaData[dst + 3] = a;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.A4R4G4B4: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const val = srcBuffer.readUInt16LE(src);
+        src += 2;
+        const a = (val >> 12 & 15) * 17;
+        const r = (val >> 8 & 15) * 17;
+        const g = (val >> 4 & 15) * 17;
+        const b = (val & 15) * 17;
+        rgbaData[dst + 0] = r;
+        rgbaData[dst + 1] = g;
+        rgbaData[dst + 2] = b;
+        rgbaData[dst + 3] = a;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.A8: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const a = srcBuffer[src++];
+        rgbaData[dst + 0] = 255;
+        rgbaData[dst + 1] = 255;
+        rgbaData[dst + 2] = 255;
+        rgbaData[dst + 3] = a;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.Y8: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const y = srcBuffer[src++];
+        rgbaData[dst + 0] = y;
+        rgbaData[dst + 1] = y;
+        rgbaData[dst + 2] = y;
+        rgbaData[dst + 3] = 255;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.AY8: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const y = srcBuffer[src + 0];
+        const a = srcBuffer[src + 1];
+        src += 2;
+        rgbaData[dst + 0] = y;
+        rgbaData[dst + 1] = y;
+        rgbaData[dst + 2] = y;
+        rgbaData[dst + 3] = a;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    default:
+      throw new UnsupportedBitmapFormatError(bitmapTagId, imageIndex, format);
+  }
+}
+
 // ../core/src/map/write-map.ts
 var import_crypto2 = require("crypto");
 var baseName = (p) => p.split(/[\\/]/).pop() ?? p;
@@ -40177,6 +40839,57 @@ function runSetDependencySlot(task) {
     handleTaskError(task.requestId, err);
   }
 }
+var cachedBitmapsMap = null;
+function getBitmapsBuffer(bitmapsPath) {
+  let resolved = bitmapsPath;
+  if (!resolved && currentMap?.filePath) {
+    const candidate = path2.join(path2.dirname(currentMap.filePath), "bitmaps.map");
+    if (fs2.existsSync(candidate)) {
+      resolved = candidate;
+    }
+  }
+  if (!resolved || !fs2.existsSync(resolved)) return void 0;
+  try {
+    const stat = fs2.statSync(resolved);
+    if (cachedBitmapsMap && cachedBitmapsMap.filePath === resolved && cachedBitmapsMap.mtimeMs === stat.mtimeMs) {
+      return cachedBitmapsMap.buffer;
+    }
+    const buffer = fs2.readFileSync(resolved);
+    cachedBitmapsMap = { filePath: resolved, mtimeMs: stat.mtimeMs, buffer };
+    return buffer;
+  } catch {
+    return void 0;
+  }
+}
+function runGetBspRenderMesh(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const mesh = extractBspRenderMesh(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.bspIndex);
+    sendResult(task.requestId, { ok: true, mesh });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+function runGetBitmapTexture(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    let tagId = task.bitmapTagId;
+    const entry = currentMap.tagIndex.entries.find((e) => e.tagId === tagId);
+    if (entry && entry.primaryClassFourCC !== BITM_FOURCC) {
+      const resolvedId = resolveShaderBaseBitmapTagId(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId);
+      if (resolvedId !== null) {
+        tagId = resolvedId;
+      } else {
+        return sendError(task.requestId, "NO_DIFFUSE_BITMAP", `Shader tag 0x${tagId.toString(16)} does not reference a diffuse bitmap.`);
+      }
+    }
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+    const texture = decodeBitmapTagImage(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId, task.imageIndex ?? 0, externalBitmaps);
+    sendResult(task.requestId, { ok: true, texture });
+  } catch (err) {
+    sendError(task.requestId, "BITMAP_TEXTURE_ERROR", err instanceof Error ? err.message : String(err));
+  }
+}
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
     if (task.type === "cancel") {
@@ -40199,6 +40912,8 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "updateTagField") runUpdateTagField(task);
     else if (task.type === "getDependencySlots") runGetDependencySlots(task);
     else if (task.type === "setDependencySlot") runSetDependencySlot(task);
+    else if (task.type === "getBspRenderMesh") runGetBspRenderMesh(task);
+    else if (task.type === "getBitmapTexture") runGetBitmapTexture(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -40223,6 +40938,8 @@ try {
   runConvertMap,
   runConvertPreflight,
   runExtractTags,
+  runGetBitmapTexture,
+  runGetBspRenderMesh,
   runGetDependencies,
   runGetDependencySlots,
   runGetTagFields,

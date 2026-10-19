@@ -42,6 +42,8 @@ function installMockOpence(overrides: Partial<OpenceApi> = {}): { progressListen
     updateTagField: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
     getDependencySlots: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
     setDependencySlot: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    getBspRenderMesh: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    getBitmapTexture: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
     openContainingFolder: vi.fn(async () => {}),
     getSettings: vi.fn(async () => ({ lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } })),
     notImplemented: vi.fn(),

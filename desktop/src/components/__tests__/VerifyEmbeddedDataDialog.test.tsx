@@ -33,6 +33,8 @@ function installMockOpence(verifyEmbeddedData: () => Promise<VerifyEmbeddedDataR
     updateTagField: vi.fn(),
     getDependencySlots: vi.fn(),
     setDependencySlot: vi.fn(),
+    getBspRenderMesh: vi.fn(),
+    getBitmapTexture: vi.fn(),
     openContainingFolder: vi.fn(async () => {}),
     getSettings: vi.fn(async () => ({ lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } })),
     notImplemented: vi.fn(),

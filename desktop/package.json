@@ -24,7 +24,8 @@
     "@mongodb-js/zstd": "^7.0.0",
     "lucide-react": "^0.462.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "three": "^0.186.1"
   },
   "devDependencies": {
     "@testing-library/dom": "10",
@@ -33,6 +34,7 @@
     "@testing-library/user-event": "14",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^4.3.3",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",

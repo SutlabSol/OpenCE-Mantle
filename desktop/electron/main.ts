@@ -49,6 +49,8 @@ import type {
   UpdateTagFieldResult,
   GetDependencySlotsResult,
   SetDependencySlotResult,
+  GetBspRenderMeshResult,
+  GetBitmapTextureResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -811,6 +813,32 @@ async function setDependencySlotFlow(tagIndex: number, fieldPath: string, newTag
   }
 }
 
+/** Step 8.4: Extracts 3D Structure BSP render mesh for the open map. */
+async function getBspRenderMeshFlow(bspIndex?: number): Promise<GetBspRenderMeshResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const { promise } = sendWorkerRequest<GetBspRenderMeshResult>(
+    { type: 'getBspRenderMesh', bspIndex },
+    sendLog,
+  );
+  return promise;
+}
+
+/** Step 8.4: Decodes a bitmap or resolves and decodes a shader's diffuse texture for 3D rendering. */
+async function getBitmapTextureFlow(bitmapTagId: number, imageIndex?: number): Promise<GetBitmapTextureResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const { promise } = sendWorkerRequest<GetBitmapTextureResult>(
+    { type: 'getBitmapTexture', bitmapTagId, imageIndex, bitmapsPath },
+    sendLog,
+  );
+  return promise;
+}
+
 /** Main-process side of File > Save (native menu, renderer IPC, unsaved-changes prompt). Logic lives in save-map.ts. */
 const saveMapDeps: SaveMapDeps = {
   getOpenMap: () =>
@@ -1131,6 +1159,8 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:updateField', (_e, tagIndex: number, fieldName: string, newValue: unknown) => updateTagFieldFlow(tagIndex, fieldName, newValue));
   ipcMain.handle('tags:getDependencySlots', (_e, tagIndex: number) => getDependencySlotsFlow(tagIndex));
   ipcMain.handle('tags:setDependencySlot', (_e, tagIndex: number, fieldPath: string, newTagId: number | null) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
+  ipcMain.handle('render:getBspMesh', (_e, bspIndex?: number) => getBspRenderMeshFlow(bspIndex));
+  ipcMain.handle('render:getBitmapTexture', (_e, bitmapTagId: number, imageIndex?: number) => getBitmapTextureFlow(bitmapTagId, imageIndex));
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());

@@ -21,6 +21,8 @@ import type {
   UpdateTagFieldResult,
   GetDependencySlotsResult,
   SetDependencySlotResult,
+  GetBspRenderMeshResult,
+  GetBitmapTextureResult,
 } from '../electron/shared-types';
 import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult, buildMockConvertReport, buildMockRepairConvertReport, buildMockModelPartsConvertReport, buildMockAlignConvertReport } from './test-fixtures/dependency-fixtures';
 
@@ -338,6 +340,60 @@ export function installDevMock() {
       currentMock = { ...currentMock, modified: true };
       updatedListeners.forEach((cb) => cb(currentMock!));
       return { ok: true, fieldPath, newTagId: newTagId ?? 0xffffffff, map: currentMock };
+    },
+    getBspRenderMesh: async (): Promise<GetBspRenderMeshResult> => ({
+      ok: true,
+      mesh: {
+        bspIndex: 0,
+        bspTagId: 0xe1740001,
+        lightmapsBitmapTagId: 0xffffffff,
+        worldBounds: [-100, -100, -10, 100, 100, 50],
+        totalVertices: 4,
+        totalTriangles: 2,
+        submeshes: [
+          {
+            submeshIndex: 0,
+            lightmapIndex: 0,
+            lightmapBitmapIndex: -1,
+            shaderTagId: 0xe1740008,
+            shaderPermutation: 0,
+            vertexCount: 4,
+            vertices: new Float32Array([
+              -100, -100, 0,  0, 0, 1,  0, 0,
+               100, -100, 0,  0, 0, 1,  1, 0,
+               100,  100, 0,  0, 0, 1,  1, 1,
+              -100,  100, 0,  0, 0, 1,  0, 1,
+            ]),
+            lightmapUvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+            indices: new Uint16Array([0, 1, 2, 0, 2, 3]),
+            boundingBox: [-100, -100, 0, 100, 100, 0],
+          },
+        ],
+      },
+    }),
+    getBitmapTexture: async (): Promise<GetBitmapTextureResult> => {
+      const width = 64;
+      const height = 64;
+      const rgbaData = new Uint8Array(width * height * 4);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = (y * width + x) * 4;
+          const c = ((x >> 3) ^ (y >> 3)) & 1 ? 200 : 70;
+          rgbaData[idx + 0] = c;
+          rgbaData[idx + 1] = c;
+          rgbaData[idx + 2] = c;
+          rgbaData[idx + 3] = 255;
+        }
+      }
+      return {
+        ok: true,
+        texture: {
+          width,
+          height,
+          format: 10,
+          rgbaData,
+        },
+      };
     },
     onProgress: (cb) => {
       progressListeners.add(cb);

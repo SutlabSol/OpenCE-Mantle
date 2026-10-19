@@ -35069,6 +35069,28 @@ async function setDependencySlotFlow(tagIndex, fieldPath, newTagId) {
     return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   }
 }
+async function getBspRenderMeshFlow(bspIndex) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const { promise } = sendWorkerRequest(
+    { type: "getBspRenderMesh", bspIndex },
+    sendLog
+  );
+  return promise;
+}
+async function getBitmapTextureFlow(bitmapTagId, imageIndex) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "getBitmapTexture", bitmapTagId, imageIndex, bitmapsPath },
+    sendLog
+  );
+  return promise;
+}
 var saveMapDeps = {
   getOpenMap: () => mainWindow && currentMapPath ? { filePath: currentMapPath, compressed: currentMapCompressed, modified: currentMapModified, backedUp: currentMapBackedUp, overwriteConfirmed } : null,
   confirmOverwriteWithoutBackup: async (filePath) => {
@@ -35357,6 +35379,8 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("tags:updateField", (_e, tagIndex, fieldName, newValue) => updateTagFieldFlow(tagIndex, fieldName, newValue));
   import_electron3.ipcMain.handle("tags:getDependencySlots", (_e, tagIndex) => getDependencySlotsFlow(tagIndex));
   import_electron3.ipcMain.handle("tags:setDependencySlot", (_e, tagIndex, fieldPath, newTagId) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
+  import_electron3.ipcMain.handle("render:getBspMesh", (_e, bspIndex) => getBspRenderMeshFlow(bspIndex));
+  import_electron3.ipcMain.handle("render:getBitmapTexture", (_e, bitmapTagId, imageIndex) => getBitmapTextureFlow(bitmapTagId, imageIndex));
   import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
   import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());

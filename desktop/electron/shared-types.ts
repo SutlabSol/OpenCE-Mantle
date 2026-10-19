@@ -3,8 +3,10 @@ import type { RetailConversionReport } from '../../core/src/map/convert/retail-t
 import type { TagDataRepairId } from '../../core/src/map/convert/tag-data-repairs';
 import type { TagFieldDescriptor, TagFieldsResult, TagFieldKind, TagReflexiveElement } from '../../core/src/map/tag-field-editor';
 import type { TagDependencySlot } from '../../core/src/map/tag-dependency-swapper';
+import type { BspRenderMesh } from '../../core/src/render/bsp-geometry';
+import type { DecodedRgbaTexture } from '../../core/src/render/bitmap-textures';
 
-export type { TagFieldDescriptor, TagFieldsResult, TagFieldKind, TagReflexiveElement, TagDependencySlot };
+export type { TagFieldDescriptor, TagFieldsResult, TagFieldKind, TagReflexiveElement, TagDependencySlot, BspRenderMesh, DecodedRgbaTexture };
 
 export interface MapHeaderSummary {
   scenarioName: string;
@@ -357,7 +359,17 @@ export type WorkerRequest =
   | { type: 'updateTagField'; requestId: string; tagIndex: number; fieldName: string; newValue: unknown }
   | { type: 'getDependencySlots'; requestId: string; tagIndex: number }
   | { type: 'setDependencySlot'; requestId: string; tagIndex: number; fieldPath: string; newTagId: number | null }
+  | { type: 'getBspRenderMesh'; requestId: string; bspIndex?: number }
+  | { type: 'getBitmapTexture'; requestId: string; bitmapTagId: number; imageIndex?: number; bitmapsPath?: string }
   | { type: 'cancel'; requestId: string };
+
+export type GetBspRenderMeshResult =
+  | { ok: true; mesh: BspRenderMesh }
+  | { ok: false; code: string; message: string };
+
+export type GetBitmapTextureResult =
+  | { ok: true; texture: DecodedRgbaTexture }
+  | { ok: false; code: string; message: string };
 
 export type GetDependencySlotsResult =
   | { ok: true; slots: TagDependencySlot[] }
@@ -439,6 +451,10 @@ export interface OpenceApi {
   getDependencySlots(tagIndex: number): Promise<GetDependencySlotsResult>;
   /** Dependency Swapper: point one slot at any tag of the open map (null clears it). In memory only. */
   setDependencySlot(tagIndex: number, fieldPath: string, newTagId: number | null): Promise<SetDependencySlotResult>;
+  /** Step 8.4: Extract 3D BSP render geometry for the open map. */
+  getBspRenderMesh(bspIndex?: number): Promise<GetBspRenderMeshResult>;
+  /** Step 8.4: Decode a bitmap or shader's diffuse texture for 3D rendering. */
+  getBitmapTexture(bitmapTagId: number, imageIndex?: number): Promise<GetBitmapTextureResult>;
   getPathForFile(file: File): string;
 }
 
