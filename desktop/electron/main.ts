@@ -1,9 +1,18 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { OCETAGS_EXTENSION, validateResourceMapFile, scenarioNameFromFileName, getAllTagGroupNames, getGroupDefinition, OCETAGS_FORMAT_VERSION } from '../../core/src/index';
+import {
+  OCETAGS_EXTENSION,
+  validateResourceMapFile,
+  scenarioNameFromFileName,
+  getAllTagGroupNames,
+  getGroupDefinition,
+  OCETAGS_FORMAT_VERSION,
+  readResourceTable,
+  type RandomAccessFile,
+} from '../../core/src/index';
 import { getRecentMaps, addRecentMap } from './recent-maps';
-import { getSettings, setLastExtractDir, setResourceMapPath } from './settings';
+import { getSettings, setLastExtractDir, setResourceMapPath, setVersionResourceMaps } from './settings';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
 import { saveMapAsFlow, registerSaveMapAsIpc, type SaveMapAsDeps } from './save-map-as';
 import { saveMapFlow, confirmUnsavedChanges, SAVE_MAP_CHANNEL, type SaveMapDeps } from './save-map';
@@ -40,6 +49,8 @@ import type {
   ConvertPreflightResult,
   ConvertMapResult,
   ConvertResourcePaths,
+  HaloBitmapVersion,
+  BitmapIdentificationResult,
   BatchExtractMode,
   BatchExtractPreflightResult,
   BatchExtractResult,
@@ -53,6 +64,20 @@ import type {
   GetBitmapTextureResult,
   GetScenarioObjectsResult,
   GetModelRenderGeometryResult,
+  UpdateScenarioPlacementResult,
+  DuplicateScenarioPlacementResult,
+  AddScenarioPlacementResult,
+  SwapScenarioPlacementResult,
+  DeleteScenarioPlacementResult,
+  ScenarioObjectKind,
+  GetReferencingTagsResult,
+  GetUnicodeStringsResult,
+  SetUnicodeStringResult,
+  RenameTagResult,
+  DuplicateTagResult,
+  BspSwapPreflightResult,
+  BspSwapOptions,
+  BspSwapResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -218,6 +243,18 @@ async function loadMapAtPath(filePath: string, options: { askBackup: boolean }):
       buildMenu();
       updateTitle();
       sendLog('info', `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
+
+      // If the edition has configured resource maps, automatically activate them
+      const edition = result.header.mapEdition ?? (result.header.engine === 7 ? 'pc' : 'ce');
+      const settings = getSettings();
+      const versionMaps = settings.versionResourceMaps?.[edition];
+      if (versionMaps?.bitmaps) {
+        setResourceMapPath('bitmaps', versionMaps.bitmaps);
+      }
+      if (versionMaps?.sounds) {
+        setResourceMapPath('sounds', versionMaps.sounds);
+      }
+
       if (options.askBackup) await askBackup(filePath);
     } else if (result.status === 'compressed') {
       currentOpenMapSummary = null;
@@ -662,6 +699,172 @@ function getResourceMapStatusesFlow(): Record<ResourceMapKind, ResourceMapStatus
   };
 }
 
+function openRandomAccessFile(filePath: string): { file: RandomAccessFile; close: () => void } | null {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const size = fs.fstatSync(fd).size;
+    const label = path.basename(filePath);
+    return {
+      file: {
+        label,
+        size,
+        read: (offset: number, length: number) => {
+          const buf = Buffer.alloc(length);
+          fs.readSync(fd, buf, 0, length, offset);
+          return buf;
+        },
+      },
+      close: () => fs.closeSync(fd),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function identifyResourceMapFlow(filePath: string, expectedVersion?: HaloBitmapVersion): BitmapIdentificationResult {
+  const handle = openRandomAccessFile(filePath);
+  if (!handle) {
+    return {
+      ok: false,
+      error: `Could not open file at ${filePath}. File may not exist or cannot be accessed.`,
+      filePath,
+      fileSizeBytes: 0,
+      entryCount: 0,
+      tableOffset: 0,
+      detectedVersion: 'unknown',
+      versionMatchConfidence: 'mismatch',
+      entries: [],
+    };
+  }
+
+  try {
+    const res = readResourceTable(handle.file, 'bitmaps');
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: res.error,
+        filePath,
+        fileSizeBytes: handle.file.size,
+        entryCount: 0,
+        tableOffset: 0,
+        detectedVersion: 'unknown',
+        versionMatchConfidence: 'mismatch',
+        entries: [],
+      };
+    }
+
+    const { table } = res;
+    const header = handle.file.read(0, 0x10);
+    const tableOffset = header.readUInt32LE(0x8);
+
+    // Heuristics for edition detection
+    let detectedVersion: HaloBitmapVersion | 'unknown' = 'unknown';
+    const fpLower = (filePath || '').toLowerCase();
+    if (
+      expectedVersion === 'mcc' ||
+      fpLower.includes('mcc') ||
+      (handle.file.size > 170 * 1024 * 1024 && handle.file.size < 220 * 1024 * 1024 && table.entries.length > 1750 && table.entries.length < 1900)
+    ) {
+      detectedVersion = 'mcc';
+    } else if (handle.file.size > 250 * 1024 * 1024 || table.entries.length > 2000) {
+      detectedVersion = 'halomd';
+    } else if (handle.file.size < 25 * 1024 * 1024 || table.entries.length < 1000) {
+      detectedVersion = 'demo';
+    } else {
+      if (expectedVersion === 'pc') {
+        detectedVersion = 'pc';
+      } else {
+        detectedVersion = 'ce';
+      }
+    }
+
+    let versionMatchConfidence: 'exact' | 'likely' | 'mismatch' = 'likely';
+    if (expectedVersion) {
+      if (expectedVersion === detectedVersion) {
+        versionMatchConfidence = 'exact';
+      } else if (
+        (expectedVersion === 'ce' && detectedVersion === 'pc') ||
+        (expectedVersion === 'pc' && detectedVersion === 'ce')
+      ) {
+        versionMatchConfidence = 'likely';
+      } else {
+        versionMatchConfidence = 'mismatch';
+      }
+    }
+
+    const entries = table.entries.map((e) => ({
+      index: e.index,
+      name: e.name,
+      dataOffset: e.dataOffset,
+      size: e.size,
+    }));
+
+    return {
+      ok: true,
+      filePath,
+      fileSizeBytes: handle.file.size,
+      entryCount: table.entries.length,
+      tableOffset,
+      detectedVersion,
+      versionMatchConfidence,
+      entries,
+    };
+  } finally {
+    handle.close();
+  }
+}
+
+function detectDefaultResourceMapPathsFlow(): Record<HaloBitmapVersion, string | null> {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const candidates: Record<HaloBitmapVersion, string[]> = {
+    halomd: [
+      path.join(home, 'Library/Application Support/HaloMD/GameData/Maps/bitmaps.map'),
+      path.join(process.cwd(), 'bitmaps.map'),
+    ],
+    ce: [
+      'C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map',
+      'C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map',
+      path.join(process.cwd(), 'maps/bitmaps.map'),
+    ],
+    pc: [
+      'C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map',
+      'C:\\Program Files\\Microsoft Games\\Halo\\maps\\bitmaps.map',
+    ],
+    demo: [
+      'C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map',
+      path.join(home, 'Applications/Halo Demo/Maps/bitmaps.map'),
+    ],
+    mcc: [
+      path.join(process.cwd(), 'sample_maps/MCC/bitmaps.map'),
+      'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
+      'C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
+      'D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
+      'E:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
+    ],
+  };
+
+  const result: Record<HaloBitmapVersion, string | null> = {
+    halomd: null,
+    ce: null,
+    pc: null,
+    demo: null,
+    mcc: null,
+  };
+
+  for (const ver of Object.keys(candidates) as HaloBitmapVersion[]) {
+    for (const p of candidates[ver]) {
+      try {
+        if (fs.existsSync(p)) {
+          result[ver] = p;
+          break;
+        }
+      } catch {}
+    }
+  }
+
+  return result;
+}
+
 async function pickInjectContainerFlow(): Promise<{ path: string; paths: string[] } | null> {
   if (!mainWindow) return null;
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -863,6 +1066,286 @@ async function getModelGeometryFlow(modelTagId: number, lod?: number): Promise<G
     sendLog,
   );
   return promise;
+}
+
+/** Step 9: Updates a placed scenario object in memory. */
+async function updateScenarioPlacementFlow(
+  placementId: string,
+  updates: {
+    position?: [number, number, number];
+    rotation?: [number, number, number];
+    paletteIndex?: number;
+    teamIndex?: number;
+  },
+): Promise<UpdateScenarioPlacementResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<UpdateScenarioPlacementResult>(
+    { type: 'updateScenarioPlacement', placementId, ...updates },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Updated scenario placement "${placementId}" (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to update scenario placement: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+/** Step 9: Duplicates an existing scenario object in memory. */
+async function duplicateScenarioPlacementFlow(
+  placementId: string,
+  offsetDelta?: [number, number, number],
+): Promise<DuplicateScenarioPlacementResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<DuplicateScenarioPlacementResult>(
+    { type: 'duplicateScenarioPlacement', placementId, offsetDelta },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Duplicated scenario placement "${placementId}" -> "${result.newPlacement.id}" (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to duplicate scenario placement: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+/** Step 9: Adds a new scenario object in memory. */
+async function addScenarioPlacementFlow(
+  kind: ScenarioObjectKind,
+  paletteIndex: number,
+  position: [number, number, number],
+  rotation?: [number, number, number],
+  teamIndex?: number,
+): Promise<AddScenarioPlacementResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<AddScenarioPlacementResult>(
+    { type: 'addScenarioPlacement', kind, paletteIndex, position, rotation, teamIndex },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Added scenario placement "${result.newPlacement.id}" (${kind}) (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to add scenario placement: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+/** Step 9: Swaps a scenario object with another item in memory. */
+async function swapScenarioPlacementFlow(
+  placementId: string,
+  newKind: ScenarioObjectKind,
+  newPaletteIndex: number,
+): Promise<SwapScenarioPlacementResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<SwapScenarioPlacementResult>(
+    { type: 'swapScenarioPlacement', placementId, newKind, newPaletteIndex },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Swapped scenario placement "${placementId}" -> "${result.newPlacement.id}" (${newKind}) (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to swap scenario placement: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+/** Step 9: Deletes a scenario object in memory. */
+async function deleteScenarioPlacementFlow(placementId: string): Promise<DeleteScenarioPlacementResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<DeleteScenarioPlacementResult>(
+    { type: 'deleteScenarioPlacement', placementId },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Deleted scenario placement "${placementId}" (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to delete scenario placement: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+/** Milestone 9: Reverse dependency lookup ("Referencing Tags"). */
+async function getReferencingTagsFlow(tagIndex: number): Promise<GetReferencingTagsResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const { promise } = sendWorkerRequest<GetReferencingTagsResult>(
+    { type: 'getReferencingTags', tagIndex },
+    sendLog,
+  );
+  return promise;
+}
+
+/** Milestone 9: Reads unicode strings from a ustr tag. */
+async function getUnicodeStringsFlow(tagIndex: number): Promise<GetUnicodeStringsResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const { promise } = sendWorkerRequest<GetUnicodeStringsResult>(
+    { type: 'getUnicodeStrings', tagIndex },
+    sendLog,
+  );
+  return promise;
+}
+
+/** Milestone 9: In-place edit of a unicode string in a ustr tag. */
+async function setUnicodeStringFlow(tagIndex: number, stringIndex: number, newText: string): Promise<SetUnicodeStringResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<SetUnicodeStringResult>(
+    { type: 'setUnicodeString', tagIndex, stringIndex, newText },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Edited unicode string #${stringIndex} in tag #${tagIndex} (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to edit unicode string: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+/** Milestone 9: Rename a tag path in the open map. */
+async function renameTagFlow(tagIndex: number, newPath: string): Promise<RenameTagResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<RenameTagResult>(
+    { type: 'renameTag', tagIndex, newPath },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Renamed tag #${tagIndex} to "${result.path}" (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to rename tag: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+/** Milestone 9: Duplicate a tag in the open map tag index. */
+async function duplicateTagFlow(tagIndex: number, newPath: string): Promise<DuplicateTagResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<DuplicateTagResult>(
+    { type: 'duplicateTag', tagIndex, newPath },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog('info', `Duplicated tag #${tagIndex} -> tag #${result.newTagIndex} ("${result.path}") (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to duplicate tag: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
+async function pickBspSourceMapFlow(): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Source Map for BSP Swap',
+    filters: [
+      { name: 'Halo Map Files (*.map)', extensions: ['map'] },
+      { name: 'All Files (*.*)', extensions: ['*'] },
+    ],
+    properties: ['openFile'],
+  });
+  if (canceled || filePaths.length === 0) return { path: null };
+  return { path: filePaths[0] };
+}
+
+async function bspSwapPreflightFlow(
+  sourceFilePath: string,
+  sourceBspIndex?: number,
+  targetBspIndex?: number,
+): Promise<BspSwapPreflightResult> {
+  const { promise } = sendWorkerRequest<BspSwapPreflightResult>(
+    { type: 'bspSwapPreflight', sourceFilePath, sourceBspIndex, targetBspIndex },
+    sendLog,
+  );
+  return await promise;
+}
+
+async function performBspSwapFlow(sourceFilePath: string, options: BspSwapOptions): Promise<BspSwapResult> {
+  const { promise } = sendWorkerRequest<BspSwapResult & { map?: OpenMapSummary }>(
+    { type: 'performBspSwap', sourceFilePath, options },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'performBspSwap', stage, percent }),
+  );
+  try {
+    const result = await promise;
+    if (result.ok && result.map) {
+      setOpenMapState(result.map);
+      sendLog('info', `Successfully swapped BSP: "${result.summary.sourceBspName}" into "${result.summary.targetBspName}"!`);
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `BSP swap failed: ${e.message}`);
+    return {
+      ok: false,
+      buffer: Buffer.alloc(0),
+      summary: { sourceBspName: '', targetBspName: '', oldSize: 0, newSize: 0, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
+      error: e.message,
+    };
+  }
 }
 
 /** Main-process side of File > Save (native menu, renderer IPC, unsaved-changes prompt). Logic lives in save-map.ts. */
@@ -1137,6 +1620,18 @@ function buildMenu() {
         { label: 'Extract Whole Map...', click: () => mainWindow?.webContents.send('menu:action', 'extract-whole-map') },
         { label: 'Inject Tags...', click: () => mainWindow?.webContents.send('menu:action', 'inject-tags') },
         { label: 'Verify Embedded Data...', click: () => mainWindow?.webContents.send('menu:action', 'verify-embedded-data') },
+        { label: 'Swap BSP...', click: () => mainWindow?.webContents.send('menu:action', 'swap-bsp') },
+        { type: 'separator' },
+        {
+          label: 'Identify Bitmaps',
+          submenu: [
+            { label: 'HaloMD...', click: () => mainWindow?.webContents.send('menu:action', 'identify-bitmaps:halomd') },
+            { label: 'Custom Edition...', click: () => mainWindow?.webContents.send('menu:action', 'identify-bitmaps:ce') },
+            { label: 'Halo PC...', click: () => mainWindow?.webContents.send('menu:action', 'identify-bitmaps:pc') },
+            { label: 'Halo Mac Demo...', click: () => mainWindow?.webContents.send('menu:action', 'identify-bitmaps:demo') },
+            { label: 'Halo MCC...', click: () => mainWindow?.webContents.send('menu:action', 'identify-bitmaps:mcc') },
+          ],
+        },
         { type: 'separator' },
         { label: 'Settings...', click: () => mainWindow?.webContents.send('menu:action', 'settings') },
       ],
@@ -1177,6 +1672,30 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:finalizeBatchExtract', (_e, request: FinalizeBatchExtractRequest) => finalizeBatchExtractFlow(request));
   ipcMain.handle('resourceMaps:pick', (_e, kind: ResourceMapKind) => pickResourceMapFlow(kind));
   ipcMain.handle('resourceMaps:getStatuses', () => getResourceMapStatusesFlow());
+  ipcMain.handle('resourceMaps:identify', (_e, filePath: string, expectedVersion?: HaloBitmapVersion) =>
+    identifyResourceMapFlow(filePath, expectedVersion),
+  );
+  ipcMain.handle('resourceMaps:setPath', (_e, kind: ResourceMapKind, filePath: string) => {
+    setResourceMapPath(kind, filePath);
+    return { ok: true };
+  });
+  ipcMain.handle('resourceMaps:detectDefaultPaths', () => detectDefaultResourceMapPathsFlow());
+  ipcMain.handle('resourceMaps:getVersionSettings', () => getSettings().versionResourceMaps ?? {});
+  ipcMain.handle(
+    'resourceMaps:setVersionSettings',
+    (_e, version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null }) => {
+      setVersionResourceMaps(version, maps);
+      if (currentOpenMapSummary) {
+        const curEdition =
+          currentOpenMapSummary.header.mapEdition ?? (currentOpenMapSummary.header.engine === 7 ? 'pc' : 'ce');
+        if (curEdition === version) {
+          if (maps.bitmaps !== undefined) setResourceMapPath('bitmaps', maps.bitmaps);
+          if (maps.sounds !== undefined) setResourceMapPath('sounds', maps.sounds);
+        }
+      }
+      return { ok: true };
+    },
+  );
   ipcMain.handle('tags:pickInjectContainer', () => pickInjectContainerFlow());
   ipcMain.handle('tags:planInject', (_e, containerPath: string, mode: InjectionMode) => planInjectFlow(containerPath, mode));
   ipcMain.handle('tags:applyInject', () => applyInjectFlow());
@@ -1185,10 +1704,31 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:updateField', (_e, tagIndex: number, fieldName: string, newValue: unknown) => updateTagFieldFlow(tagIndex, fieldName, newValue));
   ipcMain.handle('tags:getDependencySlots', (_e, tagIndex: number) => getDependencySlotsFlow(tagIndex));
   ipcMain.handle('tags:setDependencySlot', (_e, tagIndex: number, fieldPath: string, newTagId: number | null) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
+  ipcMain.handle('tags:getReferencingTags', (_e, tagIndex: number) => getReferencingTagsFlow(tagIndex));
+  ipcMain.handle('tags:getUnicodeStrings', (_e, tagIndex: number) => getUnicodeStringsFlow(tagIndex));
+  ipcMain.handle('tags:setUnicodeString', (_e, tagIndex: number, stringIndex: number, newText: string) => setUnicodeStringFlow(tagIndex, stringIndex, newText));
+  ipcMain.handle('tags:renameTag', (_e, tagIndex: number, newPath: string) => renameTagFlow(tagIndex, newPath));
+  ipcMain.handle('tags:duplicateTag', (_e, tagIndex: number, newPath: string) => duplicateTagFlow(tagIndex, newPath));
+  ipcMain.handle('dialog:pickBspSourceMap', () => pickBspSourceMapFlow());
+  ipcMain.handle('bsp:swapPreflight', (_e, sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number) =>
+    bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex),
+  );
+  ipcMain.handle('bsp:performSwap', (_e, sourceFilePath: string, options: BspSwapOptions) =>
+    performBspSwapFlow(sourceFilePath, options),
+  );
   ipcMain.handle('render:getBspMesh', (_e, bspIndex?: number) => getBspRenderMeshFlow(bspIndex));
   ipcMain.handle('render:getBitmapTexture', (_e, bitmapTagId: number, imageIndex?: number) => getBitmapTextureFlow(bitmapTagId, imageIndex));
   ipcMain.handle('render:getScenarioObjects', () => getScenarioObjectsFlow());
   ipcMain.handle('render:getModelGeometry', (_e, modelTagId: number, lod?: number) => getModelGeometryFlow(modelTagId, lod));
+  ipcMain.handle('render:updateScenarioPlacement', (_e, placementId: string, updates: any) => updateScenarioPlacementFlow(placementId, updates));
+  ipcMain.handle('render:duplicateScenarioPlacement', (_e, placementId: string, offsetDelta?: [number, number, number]) => duplicateScenarioPlacementFlow(placementId, offsetDelta));
+  ipcMain.handle('render:addScenarioPlacement', (_e, kind: ScenarioObjectKind, paletteIndex: number, position: [number, number, number], rotation?: [number, number, number], teamIndex?: number) =>
+    addScenarioPlacementFlow(kind, paletteIndex, position, rotation, teamIndex),
+  );
+  ipcMain.handle('render:swapScenarioPlacement', (_e, placementId: string, newKind: ScenarioObjectKind, newPaletteIndex: number) =>
+    swapScenarioPlacementFlow(placementId, newKind, newPaletteIndex),
+  );
+  ipcMain.handle('render:deleteScenarioPlacement', (_e, placementId: string) => deleteScenarioPlacementFlow(placementId));
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());

@@ -80,6 +80,15 @@ export const CE_BASE_MEMORY_ADDRESS = 0x40440000;
 export const CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 
 /**
+ * Virtual address MCC (Master Chief Collection - Halo: Combat Evolved) loads tag data at.
+ * Base address is 0x50000000; the tag array pointer is 0x50000028.
+ */
+export const MCC_BASE_MEMORY_ADDRESS = 0x50000000;
+
+/** The tag array pointer in an MCC map (follows the 0x28 byte tag data header). */
+export const MCC_TAG_ARRAY_ADDRESS = MCC_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
+
+/**
  * Tag space: tag data and the loaded BSP share this much memory from the base (the BSP is loaded
  * at base + tag space - bsp size), so tag data size + the largest BSP must fit. 23 MiB on PC/CE
  * and demo (`memory/demo-converter.md`, Invader `gbx-custom`).

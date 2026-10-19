@@ -142,41 +142,40 @@ export function extractModelRenderGeometry(
   const geomSize = resolveStruct('GBXModelGeometry').totalSize;
   const partSize = resolveStruct('GBXModelGeometryPart').totalSize;
 
-  // --- Pick the geometry index for the requested LOD from region[0].permutation[0]. ---
-  let chosenGeomIndex = 0;
+  // --- Pick geometry indices for the requested LOD across all model regions. ---
+  const chosenGeomIndices = new Set<number>();
   const regions = model.get('regions');
   if (regions && regions.kind === 'reflexive' && regions.value.count > 0) {
     const regionSize = resolveStruct('ModelRegion').totalSize;
+    const permSize = resolveStruct('ModelRegionPermutation').totalSize;
     const regionFileOffset = resolvePointer(
       regions.value.pointerLow,
       header.tagDataOffset,
       tagIndex.baseMemoryAddress,
     );
-    const firstRegion = decodeStruct(buffer, regionFileOffset, 'ModelRegion');
-    const perms = firstRegion.get('permutations');
-    if (perms && perms.kind === 'reflexive' && perms.value.count > 0) {
-      const permSize = resolveStruct('ModelRegionPermutation').totalSize;
-      const permFileOffset = resolvePointer(
-        perms.value.pointerLow,
-        header.tagDataOffset,
-        tagIndex.baseMemoryAddress,
-      );
-      const firstPerm = decodeStruct(buffer, permFileOffset, 'ModelRegionPermutation');
-      const lodGeomField = numeric(firstPerm.get(LOD_FIELD_NAMES[lod] ?? 'super high'));
-      if (lodGeomField !== undefined && lodGeomField >= 0 && lodGeomField < geoms.value.count) {
-        chosenGeomIndex = lodGeomField;
+    for (let r = 0; r < regions.value.count; r++) {
+      const region = decodeStruct(buffer, regionFileOffset + r * regionSize, 'ModelRegion');
+      const perms = region.get('permutations');
+      if (perms && perms.kind === 'reflexive' && perms.value.count > 0) {
+        const permFileOffset = resolvePointer(
+          perms.value.pointerLow,
+          header.tagDataOffset,
+          tagIndex.baseMemoryAddress,
+        );
+        const firstPerm = decodeStruct(buffer, permFileOffset, 'ModelRegionPermutation');
+        const lodGeomField = numeric(firstPerm.get(LOD_FIELD_NAMES[lod] ?? 'super high'));
+        if (lodGeomField !== undefined && lodGeomField >= 0 && lodGeomField < geoms.value.count) {
+          chosenGeomIndices.add(lodGeomField);
+        }
       }
     }
   }
 
-  const geomsFileOffset = resolvePointer(geoms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
-  const chosenGeom = decodeStruct(buffer, geomsFileOffset + chosenGeomIndex * geomSize, 'GBXModelGeometry');
-
-  const parts = chosenGeom.get('parts');
-  if (!parts || parts.kind !== 'reflexive' || parts.value.count === 0) {
-    throw new Error(`Model "${entry.path}" geometry #${chosenGeomIndex} has no parts.`);
+  if (chosenGeomIndices.size === 0) {
+    chosenGeomIndices.add(0);
   }
-  const partsFileOffset = resolvePointer(parts.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+
+  const geomsFileOffset = resolvePointer(geoms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
 
   // Model data region: vertices at modelDataFileOffset, triangle index words begin at
   // modelDataFileOffset + vertexSize (end of the map's total vertex data).
@@ -199,97 +198,104 @@ export function extractModelRenderGeometry(
     }
   }
 
-
   const submeshes: ModelSubmesh[] = [];
   let totalVertices = 0;
   let totalTriangles = 0;
+  let partIndexCounter = 0;
 
-  for (let p = 0; p < parts.value.count; p++) {
-    const part = decodeStruct(buffer, partsFileOffset + p * partSize, 'GBXModelGeometryPart');
+  for (const geomIndex of chosenGeomIndices) {
+    const geom = decodeStruct(buffer, geomsFileOffset + geomIndex * geomSize, 'GBXModelGeometry');
+    const parts = geom.get('parts');
+    if (!parts || parts.kind !== 'reflexive' || parts.value.count === 0) continue;
+    const partsFileOffset = resolvePointer(parts.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
 
-    const vertexType = numeric(part.get('vertex type')) ?? -1;
-    const vertexCount = numeric(part.get('vertex count')) ?? 0;
-    const vertexOffset = numeric(part.get('vertex offset')) ?? 0;
-    const triangleBufferType = numeric(part.get('triangle buffer type')) ?? -1;
-    // "triangle count" is the number of TRIANGLES - it is the stop condition for the
-    // unstrip loop ("triangle offset"+word count in the raw buffer can exceed it).
-    const triangleCount = numeric(part.get('triangle count')) ?? 0;
-    const triangleOffset = numeric(part.get('triangle offset')) ?? 0;
-    const shaderIndex = numeric(part.get('shader index')) ?? 0;
+    for (let p = 0; p < parts.value.count; p++) {
+      const part = decodeStruct(buffer, partsFileOffset + p * partSize, 'GBXModelGeometryPart');
 
-    // Skip parts with no verified decoder (mirrors scanGbxmodelGeometryBoundaries):
-    // compressed vertices / non-strip buffers need separate, unverified logic.
-    if (vertexCount === 0 || triangleCount === 0) continue;
-    if (vertexType !== VERTEX_TYPE_UNCOMPRESSED || triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
+      const vertexType = numeric(part.get('vertex type')) ?? -1;
+      const vertexCount = numeric(part.get('vertex count')) ?? 0;
+      const vertexOffset = numeric(part.get('vertex offset')) ?? 0;
+      const triangleBufferType = numeric(part.get('triangle buffer type')) ?? -1;
+      // "triangle count" is the number of TRIANGLES - it is the stop condition for the
+      // unstrip loop ("triangle offset"+word count in the raw buffer can exceed it).
+      const triangleCount = numeric(part.get('triangle count')) ?? 0;
+      const triangleOffset = numeric(part.get('triangle offset')) ?? 0;
+      const shaderIndex = numeric(part.get('shader index')) ?? 0;
 
-    const partVertOffset = vertexBase + vertexOffset;
-    const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
-    if (partVertEnd > header.tagDataOffset) continue; // refuse to read outside the model data region
+      // Skip parts with no verified decoder (mirrors scanGbxmodelGeometryBoundaries):
+      // compressed vertices / non-strip buffers need separate, unverified logic.
+      if (vertexCount === 0 || triangleCount === 0) continue;
+      if (vertexType !== VERTEX_TYPE_UNCOMPRESSED || triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
 
-    const partStripOffset = indexBase + triangleOffset;
-    const vertices = new Float32Array(vertexCount * 8);
+      const partVertOffset = vertexBase + vertexOffset;
+      const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
+      if (partVertEnd > header.tagDataOffset) continue; // refuse to read outside the model data region
 
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      const partStripOffset = indexBase + triangleOffset;
+      const vertices = new Float32Array(vertexCount * 8);
 
-    for (let v = 0; v < vertexCount; v++) {
-      const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
-      const x = buffer.readFloatLE(vOff + 0x00);
-      const y = buffer.readFloatLE(vOff + 0x04);
-      const z = buffer.readFloatLE(vOff + 0x08);
-      const nx = buffer.readFloatLE(vOff + 0x0c);
-      const ny = buffer.readFloatLE(vOff + 0x10);
-      const nz = buffer.readFloatLE(vOff + 0x14);
-      // Texture coords follow position(12)+normal(12)+binormal(12)+tangent(12) = 0x30.
-      const u = buffer.readFloatLE(vOff + 0x30) * uScale;
-      const vCoord = buffer.readFloatLE(vOff + 0x34) * vScale;
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
-      const o = v * 8;
-      vertices[o + 0] = x;
-      vertices[o + 1] = y;
-      vertices[o + 2] = z;
-      vertices[o + 3] = nx;
-      vertices[o + 4] = ny;
-      vertices[o + 5] = nz;
-      vertices[o + 6] = u;
-      vertices[o + 7] = vCoord;
+      for (let v = 0; v < vertexCount; v++) {
+        const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
+        const x = buffer.readFloatLE(vOff + 0x00);
+        const y = buffer.readFloatLE(vOff + 0x04);
+        const z = buffer.readFloatLE(vOff + 0x08);
+        const nx = buffer.readFloatLE(vOff + 0x0c);
+        const ny = buffer.readFloatLE(vOff + 0x10);
+        const nz = buffer.readFloatLE(vOff + 0x14);
+        // Texture coords follow position(12)+normal(12)+binormal(12)+tangent(12) = 0x30.
+        const u = buffer.readFloatLE(vOff + 0x30) * uScale;
+        const vCoord = buffer.readFloatLE(vOff + 0x34) * vScale;
 
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-      if (z < minZ) minZ = z;
-      if (z > maxZ) maxZ = z;
+        const o = v * 8;
+        vertices[o + 0] = x;
+        vertices[o + 1] = y;
+        vertices[o + 2] = z;
+        vertices[o + 3] = nx;
+        vertices[o + 4] = ny;
+        vertices[o + 5] = nz;
+        vertices[o + 6] = u;
+        vertices[o + 7] = vCoord;
+
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z;
+        if (z > maxZ) maxZ = z;
+      }
+
+      // Unstrip, then drop degenerate triangles (equal-vertex-index triples).
+      const raw = decodeTriangleStrip(buffer, partStripOffset, vertexCount, triangleCount);
+      const indices: number[] = [];
+      for (let t = 0; t + 2 < raw.length; t += 3) {
+        const v0 = raw[t], v1 = raw[t + 1], v2 = raw[t + 2];
+        if (v0 === v1 || v1 === v2 || v0 === v2) continue;
+        indices.push(v0, v1, v2);
+      }
+
+      submeshes.push({
+        partIndex: partIndexCounter++,
+        shaderIndex,
+        shaderTagId: shaderTagIds[shaderIndex] ?? 0xffffffff,
+        vertexCount,
+        vertices,
+        indices: new Uint16Array(indices),
+        boundingBox: [
+          minX === Infinity ? 0 : minX,
+          minY === Infinity ? 0 : minY,
+          minZ === Infinity ? 0 : minZ,
+          maxX === -Infinity ? 0 : maxX,
+          maxY === -Infinity ? 0 : maxY,
+          maxZ === -Infinity ? 0 : maxZ,
+        ],
+      });
+
+      totalVertices += vertexCount;
+      totalTriangles += indices.length / 3;
     }
-
-    // Unstrip, then drop degenerate triangles (equal-vertex-index triples).
-    const raw = decodeTriangleStrip(buffer, partStripOffset, vertexCount, triangleCount);
-    const indices: number[] = [];
-    for (let t = 0; t + 2 < raw.length; t += 3) {
-      const v0 = raw[t], v1 = raw[t + 1], v2 = raw[t + 2];
-      if (v0 === v1 || v1 === v2 || v0 === v2) continue;
-      indices.push(v0, v1, v2);
-    }
-
-    submeshes.push({
-      partIndex: p,
-      shaderIndex,
-      shaderTagId: shaderTagIds[shaderIndex] ?? 0xffffffff,
-      vertexCount,
-      vertices,
-      indices: new Uint16Array(indices),
-      boundingBox: [
-        minX === Infinity ? 0 : minX,
-        minY === Infinity ? 0 : minY,
-        minZ === Infinity ? 0 : minZ,
-        maxX === -Infinity ? 0 : maxX,
-        maxY === -Infinity ? 0 : maxY,
-        maxZ === -Infinity ? 0 : maxZ,
-      ],
-    });
-
-    totalVertices += vertexCount;
-    totalTriangles += indices.length / 3;
   }
 
   return {

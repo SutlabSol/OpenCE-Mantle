@@ -9,7 +9,7 @@ import CompressedBanner from './components/CompressedBanner';
 import UnsupportedBanner from './components/UnsupportedBanner';
 import TagBrowser from './components/TagBrowser';
 import CenterWorkspace from './components/CenterWorkspace';
-import PropertiesPalette from './components/PropertiesPalette';
+import PropertiesPalette, { type PropertiesPaletteTab } from './components/PropertiesPalette';
 import LogPanel from './components/LogPanel';
 import StatusBar from './components/StatusBar';
 import DependencyDialog from './components/DependencyDialog';
@@ -17,10 +17,14 @@ import ConfirmDialog from './components/ConfirmDialog';
 import InjectDialog from './components/InjectDialog';
 import SettingsDialog from './components/SettingsDialog';
 import TagEditorDialog from './components/TagEditorDialog';
+import TagActionDialog, { type TagActionType } from './components/TagActionDialog';
 import VerifyEmbeddedDataDialog from './components/VerifyEmbeddedDataDialog';
 import ConvertDialog from './components/ConvertDialog';
 import BatchExtractDialog from './components/BatchExtractDialog';
-import type { BatchExtractPreflightResult } from '../electron/shared-types';
+import IdentifyBitmapsDialog from './components/IdentifyBitmapsDialog';
+import ConfigureResourcesPromptDialog from './components/ConfigureResourcesPromptDialog';
+import BspSwapperDialog from './components/BspSwapperDialog';
+import type { BatchExtractPreflightResult, HaloBitmapVersion } from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
 const LARGE_SELECTION_CONFIRM_THRESHOLD = 200;
@@ -35,10 +39,22 @@ export default function App() {
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
   const [batchExtractPreflight, setBatchExtractPreflight] = useState<BatchExtractPreflightResult | null>(null);
+  const [bspSwapperOpen, setBspSwapperOpen] = useState(false);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
+  const [identifyBitmapsVersion, setIdentifyBitmapsVersion] = useState<HaloBitmapVersion | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
   const [editingTag, setEditingTag] = useState<TagEntrySummary | null>(null);
+  /** Properties palette active tab */
+  const [propertiesPaletteTab, setPropertiesPaletteTab] = useState<PropertiesPaletteTab>('overview');
+  /** Milestone 9: Tag action modal (rename or duplicate) */
+  const [tagAction, setTagAction] = useState<{ action: TagActionType; tag: TagEntrySummary } | null>(null);
+  /** Prompt dialog when opening an edition without configured bitmaps/sounds */
+  const [resourcePrompt, setResourcePrompt] = useState<{
+    mapEdition: HaloBitmapVersion;
+    mapScenarioName: string;
+  } | null>(null);
+  const [skippedPromptMapPaths, setSkippedPromptMapPaths] = useState<Set<string>>(new Set());
   const { logs, progress, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
@@ -71,6 +87,7 @@ export default function App() {
     setExtractSelection(null);
     setLargeSelectionConfirm(null);
     setEditingTag(null);
+    setTagAction(null);
   };
 
   const handleBatchExtract = async () => {
@@ -87,9 +104,12 @@ export default function App() {
       else if (action === 'extract-whole-map') void handleBatchExtract();
       else if (action === 'inject-tags') setInjectDialogOpen(true);
       else if (action === 'verify-embedded-data') setVerifyDialogOpen(true);
+      else if (action === 'swap-bsp') setBspSwapperOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
       else if (action === 'convert-map') setConvertSource('pick');
-      else if (action.endsWith('-stub')) log('warn', `${action.replace('-stub', '')} is coming in a later milestone.`);
+      else if (action.startsWith('identify-bitmaps:')) {
+        setIdentifyBitmapsVersion(action.split(':')[1] as HaloBitmapVersion);
+      } else if (action.endsWith('-stub')) log('warn', `${action.replace('-stub', '')} is coming in a later milestone.`);
     });
     const offLoaded = window.opence.onMapLoaded((result) => {
       setMapState(result);
@@ -142,6 +162,52 @@ export default function App() {
       window.removeEventListener('drop', onDrop);
     };
   }, []);
+
+  useEffect(() => {
+    if (!mapState || mapState.status !== 'ok') return;
+    if (typeof window.opence.getVersionSettings !== 'function') return;
+    const edition: HaloBitmapVersion = mapState.header.mapEdition || 'ce';
+    const filePath = mapState.filePath;
+    if (skippedPromptMapPaths.has(filePath)) return;
+
+    let cancelled = false;
+    Promise.all([
+      window.opence.getVersionSettings(),
+      window.opence.getSettings ? window.opence.getSettings() : Promise.resolve(null),
+    ])
+      .then(([verSettings, settings]) => {
+        if (cancelled) return;
+        const verResource = verSettings?.[edition];
+        const hasBitmaps = Boolean(verResource?.bitmaps || settings?.resourceMaps?.bitmaps);
+        const hasSounds = Boolean(verResource?.sounds || settings?.resourceMaps?.sounds);
+        if (!hasBitmaps && !hasSounds) {
+          setResourcePrompt({
+            mapEdition: edition,
+            mapScenarioName: mapState.header.scenarioName || 'Map',
+          });
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mapState, skippedPromptMapPaths]);
+
+  const handleSkipResourcePrompt = () => {
+    if (mapState?.status === 'ok') {
+      setSkippedPromptMapPaths((prev) => new Set([...prev, mapState.filePath]));
+    }
+    setResourcePrompt(null);
+  };
+
+  const handleSavedResourcePrompt = () => {
+    if (mapState?.status === 'ok') {
+      setSkippedPromptMapPaths((prev) => new Set([...prev, mapState.filePath]));
+    }
+    setResourcePrompt(null);
+    log('info', `Resource maps configured for ${resourcePrompt?.mapEdition ?? 'map'}.`);
+  };
 
   const handleOpen = async () => {
     const result = await window.opence.openMapDialog();
@@ -222,6 +288,19 @@ export default function App() {
               { label: 'Extract Whole Map...', onClick: () => void handleBatchExtract(), disabled: !canExtract },
               { label: 'Inject Tags...', onClick: () => setInjectDialogOpen(true), disabled: !canInject },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
+              { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
+              { label: '', separator: true },
+              {
+                label: 'Identify Bitmaps',
+                submenu: [
+                  { label: 'HaloMD...', onClick: () => setIdentifyBitmapsVersion('halomd') },
+                  { label: 'Custom Edition...', onClick: () => setIdentifyBitmapsVersion('ce') },
+                  { label: 'Halo PC...', onClick: () => setIdentifyBitmapsVersion('pc') },
+                  { label: 'Halo Mac Demo...', onClick: () => setIdentifyBitmapsVersion('demo') },
+                  { label: 'Halo MCC...', onClick: () => setIdentifyBitmapsVersion('mcc') },
+                ],
+              },
+              { label: '', separator: true },
               { label: 'Settings...', onClick: () => setSettingsDialogOpen(true) },
             ],
           },
@@ -258,9 +337,28 @@ export default function App() {
               onExtractWholeMap={handleBatchExtract}
               canExtractWholeMap={canExtract}
               onEditTag={setEditingTag}
+              onFindReferences={(tag) => {
+                setFocusedTag(tag);
+                setSelectedTagIndices(new Set([tag.index]));
+                setPropertiesPaletteTab('references');
+              }}
+              onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
+              onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
             />
             <CenterWorkspace header={mapState.header} />
-            <PropertiesPalette focusedTag={focusedTag} allTags={mapState.tags} />
+            <PropertiesPalette
+              focusedTag={focusedTag}
+              allTags={mapState.tags}
+              activeTab={propertiesPaletteTab}
+              onTabChange={setPropertiesPaletteTab}
+              onSelectTag={(idx) => {
+                const t = mapState.tags[idx];
+                if (t) {
+                  setFocusedTag(t);
+                  setSelectedTagIndices(new Set([idx]));
+                }
+              }}
+            />
           </>
         ) : (
           <WelcomeDropZone onOpen={handleOpen} />
@@ -275,6 +373,23 @@ export default function App() {
       {settingsDialogOpen && <SettingsDialog onClose={() => setSettingsDialogOpen(false)} />}
       {verifyDialogOpen && <VerifyEmbeddedDataDialog onClose={() => setVerifyDialogOpen(false)} log={log} />}
       {convertSource && <ConvertDialog source={convertSource} onClose={() => setConvertSource(null)} log={log} />}
+      {identifyBitmapsVersion && (
+        <IdentifyBitmapsDialog
+          initialVersion={identifyBitmapsVersion}
+          isOpen={true}
+          onClose={() => setIdentifyBitmapsVersion(null)}
+          openMapScenarioName={mapState?.status === 'ok' ? mapState.header.scenarioName : null}
+        />
+      )}
+      {resourcePrompt && (
+        <ConfigureResourcesPromptDialog
+          isOpen={true}
+          mapEdition={resourcePrompt.mapEdition}
+          mapScenarioName={resourcePrompt.mapScenarioName}
+          onClose={handleSkipResourcePrompt}
+          onSaved={handleSavedResourcePrompt}
+        />
+      )}
       {batchExtractPreflight && (
         <BatchExtractDialog
           open={!!batchExtractPreflight}
@@ -285,6 +400,31 @@ export default function App() {
 
       {editingTag && mapState?.status === 'ok' && (
         <TagEditorDialog tag={editingTag} allTags={mapState.tags} onClose={() => setEditingTag(null)} />
+      )}
+
+      {tagAction && mapState?.status === 'ok' && (
+        <TagActionDialog
+          action={tagAction.action}
+          tag={tagAction.tag}
+          onClose={() => setTagAction(null)}
+          onSuccess={(newIdx) => {
+            setTagAction(null);
+            if (typeof newIdx === 'number' && mapState.tags[newIdx]) {
+              setFocusedTag(mapState.tags[newIdx]);
+              setSelectedTagIndices(new Set([newIdx]));
+            }
+          }}
+        />
+      )}
+
+      {bspSwapperOpen && (
+        <BspSwapperDialog
+          isOpen={bspSwapperOpen}
+          onClose={() => setBspSwapperOpen(false)}
+          onSuccess={() => {
+            // BSP swapped in-memory
+          }}
+        />
       )}
 
       {largeSelectionConfirm && (

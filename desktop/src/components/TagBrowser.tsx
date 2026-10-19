@@ -14,6 +14,12 @@ interface Props {
   canExtractWholeMap?: boolean;
   /** Right-click "Tag Editor..." - opens the full field editor for the right-clicked tag. */
   onEditTag?: (tag: TagEntrySummary) => void;
+  /** Right-click "Find Referencing Tags" - switches to references tab for this tag. */
+  onFindReferences?: (tag: TagEntrySummary) => void;
+  /** Right-click "Rename Tag..." */
+  onRenameTag?: (tag: TagEntrySummary) => void;
+  /** Right-click "Duplicate Tag..." */
+  onDuplicateTag?: (tag: TagEntrySummary) => void;
 }
 
 type GroupMode = 'class' | 'folder';
@@ -55,6 +61,9 @@ export default function TagBrowser({
   onExtractWholeMap,
   canExtractWholeMap,
   onEditTag,
+  onFindReferences,
+  onRenameTag,
+  onDuplicateTag,
 }: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
@@ -341,6 +350,54 @@ export default function TagBrowser({
           >
             Tag Editor...
           </button>
+          <button
+            data-testid="tag-row-context-references"
+            onClick={() => {
+              const t = contextMenuTag;
+              setContextMenu(null);
+              if (t) {
+                focusRow(t);
+                onFindReferences?.(t);
+              }
+            }}
+            style={menuItemStyle(false)}
+          >
+            Find Referencing Tags
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          <button
+            data-testid="tag-row-context-rename"
+            disabled={!!contextMenuTag?.isExternal}
+            title={contextMenuTag?.isExternal ? 'Cannot rename external resource map tag' : undefined}
+            onClick={() => {
+              const t = contextMenuTag;
+              setContextMenu(null);
+              if (t) {
+                focusRow(t);
+                onRenameTag?.(t);
+              }
+            }}
+            style={menuItemStyle(!!contextMenuTag?.isExternal)}
+          >
+            Rename Tag...
+          </button>
+          <button
+            data-testid="tag-row-context-duplicate"
+            disabled={!!contextMenuTag?.isExternal}
+            title={contextMenuTag?.isExternal ? 'Cannot duplicate external resource map tag' : undefined}
+            onClick={() => {
+              const t = contextMenuTag;
+              setContextMenu(null);
+              if (t) {
+                focusRow(t);
+                onDuplicateTag?.(t);
+              }
+            }}
+            style={menuItemStyle(!!contextMenuTag?.isExternal)}
+          >
+            Duplicate Tag...
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
           <button
             data-testid="tag-row-context-extract"
             disabled={!!extractDisabledReason}

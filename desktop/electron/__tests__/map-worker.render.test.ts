@@ -11,12 +11,20 @@ import {
   runGetBitmapTexture,
   runGetScenarioObjects,
   runGetModelGeometry,
+  runUpdateScenarioPlacement,
+  runDuplicateScenarioPlacement,
+  runAddScenarioPlacement,
+  runDeleteScenarioPlacement,
 } from '../map-worker';
 import type {
   GetBspRenderMeshResult,
   GetBitmapTextureResult,
   GetScenarioObjectsResult,
   GetModelRenderGeometryResult,
+  UpdateScenarioPlacementResult,
+  DuplicateScenarioPlacementResult,
+  AddScenarioPlacementResult,
+  DeleteScenarioPlacementResult,
 } from '../shared-types';
 
 const SAMPLE_MAPS_DIR = process.env.SAMPLE_MAPS_DIR
@@ -141,7 +149,8 @@ describe('map-worker: 3D render extraction (Step 8.4)', () => {
     expect(objectsRes.summary.counts.vehicles).toBe(28);
     expect(objectsRes.summary.counts.scenery).toBe(47);
     expect(objectsRes.summary.counts.spawns).toBe(72);
-    expect(objectsRes.summary.counts.equipment).toBe(37);
+    expect(objectsRes.summary.counts.weapons).toBe(17);
+    expect(objectsRes.summary.counts.equipment).toBe(20);
 
     // Pick a vehicle with a valid modelTagId
     const vehicleWithModel = objectsRes.summary.objects.find((v) => v.kind === 'vehicle' && v.modelTagId !== 0xffffffff);
@@ -157,5 +166,69 @@ describe('map-worker: 3D render extraction (Step 8.4)', () => {
     expect(modelRes.geometry.totalVertices).toBeGreaterThan(0);
     expect(modelRes.geometry.totalTriangles).toBeGreaterThan(0);
     expect(modelRes.geometry.submeshes.length).toBeGreaterThan(0);
+  });
+
+  it.skipIf(!hasBg)('mutates scenario placements in memory: update, duplicate, add, delete (Step 9)', async () => {
+    const buf = fs.readFileSync(bgPath);
+    const inspected = inspectCustomEditionMap(buf);
+    if (inspected.status !== 'ok') throw new Error('sample map did not parse');
+    __setCurrentMapForTest({
+      filePath: bgPath,
+      buffer: buf,
+      header: inspected.header,
+      tagIndex: inspected.tagIndex,
+    });
+
+    // 1. Update placement
+    const updateRes = await call<UpdateScenarioPlacementResult>(runUpdateScenarioPlacement, {
+      placementId: 'vehicle-0',
+      position: [123.5, 456.5, 789.5],
+      rotation: [1.2, 0.3, -0.4],
+      paletteIndex: 1,
+    });
+    expect(updateRes.ok).toBe(true);
+    if (!updateRes.ok) throw new Error(updateRes.message);
+    expect(updateRes.map.modified).toBe(true);
+    const updatedV0 = updateRes.summary.objects.find((o) => o.id === 'vehicle-0');
+    expect(updatedV0).toBeDefined();
+    expect(updatedV0!.position[0]).toBeCloseTo(123.5, 1);
+    expect(updatedV0!.position[1]).toBeCloseTo(456.5, 1);
+    expect(updatedV0!.position[2]).toBeCloseTo(789.5, 1);
+    expect(updatedV0!.paletteIndex).toBe(1);
+
+    // 2. Duplicate placement
+    const initialCount = updateRes.summary.counts.vehicles;
+    const dupRes = await call<DuplicateScenarioPlacementResult>(runDuplicateScenarioPlacement, {
+      placementId: 'vehicle-0',
+      offsetDelta: [5, 10, 0],
+    });
+    expect(dupRes.ok).toBe(true);
+    if (!dupRes.ok) throw new Error(dupRes.message);
+    expect(dupRes.newPlacement.id).toBe(`vehicle-${initialCount}`);
+    expect(dupRes.summary.counts.vehicles).toBe(initialCount + 1);
+    expect(dupRes.newPlacement.position[0]).toBeCloseTo(123.5 + 5, 1);
+
+    // 3. Add placement
+    const addRes = await call<AddScenarioPlacementResult>(runAddScenarioPlacement, {
+      kind: 'spawn',
+      paletteIndex: 0,
+      position: [10, 20, 30],
+      rotation: [1.57, 0, 0],
+      teamIndex: 1,
+    });
+    expect(addRes.ok).toBe(true);
+    if (!addRes.ok) throw new Error(addRes.message);
+    expect(addRes.newPlacement.kind).toBe('spawn');
+    expect(addRes.newPlacement.teamIndex).toBe(1);
+    expect(addRes.newPlacement.position[0]).toBeCloseTo(10, 1);
+
+    // 4. Delete placement
+    const preDeleteSpawns = addRes.summary.counts.spawns;
+    const delRes = await call<DeleteScenarioPlacementResult>(runDeleteScenarioPlacement, {
+      placementId: addRes.newPlacement.id,
+    });
+    expect(delRes.ok).toBe(true);
+    if (!delRes.ok) throw new Error(delRes.message);
+    expect(delRes.summary.counts.spawns).toBe(preDeleteSpawns - 1);
   });
 });

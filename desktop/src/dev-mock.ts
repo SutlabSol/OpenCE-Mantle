@@ -25,6 +25,19 @@ import type {
   GetBitmapTextureResult,
   GetScenarioObjectsResult,
   GetModelRenderGeometryResult,
+  UpdateScenarioPlacementResult,
+  DuplicateScenarioPlacementResult,
+  AddScenarioPlacementResult,
+  SwapScenarioPlacementResult,
+  DeleteScenarioPlacementResult,
+  ScenarioPlacementsSummary,
+  ScenarioObjectPlacement,
+  ScenarioObjectKind,
+  GetReferencingTagsResult,
+  GetUnicodeStringsResult,
+  SetUnicodeStringResult,
+  RenameTagResult,
+  DuplicateTagResult,
 } from '../electron/shared-types';
 import { parseMockScenario, buildMockSummary, buildMockInjectPlan, buildMockVerifyEmbeddedDataResult, buildMockConvertReport, buildMockRepairConvertReport, buildMockModelPartsConvertReport, buildMockAlignConvertReport } from './test-fixtures/dependency-fixtures';
 
@@ -95,6 +108,63 @@ export function installDevMock() {
       await new Promise((r) => setTimeout(r, 180));
       progressListeners.forEach((cb) => cb({ taskId, stage, percent }));
     }
+  };
+
+  let mockScenarioSummary: ScenarioPlacementsSummary = {
+    scenarioTagId: 0xe1740000,
+    scenarioPath: 'levels\\test\\bloodgulch\\bloodgulch',
+    totalObjects: 3,
+    objects: [
+      {
+        id: 'vehicle-0',
+        kind: 'vehicle',
+        paletteIndex: 0,
+        nameIndex: 0,
+        objectTagId: 0xe1740004,
+        objectPath: 'vehicles\\warthog\\mp_warthog',
+        modelTagId: 0xe1740003,
+        position: [10, 10, 0],
+        rotation: [0, 0, 0],
+      },
+      {
+        id: 'scenery-0',
+        kind: 'scenery',
+        paletteIndex: 0,
+        nameIndex: 0,
+        objectTagId: 0xe1740009,
+        objectPath: 'scenery\\rocks\\rock01',
+        modelTagId: 0xe1740003,
+        position: [-15, 20, 0],
+        rotation: [0.5, 0, 0],
+      },
+      {
+        id: 'spawn-0',
+        kind: 'spawn',
+        paletteIndex: 0,
+        nameIndex: -1,
+        objectTagId: 0xffffffff,
+        objectPath: 'Player Spawn (Red)',
+        modelTagId: 0xffffffff,
+        position: [0, -30, 1],
+        rotation: [1.57, 0, 0],
+        teamIndex: 0,
+      },
+    ],
+    counts: {
+      vehicles: 1,
+      scenery: 1,
+      bipeds: 0,
+      weapons: 0,
+      equipment: 0,
+      spawns: 1,
+    },
+    palettes: {
+      vehicles: [{ paletteIndex: 0, tagId: 0xe1740004, path: 'vehicles\\warthog\\mp_warthog', name: 'mp_warthog' }],
+      scenery: [{ paletteIndex: 0, tagId: 0xe1740009, path: 'scenery\\rocks\\rock01', name: 'rock01' }],
+      bipeds: [],
+      weapons: [],
+      equipment: [{ paletteIndex: 0, tagId: 0xe174000a, path: 'item collections\\single weapons\\assault rifle', name: 'assault rifle' }],
+    },
   };
 
   const mock: OpenceApi = {
@@ -235,7 +305,34 @@ export function installDevMock() {
       return { ok: true, status };
     },
     getResourceMapStatuses: async () => ({ ...mockResourceMapStatuses }),
-  pickConvertResource: async (kind: 'bitmaps' | 'sounds') => {
+    identifyResourceMap: async (filePath: string, expectedVersion?: string) => ({
+      ok: true,
+      filePath,
+      fileSizeBytes: 34_369_536,
+      entryCount: 1568,
+      tableOffset: 0x01e42000,
+      detectedVersion: (expectedVersion as any) || 'ce',
+      versionMatchConfidence: 'exact',
+      entries: [
+        { index: 0, name: 'ui/hud/bitmaps/hud_numbers', dataOffset: 0x10, size: 4096 },
+        { index: 1, name: 'characters/cyborg/bitmaps/cyborg', dataOffset: 0x1010, size: 65536 },
+        { index: 2, name: 'vehicles/warthog/bitmaps/warthog', dataOffset: 0x11010, size: 131072 },
+      ],
+    }),
+    setResourceMapPath: async (kind, filePath) => {
+      mockResourceMapStatuses[kind] = { state: 'ok', path: filePath, fileSizeBytes: 34_369_536, entryCount: 1568 };
+      return { ok: true };
+    },
+    detectDefaultResourceMapPaths: async () => ({
+      halomd: 'C:\\HaloMD\\maps\\bitmaps.map',
+      ce: 'C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map',
+      pc: 'C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map',
+      demo: 'C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map',
+      mcc: 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
+    }),
+    getVersionSettings: async () => ({}),
+    setVersionSettings: async () => ({ ok: true }),
+    pickConvertResource: async (kind: 'bitmaps' | 'sounds') => {
       return { path: `C:\\HaloMD\\maps\\${kind}.map` };
     },
     pickInjectContainer: async () => ({ path: 'C:/mock/extracted.ocetags', paths: ['C:/mock/extracted.ocetags'] }),
@@ -399,56 +496,142 @@ export function installDevMock() {
     },
     getScenarioObjects: async (): Promise<GetScenarioObjectsResult> => ({
       ok: true,
-      summary: {
-        scenarioTagId: 0xe1740000,
-        scenarioPath: 'levels\\test\\bloodgulch\\bloodgulch',
-        totalObjects: 3,
-        objects: [
-          {
-            id: 'vehicle-0',
-            kind: 'vehicle',
-            paletteIndex: 0,
-            nameIndex: 0,
-            objectTagId: 0xe1740004,
-            objectPath: 'vehicles\\warthog\\mp_warthog',
-            modelTagId: 0xe1740003,
-            position: [10, 10, 0],
-            rotation: [0, 0, 0],
-          },
-          {
-            id: 'scenery-0',
-            kind: 'scenery',
-            paletteIndex: 0,
-            nameIndex: 0,
-            objectTagId: 0xe1740009,
-            objectPath: 'scenery\\rocks\\rock01',
-            modelTagId: 0xe1740003,
-            position: [-15, 20, 0],
-            rotation: [0.5, 0, 0],
-          },
-          {
-            id: 'spawn-0',
-            kind: 'spawn',
-            paletteIndex: 0,
-            nameIndex: -1,
-            objectTagId: 0xffffffff,
-            objectPath: 'Player Spawn (Red)',
-            modelTagId: 0xffffffff,
-            position: [0, -30, 1],
-            rotation: [1.57, 0, 0],
-            teamIndex: 0,
-          },
-        ],
-        counts: {
-          vehicles: 1,
-          scenery: 1,
-          bipeds: 0,
-          weapons: 0,
-          equipment: 0,
-          spawns: 1,
-        },
-      },
+      summary: mockScenarioSummary,
     }),
+    updateScenarioPlacement: async (placementId, updates): Promise<UpdateScenarioPlacementResult> => {
+      if (!currentMock) return { ok: false, code: 'NO_MAP', message: 'No map open' };
+      const obj = mockScenarioSummary.objects.find((o) => o.id === placementId);
+      if (obj) {
+        if (updates.position) obj.position = [...updates.position];
+        if (updates.rotation) obj.rotation = [...updates.rotation];
+        if (updates.paletteIndex !== undefined) obj.paletteIndex = updates.paletteIndex;
+        if (updates.teamIndex !== undefined) obj.teamIndex = updates.teamIndex;
+      }
+      currentMock = { ...currentMock, modified: true };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      return { ok: true, summary: mockScenarioSummary, map: currentMock };
+    },
+    duplicateScenarioPlacement: async (placementId, offsetDelta): Promise<DuplicateScenarioPlacementResult> => {
+      if (!currentMock) return { ok: false, code: 'NO_MAP', message: 'No map open' };
+      const source = mockScenarioSummary.objects.find((o) => o.id === placementId);
+      if (!source) return { ok: false, code: 'NOT_FOUND', message: `Object ${placementId} not found` };
+      const delta = offsetDelta ?? [1.5, 1.5, 0];
+      const kindKey = (source.kind === 'spawn' ? 'spawns' : `${source.kind}s`) as keyof typeof mockScenarioSummary.counts;
+      const kindCount = mockScenarioSummary.counts[kindKey] || 0;
+      const newPlacement: ScenarioObjectPlacement = {
+        ...source,
+        id: `${source.kind}-${kindCount}`,
+        position: [source.position[0] + delta[0], source.position[1] + delta[1], source.position[2] + delta[2]],
+      };
+      mockScenarioSummary = {
+        ...mockScenarioSummary,
+        totalObjects: mockScenarioSummary.totalObjects + 1,
+        objects: [...mockScenarioSummary.objects, newPlacement],
+        counts: {
+          ...mockScenarioSummary.counts,
+          [kindKey]: kindCount + 1,
+        },
+      };
+      currentMock = { ...currentMock, modified: true };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      return { ok: true, summary: mockScenarioSummary, newPlacement, map: currentMock };
+    },
+    addScenarioPlacement: async (kind, paletteIndex, position, rotation, teamIndex): Promise<AddScenarioPlacementResult> => {
+      if (!currentMock) return { ok: false, code: 'NO_MAP', message: 'No map open' };
+      const kindKey = (kind === 'spawn' ? 'spawns' : `${kind}s`) as keyof typeof mockScenarioSummary.counts;
+      const kindCount = mockScenarioSummary.counts[kindKey] || 0;
+      const palList = mockScenarioSummary.palettes[kind === 'spawn' || kind === 'equipment' ? 'vehicles' : (`${kind}s` as keyof typeof mockScenarioSummary.palettes)] || [];
+      const pal = palList[paletteIndex];
+      const newPlacement: ScenarioObjectPlacement = {
+        id: `${kind}-${kindCount}`,
+        kind,
+        paletteIndex,
+        nameIndex: -1,
+        objectTagId: pal?.tagId ?? 0xffffffff,
+        objectPath: pal?.path ?? `${kind}`,
+        modelTagId: 0xffffffff,
+        position: [...position],
+        rotation: rotation ? [...rotation] : [0, 0, 0],
+        teamIndex,
+      };
+      mockScenarioSummary = {
+        ...mockScenarioSummary,
+        totalObjects: mockScenarioSummary.totalObjects + 1,
+        objects: [...mockScenarioSummary.objects, newPlacement],
+        counts: {
+          ...mockScenarioSummary.counts,
+          [kindKey]: kindCount + 1,
+        },
+      };
+      currentMock = { ...currentMock, modified: true };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      return { ok: true, summary: mockScenarioSummary, newPlacement, map: currentMock };
+    },
+    swapScenarioPlacement: async (placementId, newKind, newPaletteIndex): Promise<SwapScenarioPlacementResult> => {
+      if (!currentMock) return { ok: false, code: 'NO_MAP', message: 'No map open' };
+      const target = mockScenarioSummary.objects.find((o) => o.id === placementId);
+      if (!target) return { ok: false, code: 'NOT_FOUND', message: `Object ${placementId} not found` };
+      const pos = [...target.position] as [number, number, number];
+      const rot = [...target.rotation] as [number, number, number];
+      const team = target.teamIndex;
+      const kindKey = (target.kind === 'spawn' ? 'spawns' : `${target.kind}s`) as keyof typeof mockScenarioSummary.counts;
+      mockScenarioSummary = {
+        ...mockScenarioSummary,
+        totalObjects: mockScenarioSummary.totalObjects - 1,
+        objects: mockScenarioSummary.objects.filter((o) => o.id !== placementId),
+        counts: {
+          ...mockScenarioSummary.counts,
+          [kindKey]: Math.max(0, (mockScenarioSummary.counts[kindKey] || 0) - 1),
+        },
+      };
+      const newKindKey = (newKind === 'spawn' ? 'spawns' : `${newKind}s`) as keyof typeof mockScenarioSummary.counts;
+      const newKindCount = mockScenarioSummary.counts[newKindKey] || 0;
+      const palList = mockScenarioSummary.palettes[newKind === 'spawn' || newKind === 'equipment' ? 'vehicles' : (`${newKind}s` as keyof typeof mockScenarioSummary.palettes)] || [];
+      const pal = palList[newPaletteIndex];
+      const newPlacement: ScenarioObjectPlacement = {
+        id: `${newKind}-${newKindCount}`,
+        kind: newKind,
+        paletteIndex: newPaletteIndex,
+        nameIndex: -1,
+        objectTagId: pal?.tagId ?? 0xffffffff,
+        objectPath: pal?.path ?? `${newKind}`,
+        modelTagId: 0xffffffff,
+        position: pos,
+        rotation: rot,
+        teamIndex: team,
+      };
+      mockScenarioSummary = {
+        ...mockScenarioSummary,
+        totalObjects: mockScenarioSummary.totalObjects + 1,
+        objects: [...mockScenarioSummary.objects, newPlacement],
+        counts: {
+          ...mockScenarioSummary.counts,
+          [newKindKey]: newKindCount + 1,
+        },
+      };
+      currentMock = { ...currentMock, modified: true };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      return { ok: true, summary: mockScenarioSummary, newPlacement, map: currentMock };
+    },
+    deleteScenarioPlacement: async (placementId): Promise<DeleteScenarioPlacementResult> => {
+      if (!currentMock) return { ok: false, code: 'NO_MAP', message: 'No map open' };
+      const target = mockScenarioSummary.objects.find((o) => o.id === placementId);
+      if (target) {
+        const kindKey = (target.kind === 'spawn' ? 'spawns' : `${target.kind}s`) as keyof typeof mockScenarioSummary.counts;
+        mockScenarioSummary = {
+          ...mockScenarioSummary,
+          totalObjects: mockScenarioSummary.totalObjects - 1,
+          objects: mockScenarioSummary.objects.filter((o) => o.id !== placementId),
+          counts: {
+            ...mockScenarioSummary.counts,
+            [kindKey]: Math.max(0, mockScenarioSummary.counts[kindKey] - 1),
+          },
+        };
+      }
+      currentMock = { ...currentMock, modified: true };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      return { ok: true, summary: mockScenarioSummary, map: currentMock };
+    },
     getModelGeometry: async (modelTagId: number): Promise<GetModelRenderGeometryResult> => ({
       ok: true,
       geometry: {
@@ -489,6 +672,158 @@ export function installDevMock() {
         ],
       },
     }),
+    getReferencingTags: async (tagIndex: number): Promise<GetReferencingTagsResult> => ({
+      ok: true,
+      referencingTags: [
+        {
+          sourceTagIndex: 0,
+          sourceTagId: 0xe1740000,
+          sourcePath: 'levels\\test\\bloodgulch\\bloodgulch',
+          sourceGroup: 'scenario',
+          fieldPath: 'weapons[0].weapon',
+        },
+        {
+          sourceTagIndex: 4,
+          sourceTagId: 0xe1740004,
+          sourcePath: 'globals\\globals',
+          sourceGroup: 'globals',
+          fieldPath: 'player information[0].unit',
+        },
+      ],
+    }),
+    getUnicodeStrings: async (tagIndex: number): Promise<GetUnicodeStringsResult> => ({
+      ok: true,
+      result: {
+        tagIndex,
+        tagId: 0xe1740010,
+        tagPath: 'ui\\hud\\hud messages',
+        strings: [
+          { index: 0, text: 'Press [action] to swap weapons', byteLength: 62, allocatedBytes: 64, maxChars: 32, fileOffset: 1000, pointer: 0x40100000 },
+          { index: 1, text: 'Reloading...', byteLength: 24, allocatedBytes: 32, maxChars: 16, fileOffset: 1064, pointer: 0x40100040 },
+          { index: 2, text: 'Out of Ammo', byteLength: 22, allocatedBytes: 32, maxChars: 16, fileOffset: 1096, pointer: 0x40100060 },
+        ],
+      },
+    }),
+    setUnicodeString: async (tagIndex: number, stringIndex: number, newText: string): Promise<SetUnicodeStringResult> => {
+      if (currentMock) {
+        currentMock = { ...currentMock, modified: true };
+        updatedListeners.forEach((cb) => cb(currentMock!));
+      }
+      return { ok: true, newText, map: currentMock! };
+    },
+    renameTag: async (tagIndex: number, newPath: string): Promise<RenameTagResult> => {
+      if (currentMock) {
+        currentMock = {
+          ...currentMock,
+          modified: true,
+          tags: currentMock.tags.map((t) => (t.index === tagIndex ? { ...t, path: newPath } : t)),
+        };
+        updatedListeners.forEach((cb) => cb(currentMock!));
+      }
+      return { ok: true, path: newPath, map: currentMock! };
+    },
+    duplicateTag: async (tagIndex: number, newPath: string): Promise<DuplicateTagResult> => {
+      const newTagIndex = currentMock ? currentMock.tags.length : tagIndex + 100;
+      const newTagId = 0xe1740000 + newTagIndex * 0x10001;
+      if (currentMock) {
+        const source = currentMock.tags.find((t) => t.index === tagIndex) ?? currentMock.tags[0];
+        const newTag = { ...source, index: newTagIndex, tagId: newTagId, path: newPath };
+        currentMock = {
+          ...currentMock,
+          modified: true,
+          tags: [...currentMock.tags, newTag],
+        };
+        updatedListeners.forEach((cb) => cb(currentMock!));
+      }
+      return { ok: true, newTagIndex, newTagId, path: newPath, map: currentMock! };
+    },
+    pickBspSourceMap: async () => ({ path: 'C:\\HaloPC\\maps\\b30.map' }),
+    bspSwapPreflight: async (_sourceFilePath, _srcIdx, _dstIdx) => ({
+      ok: true,
+      sourceBsps: [
+        {
+          index: 0,
+          path: 'levels\\b30\\b30a',
+          tagId: 0xef7b0e05,
+          bspStart: 2048,
+          bspSize: 8413184,
+          bspAddress: 0x4133a000,
+          vertexCount: 50936,
+          triangleCount: 35105,
+          submeshCount: 117,
+          worldBounds: [-200, -200, -20, 200, 200, 50],
+          hasDobc: true,
+          hasDecals: true,
+        },
+      ],
+      targetBsps: [
+        {
+          index: 0,
+          path: 'levels\\test\\bloodgulch\\bloodgulch',
+          tagId: 0xeb0b0ab5,
+          bspStart: 2048,
+          bspSize: 1517568,
+          bspAddress: 0x419cd800,
+          vertexCount: 5762,
+          triangleCount: 5503,
+          submeshCount: 79,
+          worldBounds: [-100, -100, -10, 100, 100, 30],
+          hasDobc: false,
+          hasDecals: false,
+        },
+      ],
+      selectedSourceBsp: {
+        index: 0,
+        path: 'levels\\b30\\b30a',
+        tagId: 0xef7b0e05,
+        bspStart: 2048,
+        bspSize: 8413184,
+        bspAddress: 0x4133a000,
+        vertexCount: 50936,
+        triangleCount: 35105,
+        submeshCount: 117,
+        worldBounds: [-200, -200, -20, 200, 200, 50],
+        hasDobc: true,
+        hasDecals: true,
+      },
+      selectedTargetBsp: {
+        index: 0,
+        path: 'levels\\test\\bloodgulch\\bloodgulch',
+        tagId: 0xeb0b0ab5,
+        bspStart: 2048,
+        bspSize: 1517568,
+        bspAddress: 0x419cd800,
+        vertexCount: 5762,
+        triangleCount: 5503,
+        submeshCount: 79,
+        worldBounds: [-100, -100, -10, 100, 100, 30],
+        hasDobc: false,
+        hasDecals: false,
+      },
+      sizeDelta: 6895616,
+      estimatedNewSize: 20831812,
+      warnings: ['Source BSP contains Detail Objects (DOBC). Stripping recommended for multiplayer.'],
+    }),
+    performBspSwap: async (_sourceFilePath, options) => {
+      if (currentMock) {
+        currentMock = { ...currentMock, modified: true };
+        updatedListeners.forEach((cb) => cb(currentMock!));
+      }
+      return {
+        ok: true,
+        buffer: Buffer.alloc(0),
+        summary: {
+          sourceBspName: 'levels\\b30\\b30a',
+          targetBspName: 'levels\\test\\bloodgulch\\bloodgulch',
+          oldSize: 13936196,
+          newSize: 20831812,
+          delta: 6895616,
+          strippedDobc: options.stripDobcAndDecals ?? true,
+          strippedDecals: options.stripDobcAndDecals ?? true,
+          relocatedSpawns: options.relocateGroundObjects ? 16 : 0,
+        },
+      };
+    },
     onProgress: (cb) => {
       progressListeners.add(cb);
       return () => progressListeners.delete(cb);

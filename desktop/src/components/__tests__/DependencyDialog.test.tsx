@@ -3,7 +3,7 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import DependencyDialog from '../DependencyDialog';
 import { buildMockSummary, type MockScenario } from '../../test-fixtures/dependency-fixtures';
-import type { OpenceApi, ProgressEvent, GetDependenciesResult, ExtractTagsResult, DependencyWarningInfo, DependencyWarningKind } from '../../../electron/shared-types';
+import type { OpenceApi, ProgressEvent, GetDependenciesResult, ExtractTagsResult, DependencyWarningInfo, DependencyWarningKind, GetReferencingTagsResult } from '../../../electron/shared-types';
 import { WARNING_KINDS } from '../../../../core/src/map/dependency-walker';
 
 function okDeps(scenario: MockScenario): () => Promise<GetDependenciesResult> {
@@ -42,10 +42,26 @@ function installMockOpence(overrides: Partial<OpenceApi> = {}): { progressListen
     updateTagField: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
     getDependencySlots: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
     setDependencySlot: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    getReferencingTags: vi.fn(async (): Promise<GetReferencingTagsResult> => ({ ok: true, referencingTags: [] })),
+    getUnicodeStrings: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    setUnicodeString: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    renameTag: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    duplicateTag: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    pickBspSourceMap: vi.fn(async () => ({ path: null })),
+    bspSwapPreflight: vi.fn(async () => ({ ok: false, sourceBsps: [] as any, targetBsps: [] as any, selectedSourceBsp: null, selectedTargetBsp: null, sizeDelta: 0, estimatedNewSize: 0, warnings: [] as any })),
+    performBspSwap: vi.fn(async () => ({ ok: false, buffer: Buffer.alloc(0), summary: { sourceBspName: '', targetBspName: '', oldSize: 0, newSize: 0, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 } })),
     getBspRenderMesh: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
     getBitmapTexture: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
     getScenarioObjects: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
     getModelGeometry: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    updateScenarioPlacement: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    duplicateScenarioPlacement: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    addScenarioPlacement: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    swapScenarioPlacement: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    deleteScenarioPlacement: vi.fn(async () => ({ ok: false, code: 'NOT_IMPLEMENTED', message: 'mock' }) as const),
+    identifyResourceMap: vi.fn(async () => ({ ok: false, filePath: '', fileSizeBytes: 0, entryCount: 0, tableOffset: 0, detectedVersion: 'unknown' as const, versionMatchConfidence: 'mismatch' as const, entries: [] })),
+    setResourceMapPath: vi.fn(async () => ({ ok: true })),
+    detectDefaultResourceMapPaths: vi.fn(async () => ({ halomd: null, ce: null, pc: null, demo: null, mcc: null })),
     openContainingFolder: vi.fn(async () => {}),
     getSettings: vi.fn(async () => ({ lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } })),
     notImplemented: vi.fn(),

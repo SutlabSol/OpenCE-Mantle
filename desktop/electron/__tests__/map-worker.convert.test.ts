@@ -95,11 +95,10 @@ afterEach(() => {
 });
 
 describe('map-worker: opening maps the converter knows', () => {
-  it.skipIf(HEH.skip)(`a retail-layout map opens as unsupported with Convert offered; nothing is held${HEH.suffix}`, async () => {
+  it.skipIf(HEH.skip)(`a retail-layout map opens directly as ok and is held${HEH.suffix}`, async () => {
     const result = await call(runInspect, { filePath: copyIn(sampleIn('haloMD', 'heh_2.map')) });
-    expect(result).toMatchObject({ status: 'unsupported', layout: 'retail', convertible: true });
-    expect(result.message).toMatch(/Convert to Custom Edition/);
-    expect(__getCurrentMapForTest()).toBeNull();
+    expect(result).toMatchObject({ status: 'ok' });
+    expect(__getCurrentMapForTest()).not.toBeNull();
   });
 
   it.skipIf(DEMO.skip)(`the original demo layout (Phase 2) opens as unsupported but convertible, not as "not a Halo map"${DEMO.suffix}`, async () => {

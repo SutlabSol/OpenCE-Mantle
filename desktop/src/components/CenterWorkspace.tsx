@@ -14,7 +14,11 @@ export default function CenterWorkspace({ header }: { header: MapHeaderSummary }
         <TabButton testid="center-tab-overview" label="Map Overview" active={tab === 'overview'} onClick={() => setTab('overview')} />
         <TabButton testid="center-tab-viewport" label="3D Viewport" active={tab === 'viewport'} onClick={() => setTab('viewport')} />
       </div>
-      {tab === 'overview' ? <MapInfoPanel header={header} /> : <ScenarioViewport header={header} />}
+      {tab === 'overview' ? (
+        <MapInfoPanel header={header} />
+      ) : (
+        <ScenarioViewport key={`${header.scenarioName}-${header.crc32}`} header={header} />
+      )}
     </div>
   );
 }

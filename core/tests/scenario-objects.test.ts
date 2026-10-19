@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { hasSampleMaps, readSampleMap } from './helpers/sample-maps';
 import { inspectCustomEditionMap } from '../src/map/open-map';
-import { extractScenarioPlacements } from '../src/render/scenario-objects';
+import {
+  extractScenarioPlacements,
+  updateScenarioPlacement,
+  duplicateScenarioPlacement,
+  addScenarioPlacement,
+  deleteScenarioPlacement,
+} from '../src/render/scenario-objects';
 
 describe.skipIf(!hasSampleMaps(['bloodgulch.map']))('Scenario Object Placements Extractor (Step 8.5) – bloodgulch', () => {
   const buffer = readSampleMap('bloodgulch.map');
@@ -18,7 +24,8 @@ describe.skipIf(!hasSampleMaps(['bloodgulch.map']))('Scenario Object Placements 
     expect(summary.counts.vehicles).toBe(28);
     expect(summary.counts.scenery).toBe(47);
     expect(summary.counts.spawns).toBe(72);
-    expect(summary.counts.equipment).toBe(37);
+    expect(summary.counts.weapons).toBe(17);
+    expect(summary.counts.equipment).toBe(20);
 
     // Verify vehicles
     const vehicles = summary.objects.filter((o) => o.kind === 'vehicle');
@@ -52,6 +59,129 @@ describe.skipIf(!hasSampleMaps(['bloodgulch.map']))('Scenario Object Placements 
     for (const s of spawns) {
       expect(s.position.every(Number.isFinite)).toBe(true);
     }
+
+    // Verify palettes are populated
+    expect(summary.palettes.vehicles.length).toBeGreaterThan(0);
+    expect(summary.palettes.vehicles[0].path).toMatch(/^vehicles\\/);
+    expect(summary.palettes.scenery.length).toBeGreaterThan(0);
+    expect(summary.palettes.weapons.length).toBeGreaterThan(0);
+    expect(summary.palettes.equipment.length).toBeGreaterThan(0);
+
+    // Verify weapons (multiplayer ground weapons) have 3D models resolved
+    const weaponsWithModels = summary.objects.filter(
+      (o) => o.kind === 'weapon' && o.modelTagId !== 0xffffffff,
+    );
+    expect(weaponsWithModels.length).toBe(17);
+    for (const w of weaponsWithModels) {
+      expect(w.modelTagId).not.toBe(0xffffffff);
+    }
+
+    // Verify equipment (multiplayer powerups/grenades) have 3D models resolved
+    const equipmentWithModels = summary.objects.filter(
+      (o) => o.kind === 'equipment' && o.modelTagId !== 0xffffffff,
+    );
+    expect(equipmentWithModels.length).toBeGreaterThan(10);
+    for (const eq of equipmentWithModels) {
+      expect(eq.modelTagId).not.toBe(0xffffffff);
+    }
+  });
+
+  it('updates placement position and rotation in-place (Step 9)', () => {
+    const testBuf = Buffer.from(buffer);
+    const initial = extractScenarioPlacements(testBuf, header, tagIndex);
+    const v0 = initial.objects.find((o) => o.id === 'vehicle-0')!;
+
+    const updated = updateScenarioPlacement(testBuf, header, tagIndex, 'vehicle-0', {
+      position: [123.45, -67.89, 42.0],
+      rotation: [1.23, 0.45, -0.67],
+    });
+
+    const v0Updated = updated.objects.find((o) => o.id === 'vehicle-0')!;
+    expect(v0Updated.position[0]).toBeCloseTo(123.45, 2);
+    expect(v0Updated.position[1]).toBeCloseTo(-67.89, 2);
+    expect(v0Updated.position[2]).toBeCloseTo(42.0, 2);
+    expect(v0Updated.rotation[0]).toBeCloseTo(1.23, 2);
+    expect(v0Updated.rotation[1]).toBeCloseTo(0.45, 2);
+    expect(v0Updated.rotation[2]).toBeCloseTo(-0.67, 2);
+  });
+
+  it('duplicates an existing scenario placement and appends to reflexive array (Step 9)', () => {
+    const testBuf = Buffer.from(buffer);
+    const initial = extractScenarioPlacements(testBuf, header, tagIndex);
+    const initVehicles = initial.counts.vehicles;
+
+    const dupRes = duplicateScenarioPlacement(testBuf, header, tagIndex, 'vehicle-0', [2.0, 3.0, 0.0]);
+
+    expect(dupRes.summary.counts.vehicles).toBe(initVehicles + 1);
+    expect(dupRes.newPlacement.id).toBe(`vehicle-${initVehicles}`);
+    expect(dupRes.newPlacement.kind).toBe('vehicle');
+    expect(dupRes.newPlacement.objectPath).toBe(initial.objects[0].objectPath);
+    expect(dupRes.newPlacement.position[0]).toBeCloseTo(initial.objects[0].position[0] + 2.0, 2);
+    expect(dupRes.newPlacement.position[1]).toBeCloseTo(initial.objects[0].position[1] + 3.0, 2);
+
+    // Verify map is still valid Custom Edition map
+    const rechecked = inspectCustomEditionMap(dupRes.buffer);
+    expect(rechecked.status).toBe('ok');
+  });
+
+  it('adds a new scenario placement from scratch and deletes it (Step 9)', () => {
+    const testBuf = Buffer.from(buffer);
+    const initial = extractScenarioPlacements(testBuf, header, tagIndex);
+    const initSpawns = initial.counts.spawns;
+
+    // Add spawn
+    const addRes = addScenarioPlacement(
+      testBuf,
+      header,
+      tagIndex,
+      'spawn',
+      0,
+      [50.0, 60.0, 10.0],
+      [1.57, 0, 0],
+      1,
+    );
+
+    expect(addRes.summary.counts.spawns).toBe(initSpawns + 1);
+    expect(addRes.newPlacement.position[0]).toBeCloseTo(50.0, 2);
+    expect(addRes.newPlacement.position[1]).toBeCloseTo(60.0, 2);
+    expect(addRes.newPlacement.teamIndex).toBe(1);
+
+    // Recheck map integrity
+    const rechecked = inspectCustomEditionMap(addRes.buffer);
+    expect(rechecked.status).toBe('ok');
+    if (rechecked.status !== 'ok') return;
+
+    // Delete the added spawn
+    const deletedSummary = deleteScenarioPlacement(
+      addRes.buffer,
+      rechecked.header,
+      rechecked.tagIndex,
+      addRes.newPlacement.id,
+    );
+    expect(deletedSummary.counts.spawns).toBe(initSpawns);
+  });
+
+  it('adds a vehicle not currently in palette, auto-registering in palette reflexive', () => {
+    const testBuf = Buffer.from(buffer);
+    const initial = extractScenarioPlacements(testBuf, header, tagIndex);
+    const initialVehicleCount = initial.counts.vehicles;
+    const initialPalCount = initial.palettes.vehicles.length;
+
+    // Pick a palette item index (first vehicle)
+    const addRes = addScenarioPlacement(
+      testBuf,
+      header,
+      tagIndex,
+      'vehicle',
+      0,
+      [10.0, 20.0, 5.0],
+      [0, 0, 0],
+    );
+
+    expect(addRes.summary.counts.vehicles).toBe(initialVehicleCount + 1);
+    expect(addRes.newPlacement.kind).toBe('vehicle');
+    expect(addRes.newPlacement.position[0]).toBeCloseTo(10.0, 2);
+    expect(addRes.newPlacement.modelTagId).not.toBe(0xffffffff);
   });
 });
 

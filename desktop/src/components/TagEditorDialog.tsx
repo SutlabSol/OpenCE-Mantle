@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import type { TagEntrySummary } from '../../electron/shared-types';
 import TagFieldEditorPanel from './TagFieldEditorPanel';
+import UnicodeStringEditorPanel from './UnicodeStringEditorPanel';
 
 interface Props {
   tag: TagEntrySummary;
@@ -11,11 +12,13 @@ interface Props {
 
 /**
  * Right-click "Tag Editor..." dialog: hosts the full-field editor (`TagFieldEditorPanel`)
- * for a single tag in a modal overlay (zIndex 150, above the dependency dialog's 100).
+ * or `UnicodeStringEditorPanel` for ustr tags in a modal overlay (zIndex 150, above the dependency dialog's 100).
  * Escape or the header Close button dismisses.
  */
 export default function TagEditorDialog({ tag, allTags, onClose }: Props) {
   const shellRef = useRef<HTMLDivElement>(null);
+  const isUnicodeStrings = tag.primaryClassName === 'unicode_string_list';
+  const [tab, setTab] = useState<'strings' | 'fields'>(isUnicodeStrings ? 'strings' : 'fields');
 
   useEffect(() => {
     shellRef.current?.focus();
@@ -115,8 +118,58 @@ export default function TagEditorDialog({ tag, allTags, onClose }: Props) {
             ×
           </button>
         </div>
+
+        {isUnicodeStrings && (
+          <div
+            style={{
+              display: 'flex',
+              background: 'var(--bg-panel-header)',
+              borderBottom: '1px solid var(--border)',
+              padding: '0 10px',
+              flexShrink: 0,
+            }}
+          >
+            <button
+              data-testid="tag-editor-tab-strings"
+              onClick={() => setTab('strings')}
+              style={{
+                padding: '6px 14px',
+                background: tab === 'strings' ? 'var(--bg-panel)' : 'transparent',
+                border: 'none',
+                borderBottom: tab === 'strings' ? '2px solid var(--accent-cyan)' : '2px solid transparent',
+                color: tab === 'strings' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Unicode Strings
+            </button>
+            <button
+              data-testid="tag-editor-tab-fields"
+              onClick={() => setTab('fields')}
+              style={{
+                padding: '6px 14px',
+                background: tab === 'fields' ? 'var(--bg-panel)' : 'transparent',
+                border: 'none',
+                borderBottom: tab === 'fields' ? '2px solid var(--accent-cyan)' : '2px solid transparent',
+                color: tab === 'fields' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+            >
+              Raw Fields
+            </button>
+          </div>
+        )}
+
         <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-          <TagFieldEditorPanel focusedTag={tag} allTags={allTags} />
+          {isUnicodeStrings && tab === 'strings' ? (
+            <UnicodeStringEditorPanel tag={tag} />
+          ) : (
+            <TagFieldEditorPanel focusedTag={tag} allTags={allTags} />
+          )}
         </div>
       </div>
     </div>

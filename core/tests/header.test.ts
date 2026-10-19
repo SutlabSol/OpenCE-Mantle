@@ -43,10 +43,18 @@ describe('parseCacheFileHeader', () => {
     expect(() => parseCacheFileHeader(buffer)).toThrow(CorruptMapError);
   });
 
-  it('throws UnsupportedMapVersionError for a retail (version 7) map', () => {
+  it('parses a retail (version 7) map header successfully', () => {
     const buffer = buildFakeMap({ tags: [{ primaryClass: 'scnr', tagId: 0, path: 'a' }] });
     buffer.writeUInt32LE(CacheFileEngine.RETAIL, 0x4);
-    expect(() => parseCacheFileHeader(buffer)).toThrow(UnsupportedMapVersionError);
+    const header = parseCacheFileHeader(buffer);
+    expect(header.engine).toBe(CacheFileEngine.RETAIL);
+  });
+
+  it('parses an MCC (version 13) map header successfully', () => {
+    const buffer = buildFakeMap({ tags: [{ primaryClass: 'scnr', tagId: 0, path: 'a' }] });
+    buffer.writeUInt32LE(CacheFileEngine.MCC_CEA, 0x4);
+    const header = parseCacheFileHeader(buffer);
+    expect(header.engine).toBe(CacheFileEngine.MCC_CEA);
   });
 
   it('throws UnsupportedMapVersionError for an Xbox map, with a friendly message', () => {

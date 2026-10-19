@@ -17,7 +17,7 @@ import { inferBaseMemoryAddressForClassifier } from '../tag-index';
 export type MapLayout =
   | { kind: 'customEdition' }
   | { kind: 'customEditionCompressed' }
-  /** `inferredBase` is the reader's guess from the tag array pointer; only 0x40440000 is convertible. */
+  | { kind: 'mcc' }
   | { kind: 'retail'; version: number; inferredBase: number | null }
   | { kind: 'demo'; version: number }
   | { kind: 'otherVersion'; version: number }
@@ -34,6 +34,7 @@ export function classifyMapLayout(buffer: Buffer): MapLayout {
   if (standard) {
     const version = buffer.readUInt32LE(0x4);
     if (version === CacheFileEngine.CUSTOM_EDITION) return { kind: 'customEdition' };
+    if (version === CacheFileEngine.MCC_CEA) return { kind: 'mcc' };
     if (version === CacheFileEngine.RETAIL) {
       const tagDataOffset = buffer.readUInt32LE(0x10);
       const inferredBase = tagDataOffset + 4 <= buffer.length ? inferBaseMemoryAddressForClassifier(buffer.readUInt32LE(tagDataOffset)) : null;

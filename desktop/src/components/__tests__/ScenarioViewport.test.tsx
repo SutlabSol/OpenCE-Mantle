@@ -61,6 +61,13 @@ const mockScenarioSummary: ScenarioPlacementsSummary = {
     equipment: 0,
     spawns: 1,
   },
+  palettes: {
+    vehicles: [{ paletteIndex: 0, tagId: 0xe1740004, path: 'vehicles\\warthog\\mp_warthog', name: 'mp_warthog' }],
+    scenery: [{ paletteIndex: 0, tagId: 0xe1740009, path: 'scenery\\rocks\\rock01', name: 'rock01' }],
+    bipeds: [],
+    weapons: [{ paletteIndex: 0, tagId: 0xe174000a, path: 'weapons\\assault rifle\\assault rifle', name: 'assault rifle' }],
+    equipment: [{ paletteIndex: 0, tagId: 0xe174000b, path: 'item collections\\single weapons\\shotgun', name: 'shotgun' }],
+  },
   objects: [
     {
       id: 'vehicle-0',
@@ -156,6 +163,34 @@ describe('ScenarioViewport', () => {
       getModelGeometry: vi.fn(async () => ({
         ok: true as const,
         geometry: mockModelGeometry,
+      })),
+      updateScenarioPlacement: vi.fn(async () => ({
+        ok: true as const,
+        summary: mockScenarioSummary,
+        map: { filePath: 'C:\\test.map', modified: true } as any,
+      })),
+      duplicateScenarioPlacement: vi.fn(async () => ({
+        ok: true as const,
+        summary: mockScenarioSummary,
+        newPlacement: mockScenarioSummary.objects[0],
+        map: { filePath: 'C:\\test.map', modified: true } as any,
+      })),
+      addScenarioPlacement: vi.fn(async () => ({
+        ok: true as const,
+        summary: mockScenarioSummary,
+        newPlacement: mockScenarioSummary.objects[0],
+        map: { filePath: 'C:\\test.map', modified: true } as any,
+      })),
+      swapScenarioPlacement: vi.fn(async () => ({
+        ok: true as const,
+        summary: mockScenarioSummary,
+        newPlacement: mockScenarioSummary.objects[0],
+        map: { filePath: 'C:\\test.map', modified: true } as any,
+      })),
+      deleteScenarioPlacement: vi.fn(async () => ({
+        ok: true as const,
+        summary: mockScenarioSummary,
+        map: { filePath: 'C:\\test.map', modified: true } as any,
       })),
     };
   });
@@ -259,5 +294,223 @@ describe('ScenarioViewport', () => {
     });
 
     expect(screen.getByText('Failed to read scenario structure BSP.')).toBeInTheDocument();
+  });
+
+  it('allows selecting an object from outliner and modifying its properties (Step 9)', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('scenario-inspector-panel')).toBeInTheDocument();
+    });
+
+    // Switch to outliner tab
+    const outlinerTab = screen.getByTestId('inspector-tab-outliner');
+    fireEvent.click(outlinerTab);
+
+    // Click on vehicle-0
+    const vehicleItem = screen.getByTestId('outliner-item-vehicle-0');
+    expect(vehicleItem).toBeInTheDocument();
+    fireEvent.click(vehicleItem);
+
+    // Now properties tab should show vehicle-0 details
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-pos-x')).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId('inspector-pos-x')).toHaveValue(10);
+    expect(screen.getByTestId('inspector-pos-y')).toHaveValue(10);
+
+    // Edit position X
+    const posXInput = screen.getByTestId('inspector-pos-x');
+    fireEvent.change(posXInput, { target: { value: '25.5' } });
+
+    expect(window.opence.updateScenarioPlacement).toHaveBeenCalledWith('vehicle-0', {
+      position: [25.5, 10, 0],
+    });
+
+    // Edit palette type
+    const paletteSelect = screen.getByTestId('inspector-palette-select');
+    fireEvent.change(paletteSelect, { target: { value: '0' } });
+
+    expect(window.opence.updateScenarioPlacement).toHaveBeenCalledWith('vehicle-0', {
+      paletteIndex: 0,
+    });
+
+    // Switch gizmo mode
+    const rotateGizmoBtn = screen.getByTestId('gizmo-mode-rotate');
+    fireEvent.click(rotateGizmoBtn);
+    const translateGizmoBtn = screen.getByTestId('gizmo-mode-translate');
+    fireEvent.click(translateGizmoBtn);
+  });
+
+  it('allows duplicating and deleting scenario objects from the inspector', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    // Switch to outliner tab and pick spawn-0
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-tab-outliner')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId('inspector-tab-outliner'));
+
+    fireEvent.click(screen.getByTestId('outliner-item-spawn-0'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-duplicate-btn')).toBeInTheDocument();
+    });
+
+    // Duplicate spawn-0
+    fireEvent.click(screen.getByTestId('inspector-duplicate-btn'));
+    expect(window.opence.duplicateScenarioPlacement).toHaveBeenCalledWith('spawn-0');
+
+    // Delete spawn-0
+    fireEvent.click(screen.getByTestId('inspector-delete-btn'));
+    expect(window.opence.deleteScenarioPlacement).toHaveBeenCalledWith('spawn-0');
+  });
+
+  it('allows adding a new scenario object via the add object modal', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('viewport-add-object-btn')).toBeInTheDocument();
+    });
+
+    // Open Add Object modal
+    fireEvent.click(screen.getByTestId('viewport-add-object-btn'));
+
+    expect(screen.getByTestId('add-object-modal')).toBeInTheDocument();
+
+    // Select category spawn
+    const kindSelect = screen.getByTestId('add-modal-kind-select');
+    fireEvent.change(kindSelect, { target: { value: 'spawn' } });
+
+    // Submit
+    const submitBtn = screen.getByTestId('add-modal-submit-btn');
+    fireEvent.click(submitBtn);
+
+    expect(window.opence.addScenarioPlacement).toHaveBeenCalledWith(
+      'spawn',
+      0,
+      expect.any(Array),
+      expect.any(Array),
+      0,
+    );
+  });
+
+  it('populates scenery and equipment palettes in the add object modal', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('viewport-add-object-btn')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('viewport-add-object-btn'));
+
+    const kindSelect = screen.getByTestId('add-modal-kind-select');
+
+    // Select scenery
+    fireEvent.change(kindSelect, { target: { value: 'scenery' } });
+    const scenerySelect = screen.getByTestId('add-modal-palette-select');
+    expect(scenerySelect).toBeInTheDocument();
+    expect(scenerySelect.textContent).toContain('rock01');
+
+    // Select equipment
+    fireEvent.change(kindSelect, { target: { value: 'equipment' } });
+    const equipmentSelect = screen.getByTestId('add-modal-palette-select');
+    expect(equipmentSelect).toBeInTheDocument();
+    expect(equipmentSelect.textContent).toContain('shotgun');
+  });
+
+  it('renders Multi-BSP selector when map has multiple BSPs and switches BSP on change', async () => {
+    const multiBspMesh: BspRenderMesh = {
+      ...mockBspMesh,
+      bspCount: 2,
+      bspNames: ['levels/c10/c10_a', 'levels/c10/c10_b'],
+    };
+    (window.opence.getBspRenderMesh as any).mockImplementation((idx: number) =>
+      Promise.resolve({ ok: true, mesh: { ...multiBspMesh, bspIndex: idx } }),
+    );
+
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('viewport-bsp-selector')).toBeInTheDocument();
+    });
+
+    const bspButton = screen.getByTestId('viewport-bsp-selector');
+    expect(bspButton).toBeInTheDocument();
+    expect(bspButton.textContent).toContain('1 / 2 visible');
+
+    // Open multi-BSP dropdown menu
+    fireEvent.click(bspButton);
+    expect(screen.getByTestId('viewport-bsp-dropdown-menu')).toBeInTheDocument();
+    expect(screen.getByTestId('viewport-bsp-dropdown-menu').textContent).toContain('c10_a');
+    expect(screen.getByTestId('viewport-bsp-dropdown-menu').textContent).toContain('c10_b');
+
+    // Toggle BSP 1 on (simultaneous rendering)
+    fireEvent.click(screen.getByTestId('viewport-bsp-toggle-1'));
+    expect(window.opence.getBspRenderMesh).toHaveBeenCalledWith(1);
+    expect(bspButton.textContent).toContain('2 / 2 visible');
+
+    // Toggle BSP 0 off -> now only BSP 1 is visible
+    fireEvent.click(screen.getByTestId('viewport-bsp-toggle-0'));
+    expect(bspButton.textContent).toContain('1 / 2 visible');
+
+    // Click Show All
+    fireEvent.click(screen.getByTestId('bsp-show-all-btn'));
+    expect(bspButton.textContent).toContain('2 / 2 visible');
+
+    // Click Reset
+    fireEvent.click(screen.getByTestId('bsp-reset-btn'));
+    expect(bspButton.textContent).toContain('1 / 2 visible');
+  });
+
+  it('displays Force Spawn toggle for vehicles and triggers update on toggle', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-tab-outliner')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('inspector-tab-outliner'));
+    const item = screen.getByTestId('outliner-item-vehicle-0');
+    fireEvent.click(item);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-force-spawn-toggle')).toBeInTheDocument();
+    });
+
+    const toggle = screen.getByTestId('inspector-force-spawn-toggle') as HTMLInputElement;
+    fireEvent.click(toggle);
+
+    expect(window.opence.updateScenarioPlacement).toHaveBeenCalledWith(
+      'vehicle-0',
+      expect.objectContaining({ forceSpawn: expect.any(Boolean) }),
+    );
+  });
+
+  it('allows swapping selected object with another item via Swap Object section', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-tab-outliner')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('inspector-tab-outliner'));
+    const item = screen.getByTestId('outliner-item-vehicle-0');
+    fireEvent.click(item);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-swap-btn')).toBeInTheDocument();
+    });
+
+    const swapKindSelect = screen.getByTestId('swap-kind-select');
+    fireEvent.change(swapKindSelect, { target: { value: 'scenery' } });
+
+    const swapPaletteSelect = screen.getByTestId('swap-palette-select');
+    expect(swapPaletteSelect).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('inspector-swap-btn'));
+
+    expect(window.opence.swapScenarioPlacement).toHaveBeenCalledWith('vehicle-0', 'scenery', 0);
   });
 });

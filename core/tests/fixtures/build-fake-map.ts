@@ -13,6 +13,7 @@ export interface FixtureTag {
 }
 
 export interface FixtureOptions {
+  engine?: CacheFileEngine;
   scenarioName?: string;
   buildString?: string;
   mapType?: ScenarioType;
@@ -28,7 +29,8 @@ const TAG_DATA_OFFSET = HEADER_SIZE; // tag data section starts right after the 
 
 /** Builds a complete, byte-accurate synthetic Custom Edition .map buffer for tests. */
 export function buildFakeMap(options: FixtureOptions): Buffer {
-  const baseMemoryAddress = options.baseMemoryAddress ?? CE_BASE_MEMORY_ADDRESS; // the engine's fixed CE base; anything else is rejected by parseTagIndex
+  const defaultBase = options.engine === CacheFileEngine.MCC_CEA ? 0x50000000 : CE_BASE_MEMORY_ADDRESS;
+  const baseMemoryAddress = options.baseMemoryAddress ?? defaultBase;
   const tagArrayFileOffset = TAG_DATA_OFFSET + TAG_DATA_HEADER_PC_SIZE;
   const tagArrayAddress = baseMemoryAddress + (tagArrayFileOffset - TAG_DATA_OFFSET);
 
@@ -52,9 +54,10 @@ export function buildFakeMap(options: FixtureOptions): Buffer {
 
   // --- Header ---
   buffer.writeUInt32LE(CacheFileLiteral.HEAD, 0x0);
+  const defaultEngine = options.engine ?? CacheFileEngine.CUSTOM_EDITION;
   const engineValue = options.compressed
-    ? (CacheFileEngine.CUSTOM_EDITION | CHIMERA_COMPRESSED_ENGINE_MASK) >>> 0
-    : CacheFileEngine.CUSTOM_EDITION;
+    ? (defaultEngine | CHIMERA_COMPRESSED_ENGINE_MASK) >>> 0
+    : defaultEngine;
   buffer.writeUInt32LE(engineValue, 0x4);
   buffer.writeUInt32LE(totalSize, 0x8); // decompressedFileSize
   buffer.writeUInt32LE(0, 0xc); // compressedPadding

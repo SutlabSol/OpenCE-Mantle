@@ -45,6 +45,10 @@ export interface BspSubmesh {
 export interface BspRenderMesh {
   /** Scenario BSP index (0 for primary BSP). */
   bspIndex: number;
+  /** Total number of BSPs in this scenario. */
+  bspCount?: number;
+  /** Human-readable tag paths or labels for all BSPs in the scenario. */
+  bspNames?: string[];
   /** Tag ID of the scenario_structure_bsp tag. */
   bspTagId: number;
   /** Tag ID of the lightmap bitmap tag (or 0xFFFFFFFF if none). */
@@ -91,12 +95,24 @@ export function extractBspRenderMesh(
     throw new Error('Scenario has no structure bsps.');
   }
 
-  if (bspIndex < 0 || bspIndex >= bspsField.value.count) {
-    throw new Error(`BSP index ${bspIndex} is out of bounds (scenario has ${bspsField.value.count} BSPs).`);
+  const bspCount = bspsField.value.count;
+  if (bspIndex < 0 || bspIndex >= bspCount) {
+    throw new Error(`BSP index ${bspIndex} is out of bounds (scenario has ${bspCount} BSPs).`);
   }
 
   const scenarioBspSize = resolveStruct('ScenarioBSP').totalSize;
   const bspsArrayOffset = header.tagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+
+  const bspNames: string[] = [];
+  for (let i = 0; i < bspCount; i++) {
+    const entryOffset = bspsArrayOffset + i * scenarioBspSize;
+    const entry = decodeStruct(buffer, entryOffset, 'ScenarioBSP');
+    const dep = entry.get('structure bsp');
+    const depTagId = dep && dep.kind === 'dependency' ? dep.value.tagId : 0xffffffff;
+    const tagEntry = tagIndex.entries[depTagId & 0xffff];
+    bspNames.push(tagEntry?.path || `BSP ${i}`);
+  }
+
   const bspEntryOffset = bspsArrayOffset + bspIndex * scenarioBspSize;
   const decodedBspEntry = decodeStruct(buffer, bspEntryOffset, 'ScenarioBSP');
 
@@ -194,12 +210,18 @@ export function extractBspRenderMesh(
       }
 
       const uncompressedData = decodedMat.get('uncompressed vertices');
-      if (!uncompressedData || uncompressedData.kind !== 'tagDataOffset') {
-        continue;
+      const vertPtr = uncompressedData && uncompressedData.kind === 'tagDataOffset' ? uncompressedData.value.pointerLow : 0;
+      let vertOffset: number;
+      let lmVertOffset: number;
+      if (vertPtr !== 0) {
+        vertOffset = bspLocation.fileOffsetAnchor + (vertPtr - bspLocation.baseMemoryAddress);
+        lmVertOffset = vertOffset + vertexCount * 56;
+      } else {
+        const renderedVertOffsetField = decodedMat.get('rendered vertices offset') as { kind: 'basic'; value: number } | undefined;
+        const lmVertOffsetField = decodedMat.get('lightmap vertices offset') as { kind: 'basic'; value: number } | undefined;
+        vertOffset = 2048 + (renderedVertOffsetField?.value ?? 0);
+        lmVertOffset = 2048 + (lmVertOffsetField?.value ?? (renderedVertOffsetField?.value ?? 0) + vertexCount * 56);
       }
-
-      const vertPtr = uncompressedData.value.pointerLow;
-      const vertOffset = bspLocation.fileOffsetAnchor + (vertPtr - bspLocation.baseMemoryAddress);
 
       // Read interleaved vertices: [x, y, z, nx, ny, nz, u, v] (8 floats per vertex)
       const vertices = new Float32Array(vertexCount * 8);
@@ -237,7 +259,6 @@ export function extractBspRenderMesh(
 
       // Read lightmap UVs (secondary stream immediately follows vertexCount * 56)
       const lightmapUvs = new Float32Array(vertexCount * 2);
-      const lmVertOffset = vertOffset + vertexCount * 56;
       for (let v = 0; v < vertexCount; v++) {
         const lmvOff = lmVertOffset + v * 20;
         const lu = buffer.readFloatLE(lmvOff + 12);
@@ -284,6 +305,8 @@ export function extractBspRenderMesh(
 
   return {
     bspIndex,
+    bspCount,
+    bspNames,
     bspTagId,
     lightmapsBitmapTagId,
     worldBounds,

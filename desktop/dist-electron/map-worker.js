@@ -37,23 +37,35 @@ __export(map_worker_exports, {
   __setMapFsForTest: () => __setMapFsForTest,
   __setSinkForTest: () => __setSinkForTest,
   describeMapWriteError: () => describeMapWriteError,
+  runAddScenarioPlacement: () => runAddScenarioPlacement,
   runApplyInject: () => runApplyInject,
   runBatchExtract: () => runBatchExtract,
+  runBspSwapPreflight: () => runBspSwapPreflight,
   runConvertMap: () => runConvertMap,
   runConvertPreflight: () => runConvertPreflight,
+  runDeleteScenarioPlacement: () => runDeleteScenarioPlacement,
+  runDuplicateScenarioPlacement: () => runDuplicateScenarioPlacement,
+  runDuplicateTag: () => runDuplicateTag,
   runExtractTags: () => runExtractTags,
   runGetBitmapTexture: () => runGetBitmapTexture,
   runGetBspRenderMesh: () => runGetBspRenderMesh,
   runGetDependencies: () => runGetDependencies,
   runGetDependencySlots: () => runGetDependencySlots,
   runGetModelGeometry: () => runGetModelGeometry,
+  runGetReferencingTags: () => runGetReferencingTags,
   runGetScenarioObjects: () => runGetScenarioObjects,
   runGetTagFields: () => runGetTagFields,
+  runGetUnicodeStrings: () => runGetUnicodeStrings,
   runInspect: () => runInspect,
+  runPerformBspSwap: () => runPerformBspSwap,
   runPlanInject: () => runPlanInject,
+  runRenameTag: () => runRenameTag,
   runSaveMap: () => runSaveMap,
   runSaveMapAs: () => runSaveMapAs,
   runSetDependencySlot: () => runSetDependencySlot,
+  runSetUnicodeString: () => runSetUnicodeString,
+  runSwapScenarioPlacement: () => runSwapScenarioPlacement,
+  runUpdateScenarioPlacement: () => runUpdateScenarioPlacement,
   runUpdateTagField: () => runUpdateTagField,
   runVerifyEmbeddedData: () => runVerifyEmbeddedData,
   summarizeOpenMap: () => summarizeOpenMap
@@ -72,6 +84,8 @@ var TAG_DATA_HEADER_PC_SIZE = 40;
 var TAG_ENTRY_SIZE = 32;
 var CE_BASE_MEMORY_ADDRESS = 1078198272;
 var CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
+var MCC_BASE_MEMORY_ADDRESS = 1342177280;
+var MCC_TAG_ARRAY_ADDRESS = MCC_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 var CE_TAG_SPACE_SIZE = 23 * 1024 * 1024;
 
 // ../core/src/constants/tag-classes.ts
@@ -275,7 +289,7 @@ function parseCacheFileHeader(buffer) {
     throw new CorruptMapError('Missing "head"/"foot" magic values. This does not look like a Halo map file.');
   }
   const engine = buffer.readUInt32LE(4);
-  if (engine !== 609 /* CUSTOM_EDITION */) {
+  if (engine !== 609 /* CUSTOM_EDITION */ && engine !== 7 /* RETAIL */ && engine !== 13 /* MCC_CEA */) {
     throw new UnsupportedMapVersionError(engine);
   }
   return {
@@ -311,9 +325,11 @@ function parseTagIndex(buffer, header) {
   const modelDataFileOffset = buffer.readUInt32LE(tagDataHeaderOffset + 20);
   const vertexSize = buffer.readUInt32LE(tagDataHeaderOffset + 28);
   const modelDataSize = buffer.readUInt32LE(tagDataHeaderOffset + 32);
-  if (tagArrayAddress !== CE_TAG_ARRAY_ADDRESS) throw new UnexpectedTagArrayAddressError(tagArrayAddress, CE_TAG_ARRAY_ADDRESS);
+  const isMcc = header.engine === 13 /* MCC_CEA */ || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS;
+  const expectedTagArrayAddress = isMcc ? MCC_TAG_ARRAY_ADDRESS : CE_TAG_ARRAY_ADDRESS;
+  if (tagArrayAddress !== expectedTagArrayAddress) throw new UnexpectedTagArrayAddressError(tagArrayAddress, expectedTagArrayAddress);
   const tagArrayFileOffset = tagDataHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
-  const baseMemoryAddress = CE_BASE_MEMORY_ADDRESS;
+  const baseMemoryAddress = isMcc ? MCC_BASE_MEMORY_ADDRESS : CE_BASE_MEMORY_ADDRESS;
   if (tagArrayFileOffset + tagCount * TAG_ENTRY_SIZE > buffer.length) {
     throw new CorruptMapError("Tag count from the tag index is out of bounds of the file (map may be corrupt).");
   }
@@ -397,7 +413,10 @@ function inspectCustomEditionMap(buffer) {
 var import_zstd = require("@mongodb-js/zstd");
 var CUSTOM_EDITION_COMPRESSED_ENGINE = (609 /* CUSTOM_EDITION */ | CHIMERA_COMPRESSED_ENGINE_MASK) >>> 0;
 async function compressCustomEditionMap(buffer, level = 19) {
-  parseCacheFileHeader(buffer);
+  const header = parseCacheFileHeader(buffer);
+  if (header.engine !== 609 /* CUSTOM_EDITION */) {
+    throw new UnsupportedMapVersionError(header.engine);
+  }
   const body = buffer.subarray(CACHE_FILE_HEADER_SIZE);
   const compressedBody = await (0, import_zstd.compress)(Buffer.from(body), level);
   const output = Buffer.alloc(CACHE_FILE_HEADER_SIZE + compressedBody.length);
@@ -36472,6 +36491,7 @@ function classifyMapLayout(buffer) {
   if (standard) {
     const version = buffer.readUInt32LE(4);
     if (version === 609 /* CUSTOM_EDITION */) return { kind: "customEdition" };
+    if (version === 13 /* MCC_CEA */) return { kind: "mcc" };
     if (version === 7 /* RETAIL */) {
       const tagDataOffset = buffer.readUInt32LE(16);
       const inferredBase = tagDataOffset + 4 <= buffer.length ? inferBaseMemoryAddressForClassifier(buffer.readUInt32LE(tagDataOffset)) : null;
@@ -39236,11 +39256,21 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
   if (!bspsField || bspsField.kind !== "reflexive" || bspsField.value.count === 0) {
     throw new Error("Scenario has no structure bsps.");
   }
-  if (bspIndex < 0 || bspIndex >= bspsField.value.count) {
-    throw new Error(`BSP index ${bspIndex} is out of bounds (scenario has ${bspsField.value.count} BSPs).`);
+  const bspCount = bspsField.value.count;
+  if (bspIndex < 0 || bspIndex >= bspCount) {
+    throw new Error(`BSP index ${bspIndex} is out of bounds (scenario has ${bspCount} BSPs).`);
   }
   const scenarioBspSize = resolveStruct("ScenarioBSP").totalSize;
   const bspsArrayOffset = header.tagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+  const bspNames = [];
+  for (let i = 0; i < bspCount; i++) {
+    const entryOffset = bspsArrayOffset + i * scenarioBspSize;
+    const entry = decodeStruct(buffer, entryOffset, "ScenarioBSP");
+    const dep = entry.get("structure bsp");
+    const depTagId = dep && dep.kind === "dependency" ? dep.value.tagId : 4294967295;
+    const tagEntry = tagIndex.entries[depTagId & 65535];
+    bspNames.push(tagEntry?.path || `BSP ${i}`);
+  }
   const bspEntryOffset = bspsArrayOffset + bspIndex * scenarioBspSize;
   const decodedBspEntry = decodeStruct(buffer, bspEntryOffset, "ScenarioBSP");
   const bspDep = decodedBspEntry.get("structure bsp");
@@ -39313,11 +39343,18 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
         continue;
       }
       const uncompressedData = decodedMat.get("uncompressed vertices");
-      if (!uncompressedData || uncompressedData.kind !== "tagDataOffset") {
-        continue;
+      const vertPtr = uncompressedData && uncompressedData.kind === "tagDataOffset" ? uncompressedData.value.pointerLow : 0;
+      let vertOffset;
+      let lmVertOffset;
+      if (vertPtr !== 0) {
+        vertOffset = bspLocation.fileOffsetAnchor + (vertPtr - bspLocation.baseMemoryAddress);
+        lmVertOffset = vertOffset + vertexCount * 56;
+      } else {
+        const renderedVertOffsetField = decodedMat.get("rendered vertices offset");
+        const lmVertOffsetField = decodedMat.get("lightmap vertices offset");
+        vertOffset = 2048 + (renderedVertOffsetField?.value ?? 0);
+        lmVertOffset = 2048 + (lmVertOffsetField?.value ?? (renderedVertOffsetField?.value ?? 0) + vertexCount * 56);
       }
-      const vertPtr = uncompressedData.value.pointerLow;
-      const vertOffset = bspLocation.fileOffsetAnchor + (vertPtr - bspLocation.baseMemoryAddress);
       const vertices = new Float32Array(vertexCount * 8);
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
@@ -39348,7 +39385,6 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
         if (z > maxZ) maxZ = z;
       }
       const lightmapUvs = new Float32Array(vertexCount * 2);
-      const lmVertOffset = vertOffset + vertexCount * 56;
       for (let v = 0; v < vertexCount; v++) {
         const lmvOff = lmVertOffset + v * 20;
         const lu = buffer.readFloatLE(lmvOff + 12);
@@ -39389,6 +39425,8 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
   }
   return {
     bspIndex,
+    bspCount,
+    bspNames,
     bspTagId,
     lightmapsBitmapTagId,
     worldBounds,
@@ -39459,38 +39497,37 @@ function extractModelRenderGeometry(buffer, header, tagIndex, modelTagId, lod = 
   }
   const geomSize = resolveStruct("GBXModelGeometry").totalSize;
   const partSize = resolveStruct("GBXModelGeometryPart").totalSize;
-  let chosenGeomIndex = 0;
+  const chosenGeomIndices = /* @__PURE__ */ new Set();
   const regions = model.get("regions");
   if (regions && regions.kind === "reflexive" && regions.value.count > 0) {
     const regionSize = resolveStruct("ModelRegion").totalSize;
+    const permSize = resolveStruct("ModelRegionPermutation").totalSize;
     const regionFileOffset = resolvePointer(
       regions.value.pointerLow,
       header.tagDataOffset,
       tagIndex.baseMemoryAddress
     );
-    const firstRegion = decodeStruct(buffer, regionFileOffset, "ModelRegion");
-    const perms = firstRegion.get("permutations");
-    if (perms && perms.kind === "reflexive" && perms.value.count > 0) {
-      const permSize = resolveStruct("ModelRegionPermutation").totalSize;
-      const permFileOffset = resolvePointer(
-        perms.value.pointerLow,
-        header.tagDataOffset,
-        tagIndex.baseMemoryAddress
-      );
-      const firstPerm = decodeStruct(buffer, permFileOffset, "ModelRegionPermutation");
-      const lodGeomField = numeric2(firstPerm.get(LOD_FIELD_NAMES[lod] ?? "super high"));
-      if (lodGeomField !== void 0 && lodGeomField >= 0 && lodGeomField < geoms.value.count) {
-        chosenGeomIndex = lodGeomField;
+    for (let r = 0; r < regions.value.count; r++) {
+      const region = decodeStruct(buffer, regionFileOffset + r * regionSize, "ModelRegion");
+      const perms = region.get("permutations");
+      if (perms && perms.kind === "reflexive" && perms.value.count > 0) {
+        const permFileOffset = resolvePointer(
+          perms.value.pointerLow,
+          header.tagDataOffset,
+          tagIndex.baseMemoryAddress
+        );
+        const firstPerm = decodeStruct(buffer, permFileOffset, "ModelRegionPermutation");
+        const lodGeomField = numeric2(firstPerm.get(LOD_FIELD_NAMES[lod] ?? "super high"));
+        if (lodGeomField !== void 0 && lodGeomField >= 0 && lodGeomField < geoms.value.count) {
+          chosenGeomIndices.add(lodGeomField);
+        }
       }
     }
   }
-  const geomsFileOffset = resolvePointer(geoms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
-  const chosenGeom = decodeStruct(buffer, geomsFileOffset + chosenGeomIndex * geomSize, "GBXModelGeometry");
-  const parts = chosenGeom.get("parts");
-  if (!parts || parts.kind !== "reflexive" || parts.value.count === 0) {
-    throw new Error(`Model "${entry.path}" geometry #${chosenGeomIndex} has no parts.`);
+  if (chosenGeomIndices.size === 0) {
+    chosenGeomIndices.add(0);
   }
-  const partsFileOffset = resolvePointer(parts.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  const geomsFileOffset = resolvePointer(geoms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
   const vertexBase = tagIndex.modelDataFileOffset;
   const indexBase = vertexBase + tagIndex.vertexSize;
   const shaderTagIds = [];
@@ -39511,75 +39548,82 @@ function extractModelRenderGeometry(buffer, header, tagIndex, modelTagId, lod = 
   const submeshes = [];
   let totalVertices = 0;
   let totalTriangles = 0;
-  for (let p = 0; p < parts.value.count; p++) {
-    const part = decodeStruct(buffer, partsFileOffset + p * partSize, "GBXModelGeometryPart");
-    const vertexType = numeric2(part.get("vertex type")) ?? -1;
-    const vertexCount = numeric2(part.get("vertex count")) ?? 0;
-    const vertexOffset = numeric2(part.get("vertex offset")) ?? 0;
-    const triangleBufferType = numeric2(part.get("triangle buffer type")) ?? -1;
-    const triangleCount = numeric2(part.get("triangle count")) ?? 0;
-    const triangleOffset = numeric2(part.get("triangle offset")) ?? 0;
-    const shaderIndex = numeric2(part.get("shader index")) ?? 0;
-    if (vertexCount === 0 || triangleCount === 0) continue;
-    if (vertexType !== VERTEX_TYPE_UNCOMPRESSED2 || triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
-    const partVertOffset = vertexBase + vertexOffset;
-    const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
-    if (partVertEnd > header.tagDataOffset) continue;
-    const partStripOffset = indexBase + triangleOffset;
-    const vertices = new Float32Array(vertexCount * 8);
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let v = 0; v < vertexCount; v++) {
-      const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
-      const x = buffer.readFloatLE(vOff + 0);
-      const y = buffer.readFloatLE(vOff + 4);
-      const z = buffer.readFloatLE(vOff + 8);
-      const nx = buffer.readFloatLE(vOff + 12);
-      const ny = buffer.readFloatLE(vOff + 16);
-      const nz = buffer.readFloatLE(vOff + 20);
-      const u = buffer.readFloatLE(vOff + 48) * uScale;
-      const vCoord = buffer.readFloatLE(vOff + 52) * vScale;
-      const o = v * 8;
-      vertices[o + 0] = x;
-      vertices[o + 1] = y;
-      vertices[o + 2] = z;
-      vertices[o + 3] = nx;
-      vertices[o + 4] = ny;
-      vertices[o + 5] = nz;
-      vertices[o + 6] = u;
-      vertices[o + 7] = vCoord;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-      if (z < minZ) minZ = z;
-      if (z > maxZ) maxZ = z;
+  let partIndexCounter = 0;
+  for (const geomIndex of chosenGeomIndices) {
+    const geom = decodeStruct(buffer, geomsFileOffset + geomIndex * geomSize, "GBXModelGeometry");
+    const parts = geom.get("parts");
+    if (!parts || parts.kind !== "reflexive" || parts.value.count === 0) continue;
+    const partsFileOffset = resolvePointer(parts.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let p = 0; p < parts.value.count; p++) {
+      const part = decodeStruct(buffer, partsFileOffset + p * partSize, "GBXModelGeometryPart");
+      const vertexType = numeric2(part.get("vertex type")) ?? -1;
+      const vertexCount = numeric2(part.get("vertex count")) ?? 0;
+      const vertexOffset = numeric2(part.get("vertex offset")) ?? 0;
+      const triangleBufferType = numeric2(part.get("triangle buffer type")) ?? -1;
+      const triangleCount = numeric2(part.get("triangle count")) ?? 0;
+      const triangleOffset = numeric2(part.get("triangle offset")) ?? 0;
+      const shaderIndex = numeric2(part.get("shader index")) ?? 0;
+      if (vertexCount === 0 || triangleCount === 0) continue;
+      if (vertexType !== VERTEX_TYPE_UNCOMPRESSED2 || triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
+      const partVertOffset = vertexBase + vertexOffset;
+      const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
+      if (partVertEnd > header.tagDataOffset) continue;
+      const partStripOffset = indexBase + triangleOffset;
+      const vertices = new Float32Array(vertexCount * 8);
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let v = 0; v < vertexCount; v++) {
+        const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
+        const x = buffer.readFloatLE(vOff + 0);
+        const y = buffer.readFloatLE(vOff + 4);
+        const z = buffer.readFloatLE(vOff + 8);
+        const nx = buffer.readFloatLE(vOff + 12);
+        const ny = buffer.readFloatLE(vOff + 16);
+        const nz = buffer.readFloatLE(vOff + 20);
+        const u = buffer.readFloatLE(vOff + 48) * uScale;
+        const vCoord = buffer.readFloatLE(vOff + 52) * vScale;
+        const o = v * 8;
+        vertices[o + 0] = x;
+        vertices[o + 1] = y;
+        vertices[o + 2] = z;
+        vertices[o + 3] = nx;
+        vertices[o + 4] = ny;
+        vertices[o + 5] = nz;
+        vertices[o + 6] = u;
+        vertices[o + 7] = vCoord;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z;
+        if (z > maxZ) maxZ = z;
+      }
+      const raw = decodeTriangleStrip(buffer, partStripOffset, vertexCount, triangleCount);
+      const indices = [];
+      for (let t = 0; t + 2 < raw.length; t += 3) {
+        const v0 = raw[t], v1 = raw[t + 1], v2 = raw[t + 2];
+        if (v0 === v1 || v1 === v2 || v0 === v2) continue;
+        indices.push(v0, v1, v2);
+      }
+      submeshes.push({
+        partIndex: partIndexCounter++,
+        shaderIndex,
+        shaderTagId: shaderTagIds[shaderIndex] ?? 4294967295,
+        vertexCount,
+        vertices,
+        indices: new Uint16Array(indices),
+        boundingBox: [
+          minX === Infinity ? 0 : minX,
+          minY === Infinity ? 0 : minY,
+          minZ === Infinity ? 0 : minZ,
+          maxX === -Infinity ? 0 : maxX,
+          maxY === -Infinity ? 0 : maxY,
+          maxZ === -Infinity ? 0 : maxZ
+        ]
+      });
+      totalVertices += vertexCount;
+      totalTriangles += indices.length / 3;
     }
-    const raw = decodeTriangleStrip(buffer, partStripOffset, vertexCount, triangleCount);
-    const indices = [];
-    for (let t = 0; t + 2 < raw.length; t += 3) {
-      const v0 = raw[t], v1 = raw[t + 1], v2 = raw[t + 2];
-      if (v0 === v1 || v1 === v2 || v0 === v2) continue;
-      indices.push(v0, v1, v2);
-    }
-    submeshes.push({
-      partIndex: p,
-      shaderIndex,
-      shaderTagId: shaderTagIds[shaderIndex] ?? 4294967295,
-      vertexCount,
-      vertices,
-      indices: new Uint16Array(indices),
-      boundingBox: [
-        minX === Infinity ? 0 : minX,
-        minY === Infinity ? 0 : minY,
-        minZ === Infinity ? 0 : minZ,
-        maxX === -Infinity ? 0 : maxX,
-        maxY === -Infinity ? 0 : maxY,
-        maxZ === -Infinity ? 0 : maxZ
-      ]
-    });
-    totalVertices += vertexCount;
-    totalTriangles += indices.length / 3;
   }
   return {
     modelTagId,
@@ -40091,6 +40135,57 @@ function resolveObjectModelTagId(buffer, header, tagIndex, objectTagId) {
   }
   return 4294967295;
 }
+function resolveItemCollectionModelTagId(buffer, header, tagIndex, itmcTagId) {
+  if (itmcTagId === 4294967295) return 4294967295;
+  const entry = tagIndex.entries[itmcTagId & 65535];
+  if (!entry || entry.isExternal) return 4294967295;
+  try {
+    const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const itmcStruct = decodeStruct(buffer, offset, "ItemCollection");
+    const perms = itmcStruct.get("permutations");
+    if (perms && perms.kind === "reflexive" && perms.value.count > 0) {
+      const permOffset = resolvePointer(perms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      const permStruct = decodeStruct(buffer, permOffset, "ItemCollectionPermutation");
+      const itemDep = permStruct.get("item");
+      if (itemDep && itemDep.kind === "dependency" && itemDep.value.tagId !== 4294967295) {
+        return resolveObjectModelTagId(buffer, header, tagIndex, itemDep.value.tagId);
+      }
+    }
+  } catch {
+  }
+  return 4294967295;
+}
+function getItemCollectionCategory(buffer, header, tagIndex, itmcTagId) {
+  if (itmcTagId === 4294967295) return "equipment";
+  const entry = tagIndex.entries[itmcTagId & 65535];
+  if (!entry || entry.isExternal) return "equipment";
+  try {
+    const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const itmcStruct = decodeStruct(buffer, offset, "ItemCollection");
+    const perms = itmcStruct.get("permutations");
+    if (perms && perms.kind === "reflexive" && perms.value.count > 0) {
+      const permOffset = resolvePointer(perms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      const permStruct = decodeStruct(buffer, permOffset, "ItemCollectionPermutation");
+      const itemDep = permStruct.get("item");
+      if (itemDep && itemDep.kind === "dependency" && itemDep.value.tagId !== 4294967295) {
+        const itemEntry = tagIndex.entries[itemDep.value.tagId & 65535];
+        if (itemEntry) {
+          if (itemEntry.primaryClassName === "weapon") return "weapon";
+          if (itemEntry.primaryClassName === "equipment") return "equipment";
+        }
+      }
+    }
+  } catch {
+  }
+  const lower = entry.path.toLowerCase();
+  if (lower.includes("grenade") || lower.includes("powerup") || lower.includes("health") || lower.includes("shield") || lower.includes("camo")) {
+    return "equipment";
+  }
+  if (lower.includes("weapon") || lower.includes("pistol") || lower.includes("rifle") || lower.includes("shotgun") || lower.includes("cannon") || lower.includes("thrower") || lower.includes("launcher")) {
+    return "weapon";
+  }
+  return "equipment";
+}
 function parsePalette(buffer, header, tagIndex, paletteReflexive, structName) {
   if (!paletteReflexive || paletteReflexive.count === 0) return [];
   const palette = [];
@@ -40110,6 +40205,74 @@ function parsePalette(buffer, header, tagIndex, paletteReflexive, structName) {
     }
   }
   return palette;
+}
+function appendReflexiveElement(buffer, header, tagIndex, reflexiveFieldOffset, elementBytes) {
+  const refl = decodeReflexive(buffer, reflexiveFieldOffset);
+  const elementSize = elementBytes.length;
+  const newCount = refl.count + 1;
+  const oldArrayBytes = refl.count > 0 ? buffer.subarray(
+    resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress),
+    resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress) + refl.count * elementSize
+  ) : Buffer.alloc(0);
+  const newArrayBytes = Buffer.concat([oldArrayBytes, elementBytes]);
+  const alignedPad = (4 - buffer.length % 4) % 4;
+  const padBuffer = alignedPad > 0 ? Buffer.alloc(alignedPad, 0) : Buffer.alloc(0);
+  const newArrayFileOffset = buffer.length + padBuffer.length;
+  const newArrayVirtualAddress = tagIndex.baseMemoryAddress + (newArrayFileOffset - header.tagDataOffset);
+  const newBuffer = Buffer.concat([buffer, padBuffer, newArrayBytes]);
+  const newHeader = {
+    ...header,
+    tagDataSize: newBuffer.length - header.tagDataOffset,
+    decompressedFileSize: newBuffer.length
+  };
+  newBuffer.writeUInt32LE(newBuffer.length, 8);
+  newBuffer.writeUInt32LE(newHeader.tagDataSize, 20);
+  encodeReflexive(newBuffer, reflexiveFieldOffset, {
+    count: newCount,
+    pointerLow: newArrayVirtualAddress,
+    pointerHigh: 0
+  });
+  return {
+    buffer: newBuffer,
+    header: newHeader,
+    newIndex: refl.count
+  };
+}
+function ensurePaletteEntry(buffer, header, tagIndex, paletteFieldName, paletteStructName, tagId, classFourCC) {
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (0x${tagIndex.scenarioTagId.toString(16)}) not found.`);
+  }
+  const scenarioOffset = resolveTagDataPointer(
+    scenarioEntry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const scnrDef = resolveStruct("Scenario");
+  const field = scnrDef.fields.find((f) => f.name === paletteFieldName);
+  if (!field) {
+    throw new Error(`Palette field '${paletteFieldName}' not found in Scenario struct.`);
+  }
+  const reflOffset = scenarioOffset + field.offset;
+  const refl = decodeReflexive(buffer, reflOffset);
+  const structSize = resolveStruct(paletteStructName).totalSize;
+  if (refl.count > 0) {
+    const baseOffset = resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < refl.count; i++) {
+      const decoded = decodeStruct(buffer, baseOffset + i * structSize, paletteStructName);
+      const nameDep = decoded.get("name");
+      if (nameDep && nameDep.kind === "dependency" && nameDep.value.tagId === tagId) {
+        return { buffer, header, paletteIndex: i };
+      }
+    }
+  }
+  const entryBytes = Buffer.alloc(structSize, 0);
+  entryBytes.writeUInt32LE(classFourCC, 0);
+  entryBytes.writeUInt32LE(0, 4);
+  entryBytes.writeUInt32LE(0, 8);
+  entryBytes.writeUInt32LE(tagId, 12);
+  const res = appendReflexiveElement(buffer, header, tagIndex, reflOffset, entryBytes);
+  return { buffer: res.buffer, header: res.header, paletteIndex: res.newIndex };
 }
 function extractScenarioPlacements(buffer, header, tagIndex) {
   const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
@@ -40149,6 +40312,9 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
       const pos = item.get("position")?.value || [0, 0, 0];
       const rot = item.get("rotation")?.value || [0, 0, 0];
       const pal = vehiclePal[typeIdx] || { tagId: 4294967295, path: "Vehicle", modelTagId: 4294967295 };
+      const mpSpawnFlags = buffer.readUInt16LE(vOffset + i * vSize + 90);
+      const notPlacedVal = buffer.readUInt16LE(vOffset + i * vSize + 4);
+      const isForceSpawned = (mpSpawnFlags & 3855) !== 0 && (notPlacedVal & 1) === 0;
       placements.push({
         id: `vehicle-${i}`,
         kind: "vehicle",
@@ -40158,7 +40324,9 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
         objectPath: pal.path,
         modelTagId: pal.modelTagId,
         position: pos,
-        rotation: rot
+        rotation: rot,
+        multiplayerSpawnFlags: mpSpawnFlags,
+        forceSpawn: isForceSpawned
       });
       counts.vehicles++;
     }
@@ -40259,6 +40427,121 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
       counts.weapons++;
     }
   }
+  const fullVehiclePal = vehiclePal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split("\\").pop() || p.path || `Vehicle ${i}`
+  }));
+  const vehicleTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === "vehicle" || e.primaryClassFourCC === 1986357353) && !e.isExternal
+  );
+  for (const ve of vehicleTagEntries) {
+    if (!fullVehiclePal.some((p) => p.tagId === ve.tagId)) {
+      fullVehiclePal.push({
+        paletteIndex: fullVehiclePal.length,
+        tagId: ve.tagId,
+        path: ve.path,
+        name: ve.path.split("\\").pop() || ve.path
+      });
+    }
+  }
+  const fullSceneryPal = sceneryPal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split("\\").pop() || p.path || `Scenery ${i}`
+  }));
+  const sceneryTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === "scenery" || e.primaryClassFourCC === 1935893870) && !e.isExternal
+  );
+  for (const se of sceneryTagEntries) {
+    if (!fullSceneryPal.some((p) => p.tagId === se.tagId)) {
+      fullSceneryPal.push({
+        paletteIndex: fullSceneryPal.length,
+        tagId: se.tagId,
+        path: se.path,
+        name: se.path.split("\\").pop() || se.path
+      });
+    }
+  }
+  const fullBipedPal = bipedPal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split("\\").pop() || p.path || `Biped ${i}`
+  }));
+  const bipedTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === "biped" || e.primaryClassFourCC === 1651077220) && !e.isExternal
+  );
+  for (const be of bipedTagEntries) {
+    if (!fullBipedPal.some((p) => p.tagId === be.tagId)) {
+      fullBipedPal.push({
+        paletteIndex: fullBipedPal.length,
+        tagId: be.tagId,
+        path: be.path,
+        name: be.path.split("\\").pop() || be.path
+      });
+    }
+  }
+  const itmcEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === "item_collection" || e.primaryClassFourCC === 1769237859) && !e.isExternal
+  );
+  const fullWeaponPal = weaponPal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split("\\").pop() || p.path || `Weapon ${i}`
+  }));
+  const fullEquipmentPal = [];
+  for (const ie of itmcEntries) {
+    const cat = getItemCollectionCategory(buffer, header, tagIndex, ie.tagId);
+    if (cat === "weapon") {
+      if (!fullWeaponPal.some((p) => p.tagId === ie.tagId)) {
+        fullWeaponPal.push({
+          paletteIndex: fullWeaponPal.length,
+          tagId: ie.tagId,
+          path: ie.path,
+          name: ie.path.split("\\").pop() || ie.path
+        });
+      }
+    } else {
+      if (!fullEquipmentPal.some((p) => p.tagId === ie.tagId)) {
+        fullEquipmentPal.push({
+          paletteIndex: fullEquipmentPal.length,
+          tagId: ie.tagId,
+          path: ie.path,
+          name: ie.path.split("\\").pop() || ie.path
+        });
+      }
+    }
+  }
+  const weaponTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === "weapon" || e.primaryClassFourCC === 2003132784) && !e.isExternal
+  );
+  for (const we of weaponTagEntries) {
+    if (!fullWeaponPal.some((p) => p.tagId === we.tagId || p.path === we.path)) {
+      fullWeaponPal.push({
+        paletteIndex: fullWeaponPal.length,
+        tagId: we.tagId,
+        path: we.path,
+        name: we.path.split("\\").pop() || we.path
+      });
+    }
+  }
+  const equipmentTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === "equipment" || e.primaryClassFourCC === 1701931376) && !e.isExternal
+  );
+  for (const ee of equipmentTagEntries) {
+    if (!fullEquipmentPal.some((p) => p.tagId === ee.tagId || p.path === ee.path)) {
+      fullEquipmentPal.push({
+        paletteIndex: fullEquipmentPal.length,
+        tagId: ee.tagId,
+        path: ee.path,
+        name: ee.path.split("\\").pop() || ee.path
+      });
+    }
+  }
   const netgameEqRef = scnr.get("netgame equipment")?.value;
   if (netgameEqRef && netgameEqRef.count > 0) {
     const eqSize = resolveStruct("ScenarioNetgameEquipment").totalSize;
@@ -40270,18 +40553,30 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
       const itemCollDep = item.get("item collection");
       const itmcTagId = itemCollDep && itemCollDep.kind === "dependency" ? itemCollDep.value.tagId : 4294967295;
       const itmcEntry = itmcTagId !== 4294967295 ? tagIndex.entries[itmcTagId & 65535] : void 0;
+      const modelTagId = resolveItemCollectionModelTagId(buffer, header, tagIndex, itmcTagId);
+      const isWeapon = itmcTagId !== 4294967295 && getItemCollectionCategory(buffer, header, tagIndex, itmcTagId) === "weapon";
+      const kind = isWeapon ? "weapon" : "equipment";
+      const targetPal = isWeapon ? fullWeaponPal : fullEquipmentPal;
+      const palIdx = targetPal.findIndex((p) => p.tagId === itmcTagId);
+      const type0 = buffer.readInt16LE(eqOffset + i * eqSize + 4);
+      const isEqForceSpawned = type0 === 12;
       placements.push({
         id: `equipment-${i}`,
-        kind: "equipment",
-        paletteIndex: i,
+        kind,
+        paletteIndex: palIdx >= 0 ? palIdx : 0,
         nameIndex: -1,
         objectTagId: itmcTagId,
         objectPath: itmcEntry ? itmcEntry.path : "Netgame Equipment",
-        modelTagId: 4294967295,
+        modelTagId,
         position: pos,
-        rotation: [facing, 0, 0]
+        rotation: [facing, 0, 0],
+        forceSpawn: isEqForceSpawned
       });
-      counts.equipment++;
+      if (isWeapon) {
+        counts.weapons++;
+      } else {
+        counts.equipment++;
+      }
     }
   }
   const spawnsRef = scnr.get("player starting locations")?.value;
@@ -40313,7 +40608,1010 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
     scenarioPath: scenarioEntry.path,
     totalObjects: placements.length,
     objects: placements,
-    counts
+    counts,
+    palettes: {
+      vehicles: fullVehiclePal,
+      scenery: fullSceneryPal,
+      bipeds: fullBipedPal,
+      weapons: fullWeaponPal,
+      equipment: fullEquipmentPal
+    }
+  };
+}
+function getScenarioReflexiveInfo(buffer, header, tagIndex, kind) {
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (0x${tagIndex.scenarioTagId.toString(16)}) not found.`);
+  }
+  const scenarioOffset = resolveTagDataPointer(
+    scenarioEntry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const reflexiveNameMap = {
+    vehicle: { fieldName: "vehicles", structName: "ScenarioVehicle" },
+    scenery: { fieldName: "scenery", structName: "ScenarioScenery" },
+    biped: { fieldName: "bipeds", structName: "ScenarioBiped" },
+    weapon: { fieldName: "weapons", structName: "ScenarioWeapon" },
+    equipment: { fieldName: "netgame equipment", structName: "ScenarioNetgameEquipment" },
+    spawn: { fieldName: "player starting locations", structName: "ScenarioPlayerStartingLocation" }
+  };
+  const { fieldName, structName } = reflexiveNameMap[kind];
+  const scnrDef = resolveStruct("Scenario");
+  const field = scnrDef.fields.find((f) => f.name === fieldName);
+  if (!field) {
+    throw new Error(`Field '${fieldName}' not found in Scenario struct.`);
+  }
+  const reflexiveFieldOffset = scenarioOffset + field.offset;
+  const refl = decodeReflexive(buffer, reflexiveFieldOffset);
+  const structSize = resolveStruct(structName).totalSize;
+  const baseOffset = refl.count > 0 ? resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress) : 0;
+  return {
+    scenarioOffset,
+    reflexiveFieldOffset,
+    structName,
+    structSize,
+    count: refl.count,
+    baseOffset,
+    pointerLow: refl.pointerLow
+  };
+}
+function updateScenarioPlacement(buffer, header, tagIndex, placementId, updates) {
+  const [kindStr, idxStr] = placementId.split("-");
+  const index = parseInt(idxStr, 10);
+  if (kindStr === "spawn") {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, "spawn");
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind spawn.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 0);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 4);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 8);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 12);
+    }
+    if (updates.teamIndex !== void 0) {
+      buffer.writeInt16LE(updates.teamIndex, itemOffset + 16);
+    }
+  } else if (kindStr === "equipment") {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, "equipment");
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind equipment.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 64);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 68);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 72);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 76);
+    }
+    if (updates.forceSpawn !== void 0 && updates.forceSpawn) {
+      buffer.writeInt16LE(12, itemOffset + 4);
+    }
+    if (updates.paletteIndex !== void 0) {
+      const summary = extractScenarioPlacements(buffer, header, tagIndex);
+      const curPlacement = summary.objects.find((o) => o.id === placementId);
+      const isWeapon = curPlacement?.kind === "weapon";
+      const targetPal = isWeapon ? summary.palettes.weapons : summary.palettes.equipment;
+      const chosen = targetPal[updates.paletteIndex];
+      if (chosen) {
+        buffer.write("itmc", itemOffset + 80, 4, "ascii");
+        buffer.writeUInt32LE(0, itemOffset + 84);
+        buffer.writeUInt32LE(0, itemOffset + 88);
+        buffer.writeUInt32LE(chosen.tagId, itemOffset + 92);
+      }
+    }
+  } else {
+    const kind = kindStr;
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, kind);
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind ${kind}.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 8);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 12);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 16);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 20);
+      buffer.writeFloatLE(updates.rotation[1], itemOffset + 24);
+      buffer.writeFloatLE(updates.rotation[2], itemOffset + 28);
+    }
+    if (updates.paletteIndex !== void 0) {
+      buffer.writeInt16LE(updates.paletteIndex, itemOffset + 0);
+    }
+    if (kind === "vehicle") {
+      if (updates.forceSpawn !== void 0) {
+        if (updates.forceSpawn) {
+          buffer.writeUInt16LE(0, itemOffset + 4);
+          buffer.writeFloatLE(1, itemOffset + 72);
+          buffer.writeUInt16LE(3855, itemOffset + 90);
+        } else {
+          buffer.writeUInt16LE(0, itemOffset + 90);
+        }
+      }
+      if (updates.multiplayerSpawnFlags !== void 0) {
+        buffer.writeUInt16LE(updates.multiplayerSpawnFlags, itemOffset + 90);
+      }
+    }
+  }
+  return extractScenarioPlacements(buffer, header, tagIndex);
+}
+function duplicateScenarioPlacement(buffer, header, tagIndex, placementId, offsetDelta = [1.5, 1.5, 0]) {
+  const [kindStr, idxStr] = placementId.split("-");
+  const kind = kindStr;
+  const index = parseInt(idxStr, 10);
+  const info = getScenarioReflexiveInfo(buffer, header, tagIndex, kind);
+  if (index < 0 || index >= info.count) {
+    throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind ${kind}.`);
+  }
+  const sourceItemOffset = info.baseOffset + index * info.structSize;
+  const sourceBytes = buffer.subarray(sourceItemOffset, sourceItemOffset + info.structSize);
+  const newItemBytes = Buffer.from(sourceBytes);
+  if (kind === "spawn") {
+    const curX = newItemBytes.readFloatLE(0);
+    const curY = newItemBytes.readFloatLE(4);
+    const curZ = newItemBytes.readFloatLE(8);
+    newItemBytes.writeFloatLE(curX + offsetDelta[0], 0);
+    newItemBytes.writeFloatLE(curY + offsetDelta[1], 4);
+    newItemBytes.writeFloatLE(curZ + offsetDelta[2], 8);
+  } else if (kind === "equipment") {
+    const curX = newItemBytes.readFloatLE(64);
+    const curY = newItemBytes.readFloatLE(68);
+    const curZ = newItemBytes.readFloatLE(72);
+    newItemBytes.writeFloatLE(curX + offsetDelta[0], 64);
+    newItemBytes.writeFloatLE(curY + offsetDelta[1], 68);
+    newItemBytes.writeFloatLE(curZ + offsetDelta[2], 72);
+  } else {
+    const curX = newItemBytes.readFloatLE(8);
+    const curY = newItemBytes.readFloatLE(12);
+    const curZ = newItemBytes.readFloatLE(16);
+    newItemBytes.writeFloatLE(curX + offsetDelta[0], 8);
+    newItemBytes.writeFloatLE(curY + offsetDelta[1], 12);
+    newItemBytes.writeFloatLE(curZ + offsetDelta[2], 16);
+    newItemBytes.writeInt16LE(-1, 2);
+  }
+  const appended = appendReflexiveElement(buffer, header, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+  const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+  const newId = `${kind}-${info.count}`;
+  const newPlacement = summary.objects.find((o) => o.id === newId);
+  return {
+    buffer: appended.buffer,
+    header: appended.header,
+    summary,
+    newPlacement
+  };
+}
+function addScenarioPlacement(buffer, header, tagIndex, kind, paletteIndex, position, rotation = [0, 0, 0], teamIndex) {
+  let curBuf = buffer;
+  let curHdr = header;
+  const summaryBefore = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+  if (kind === "spawn") {
+    const info2 = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "spawn");
+    const newItemBytes2 = Buffer.alloc(info2.structSize, 0);
+    newItemBytes2.writeFloatLE(position[0], 0);
+    newItemBytes2.writeFloatLE(position[1], 4);
+    newItemBytes2.writeFloatLE(position[2], 8);
+    newItemBytes2.writeFloatLE(rotation[0], 12);
+    newItemBytes2.writeInt16LE(teamIndex ?? 0, 16);
+    const appended2 = appendReflexiveElement(curBuf, curHdr, tagIndex, info2.reflexiveFieldOffset, newItemBytes2);
+    const summary2 = extractScenarioPlacements(appended2.buffer, appended2.header, tagIndex);
+    const newId2 = `spawn-${info2.count}`;
+    const newPlacement2 = summary2.objects.find((o) => o.id === newId2);
+    return { buffer: appended2.buffer, header: appended2.header, summary: summary2, newPlacement: newPlacement2 };
+  }
+  if (kind === "vehicle") {
+    const chosen2 = summaryBefore.palettes.vehicles[paletteIndex] || summaryBefore.palettes.vehicles[0];
+    if (!chosen2) throw new Error("No vehicle available in map palettes.");
+    const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, "vehicle palette", "ScenarioVehiclePalette", chosen2.tagId, 1986357353);
+    curBuf = palRes.buffer;
+    curHdr = palRes.header;
+    const info2 = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "vehicle");
+    const newItemBytes2 = Buffer.alloc(info2.structSize, 0);
+    newItemBytes2.writeInt16LE(palRes.paletteIndex, 0);
+    newItemBytes2.writeInt16LE(-1, 2);
+    newItemBytes2.writeUInt16LE(0, 4);
+    newItemBytes2.writeFloatLE(position[0], 8);
+    newItemBytes2.writeFloatLE(position[1], 12);
+    newItemBytes2.writeFloatLE(position[2], 16);
+    newItemBytes2.writeFloatLE(rotation[0], 20);
+    newItemBytes2.writeFloatLE(rotation[1], 24);
+    newItemBytes2.writeFloatLE(rotation[2], 28);
+    newItemBytes2.writeFloatLE(1, 72);
+    newItemBytes2.writeUInt16LE(3855, 90);
+    const appended2 = appendReflexiveElement(curBuf, curHdr, tagIndex, info2.reflexiveFieldOffset, newItemBytes2);
+    const summary2 = extractScenarioPlacements(appended2.buffer, appended2.header, tagIndex);
+    const newId2 = `vehicle-${info2.count}`;
+    const newPlacement2 = summary2.objects.find((o) => o.id === newId2);
+    return { buffer: appended2.buffer, header: appended2.header, summary: summary2, newPlacement: newPlacement2 };
+  }
+  if (kind === "scenery") {
+    const chosen2 = summaryBefore.palettes.scenery[paletteIndex] || summaryBefore.palettes.scenery[0];
+    if (!chosen2) throw new Error("No scenery available in map palettes.");
+    const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, "scenery palette", "ScenarioSceneryPalette", chosen2.tagId, 1935893870);
+    curBuf = palRes.buffer;
+    curHdr = palRes.header;
+    const info2 = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "scenery");
+    const newItemBytes2 = Buffer.alloc(info2.structSize, 0);
+    newItemBytes2.writeInt16LE(palRes.paletteIndex, 0);
+    newItemBytes2.writeInt16LE(-1, 2);
+    newItemBytes2.writeFloatLE(position[0], 8);
+    newItemBytes2.writeFloatLE(position[1], 12);
+    newItemBytes2.writeFloatLE(position[2], 16);
+    newItemBytes2.writeFloatLE(rotation[0], 20);
+    newItemBytes2.writeFloatLE(rotation[1], 24);
+    newItemBytes2.writeFloatLE(rotation[2], 28);
+    const appended2 = appendReflexiveElement(curBuf, curHdr, tagIndex, info2.reflexiveFieldOffset, newItemBytes2);
+    const summary2 = extractScenarioPlacements(appended2.buffer, appended2.header, tagIndex);
+    const newId2 = `scenery-${info2.count}`;
+    const newPlacement2 = summary2.objects.find((o) => o.id === newId2);
+    return { buffer: appended2.buffer, header: appended2.header, summary: summary2, newPlacement: newPlacement2 };
+  }
+  if (kind === "biped") {
+    const chosen2 = summaryBefore.palettes.bipeds[paletteIndex] || summaryBefore.palettes.bipeds[0];
+    if (!chosen2) throw new Error("No biped available in map palettes.");
+    const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, "biped palette", "ScenarioBipedPalette", chosen2.tagId, 1651077220);
+    curBuf = palRes.buffer;
+    curHdr = palRes.header;
+    const info2 = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "biped");
+    const newItemBytes2 = Buffer.alloc(info2.structSize, 0);
+    newItemBytes2.writeInt16LE(palRes.paletteIndex, 0);
+    newItemBytes2.writeInt16LE(-1, 2);
+    newItemBytes2.writeFloatLE(position[0], 8);
+    newItemBytes2.writeFloatLE(position[1], 12);
+    newItemBytes2.writeFloatLE(position[2], 16);
+    newItemBytes2.writeFloatLE(rotation[0], 20);
+    newItemBytes2.writeFloatLE(rotation[1], 24);
+    newItemBytes2.writeFloatLE(rotation[2], 28);
+    const appended2 = appendReflexiveElement(curBuf, curHdr, tagIndex, info2.reflexiveFieldOffset, newItemBytes2);
+    const summary2 = extractScenarioPlacements(appended2.buffer, appended2.header, tagIndex);
+    const newId2 = `biped-${info2.count}`;
+    const newPlacement2 = summary2.objects.find((o) => o.id === newId2);
+    return { buffer: appended2.buffer, header: appended2.header, summary: summary2, newPlacement: newPlacement2 };
+  }
+  const isWeaponKind = kind === "weapon";
+  const targetPal = isWeaponKind ? summaryBefore.palettes.weapons : summaryBefore.palettes.equipment;
+  const chosen = targetPal[paletteIndex] || targetPal[0];
+  if (!chosen) throw new Error(`No ${kind} available in map palettes.`);
+  let itmcTagId = chosen.tagId;
+  const entry = tagIndex.entries[chosen.tagId & 65535];
+  if (entry && entry.primaryClassName !== "item_collection") {
+    const matchingItmc = tagIndex.entries.find((e) => {
+      if (e.primaryClassName !== "item_collection" || e.isExternal) return false;
+      const mId = resolveItemCollectionModelTagId(curBuf, curHdr, tagIndex, e.tagId);
+      return mId !== 4294967295 && mId === chosen.tagId;
+    });
+    if (matchingItmc) {
+      itmcTagId = matchingItmc.tagId;
+    }
+  }
+  const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "equipment");
+  const newItemBytes = Buffer.alloc(info.structSize, 0);
+  newItemBytes.writeUInt32LE(1, 0);
+  newItemBytes.writeInt16LE(12, 4);
+  newItemBytes.writeUInt32LE(4294967295, 16);
+  newItemBytes.writeFloatLE(position[0], 64);
+  newItemBytes.writeFloatLE(position[1], 68);
+  newItemBytes.writeFloatLE(position[2], 72);
+  newItemBytes.writeFloatLE(rotation[0], 76);
+  newItemBytes.write("itmc", 80, 4, "ascii");
+  newItemBytes.writeUInt32LE(itmcTagId, 92);
+  const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+  const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+  const newId = `equipment-${info.count}`;
+  const newPlacement = summary.objects.find((o) => o.id === newId);
+  return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+}
+function deleteScenarioPlacement(buffer, header, tagIndex, placementId) {
+  const [kindStr, idxStr] = placementId.split("-");
+  const kind = kindStr;
+  const index = parseInt(idxStr, 10);
+  const info = getScenarioReflexiveInfo(buffer, header, tagIndex, kind);
+  if (index < 0 || index >= info.count) {
+    throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind ${kind}.`);
+  }
+  const targetOffset = info.baseOffset + index * info.structSize;
+  const afterOffset = info.baseOffset + (index + 1) * info.structSize;
+  const remainingCount = info.count - 1 - index;
+  if (remainingCount > 0) {
+    buffer.copy(buffer, targetOffset, afterOffset, afterOffset + remainingCount * info.structSize);
+  }
+  const lastElementOffset = info.baseOffset + (info.count - 1) * info.structSize;
+  buffer.fill(0, lastElementOffset, lastElementOffset + info.structSize);
+  encodeReflexive(buffer, info.reflexiveFieldOffset, {
+    count: info.count - 1,
+    pointerLow: info.pointerLow,
+    pointerHigh: 0
+  });
+  return extractScenarioPlacements(buffer, header, tagIndex);
+}
+function swapScenarioPlacement(buffer, header, tagIndex, placementId, newKind, newPaletteIndex) {
+  const summaryBefore = extractScenarioPlacements(buffer, header, tagIndex);
+  const target = summaryBefore.objects.find((o) => o.id === placementId);
+  if (!target) {
+    throw new Error(`Scenario placement "${placementId}" not found.`);
+  }
+  const oldKind = target.kind;
+  const position = [...target.position];
+  const rotation = [...target.rotation];
+  const teamIndex = target.teamIndex;
+  if (oldKind === newKind && newKind !== "spawn") {
+    let curBuf = buffer;
+    let curHdr = header;
+    if (newKind === "vehicle") {
+      const chosen = summaryBefore.palettes.vehicles[newPaletteIndex] || summaryBefore.palettes.vehicles[0];
+      if (!chosen) throw new Error("No vehicle available in map palettes.");
+      const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, "vehicle palette", "ScenarioVehiclePalette", chosen.tagId, 1986357353);
+      curBuf = palRes.buffer;
+      curHdr = palRes.header;
+      const [_, idxStr] = placementId.split("-");
+      const index = parseInt(idxStr, 10);
+      const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "vehicle");
+      const itemOffset = info.baseOffset + index * info.structSize;
+      curBuf.writeInt16LE(palRes.paletteIndex, itemOffset + 0);
+      curBuf.writeUInt16LE(0, itemOffset + 4);
+      curBuf.writeFloatLE(1, itemOffset + 72);
+      curBuf.writeUInt16LE(3855, itemOffset + 90);
+      const summary = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+      const newPlacement = summary.objects.find((o) => o.id === placementId);
+      return { buffer: curBuf, header: curHdr, summary, newPlacement };
+    } else if (newKind === "scenery") {
+      const chosen = summaryBefore.palettes.scenery[newPaletteIndex] || summaryBefore.palettes.scenery[0];
+      if (!chosen) throw new Error("No scenery available in map palettes.");
+      const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, "scenery palette", "ScenarioSceneryPalette", chosen.tagId, 1935893870);
+      curBuf = palRes.buffer;
+      curHdr = palRes.header;
+      const [_, idxStr] = placementId.split("-");
+      const index = parseInt(idxStr, 10);
+      const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "scenery");
+      const itemOffset = info.baseOffset + index * info.structSize;
+      curBuf.writeInt16LE(palRes.paletteIndex, itemOffset + 0);
+      const summary = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+      const newPlacement = summary.objects.find((o) => o.id === placementId);
+      return { buffer: curBuf, header: curHdr, summary, newPlacement };
+    } else if (newKind === "biped") {
+      const chosen = summaryBefore.palettes.bipeds[newPaletteIndex] || summaryBefore.palettes.bipeds[0];
+      if (!chosen) throw new Error("No biped available in map palettes.");
+      const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, "biped palette", "ScenarioBipedPalette", chosen.tagId, 1651077220);
+      curBuf = palRes.buffer;
+      curHdr = palRes.header;
+      const [_, idxStr] = placementId.split("-");
+      const index = parseInt(idxStr, 10);
+      const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "biped");
+      const itemOffset = info.baseOffset + index * info.structSize;
+      curBuf.writeInt16LE(palRes.paletteIndex, itemOffset + 0);
+      const summary = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+      const newPlacement = summary.objects.find((o) => o.id === placementId);
+      return { buffer: curBuf, header: curHdr, summary, newPlacement };
+    }
+  }
+  deleteScenarioPlacement(buffer, header, tagIndex, placementId);
+  return addScenarioPlacement(
+    buffer,
+    header,
+    tagIndex,
+    newKind,
+    newPaletteIndex,
+    position,
+    rotation,
+    teamIndex
+  );
+}
+
+// ../core/src/map/tag-reverse-dependencies.ts
+var MAX_ELEMENTS_PER_REFLEXIVE2 = 4096;
+function walkStructForReferences(buffer, structName, base, anchor, baseMemoryAddress, prefix, targetTagId, out) {
+  const resolved = resolveStruct(structName);
+  if (!isRangeInBuffer(base, resolved.totalSize, buffer.length)) return;
+  for (const field of resolved.fields) {
+    if (field.def.nonCached) continue;
+    const abs = base + field.offset;
+    if (field.def.type === "TagDependency") {
+      const dep = decodeDependency(buffer, abs);
+      if (dep.tagId !== NULL_TAG_ID && dep.tagId !== 0) {
+        if (targetTagId === null || dep.tagId === targetTagId) {
+          out.push({ targetTagId: dep.tagId, fieldPath: `${prefix}${field.name}` });
+        }
+      }
+    } else if (field.def.type === "TagReflexive" && field.def.struct) {
+      const refl = decodeReflexive(buffer, abs);
+      if (refl.count === 0) continue;
+      const childSize = resolveStruct(field.def.struct).totalSize;
+      const childBase = resolvePointer(refl.pointerLow, anchor, baseMemoryAddress);
+      if (!isRangeInBuffer(childBase, refl.count * childSize, buffer.length)) continue;
+      const n = Math.min(refl.count, MAX_ELEMENTS_PER_REFLEXIVE2);
+      for (let i = 0; i < n; i++) {
+        walkStructForReferences(
+          buffer,
+          field.def.struct,
+          childBase + i * childSize,
+          anchor,
+          baseMemoryAddress,
+          `${prefix}${field.name}[${i}].`,
+          targetTagId,
+          out
+        );
+      }
+    }
+  }
+}
+function findReferencingTags(buffer, header, tagIndex, targetTagIndex) {
+  const targetEntry = tagIndex.entries[targetTagIndex];
+  if (!targetEntry) return [];
+  const targetTagId = targetEntry.tagId;
+  const results = [];
+  for (let i = 0; i < tagIndex.entries.length; i++) {
+    const entry = tagIndex.entries[i];
+    if (entry.isExternal) continue;
+    const group = entry.primaryClassName;
+    if (!group || !getGroupStructName(group)) continue;
+    const def = getGroupDefinition(group);
+    if (def.extractable === false) continue;
+    const rootOffset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const references = [];
+    walkStructForReferences(
+      buffer,
+      def.name,
+      rootOffset,
+      header.tagDataOffset,
+      tagIndex.baseMemoryAddress,
+      "",
+      targetTagId,
+      references
+    );
+    for (const ref of references) {
+      results.push({
+        sourceTagIndex: i,
+        sourceTagId: entry.tagId,
+        sourcePath: entry.path,
+        sourceGroup: group,
+        fieldPath: ref.fieldPath
+      });
+    }
+  }
+  return results;
+}
+
+// ../core/src/map/unicode-string-editor.ts
+var UnicodeStringEditorError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "UnicodeStringEditorError";
+  }
+};
+var UNICODE_STRING_ELEMENT_SIZE = 20;
+function readUnicodeStringList(buffer, header, tagIndex, tagEntryIndex) {
+  const entry = tagIndex.entries[tagEntryIndex];
+  if (!entry) {
+    throw new UnicodeStringEditorError(`Tag #${tagEntryIndex} not found in map.`);
+  }
+  if (entry.primaryClassName !== "unicode_string_list" && entry.primaryClassFourCC !== 1970500722) {
+    throw new UnicodeStringEditorError(`Tag #${tagEntryIndex} ("${entry.path}") is not a unicode_string_list tag.`);
+  }
+  if (entry.isExternal) {
+    return {
+      tagIndex: tagEntryIndex,
+      tagId: entry.tagId,
+      tagPath: entry.path,
+      strings: [],
+      isExternal: true,
+      externalNote: "Tag data is stored in external resource map (loc.map). In-place editing is only supported for map-embedded unicode string lists."
+    };
+  }
+  const rootOffset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(rootOffset, 12, buffer.length)) {
+    throw new UnicodeStringEditorError(`Root struct offset 0x${rootOffset.toString(16)} is out of bounds.`);
+  }
+  const count2 = buffer.readUInt32LE(rootOffset + 0);
+  const pointerLow = buffer.readUInt32LE(rootOffset + 4);
+  if (count2 === 0) {
+    return {
+      tagIndex: tagEntryIndex,
+      tagId: entry.tagId,
+      tagPath: entry.path,
+      strings: []
+    };
+  }
+  const reflexiveBase = resolvePointer(pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  const totalReflexiveSize = count2 * UNICODE_STRING_ELEMENT_SIZE;
+  if (!isRangeInBuffer(reflexiveBase, totalReflexiveSize, buffer.length)) {
+    throw new UnicodeStringEditorError(
+      `Reflexive block (${count2} items at 0x${reflexiveBase.toString(16)}) is out of bounds.`
+    );
+  }
+  const strings = [];
+  for (let i = 0; i < count2; i++) {
+    const elOffset = reflexiveBase + i * UNICODE_STRING_ELEMENT_SIZE;
+    const size = buffer.readUInt32LE(elOffset + 0);
+    const strPointerLow = buffer.readUInt32LE(elOffset + 12);
+    if (size === 0 || strPointerLow === 0) {
+      strings.push({
+        index: i,
+        text: "",
+        byteLength: 0,
+        allocatedBytes: size,
+        maxChars: Math.floor(size / 2),
+        fileOffset: 0,
+        pointer: strPointerLow
+      });
+      continue;
+    }
+    const strFileOffset = resolveTagDataPointer(strPointerLow, header, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(strFileOffset, size, buffer.length)) {
+      strings.push({
+        index: i,
+        text: "[Out of bounds]",
+        byteLength: size,
+        allocatedBytes: size,
+        maxChars: Math.floor(size / 2),
+        fileOffset: strFileOffset,
+        pointer: strPointerLow
+      });
+      continue;
+    }
+    const rawStr = buffer.toString("utf16le", strFileOffset, strFileOffset + size);
+    const text = rawStr.replace(/\0+$/, "");
+    strings.push({
+      index: i,
+      text,
+      byteLength: size,
+      allocatedBytes: size,
+      maxChars: Math.floor(size / 2),
+      fileOffset: strFileOffset,
+      pointer: strPointerLow
+    });
+  }
+  return {
+    tagIndex: tagEntryIndex,
+    tagId: entry.tagId,
+    tagPath: entry.path,
+    strings
+  };
+}
+function writeUnicodeString(buffer, header, tagIndex, tagEntryIndex, stringIndex, newText) {
+  const list = readUnicodeStringList(buffer, header, tagIndex, tagEntryIndex);
+  const target = list.strings[stringIndex];
+  if (!target) {
+    throw new UnicodeStringEditorError(`String index #${stringIndex} out of bounds (tag has ${list.strings.length} strings).`);
+  }
+  const encodedTextBytes = Buffer.byteLength(newText, "utf16le");
+  if (encodedTextBytes > target.allocatedBytes) {
+    throw new UnicodeStringEditorError(
+      `New string is ${newText.length} characters (${encodedTextBytes} bytes), which exceeds the allocated capacity of ${target.allocatedBytes} bytes (${target.maxChars} chars).`
+    );
+  }
+  if (target.fileOffset <= 0 || !isRangeInBuffer(target.fileOffset, target.allocatedBytes, buffer.length)) {
+    throw new UnicodeStringEditorError(`String buffer offset 0x${target.fileOffset.toString(16)} is invalid.`);
+  }
+  buffer.write(newText, target.fileOffset, "utf16le");
+  const nullStart = target.fileOffset + encodedTextBytes;
+  const paddingBytes = target.allocatedBytes - encodedTextBytes;
+  if (paddingBytes > 0) {
+    buffer.fill(0, nullStart, target.fileOffset + target.allocatedBytes);
+  }
+  return {
+    ok: true,
+    newText,
+    bytesWritten: encodedTextBytes
+  };
+}
+
+// ../core/src/map/tag-index-editor.ts
+var TagIndexEditorError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "TagIndexEditorError";
+  }
+};
+function renameTagInMap(buffer, header, tagIndex, tagEntryIndex, newPath) {
+  const entry = tagIndex.entries[tagEntryIndex];
+  if (!entry) {
+    throw new TagIndexEditorError(`Tag #${tagEntryIndex} not found in map.`);
+  }
+  const cleanPath = newPath.trim().replace(/\//g, "\\");
+  if (!cleanPath) {
+    throw new TagIndexEditorError("Tag path cannot be empty.");
+  }
+  const normalizedNew = normalizeTagPath(cleanPath);
+  const exists = tagIndex.entries.some(
+    (e, idx) => idx !== tagEntryIndex && normalizeTagPath(e.path) === normalizedNew && e.primaryClassName === entry.primaryClassName
+  );
+  if (exists) {
+    throw new TagIndexEditorError(`A tag with path "${cleanPath}" and class "${entry.primaryClassName}" already exists.`);
+  }
+  const tagArrayFileOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
+  const entryOffset = tagArrayFileOffset + tagEntryIndex * TAG_ENTRY_SIZE;
+  const pathPointer = buffer.readUInt32LE(entryOffset + 16);
+  const pathFileOffset = resolveTagDataPointer(pathPointer, header, tagIndex.baseMemoryAddress);
+  const oldPathLength = entry.path.length;
+  if (cleanPath.length <= oldPathLength) {
+    buffer.write(cleanPath, pathFileOffset, "ascii");
+    buffer.fill(0, pathFileOffset + cleanPath.length, pathFileOffset + oldPathLength + 1);
+    entry.path = cleanPath;
+    return { buffer, path: cleanPath };
+  }
+  const newPathBytes = Buffer.from(cleanPath + "\0", "ascii");
+  const pad = (4 - newPathBytes.length % 4) % 4;
+  const paddedBytes = pad > 0 ? Buffer.concat([newPathBytes, Buffer.alloc(pad, 0)]) : newPathBytes;
+  const newOffset = buffer.length;
+  const outBuffer = Buffer.concat([buffer, paddedBytes]);
+  outBuffer.writeUInt32LE(outBuffer.length, 8);
+  outBuffer.writeUInt32LE(header.tagDataSize + paddedBytes.length, 20);
+  const newPathPointer = tagIndex.baseMemoryAddress + (newOffset - header.tagDataOffset) >>> 0;
+  outBuffer.writeUInt32LE(newPathPointer, entryOffset + 16);
+  entry.path = cleanPath;
+  return { buffer: outBuffer, path: cleanPath };
+}
+function duplicateTagInMap(buffer, header, tagIndex, sourceTagEntryIndex, newPath) {
+  const sourceEntry = tagIndex.entries[sourceTagEntryIndex];
+  if (!sourceEntry) {
+    throw new TagIndexEditorError(`Source tag #${sourceTagEntryIndex} not found in map.`);
+  }
+  const cleanPath = newPath.trim().replace(/\//g, "\\");
+  if (!cleanPath) {
+    throw new TagIndexEditorError("New tag path cannot be empty.");
+  }
+  const normalizedNew = normalizeTagPath(cleanPath);
+  const exists = tagIndex.entries.some(
+    (e) => normalizeTagPath(e.path) === normalizedNew && e.primaryClassName === sourceEntry.primaryClassName
+  );
+  if (exists) {
+    throw new TagIndexEditorError(`A tag with path "${cleanPath}" and class "${sourceEntry.primaryClassName}" already exists.`);
+  }
+  const extractedSet = extractTagSet(buffer, header, tagIndex, [sourceTagEntryIndex]);
+  const rootExtracted = extractedSet.tags.find((t) => t.originalIndex === sourceTagEntryIndex);
+  if (!rootExtracted) {
+    throw new TagIndexEditorError(`Failed to extract source tag "${sourceEntry.path}".`);
+  }
+  const oldRootPath = rootExtracted.path;
+  const containerTags = extractedSet.tags.map((t) => {
+    const isRoot = t.originalIndex === sourceTagEntryIndex;
+    return {
+      originalIndex: t.originalIndex,
+      group: t.group,
+      path: isRoot ? cleanPath : t.path,
+      structName: t.structName,
+      data: t.data.toString("base64"),
+      dependencies: t.dependencies.map((d) => {
+        if (isRoot && d.fieldPath.startsWith(oldRootPath)) {
+          return {
+            ...d,
+            fieldPath: cleanPath + d.fieldPath.slice(oldRootPath.length)
+          };
+        }
+        return d;
+      }),
+      secondaryClassFourCC: t.secondaryClassFourCC,
+      tertiaryClassFourCC: t.tertiaryClassFourCC,
+      embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
+      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p })),
+      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
+      gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
+        geometryIndex: p.geometryIndex,
+        partIndex: p.partIndex,
+        vertexType: p.vertexType,
+        vertexCount: p.vertexCount,
+        vertexData: p.vertexBytes.toString("base64"),
+        triangleBufferType: p.triangleBufferType,
+        triangleCount: p.triangleCount,
+        triangleData: p.triangleBytes.toString("base64")
+      }))
+    };
+  });
+  const container = {
+    magic: OCETAGS_MAGIC,
+    formatVersion: OCETAGS_FORMAT_VERSION,
+    sourceMapName: header.scenarioName,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    hasUnresolvedBspReferences: false,
+    rootOriginalIndices: [sourceTagEntryIndex],
+    tags: containerTags,
+    notExtracted: [],
+    warnings: [],
+    resourceMapIdentities: {},
+    externalResourceRefs: [],
+    externalData: "referenced"
+  };
+  const plan = planAddInjection(
+    { buffer, header, tagIndex },
+    container,
+    {},
+    { allowEmbeddedRelocation: true }
+  );
+  if (plan.kind === "refused") {
+    throw new TagIndexEditorError(`Cannot duplicate tag: ${plan.reason}`);
+  }
+  if (plan.toAdd.length === 0) {
+    const blockers = [...plan.blockedOther, ...plan.blockedEmbedded];
+    const reasons = blockers.map((b) => `${b.path}: ${b.reasons.join("; ")}`).join("\n");
+    throw new TagIndexEditorError(`Cannot duplicate tag: no tags were planned for addition. Reasons:
+${reasons}`);
+  }
+  const report = applyInjectionWithReport(
+    buffer,
+    header,
+    tagIndex,
+    container,
+    plan,
+    { allowEmbeddedRelocation: true }
+  );
+  const rootLocalIndex = containerTags.findIndex((t) => t.originalIndex === sourceTagEntryIndex);
+  const newTagId = plan.resolvedTagIdByLocalIndex.get(rootLocalIndex) ?? computeNewTagId(tagIndex.entries.length);
+  const newTagIndex = tagIndex.entries.length;
+  return {
+    buffer: report.buffer,
+    newTagIndex,
+    newTagId,
+    path: cleanPath
+  };
+}
+
+// ../core/src/map/bsp-swapper.ts
+function getMapBsps(buffer) {
+  const inspected = inspectCustomEditionMap(buffer);
+  if (inspected.status !== "ok") {
+    return [];
+  }
+  const { header, tagIndex } = inspected;
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenarioEntry) return [];
+  const scenarioFileOffset = header.tagDataOffset + (scenarioEntry.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+  const decodedScenario = decodeStruct(buffer, scenarioFileOffset, "Scenario");
+  const bspsField = decodedScenario.get("structure bsps");
+  if (!bspsField || bspsField.kind !== "reflexive" || bspsField.value.count === 0) {
+    return [];
+  }
+  const bspCount = bspsField.value.count;
+  const scenarioBspSize = resolveStruct("ScenarioBSP").totalSize;
+  const bspsArrayOffset = header.tagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+  const results = [];
+  for (let i = 0; i < bspCount; i++) {
+    const entryOffset = bspsArrayOffset + i * scenarioBspSize;
+    const entry = decodeStruct(buffer, entryOffset, "ScenarioBSP");
+    const dep = entry.get("structure bsp");
+    const depTagId = dep && dep.kind === "dependency" ? dep.value.tagId : 4294967295;
+    const tagEntry = tagIndex.entries[depTagId & 65535];
+    const path3 = tagEntry?.path || `levels\\bsp_${i}`;
+    const bspStart = entry.get("bsp start").value;
+    const bspSize = entry.get("bsp size").value;
+    const bspAddress = entry.get("bsp address").value;
+    let vertexCount = 0;
+    let triangleCount = 0;
+    let submeshCount = 0;
+    let worldBounds = [0, 0, 0, 0, 0, 0];
+    let hasDobc = false;
+    let hasDecals = false;
+    try {
+      const mesh = extractBspRenderMesh(buffer, header, tagIndex, i);
+      vertexCount = mesh.totalVertices;
+      triangleCount = mesh.totalTriangles;
+      submeshCount = mesh.submeshes.length;
+      worldBounds = mesh.worldBounds;
+    } catch {
+    }
+    const bspLoc = locateStructureBsp(
+      buffer,
+      tagIndex,
+      scenarioFileOffset,
+      header.tagDataOffset,
+      tagIndex.baseMemoryAddress,
+      depTagId
+    );
+    if (bspLoc && bspLoc.fileOffset + 608 <= buffer.length) {
+      const dobcCount = buffer.readUInt32LE(bspLoc.fileOffset + 588);
+      const decalCount = buffer.readUInt32LE(bspLoc.fileOffset + 600);
+      hasDobc = dobcCount > 0;
+      hasDecals = decalCount > 0;
+    }
+    results.push({
+      index: i,
+      path: path3,
+      tagId: depTagId,
+      bspStart,
+      bspSize,
+      bspAddress,
+      vertexCount,
+      triangleCount,
+      submeshCount,
+      worldBounds,
+      hasDobc,
+      hasDecals
+    });
+  }
+  return results;
+}
+function bspSwapPreflight(sourceBuffer, targetBuffer, sourceBspIndex = 0, targetBspIndex = 0) {
+  const sourceBsps = getMapBsps(sourceBuffer);
+  const targetBsps = getMapBsps(targetBuffer);
+  if (sourceBsps.length === 0) {
+    return {
+      ok: false,
+      sourceBsps: [],
+      targetBsps: [],
+      selectedSourceBsp: null,
+      selectedTargetBsp: null,
+      sizeDelta: 0,
+      estimatedNewSize: targetBuffer.length,
+      warnings: [],
+      error: "No valid Structure BSPs found in source map."
+    };
+  }
+  if (targetBsps.length === 0) {
+    return {
+      ok: false,
+      sourceBsps,
+      targetBsps: [],
+      selectedSourceBsp: null,
+      selectedTargetBsp: null,
+      sizeDelta: 0,
+      estimatedNewSize: targetBuffer.length,
+      warnings: [],
+      error: "No valid Structure BSPs found in target map."
+    };
+  }
+  const selectedSourceBsp = sourceBsps[sourceBspIndex] ?? sourceBsps[0];
+  const selectedTargetBsp = targetBsps[targetBspIndex] ?? targetBsps[0];
+  const sizeDelta = selectedSourceBsp.bspSize - selectedTargetBsp.bspSize;
+  const estimatedNewSize = targetBuffer.length + sizeDelta;
+  const warnings = [];
+  if (selectedSourceBsp.hasDobc) {
+    warnings.push("Source BSP contains Detail Objects (DOBC). Stripping recommended for multiplayer.");
+  }
+  if (selectedSourceBsp.hasDecals) {
+    warnings.push("Source BSP contains Runtime Decals. Stripping recommended for multiplayer stability.");
+  }
+  if (estimatedNewSize > 250 * 1024 * 1024) {
+    warnings.push("Target map size will exceed 250 MB; verify engine memory constraints.");
+  }
+  return {
+    ok: true,
+    sourceBsps,
+    targetBsps,
+    selectedSourceBsp,
+    selectedTargetBsp,
+    sizeDelta,
+    estimatedNewSize,
+    warnings
+  };
+}
+function performBspSwap(sourceBuffer, targetBuffer, options) {
+  const targetInspected = inspectCustomEditionMap(targetBuffer);
+  if (targetInspected.status !== "ok") {
+    return {
+      ok: false,
+      buffer: targetBuffer,
+      summary: {
+        sourceBspName: "",
+        targetBspName: "",
+        oldSize: targetBuffer.length,
+        newSize: targetBuffer.length,
+        delta: 0,
+        strippedDobc: false,
+        strippedDecals: false,
+        relocatedSpawns: 0
+      },
+      error: "Failed to parse target map header or tag index."
+    };
+  }
+  const sourceBsps = getMapBsps(sourceBuffer);
+  const targetBsps = getMapBsps(targetBuffer);
+  const srcIdx = options.sourceBspIndex ?? 0;
+  const dstIdx = options.targetBspIndex ?? 0;
+  const srcBsp = sourceBsps[srcIdx];
+  const dstBsp = targetBsps[dstIdx];
+  if (!srcBsp) {
+    return {
+      ok: false,
+      buffer: targetBuffer,
+      summary: { sourceBspName: "", targetBspName: "", oldSize: targetBuffer.length, newSize: targetBuffer.length, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
+      error: `Invalid source BSP index ${srcIdx}.`
+    };
+  }
+  if (!dstBsp) {
+    return {
+      ok: false,
+      buffer: targetBuffer,
+      summary: { sourceBspName: srcBsp.path, targetBspName: "", oldSize: targetBuffer.length, newSize: targetBuffer.length, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
+      error: `Invalid target BSP index ${dstIdx}.`
+    };
+  }
+  const delta = srcBsp.bspSize - dstBsp.bspSize;
+  const newLength = targetBuffer.length + delta;
+  const out = Buffer.alloc(newLength);
+  targetBuffer.copy(out, 0, 0, dstBsp.bspStart);
+  sourceBuffer.copy(out, dstBsp.bspStart, srcBsp.bspStart, srcBsp.bspStart + srcBsp.bspSize);
+  targetBuffer.copy(out, dstBsp.bspStart + srcBsp.bspSize, dstBsp.bspStart + dstBsp.bspSize);
+  const oldFileSize = targetBuffer.readUInt32LE(8);
+  out.writeUInt32LE(oldFileSize + delta, 8);
+  const oldTagDataOffset = targetBuffer.readUInt32LE(16);
+  const newTagDataOffset = oldTagDataOffset + delta;
+  out.writeUInt32LE(newTagDataOffset, 16);
+  const oldModelDataOffset = targetBuffer.readUInt32LE(oldTagDataOffset + 20);
+  out.writeUInt32LE(oldModelDataOffset + delta, newTagDataOffset + 20);
+  const { header, tagIndex } = targetInspected;
+  const scnrEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scnrOffset = newTagDataOffset + (scnrEntry.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+  const decodedScnr = decodeStruct(out, scnrOffset, "Scenario");
+  const bspsField = decodedScnr.get("structure bsps");
+  if (!bspsField || bspsField.kind !== "reflexive") {
+    return {
+      ok: false,
+      buffer: targetBuffer,
+      summary: { sourceBspName: srcBsp.path, targetBspName: dstBsp.path, oldSize: targetBuffer.length, newSize: targetBuffer.length, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
+      error: "Target scenario structure bsps reflexive missing."
+    };
+  }
+  const scenarioBspSize = resolveStruct("ScenarioBSP").totalSize;
+  const bspArrayOffset = newTagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+  const targetEntryOffset = bspArrayOffset + dstIdx * scenarioBspSize;
+  out.writeUInt32LE(dstBsp.bspStart, targetEntryOffset + 0);
+  out.writeUInt32LE(srcBsp.bspSize, targetEntryOffset + 4);
+  out.writeUInt32LE(srcBsp.bspAddress, targetEntryOffset + 8);
+  let strippedDobc = false;
+  let strippedDecals = false;
+  if (options.stripDobcAndDecals ?? true) {
+    const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
+    const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBsp.bspAddress);
+    if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 608 <= dstBsp.bspStart + srcBsp.bspSize) {
+      out.writeUInt32LE(0, bspRootFileOffset + 588);
+      out.writeUInt32LE(0, bspRootFileOffset + 592);
+      strippedDobc = true;
+      out.writeUInt32LE(0, bspRootFileOffset + 600);
+      out.writeUInt32LE(0, bspRootFileOffset + 604);
+      strippedDecals = true;
+    }
+  }
+  let relocatedSpawns = 0;
+  if (options.relocateGroundObjects ?? true) {
+    const minZ = srcBsp.worldBounds[2];
+    const maxZ = srcBsp.worldBounds[5];
+    const defaultGroundZ = minZ + 0.5;
+    const spawnsReflexive = decodedScnr.get("player starting locations");
+    if (spawnsReflexive && spawnsReflexive.kind === "reflexive" && spawnsReflexive.value.count > 0) {
+      const spawnSize = 52;
+      const spawnsOffset = newTagDataOffset + (spawnsReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
+      for (let s = 0; s < spawnsReflexive.value.count; s++) {
+        const sOff = spawnsOffset + s * spawnSize;
+        const curZ = out.readFloatLE(sOff + 8);
+        if (curZ < minZ || curZ > maxZ) {
+          out.writeFloatLE(defaultGroundZ, sOff + 8);
+          relocatedSpawns++;
+        }
+      }
+    }
+    const equipReflexive = decodedScnr.get("netgame equipment");
+    if (equipReflexive && equipReflexive.kind === "reflexive" && equipReflexive.value.count > 0) {
+      const equipSize = 48;
+      const equipOffset = newTagDataOffset + (equipReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
+      for (let e = 0; e < equipReflexive.value.count; e++) {
+        const eOff = equipOffset + e * equipSize;
+        const curZ = out.readFloatLE(eOff + 8);
+        if (curZ < minZ || curZ > maxZ) {
+          out.writeFloatLE(defaultGroundZ, eOff + 8);
+          relocatedSpawns++;
+        }
+      }
+    }
+  }
+  return {
+    ok: true,
+    buffer: out,
+    summary: {
+      sourceBspName: srcBsp.path,
+      targetBspName: dstBsp.path,
+      oldSize: targetBuffer.length,
+      newSize: newLength,
+      delta,
+      strippedDobc,
+      strippedDecals,
+      relocatedSpawns
+    }
   };
 }
 
@@ -40590,6 +41888,28 @@ function diskStatOf(filePath) {
 }
 function summarizeOpenMap(map) {
   const sizes = sizeByIndex(map.header, map.tagIndex);
+  const engine = map.header.engine;
+  let mapEdition = "ce";
+  const fpLower = (map.filePath || "").toLowerCase();
+  if (engine === 13 /* MCC_CEA */ || fpLower.includes("mcc")) {
+    mapEdition = "mcc";
+  } else if (fpLower.includes("halomd")) {
+    mapEdition = "halomd";
+  } else if (engine === 7) {
+    mapEdition = "pc";
+  } else {
+    try {
+      const layout = classifyMapLayout(map.buffer);
+      if (layout.kind === "demo") {
+        mapEdition = "demo";
+      } else if (layout.kind === "mcc") {
+        mapEdition = "mcc";
+      } else if (layout.kind === "retail") {
+        mapEdition = fpLower.includes("halomd") ? "halomd" : "pc";
+      }
+    } catch {
+    }
+  }
   return {
     status: "ok",
     filePath: map.filePath,
@@ -40603,7 +41923,9 @@ function summarizeOpenMap(map) {
       tagDataSize: map.header.tagDataSize,
       decompressedFileSize: map.header.decompressedFileSize,
       fileSizeOnDisk: map.buffer.length,
-      tagCount: map.tagIndex.tagCount
+      tagCount: map.tagIndex.tagCount,
+      engine,
+      mapEdition
     },
     tags: map.tagIndex.entries.map((e) => ({
       index: e.index,
@@ -40627,7 +41949,7 @@ async function runInspect(task) {
   progress(task.requestId, "Parsing header and tag index", 50);
   currentInject = null;
   const layout = classifyMapLayout(buffer);
-  if (layout.kind === "retail" || layout.kind === "demo") {
+  if (layout.kind === "demo" || layout.kind === "retail" && !isConvertibleRetailLayout(layout)) {
     currentMap = null;
     progress(task.requestId, "Done", 100);
     return sendResult(task.requestId, {
@@ -40635,8 +41957,7 @@ async function runInspect(task) {
       filePath: task.filePath,
       message: describeUnsupportedLayout(layout),
       layout: layout.kind,
-      // Retail maps are convertible only at the CE base; a true demo map always converts via the Phase 2 demo converter.
-      convertible: layout.kind === "demo" ? true : isConvertibleRetailLayout(layout)
+      convertible: layout.kind === "demo"
     });
   }
   const inspected = inspectCustomEditionMap(buffer);
@@ -41354,6 +42675,214 @@ function runGetModelGeometry(task) {
     handleTaskError(task.requestId, err);
   }
 }
+function runUpdateScenarioPlacement(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const summary = updateScenarioPlacement(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.placementId, {
+      position: task.position,
+      rotation: task.rotation,
+      paletteIndex: task.paletteIndex,
+      teamIndex: task.teamIndex,
+      multiplayerSpawnFlags: task.multiplayerSpawnFlags,
+      forceSpawn: task.forceSpawn
+    });
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+function runDuplicateScenarioPlacement(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const res = duplicateScenarioPlacement(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.placementId, task.offsetDelta);
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary: res.summary,
+      newPlacement: res.newPlacement,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+function runAddScenarioPlacement(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const res = addScenarioPlacement(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.kind,
+      task.paletteIndex,
+      task.position,
+      task.rotation,
+      task.teamIndex
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary: res.summary,
+      newPlacement: res.newPlacement,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+function runSwapScenarioPlacement(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const res = swapScenarioPlacement(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.placementId,
+      task.newKind,
+      task.newPaletteIndex
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary: res.summary,
+      newPlacement: res.newPlacement,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+function runDeleteScenarioPlacement(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const summary = deleteScenarioPlacement(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.placementId);
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+function runGetReferencingTags(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const referencingTags = findReferencingTags(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
+    sendResult(task.requestId, { ok: true, referencingTags });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+function runGetUnicodeStrings(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const result = readUnicodeStringList(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
+    sendResult(task.requestId, { ok: true, result });
+  } catch (err) {
+    if (err instanceof UnicodeStringEditorError) return sendError(task.requestId, "UNICODE_STRING_ERROR", err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+function runSetUnicodeString(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const res = writeUnicodeString(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.stringIndex, task.newText);
+    currentMap.modified = true;
+    sendResult(task.requestId, { ok: true, newText: res.newText, map: summarizeOpenMap(currentMap) });
+  } catch (err) {
+    if (err instanceof UnicodeStringEditorError) return sendError(task.requestId, "UNICODE_STRING_ERROR", err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+function runRenameTag(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const res = renameTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.newPath);
+    currentMap.buffer = res.buffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== "ok") {
+      return sendError(task.requestId, "TAG_INDEX_ERROR", "Failed to inspect map after renaming.");
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, { ok: true, path: res.path, map: summarizeOpenMap(currentMap) });
+  } catch (err) {
+    if (err instanceof TagIndexEditorError) return sendError(task.requestId, "TAG_INDEX_ERROR", err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+function runDuplicateTag(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const res = duplicateTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.newPath);
+    currentMap.buffer = res.buffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== "ok") {
+      return sendError(task.requestId, "TAG_INDEX_ERROR", "Failed to inspect map after duplicating.");
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      newTagIndex: res.newTagIndex,
+      newTagId: res.newTagId,
+      path: res.path,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    if (err instanceof TagIndexEditorError) return sendError(task.requestId, "TAG_INDEX_ERROR", err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+async function runBspSwapPreflight(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
+    const result = bspSwapPreflight(sourceBuffer, currentMap.buffer, task.sourceBspIndex, task.targetBspIndex);
+    sendResult(task.requestId, result);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+async function runPerformBspSwap(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
+    const result = performBspSwap(sourceBuffer, currentMap.buffer, task.options);
+    if (!result.ok) {
+      return sendError(task.requestId, "BSP_SWAP_ERROR", result.error || "Failed to perform BSP swap.");
+    }
+    currentMap.buffer = result.buffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== "ok") {
+      return sendError(task.requestId, "BSP_SWAP_ERROR", "Failed to inspect map after BSP swap.");
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ...result,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
     if (task.type === "cancel") {
@@ -41380,6 +42909,18 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "getBitmapTexture") runGetBitmapTexture(task);
     else if (task.type === "getScenarioObjects") runGetScenarioObjects(task);
     else if (task.type === "getModelGeometry") runGetModelGeometry(task);
+    else if (task.type === "updateScenarioPlacement") runUpdateScenarioPlacement(task);
+    else if (task.type === "duplicateScenarioPlacement") runDuplicateScenarioPlacement(task);
+    else if (task.type === "addScenarioPlacement") runAddScenarioPlacement(task);
+    else if (task.type === "swapScenarioPlacement") runSwapScenarioPlacement(task);
+    else if (task.type === "deleteScenarioPlacement") runDeleteScenarioPlacement(task);
+    else if (task.type === "getReferencingTags") runGetReferencingTags(task);
+    else if (task.type === "getUnicodeStrings") runGetUnicodeStrings(task);
+    else if (task.type === "setUnicodeString") runSetUnicodeString(task);
+    else if (task.type === "renameTag") runRenameTag(task);
+    else if (task.type === "duplicateTag") runDuplicateTag(task);
+    else if (task.type === "bspSwapPreflight") await runBspSwapPreflight(task);
+    else if (task.type === "performBspSwap") await runPerformBspSwap(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -41399,23 +42940,35 @@ try {
   __setMapFsForTest,
   __setSinkForTest,
   describeMapWriteError,
+  runAddScenarioPlacement,
   runApplyInject,
   runBatchExtract,
+  runBspSwapPreflight,
   runConvertMap,
   runConvertPreflight,
+  runDeleteScenarioPlacement,
+  runDuplicateScenarioPlacement,
+  runDuplicateTag,
   runExtractTags,
   runGetBitmapTexture,
   runGetBspRenderMesh,
   runGetDependencies,
   runGetDependencySlots,
   runGetModelGeometry,
+  runGetReferencingTags,
   runGetScenarioObjects,
   runGetTagFields,
+  runGetUnicodeStrings,
   runInspect,
+  runPerformBspSwap,
   runPlanInject,
+  runRenameTag,
   runSaveMap,
   runSaveMapAs,
   runSetDependencySlot,
+  runSetUnicodeString,
+  runSwapScenarioPlacement,
+  runUpdateScenarioPlacement,
   runUpdateTagField,
   runVerifyEmbeddedData,
   summarizeOpenMap

@@ -7,6 +7,7 @@ import type { CacheFileHeader } from '../map/header';
 import type { TagIndex } from '../map/tag-index';
 import { resolveTagDataPointer } from '../map/tag-index';
 import { decodeStruct, resolveStruct, resolvePointer } from '../map/definitions/engine';
+import { decodeReflexive, encodeReflexive } from '../map/definitions/codec';
 
 export type ScenarioObjectKind =
   | 'vehicle'
@@ -17,7 +18,7 @@ export type ScenarioObjectKind =
   | 'spawn';
 
 export interface ScenarioObjectPlacement {
-  /** Unique identifier e.g. "vehicle-0", "scenery-12", "spawn-3". */
+  /** Unique identifier e.g. "vehicle-0", "scenery-12", "equipment-3", "spawn-3". */
   id: string;
   kind: ScenarioObjectKind;
   paletteIndex: number;
@@ -34,6 +35,17 @@ export interface ScenarioObjectPlacement {
   rotation: [number, number, number];
   /** Multiplayer team index (e.g. 0 = Red, 1 = Blue for player spawns). */
   teamIndex?: number;
+  /** Raw multiplayer spawn bitmask (e.g. 0x0F0F for all gametypes default+allowed). */
+  multiplayerSpawnFlags?: number;
+  /** Whether the object is forced/configured to spawn in multiplayer gametypes. */
+  forceSpawn?: boolean;
+}
+
+export interface ScenarioPaletteItem {
+  paletteIndex: number;
+  tagId: number;
+  path: string;
+  name: string;
 }
 
 export interface ScenarioPlacementsSummary {
@@ -48,6 +60,13 @@ export interface ScenarioPlacementsSummary {
     weapons: number;
     equipment: number;
     spawns: number;
+  };
+  palettes: {
+    vehicles: ScenarioPaletteItem[];
+    scenery: ScenarioPaletteItem[];
+    bipeds: ScenarioPaletteItem[];
+    weapons: ScenarioPaletteItem[];
+    equipment: ScenarioPaletteItem[];
   };
 }
 
@@ -85,6 +104,94 @@ function resolveObjectModelTagId(
 }
 
 /**
+ * Resolves the 3D model tag ID referenced by an item collection tag (`itmc`),
+ * which is used for multiplayer weapons, powerups, and equipment.
+ */
+function resolveItemCollectionModelTagId(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  itmcTagId: number,
+): number {
+  if (itmcTagId === 0xffffffff) return 0xffffffff;
+  const entry = tagIndex.entries[itmcTagId & 0xffff];
+  if (!entry || entry.isExternal) return 0xffffffff;
+
+  try {
+    const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const itmcStruct = decodeStruct(buffer, offset, 'ItemCollection');
+    const perms = itmcStruct.get('permutations');
+    if (perms && perms.kind === 'reflexive' && perms.value.count > 0) {
+      const permOffset = resolvePointer(perms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      const permStruct = decodeStruct(buffer, permOffset, 'ItemCollectionPermutation');
+      const itemDep = permStruct.get('item');
+      if (itemDep && itemDep.kind === 'dependency' && itemDep.value.tagId !== 0xffffffff) {
+        return resolveObjectModelTagId(buffer, header, tagIndex, itemDep.value.tagId);
+      }
+    }
+  } catch {
+    // If decoding fails, return 0xFFFFFFFF gracefully
+  }
+  return 0xffffffff;
+}
+
+/**
+ * Determines whether an item collection tag (`itmc`) spawns a weapon or equipment/powerup/grenade.
+ */
+export function getItemCollectionCategory(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  itmcTagId: number,
+): 'weapon' | 'equipment' {
+  if (itmcTagId === 0xffffffff) return 'equipment';
+  const entry = tagIndex.entries[itmcTagId & 0xffff];
+  if (!entry || entry.isExternal) return 'equipment';
+  try {
+    const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const itmcStruct = decodeStruct(buffer, offset, 'ItemCollection');
+    const perms = itmcStruct.get('permutations');
+    if (perms && perms.kind === 'reflexive' && perms.value.count > 0) {
+      const permOffset = resolvePointer(perms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      const permStruct = decodeStruct(buffer, permOffset, 'ItemCollectionPermutation');
+      const itemDep = permStruct.get('item');
+      if (itemDep && itemDep.kind === 'dependency' && itemDep.value.tagId !== 0xffffffff) {
+        const itemEntry = tagIndex.entries[itemDep.value.tagId & 0xffff];
+        if (itemEntry) {
+          if (itemEntry.primaryClassName === 'weapon') return 'weapon';
+          if (itemEntry.primaryClassName === 'equipment') return 'equipment';
+        }
+      }
+    }
+  } catch {
+    // fallback
+  }
+
+  const lower = entry.path.toLowerCase();
+  if (
+    lower.includes('grenade') ||
+    lower.includes('powerup') ||
+    lower.includes('health') ||
+    lower.includes('shield') ||
+    lower.includes('camo')
+  ) {
+    return 'equipment';
+  }
+  if (
+    lower.includes('weapon') ||
+    lower.includes('pistol') ||
+    lower.includes('rifle') ||
+    lower.includes('shotgun') ||
+    lower.includes('cannon') ||
+    lower.includes('thrower') ||
+    lower.includes('launcher')
+  ) {
+    return 'weapon';
+  }
+  return 'equipment';
+}
+
+/**
  * Parses a scenario palette reflexive into an array of resolved palette entries.
  */
 function parsePalette(
@@ -113,6 +220,110 @@ function parsePalette(
     }
   }
   return palette;
+}
+
+/**
+ * Appends a new element to any reflexive array in the map, resizing the buffer safely.
+ */
+export function appendReflexiveElement(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  reflexiveFieldOffset: number,
+  elementBytes: Buffer,
+): { buffer: Buffer; header: CacheFileHeader; newIndex: number } {
+  const refl = decodeReflexive(buffer, reflexiveFieldOffset);
+  const elementSize = elementBytes.length;
+  const newCount = refl.count + 1;
+
+  const oldArrayBytes =
+    refl.count > 0
+      ? buffer.subarray(
+          resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress),
+          resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress) + refl.count * elementSize,
+        )
+      : Buffer.alloc(0);
+  const newArrayBytes = Buffer.concat([oldArrayBytes, elementBytes]);
+
+  const alignedPad = (4 - (buffer.length % 4)) % 4;
+  const padBuffer = alignedPad > 0 ? Buffer.alloc(alignedPad, 0) : Buffer.alloc(0);
+
+  const newArrayFileOffset = buffer.length + padBuffer.length;
+  const newArrayVirtualAddress = tagIndex.baseMemoryAddress + (newArrayFileOffset - header.tagDataOffset);
+
+  const newBuffer = Buffer.concat([buffer, padBuffer, newArrayBytes]);
+  const newHeader: CacheFileHeader = {
+    ...header,
+    tagDataSize: newBuffer.length - header.tagDataOffset,
+    decompressedFileSize: newBuffer.length,
+  };
+  newBuffer.writeUInt32LE(newBuffer.length, 0x08);
+  newBuffer.writeUInt32LE(newHeader.tagDataSize, 0x14);
+
+  encodeReflexive(newBuffer, reflexiveFieldOffset, {
+    count: newCount,
+    pointerLow: newArrayVirtualAddress,
+    pointerHigh: 0,
+  });
+
+  return {
+    buffer: newBuffer,
+    header: newHeader,
+    newIndex: refl.count,
+  };
+}
+
+/**
+ * Ensures that a tag is present in a scenario palette reflexive, appending a 48-byte palette entry if missing.
+ */
+export function ensurePaletteEntry(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  paletteFieldName: 'vehicle palette' | 'scenery palette' | 'biped palette' | 'weapon palette' | 'equipment palette',
+  paletteStructName: string,
+  tagId: number,
+  classFourCC: number,
+): { buffer: Buffer; header: CacheFileHeader; paletteIndex: number } {
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (0x${tagIndex.scenarioTagId.toString(16)}) not found.`);
+  }
+  const scenarioOffset = resolveTagDataPointer(
+    scenarioEntry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress,
+  );
+  const scnrDef = resolveStruct('Scenario');
+  const field = scnrDef.fields.find((f) => f.name === paletteFieldName);
+  if (!field) {
+    throw new Error(`Palette field '${paletteFieldName}' not found in Scenario struct.`);
+  }
+
+  const reflOffset = scenarioOffset + field.offset;
+  const refl = decodeReflexive(buffer, reflOffset);
+  const structSize = resolveStruct(paletteStructName).totalSize; // 48
+
+  if (refl.count > 0) {
+    const baseOffset = resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < refl.count; i++) {
+      const decoded = decodeStruct(buffer, baseOffset + i * structSize, paletteStructName);
+      const nameDep = decoded.get('name');
+      if (nameDep && nameDep.kind === 'dependency' && nameDep.value.tagId === tagId) {
+        return { buffer, header, paletteIndex: i };
+      }
+    }
+  }
+
+  // Not in palette yet -> append new 48-byte palette entry
+  const entryBytes = Buffer.alloc(structSize, 0);
+  entryBytes.writeUInt32LE(classFourCC, 0);
+  entryBytes.writeUInt32LE(0, 4);
+  entryBytes.writeUInt32LE(0, 8);
+  entryBytes.writeUInt32LE(tagId, 12);
+
+  const res = appendReflexiveElement(buffer, header, tagIndex, reflOffset, entryBytes);
+  return { buffer: res.buffer, header: res.header, paletteIndex: res.newIndex };
 }
 
 /**
@@ -165,6 +376,10 @@ export function extractScenarioPlacements(
       const rot = (item.get('rotation')?.value as [number, number, number]) || [0, 0, 0];
       const pal = vehiclePal[typeIdx] || { tagId: 0xffffffff, path: 'Vehicle', modelTagId: 0xffffffff };
 
+      const mpSpawnFlags = buffer.readUInt16LE(vOffset + i * vSize + 90);
+      const notPlacedVal = buffer.readUInt16LE(vOffset + i * vSize + 4);
+      const isForceSpawned = (mpSpawnFlags & 0x0f0f) !== 0 && (notPlacedVal & 1) === 0;
+
       placements.push({
         id: `vehicle-${i}`,
         kind: 'vehicle',
@@ -175,6 +390,8 @@ export function extractScenarioPlacements(
         modelTagId: pal.modelTagId,
         position: pos,
         rotation: rot,
+        multiplayerSpawnFlags: mpSpawnFlags,
+        forceSpawn: isForceSpawned,
       });
       counts.vehicles++;
     }
@@ -285,7 +502,137 @@ export function extractScenarioPlacements(
     }
   }
 
-  // 5. Netgame Equipment (Multiplayer weapon / powerup spawn sites)
+  // Build Comprehensive Palettes (Scenario palette items + injected / map tags)
+  // Vehicle palette
+  const fullVehiclePal: ScenarioPaletteItem[] = vehiclePal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split('\\').pop() || p.path || `Vehicle ${i}`,
+  }));
+  const vehicleTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === 'vehicle' || e.primaryClassFourCC === 0x76656869) && !e.isExternal,
+  );
+  for (const ve of vehicleTagEntries) {
+    if (!fullVehiclePal.some((p) => p.tagId === ve.tagId)) {
+      fullVehiclePal.push({
+        paletteIndex: fullVehiclePal.length,
+        tagId: ve.tagId,
+        path: ve.path,
+        name: ve.path.split('\\').pop() || ve.path,
+      });
+    }
+  }
+
+  // Scenery palette
+  const fullSceneryPal: ScenarioPaletteItem[] = sceneryPal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split('\\').pop() || p.path || `Scenery ${i}`,
+  }));
+  const sceneryTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === 'scenery' || e.primaryClassFourCC === 0x7363656e) && !e.isExternal,
+  );
+  for (const se of sceneryTagEntries) {
+    if (!fullSceneryPal.some((p) => p.tagId === se.tagId)) {
+      fullSceneryPal.push({
+        paletteIndex: fullSceneryPal.length,
+        tagId: se.tagId,
+        path: se.path,
+        name: se.path.split('\\').pop() || se.path,
+      });
+    }
+  }
+
+  // Biped palette
+  const fullBipedPal: ScenarioPaletteItem[] = bipedPal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split('\\').pop() || p.path || `Biped ${i}`,
+  }));
+  const bipedTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === 'biped' || e.primaryClassFourCC === 0x62697064) && !e.isExternal,
+  );
+  for (const be of bipedTagEntries) {
+    if (!fullBipedPal.some((p) => p.tagId === be.tagId)) {
+      fullBipedPal.push({
+        paletteIndex: fullBipedPal.length,
+        tagId: be.tagId,
+        path: be.path,
+        name: be.path.split('\\').pop() || be.path,
+      });
+    }
+  }
+
+  // Weapon and Equipment palettes
+  const itmcEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === 'item_collection' || e.primaryClassFourCC === 0x69746d63) && !e.isExternal,
+  );
+
+  const fullWeaponPal: ScenarioPaletteItem[] = weaponPal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split('\\').pop() || p.path || `Weapon ${i}`,
+  }));
+  const fullEquipmentPal: ScenarioPaletteItem[] = [];
+
+  for (const ie of itmcEntries) {
+    const cat = getItemCollectionCategory(buffer, header, tagIndex, ie.tagId);
+    if (cat === 'weapon') {
+      if (!fullWeaponPal.some((p) => p.tagId === ie.tagId)) {
+        fullWeaponPal.push({
+          paletteIndex: fullWeaponPal.length,
+          tagId: ie.tagId,
+          path: ie.path,
+          name: ie.path.split('\\').pop() || ie.path,
+        });
+      }
+    } else {
+      if (!fullEquipmentPal.some((p) => p.tagId === ie.tagId)) {
+        fullEquipmentPal.push({
+          paletteIndex: fullEquipmentPal.length,
+          tagId: ie.tagId,
+          path: ie.path,
+          name: ie.path.split('\\').pop() || ie.path,
+        });
+      }
+    }
+  }
+
+  // Also include standalone weapon tags in map
+  const weaponTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === 'weapon' || e.primaryClassFourCC === 0x77656170) && !e.isExternal,
+  );
+  for (const we of weaponTagEntries) {
+    if (!fullWeaponPal.some((p) => p.tagId === we.tagId || p.path === we.path)) {
+      fullWeaponPal.push({
+        paletteIndex: fullWeaponPal.length,
+        tagId: we.tagId,
+        path: we.path,
+        name: we.path.split('\\').pop() || we.path,
+      });
+    }
+  }
+
+  // Also include standalone equipment tags in map
+  const equipmentTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === 'equipment' || e.primaryClassFourCC === 0x65716970) && !e.isExternal,
+  );
+  for (const ee of equipmentTagEntries) {
+    if (!fullEquipmentPal.some((p) => p.tagId === ee.tagId || p.path === ee.path)) {
+      fullEquipmentPal.push({
+        paletteIndex: fullEquipmentPal.length,
+        tagId: ee.tagId,
+        path: ee.path,
+        name: ee.path.split('\\').pop() || ee.path,
+      });
+    }
+  }
+
+  // 5. Netgame Equipment (Categorized as weapon or equipment)
   const netgameEqRef = scnr.get('netgame equipment')?.value as { count: number; pointerLow: number } | undefined;
   if (netgameEqRef && netgameEqRef.count > 0) {
     const eqSize = resolveStruct('ScenarioNetgameEquipment').totalSize;
@@ -297,19 +644,33 @@ export function extractScenarioPlacements(
       const itemCollDep = item.get('item collection');
       const itmcTagId = itemCollDep && itemCollDep.kind === 'dependency' ? itemCollDep.value.tagId : 0xffffffff;
       const itmcEntry = itmcTagId !== 0xffffffff ? tagIndex.entries[itmcTagId & 0xffff] : undefined;
+      const modelTagId = resolveItemCollectionModelTagId(buffer, header, tagIndex, itmcTagId);
+
+      const isWeapon = itmcTagId !== 0xffffffff && getItemCollectionCategory(buffer, header, tagIndex, itmcTagId) === 'weapon';
+      const kind: ScenarioObjectKind = isWeapon ? 'weapon' : 'equipment';
+      const targetPal = isWeapon ? fullWeaponPal : fullEquipmentPal;
+      const palIdx = targetPal.findIndex((p) => p.tagId === itmcTagId);
+
+      const type0 = buffer.readInt16LE(eqOffset + i * eqSize + 4);
+      const isEqForceSpawned = type0 === 12; // 12 = 'all games'
 
       placements.push({
         id: `equipment-${i}`,
-        kind: 'equipment',
-        paletteIndex: i,
+        kind,
+        paletteIndex: palIdx >= 0 ? palIdx : 0,
         nameIndex: -1,
         objectTagId: itmcTagId,
         objectPath: itmcEntry ? itmcEntry.path : 'Netgame Equipment',
-        modelTagId: 0xffffffff,
+        modelTagId,
         position: pos,
         rotation: [facing, 0, 0],
+        forceSpawn: isEqForceSpawned,
       });
-      counts.equipment++;
+      if (isWeapon) {
+        counts.weapons++;
+      } else {
+        counts.equipment++;
+      }
     }
   }
 
@@ -346,5 +707,543 @@ export function extractScenarioPlacements(
     totalObjects: placements.length,
     objects: placements,
     counts,
+    palettes: {
+      vehicles: fullVehiclePal,
+      scenery: fullSceneryPal,
+      bipeds: fullBipedPal,
+      weapons: fullWeaponPal,
+      equipment: fullEquipmentPal,
+    },
   };
+}
+
+/**
+ * Resolves reflexive offset, size, and count for a scenario object category.
+ */
+function getScenarioReflexiveInfo(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  kind: ScenarioObjectKind,
+): {
+  scenarioOffset: number;
+  reflexiveFieldOffset: number;
+  structName: string;
+  structSize: number;
+  count: number;
+  baseOffset: number;
+  pointerLow: number;
+} {
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (0x${tagIndex.scenarioTagId.toString(16)}) not found.`);
+  }
+  const scenarioOffset = resolveTagDataPointer(
+    scenarioEntry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress,
+  );
+
+  const reflexiveNameMap: Record<ScenarioObjectKind, { fieldName: string; structName: string }> = {
+    vehicle: { fieldName: 'vehicles', structName: 'ScenarioVehicle' },
+    scenery: { fieldName: 'scenery', structName: 'ScenarioScenery' },
+    biped: { fieldName: 'bipeds', structName: 'ScenarioBiped' },
+    weapon: { fieldName: 'weapons', structName: 'ScenarioWeapon' },
+    equipment: { fieldName: 'netgame equipment', structName: 'ScenarioNetgameEquipment' },
+    spawn: { fieldName: 'player starting locations', structName: 'ScenarioPlayerStartingLocation' },
+  };
+
+  const { fieldName, structName } = reflexiveNameMap[kind];
+  const scnrDef = resolveStruct('Scenario');
+  const field = scnrDef.fields.find((f) => f.name === fieldName);
+  if (!field) {
+    throw new Error(`Field '${fieldName}' not found in Scenario struct.`);
+  }
+
+  const reflexiveFieldOffset = scenarioOffset + field.offset;
+  const refl = decodeReflexive(buffer, reflexiveFieldOffset);
+  const structSize = resolveStruct(structName).totalSize;
+  const baseOffset = refl.count > 0 ? resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress) : 0;
+
+  return {
+    scenarioOffset,
+    reflexiveFieldOffset,
+    structName,
+    structSize,
+    count: refl.count,
+    baseOffset,
+    pointerLow: refl.pointerLow,
+  };
+}
+
+/**
+ * Updates an existing scenario object's position, rotation, paletteIndex, or teamIndex in-place.
+ */
+export function updateScenarioPlacement(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  placementId: string,
+  updates: {
+    position?: [number, number, number];
+    rotation?: [number, number, number];
+    paletteIndex?: number;
+    teamIndex?: number;
+    multiplayerSpawnFlags?: number;
+    forceSpawn?: boolean;
+  },
+): ScenarioPlacementsSummary {
+  const [kindStr, idxStr] = placementId.split('-');
+  const index = parseInt(idxStr, 10);
+
+  if (kindStr === 'spawn') {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, 'spawn');
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind spawn.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 0);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 4);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 8);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 12);
+    }
+    if (updates.teamIndex !== undefined) {
+      buffer.writeInt16LE(updates.teamIndex, itemOffset + 16);
+    }
+  } else if (kindStr === 'equipment') {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, 'equipment');
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind equipment.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 64);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 68);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 72);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 76);
+    }
+    if (updates.forceSpawn !== undefined && updates.forceSpawn) {
+      buffer.writeInt16LE(12, itemOffset + 4); // 12 = all games
+    }
+    if (updates.paletteIndex !== undefined) {
+      const summary = extractScenarioPlacements(buffer, header, tagIndex);
+      const curPlacement = summary.objects.find((o) => o.id === placementId);
+      const isWeapon = curPlacement?.kind === 'weapon';
+      const targetPal = isWeapon ? summary.palettes.weapons : summary.palettes.equipment;
+      const chosen = targetPal[updates.paletteIndex];
+      if (chosen) {
+        buffer.write('itmc', itemOffset + 80, 4, 'ascii');
+        buffer.writeUInt32LE(0, itemOffset + 84);
+        buffer.writeUInt32LE(0, itemOffset + 88);
+        buffer.writeUInt32LE(chosen.tagId, itemOffset + 92);
+      }
+    }
+  } else {
+    const kind = kindStr as ScenarioObjectKind;
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, kind);
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind ${kind}.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 8);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 12);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 16);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 20);
+      buffer.writeFloatLE(updates.rotation[1], itemOffset + 24);
+      buffer.writeFloatLE(updates.rotation[2], itemOffset + 28);
+    }
+    if (updates.paletteIndex !== undefined) {
+      buffer.writeInt16LE(updates.paletteIndex, itemOffset + 0);
+    }
+    if (kind === 'vehicle') {
+      if (updates.forceSpawn !== undefined) {
+        if (updates.forceSpawn) {
+          buffer.writeUInt16LE(0, itemOffset + 4); // clear not placed
+          buffer.writeFloatLE(1.0, itemOffset + 72); // full vitality
+          buffer.writeUInt16LE(0x0f0f, itemOffset + 90); // all gametypes default+allowed
+        } else {
+          buffer.writeUInt16LE(0, itemOffset + 90);
+        }
+      }
+      if (updates.multiplayerSpawnFlags !== undefined) {
+        buffer.writeUInt16LE(updates.multiplayerSpawnFlags, itemOffset + 90);
+      }
+    }
+  }
+
+  return extractScenarioPlacements(buffer, header, tagIndex);
+}
+
+/**
+ * Duplicates an existing scenario object, cloning its struct and appending it to the reflexive array.
+ */
+export function duplicateScenarioPlacement(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  placementId: string,
+  offsetDelta: [number, number, number] = [1.5, 1.5, 0],
+): {
+  buffer: Buffer;
+  header: CacheFileHeader;
+  summary: ScenarioPlacementsSummary;
+  newPlacement: ScenarioObjectPlacement;
+} {
+  const [kindStr, idxStr] = placementId.split('-');
+  const kind = kindStr as ScenarioObjectKind;
+  const index = parseInt(idxStr, 10);
+
+  const info = getScenarioReflexiveInfo(buffer, header, tagIndex, kind);
+  if (index < 0 || index >= info.count) {
+    throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind ${kind}.`);
+  }
+
+  const sourceItemOffset = info.baseOffset + index * info.structSize;
+  const sourceBytes = buffer.subarray(sourceItemOffset, sourceItemOffset + info.structSize);
+  const newItemBytes = Buffer.from(sourceBytes);
+
+  // Offset position slightly so it doesn't z-fight with original
+  if (kind === 'spawn') {
+    const curX = newItemBytes.readFloatLE(0);
+    const curY = newItemBytes.readFloatLE(4);
+    const curZ = newItemBytes.readFloatLE(8);
+    newItemBytes.writeFloatLE(curX + offsetDelta[0], 0);
+    newItemBytes.writeFloatLE(curY + offsetDelta[1], 4);
+    newItemBytes.writeFloatLE(curZ + offsetDelta[2], 8);
+  } else if (kind === 'equipment') {
+    const curX = newItemBytes.readFloatLE(64);
+    const curY = newItemBytes.readFloatLE(68);
+    const curZ = newItemBytes.readFloatLE(72);
+    newItemBytes.writeFloatLE(curX + offsetDelta[0], 64);
+    newItemBytes.writeFloatLE(curY + offsetDelta[1], 68);
+    newItemBytes.writeFloatLE(curZ + offsetDelta[2], 72);
+  } else {
+    const curX = newItemBytes.readFloatLE(8);
+    const curY = newItemBytes.readFloatLE(12);
+    const curZ = newItemBytes.readFloatLE(16);
+    newItemBytes.writeFloatLE(curX + offsetDelta[0], 8);
+    newItemBytes.writeFloatLE(curY + offsetDelta[1], 12);
+    newItemBytes.writeFloatLE(curZ + offsetDelta[2], 16);
+    newItemBytes.writeInt16LE(-1, 2); // Unnamed
+  }
+
+  const appended = appendReflexiveElement(buffer, header, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+  const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+  const newId = `${kind}-${info.count}`;
+  const newPlacement = summary.objects.find((o) => o.id === newId)!;
+
+  return {
+    buffer: appended.buffer,
+    header: appended.header,
+    summary,
+    newPlacement,
+  };
+}
+
+/**
+ * Adds a new scenario object placement of the specified kind at the given coordinates.
+ */
+export function addScenarioPlacement(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  kind: ScenarioObjectKind,
+  paletteIndex: number,
+  position: [number, number, number],
+  rotation: [number, number, number] = [0, 0, 0],
+  teamIndex?: number,
+): {
+  buffer: Buffer;
+  header: CacheFileHeader;
+  summary: ScenarioPlacementsSummary;
+  newPlacement: ScenarioObjectPlacement;
+} {
+  let curBuf = buffer;
+  let curHdr = header;
+
+  const summaryBefore = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+
+  if (kind === 'spawn') {
+    const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'spawn');
+    const newItemBytes = Buffer.alloc(info.structSize, 0);
+    newItemBytes.writeFloatLE(position[0], 0);
+    newItemBytes.writeFloatLE(position[1], 4);
+    newItemBytes.writeFloatLE(position[2], 8);
+    newItemBytes.writeFloatLE(rotation[0], 12);
+    newItemBytes.writeInt16LE(teamIndex ?? 0, 16);
+
+    const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+    const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+    const newId = `spawn-${info.count}`;
+    const newPlacement = summary.objects.find((o) => o.id === newId)!;
+    return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+  }
+
+  if (kind === 'vehicle') {
+    const chosen = summaryBefore.palettes.vehicles[paletteIndex] || summaryBefore.palettes.vehicles[0];
+    if (!chosen) throw new Error('No vehicle available in map palettes.');
+
+    const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, 'vehicle palette', 'ScenarioVehiclePalette', chosen.tagId, 0x76656869);
+    curBuf = palRes.buffer;
+    curHdr = palRes.header;
+
+    const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'vehicle');
+    const newItemBytes = Buffer.alloc(info.structSize, 0);
+    newItemBytes.writeInt16LE(palRes.paletteIndex, 0);
+    newItemBytes.writeInt16LE(-1, 2);
+    newItemBytes.writeUInt16LE(0, 4); // not placed = 0 (placed automatically)
+    newItemBytes.writeFloatLE(position[0], 8);
+    newItemBytes.writeFloatLE(position[1], 12);
+    newItemBytes.writeFloatLE(position[2], 16);
+    newItemBytes.writeFloatLE(rotation[0], 20);
+    newItemBytes.writeFloatLE(rotation[1], 24);
+    newItemBytes.writeFloatLE(rotation[2], 28);
+    newItemBytes.writeFloatLE(1.0, 72); // body vitality = 1.0 (full health)
+    newItemBytes.writeUInt16LE(0x0f0f, 90); // default & allowed for all multiplayer gametypes
+
+    const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+    const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+    const newId = `vehicle-${info.count}`;
+    const newPlacement = summary.objects.find((o) => o.id === newId)!;
+    return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+  }
+
+  if (kind === 'scenery') {
+    const chosen = summaryBefore.palettes.scenery[paletteIndex] || summaryBefore.palettes.scenery[0];
+    if (!chosen) throw new Error('No scenery available in map palettes.');
+
+    const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, 'scenery palette', 'ScenarioSceneryPalette', chosen.tagId, 0x7363656e);
+    curBuf = palRes.buffer;
+    curHdr = palRes.header;
+
+    const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'scenery');
+    const newItemBytes = Buffer.alloc(info.structSize, 0);
+    newItemBytes.writeInt16LE(palRes.paletteIndex, 0);
+    newItemBytes.writeInt16LE(-1, 2);
+    newItemBytes.writeFloatLE(position[0], 8);
+    newItemBytes.writeFloatLE(position[1], 12);
+    newItemBytes.writeFloatLE(position[2], 16);
+    newItemBytes.writeFloatLE(rotation[0], 20);
+    newItemBytes.writeFloatLE(rotation[1], 24);
+    newItemBytes.writeFloatLE(rotation[2], 28);
+
+    const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+    const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+    const newId = `scenery-${info.count}`;
+    const newPlacement = summary.objects.find((o) => o.id === newId)!;
+    return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+  }
+
+  if (kind === 'biped') {
+    const chosen = summaryBefore.palettes.bipeds[paletteIndex] || summaryBefore.palettes.bipeds[0];
+    if (!chosen) throw new Error('No biped available in map palettes.');
+
+    const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, 'biped palette', 'ScenarioBipedPalette', chosen.tagId, 0x62697064);
+    curBuf = palRes.buffer;
+    curHdr = palRes.header;
+
+    const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'biped');
+    const newItemBytes = Buffer.alloc(info.structSize, 0);
+    newItemBytes.writeInt16LE(palRes.paletteIndex, 0);
+    newItemBytes.writeInt16LE(-1, 2);
+    newItemBytes.writeFloatLE(position[0], 8);
+    newItemBytes.writeFloatLE(position[1], 12);
+    newItemBytes.writeFloatLE(position[2], 16);
+    newItemBytes.writeFloatLE(rotation[0], 20);
+    newItemBytes.writeFloatLE(rotation[1], 24);
+    newItemBytes.writeFloatLE(rotation[2], 28);
+
+    const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+    const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+    const newId = `biped-${info.count}`;
+    const newPlacement = summary.objects.find((o) => o.id === newId)!;
+    return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+  }
+
+  // weapon or equipment
+  const isWeaponKind = kind === 'weapon';
+  const targetPal = isWeaponKind ? summaryBefore.palettes.weapons : summaryBefore.palettes.equipment;
+  const chosen = targetPal[paletteIndex] || targetPal[0];
+  if (!chosen) throw new Error(`No ${kind} available in map palettes.`);
+
+  let itmcTagId = chosen.tagId;
+  const entry = tagIndex.entries[chosen.tagId & 0xffff];
+  if (entry && entry.primaryClassName !== 'item_collection') {
+    const matchingItmc = tagIndex.entries.find((e) => {
+      if (e.primaryClassName !== 'item_collection' || e.isExternal) return false;
+      const mId = resolveItemCollectionModelTagId(curBuf, curHdr, tagIndex, e.tagId);
+      return mId !== 0xffffffff && mId === chosen.tagId;
+    });
+    if (matchingItmc) {
+      itmcTagId = matchingItmc.tagId;
+    }
+  }
+
+  const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'equipment');
+  const newItemBytes = Buffer.alloc(info.structSize, 0);
+  newItemBytes.writeUInt32LE(1, 0); // flags: 1 = levitate
+  newItemBytes.writeInt16LE(12, 4); // type 0 = 12 (all games)
+  newItemBytes.writeUInt32LE(0xffffffff, 16);
+  newItemBytes.writeFloatLE(position[0], 64);
+  newItemBytes.writeFloatLE(position[1], 68);
+  newItemBytes.writeFloatLE(position[2], 72);
+  newItemBytes.writeFloatLE(rotation[0], 76);
+  newItemBytes.write('itmc', 80, 4, 'ascii');
+  newItemBytes.writeUInt32LE(itmcTagId, 92);
+
+  const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+  const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+  const newId = `equipment-${info.count}`;
+  const newPlacement = summary.objects.find((o) => o.id === newId)!;
+  return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+}
+
+/**
+ * Deletes a scenario object placement by shifting subsequent elements down and decrementing count.
+ */
+export function deleteScenarioPlacement(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  placementId: string,
+): ScenarioPlacementsSummary {
+  const [kindStr, idxStr] = placementId.split('-');
+  const kind = kindStr as ScenarioObjectKind;
+  const index = parseInt(idxStr, 10);
+
+  const info = getScenarioReflexiveInfo(buffer, header, tagIndex, kind);
+  if (index < 0 || index >= info.count) {
+    throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind ${kind}.`);
+  }
+
+  // Shift elements after index down by 1 structSize
+  const targetOffset = info.baseOffset + index * info.structSize;
+  const afterOffset = info.baseOffset + (index + 1) * info.structSize;
+  const remainingCount = info.count - 1 - index;
+
+  if (remainingCount > 0) {
+    buffer.copy(buffer, targetOffset, afterOffset, afterOffset + remainingCount * info.structSize);
+  }
+
+  // Zero out the vacated last element
+  const lastElementOffset = info.baseOffset + (info.count - 1) * info.structSize;
+  buffer.fill(0, lastElementOffset, lastElementOffset + info.structSize);
+
+  // Update count in reflexive field
+  encodeReflexive(buffer, info.reflexiveFieldOffset, {
+    count: info.count - 1,
+    pointerLow: info.pointerLow,
+    pointerHigh: 0,
+  });
+
+  return extractScenarioPlacements(buffer, header, tagIndex);
+}
+
+/**
+ * Swaps an existing scenario placement with another object (same kind or different kind).
+ * Preserves the object's position and rotation, updating or recreating the placement in memory.
+ */
+export function swapScenarioPlacement(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  placementId: string,
+  newKind: ScenarioObjectKind,
+  newPaletteIndex: number,
+): {
+  buffer: Buffer;
+  header: CacheFileHeader;
+  summary: ScenarioPlacementsSummary;
+  newPlacement: ScenarioObjectPlacement;
+} {
+  const summaryBefore = extractScenarioPlacements(buffer, header, tagIndex);
+  const target = summaryBefore.objects.find((o) => o.id === placementId);
+  if (!target) {
+    throw new Error(`Scenario placement "${placementId}" not found.`);
+  }
+
+  const oldKind = target.kind;
+  const position: [number, number, number] = [...target.position];
+  const rotation: [number, number, number] = [...target.rotation];
+  const teamIndex = target.teamIndex;
+
+  // If swapping within the same kind (and not a spawn):
+  if (oldKind === newKind && newKind !== 'spawn') {
+    let curBuf = buffer;
+    let curHdr = header;
+
+    if (newKind === 'vehicle') {
+      const chosen = summaryBefore.palettes.vehicles[newPaletteIndex] || summaryBefore.palettes.vehicles[0];
+      if (!chosen) throw new Error('No vehicle available in map palettes.');
+      const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, 'vehicle palette', 'ScenarioVehiclePalette', chosen.tagId, 0x76656869);
+      curBuf = palRes.buffer;
+      curHdr = palRes.header;
+      const [_, idxStr] = placementId.split('-');
+      const index = parseInt(idxStr, 10);
+      const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'vehicle');
+      const itemOffset = info.baseOffset + index * info.structSize;
+      curBuf.writeInt16LE(palRes.paletteIndex, itemOffset + 0);
+      curBuf.writeUInt16LE(0, itemOffset + 4);
+      curBuf.writeFloatLE(1.0, itemOffset + 72);
+      curBuf.writeUInt16LE(0x0f0f, itemOffset + 90);
+
+      const summary = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+      const newPlacement = summary.objects.find((o) => o.id === placementId)!;
+      return { buffer: curBuf, header: curHdr, summary, newPlacement };
+    } else if (newKind === 'scenery') {
+      const chosen = summaryBefore.palettes.scenery[newPaletteIndex] || summaryBefore.palettes.scenery[0];
+      if (!chosen) throw new Error('No scenery available in map palettes.');
+      const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, 'scenery palette', 'ScenarioSceneryPalette', chosen.tagId, 0x7363656e);
+      curBuf = palRes.buffer;
+      curHdr = palRes.header;
+      const [_, idxStr] = placementId.split('-');
+      const index = parseInt(idxStr, 10);
+      const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'scenery');
+      const itemOffset = info.baseOffset + index * info.structSize;
+      curBuf.writeInt16LE(palRes.paletteIndex, itemOffset + 0);
+
+      const summary = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+      const newPlacement = summary.objects.find((o) => o.id === placementId)!;
+      return { buffer: curBuf, header: curHdr, summary, newPlacement };
+    } else if (newKind === 'biped') {
+      const chosen = summaryBefore.palettes.bipeds[newPaletteIndex] || summaryBefore.palettes.bipeds[0];
+      if (!chosen) throw new Error('No biped available in map palettes.');
+      const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, 'biped palette', 'ScenarioBipedPalette', chosen.tagId, 0x62697064);
+      curBuf = palRes.buffer;
+      curHdr = palRes.header;
+      const [_, idxStr] = placementId.split('-');
+      const index = parseInt(idxStr, 10);
+      const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'biped');
+      const itemOffset = info.baseOffset + index * info.structSize;
+      curBuf.writeInt16LE(palRes.paletteIndex, itemOffset + 0);
+
+      const summary = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+      const newPlacement = summary.objects.find((o) => o.id === placementId)!;
+      return { buffer: curBuf, header: curHdr, summary, newPlacement };
+    }
+  }
+
+  // Cross-category swap or spawn/equipment swap:
+  // 1. Delete original placement
+  deleteScenarioPlacement(buffer, header, tagIndex, placementId);
+
+  // 2. Add replacement placement with preserved position & rotation
+  return addScenarioPlacement(
+    buffer,
+    header,
+    tagIndex,
+    newKind,
+    newPaletteIndex,
+    position,
+    rotation,
+    teamIndex,
+  );
 }

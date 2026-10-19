@@ -5,7 +5,7 @@ import {
   CHIMERA_COMPRESSED_ENGINE_MASK,
 } from '../constants/cache-file';
 import { hasValidMagic, isChimeraCompressedCustomEdition, parseCacheFileHeader } from './header';
-import { CorruptMapError, NotCompressedMapError } from './errors';
+import { CorruptMapError, NotCompressedMapError, UnsupportedMapVersionError } from './errors';
 
 /**
  * Milestone 2: decompress/recompress.
@@ -35,7 +35,10 @@ const CUSTOM_EDITION_COMPRESSED_ENGINE = (CacheFileEngine.CUSTOM_EDITION | CHIME
 /** Compresses a decompressed Custom Edition map using zstd (level 19, matching Chimera's chimera-compress tool). */
 export async function compressCustomEditionMap(buffer: Buffer, level = 19): Promise<Buffer> {
   // Validates magic + engine === CUSTOM_EDITION (609); throws a friendly error otherwise.
-  parseCacheFileHeader(buffer);
+  const header = parseCacheFileHeader(buffer);
+  if (header.engine !== CacheFileEngine.CUSTOM_EDITION) {
+    throw new UnsupportedMapVersionError(header.engine);
+  }
 
   const body = buffer.subarray(CACHE_FILE_HEADER_SIZE);
   const compressedBody = await zstdCompress(Buffer.from(body), level);

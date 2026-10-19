@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type { TagDependencySlot, TagEntrySummary } from '../../electron/shared-types';
+import type { ReferencingTagSummary, TagDependencySlot, TagEntrySummary } from '../../electron/shared-types';
 import { lookupTagClassByName, NULL_TAG_ID } from '../../../core/src/constants/tag-classes';
+
+export type PropertiesPaletteTab = 'overview' | 'swapper' | 'references';
 
 interface Props {
   focusedTag: TagEntrySummary | null;
   allTags?: TagEntrySummary[];
+  onSelectTag?: (tagIndex: number) => void;
+  activeTab?: PropertiesPaletteTab;
+  onTabChange?: (tab: PropertiesPaletteTab) => void;
 }
 
-type Tab = 'overview' | 'swapper';
+type Tab = PropertiesPaletteTab;
 
 function Row(label: string, value: string) {
   return (
@@ -26,8 +31,8 @@ function getSlotClassCode(slot: TagDependencySlot): string {
   return info ? info.groupId.trim() : groupName;
 }
 
-export default function PropertiesPalette({ focusedTag, allTags = [] }: Props) {
-  const [tab, setTab] = useState<Tab>('overview');
+export default function PropertiesPalette({ focusedTag, allTags = [], onSelectTag, activeTab, onTabChange }: Props) {
+  const [tab, setTab] = useState<Tab>(activeTab ?? 'overview');
   const [slots, setSlots] = useState<TagDependencySlot[]>([]);
   const [isLoadingSlots, setIsLoadingSlots] = useState(false);
   const [slotsError, setSlotsError] = useState<string | null>(null);
@@ -37,6 +42,16 @@ export default function PropertiesPalette({ focusedTag, allTags = [] }: Props) {
   const [selectedTagId, setSelectedTagId] = useState<string>('null');
   const [isSwapping, setIsSwapping] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  // References state
+  const [references, setReferences] = useState<ReferencingTagSummary[]>([]);
+  const [isLoadingRefs, setIsLoadingRefs] = useState(false);
+  const [refsError, setRefsError] = useState<string | null>(null);
+  const [refSearch, setRefSearch] = useState('');
+
+  useEffect(() => {
+    if (activeTab) setTab(activeTab);
+  }, [activeTab]);
 
   const availableClasses = useMemo(() => {
     const set = new Set<string>();
@@ -110,6 +125,44 @@ export default function PropertiesPalette({ focusedTag, allTags = [] }: Props) {
       isCancelled = true;
     };
   }, [focusedTag]);
+
+  // Load referencing tags whenever focusedTag changes
+  useEffect(() => {
+    if (!focusedTag) {
+      setReferences([]);
+      setRefsError(null);
+      return;
+    }
+
+    let isCancelled = false;
+    setIsLoadingRefs(true);
+    setRefsError(null);
+
+    void window.opence.getReferencingTags(focusedTag.index).then((res) => {
+      if (isCancelled) return;
+      setIsLoadingRefs(false);
+      if (res.ok) {
+        setReferences(res.referencingTags);
+      } else {
+        setReferences([]);
+        setRefsError(res.message);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [focusedTag]);
+
+  const filteredReferences = useMemo(() => {
+    const q = refSearch.trim().toLowerCase();
+    if (!q) return references;
+    return references.filter((r) =>
+      r.sourcePath.toLowerCase().includes(q) ||
+      r.sourceGroup.toLowerCase().includes(q) ||
+      r.fieldPath.toLowerCase().includes(q),
+    );
+  }, [references, refSearch]);
 
   const filteredSlots = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -231,10 +284,10 @@ export default function PropertiesPalette({ focusedTag, allTags = [] }: Props) {
         </button>
         <button
           data-testid="tab-properties-swapper"
-          onClick={() => setTab('swapper')}
+          onClick={() => { setTab('swapper'); onTabChange?.('swapper'); }}
           style={{
             flex: 1,
-            padding: '7px 10px',
+            padding: '7px 8px',
             background: tab === 'swapper' ? 'var(--bg-panel)' : 'transparent',
             border: 'none',
             borderBottom: tab === 'swapper' ? '2px solid var(--accent-cyan)' : '2px solid transparent',
@@ -245,7 +298,25 @@ export default function PropertiesPalette({ focusedTag, allTags = [] }: Props) {
             cursor: 'pointer',
           }}
         >
-          Dependency Swapper {slots.length > 0 ? `(${slots.length})` : ''}
+          Swapper {slots.length > 0 ? `(${slots.length})` : ''}
+        </button>
+        <button
+          data-testid="tab-properties-references"
+          onClick={() => { setTab('references'); onTabChange?.('references'); }}
+          style={{
+            flex: 1,
+            padding: '7px 8px',
+            background: tab === 'references' ? 'var(--bg-panel)' : 'transparent',
+            border: 'none',
+            borderBottom: tab === 'references' ? '2px solid var(--accent-cyan)' : '2px solid transparent',
+            fontSize: 11,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            color: tab === 'references' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+            cursor: 'pointer',
+          }}
+        >
+          References {references.length > 0 ? `(${references.length})` : ''}
         </button>
       </div>
 
@@ -265,7 +336,7 @@ export default function PropertiesPalette({ focusedTag, allTags = [] }: Props) {
               </div>
             </div>
           </div>
-        ) : (
+        ) : tab === 'swapper' ? (
           <div data-testid="properties-palette-swapper" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
             {/* Search filter */}
             <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>
@@ -476,6 +547,120 @@ export default function PropertiesPalette({ focusedTag, allTags = [] }: Props) {
                 {isSwapping ? 'Swapping...' : 'Swap'}
               </button>
             </div>
+          </div>
+        ) : (
+          <div data-testid="properties-references-content" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, padding: 8 }}>
+            <div style={{ marginBottom: 8 }}>
+              <input
+                data-testid="references-search-input"
+                type="text"
+                placeholder="Search referencing tags..."
+                value={refSearch}
+                onChange={(e) => setRefSearch(e.target.value)}
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  background: 'var(--bg-input, #1e1e1e)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 3,
+                  color: 'var(--text-primary)',
+                  fontSize: 12,
+                  padding: '4px 8px',
+                  fontFamily: 'var(--mono-font)',
+                }}
+              />
+            </div>
+
+            {isLoadingRefs && (
+              <div data-testid="references-loading" style={{ padding: 12, color: 'var(--text-dim)', fontSize: 11.5, fontStyle: 'italic', textAlign: 'center' }}>
+                Scanning map for referencing tags...
+              </div>
+            )}
+
+            {refsError && (
+              <div data-testid="references-error" style={{ padding: 8, color: 'var(--error-text, #f87171)', fontSize: 11 }}>
+                {refsError}
+              </div>
+            )}
+
+            {!isLoadingRefs && !refsError && (
+              <>
+                <div style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: 6, paddingLeft: 2 }}>
+                  {filteredReferences.length === references.length
+                    ? `${references.length} tag(s) reference this tag`
+                    : `Showing ${filteredReferences.length} of ${references.length} references`}
+                </div>
+
+                {filteredReferences.length === 0 ? (
+                  <div data-testid="no-references-message" style={{ padding: 16, color: 'var(--text-dim)', fontSize: 12, fontStyle: 'italic', textAlign: 'center' }}>
+                    {references.length === 0 ? 'No tags in this map reference this tag.' : 'No references match your filter.'}
+                  </div>
+                ) : (
+                  <div data-testid="references-list" style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {filteredReferences.map((ref, idx) => (
+                      <div
+                        key={`${ref.sourceTagIndex}-${ref.fieldPath}-${idx}`}
+                        data-testid={`referencing-tag-item-${ref.sourceTagIndex}`}
+                        onClick={() => onSelectTag?.(ref.sourceTagIndex)}
+                        style={{
+                          padding: '6px 8px',
+                          background: 'var(--bg-input, #1e1e1e)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 3,
+                          cursor: onSelectTag ? 'pointer' : 'default',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 2,
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span
+                            style={{
+                              fontSize: 9.5,
+                              padding: '1px 4px',
+                              borderRadius: 2,
+                              background: 'rgba(56,189,248,0.15)',
+                              color: 'var(--accent-cyan, #38bdf8)',
+                              fontFamily: 'var(--mono-font)',
+                            }}
+                          >
+                            {ref.sourceGroup}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: 11.5,
+                              color: 'var(--text-primary)',
+                              fontFamily: 'var(--mono-font)',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              flex: 1,
+                            }}
+                            title={ref.sourcePath}
+                          >
+                            {ref.sourcePath}
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 10.5,
+                            color: 'var(--text-dim)',
+                            fontFamily: 'var(--mono-font)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            paddingLeft: 2,
+                          }}
+                          title={ref.fieldPath}
+                        >
+                          via {ref.fieldPath}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )
       ) : (

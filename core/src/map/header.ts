@@ -76,7 +76,11 @@ export function parseCacheFileHeader(buffer: Buffer): CacheFileHeader {
   }
 
   const engine = buffer.readUInt32LE(0x4);
-  if (engine !== CacheFileEngine.CUSTOM_EDITION) {
+  if (
+    engine !== CacheFileEngine.CUSTOM_EDITION &&
+    engine !== CacheFileEngine.RETAIL &&
+    engine !== CacheFileEngine.MCC_CEA
+  ) {
     throw new UnsupportedMapVersionError(engine);
   }
 

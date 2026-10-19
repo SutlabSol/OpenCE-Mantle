@@ -108,6 +108,18 @@ describe('PropertiesPalette (Dependency Swapper)', () => {
         newValue: 0.25,
         map: { filePath: 'test.map', modified: true } as any,
       } satisfies UpdateTagFieldResult),
+      getReferencingTags: vi.fn().mockResolvedValue({
+        ok: true,
+        referencingTags: [
+          {
+            sourceTagIndex: 12,
+            sourceTagId: 0xe174000c,
+            sourceGroup: 'vehi',
+            sourcePath: 'vehicles\\warthog\\mp_warthog',
+            fieldPath: 'weapons[0].weapon',
+          },
+        ],
+      }),
     } as any;
   });
 
@@ -187,6 +199,23 @@ describe('PropertiesPalette (Dependency Swapper)', () => {
         'vehicles\\warthog\\mp_warthog',
       );
     });
+  });
+
+  it('switches to References tab, displays referencing tags, and triggers onSelectTag when clicked', async () => {
+    const onSelectTag = vi.fn();
+    render(<PropertiesPalette focusedTag={SAMPLE_FOCUSED_TAG} allTags={SAMPLE_ALL_TAGS} onSelectTag={onSelectTag} />);
+
+    await userEvent.click(screen.getByTestId('tab-properties-references'));
+
+    expect(window.opence.getReferencingTags).toHaveBeenCalledWith(5);
+    await waitFor(() => {
+      expect(screen.getByTestId('referencing-tag-item-12')).toBeInTheDocument();
+      expect(screen.getByText('vehicles\\warthog\\mp_warthog')).toBeInTheDocument();
+      expect(screen.getByText('via weapons[0].weapon')).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId('referencing-tag-item-12'));
+    expect(onSelectTag).toHaveBeenCalledWith(12);
   });
 });
 

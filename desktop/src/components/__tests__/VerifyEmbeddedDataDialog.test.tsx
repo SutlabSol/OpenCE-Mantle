@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import VerifyEmbeddedDataDialog from '../VerifyEmbeddedDataDialog';
-import type { OpenceApi, VerifyEmbeddedDataResult } from '../../../electron/shared-types';
+import type { OpenceApi, VerifyEmbeddedDataResult, GetReferencingTagsResult } from '../../../electron/shared-types';
 
 function installMockOpence(verifyEmbeddedData: () => Promise<VerifyEmbeddedDataResult>) {
   const api: OpenceApi = {
@@ -33,10 +33,26 @@ function installMockOpence(verifyEmbeddedData: () => Promise<VerifyEmbeddedDataR
     updateTagField: vi.fn(),
     getDependencySlots: vi.fn(),
     setDependencySlot: vi.fn(),
+    getReferencingTags: vi.fn(async (): Promise<GetReferencingTagsResult> => ({ ok: true, referencingTags: [] })),
+    getUnicodeStrings: vi.fn(),
+    setUnicodeString: vi.fn(),
+    renameTag: vi.fn(),
+    duplicateTag: vi.fn(),
+    pickBspSourceMap: vi.fn(async () => ({ path: null })),
+    bspSwapPreflight: vi.fn(async () => ({ ok: false, sourceBsps: [] as any, targetBsps: [] as any, selectedSourceBsp: null, selectedTargetBsp: null, sizeDelta: 0, estimatedNewSize: 0, warnings: [] as any })),
+    performBspSwap: vi.fn(async () => ({ ok: false, buffer: Buffer.alloc(0), summary: { sourceBspName: '', targetBspName: '', oldSize: 0, newSize: 0, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 } })),
     getBspRenderMesh: vi.fn(),
     getBitmapTexture: vi.fn(),
     getScenarioObjects: vi.fn(),
     getModelGeometry: vi.fn(),
+    updateScenarioPlacement: vi.fn(),
+    duplicateScenarioPlacement: vi.fn(),
+    addScenarioPlacement: vi.fn(),
+    swapScenarioPlacement: vi.fn(),
+    deleteScenarioPlacement: vi.fn(),
+    identifyResourceMap: vi.fn(async () => ({ ok: false, filePath: '', fileSizeBytes: 0, entryCount: 0, tableOffset: 0, detectedVersion: 'unknown' as const, versionMatchConfidence: 'mismatch' as const, entries: [] })),
+    setResourceMapPath: vi.fn(async () => ({ ok: true })),
+    detectDefaultResourceMapPaths: vi.fn(async () => ({ halomd: null, ce: null, pc: null, demo: null, mcc: null })),
     openContainingFolder: vi.fn(async () => {}),
     getSettings: vi.fn(async () => ({ lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } })),
     notImplemented: vi.fn(),

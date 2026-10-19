@@ -1,5 +1,13 @@
 import { TAG_CLASS_NONE, fourCCToString, lookupTagClass } from '../constants/tag-classes';
-import { CE_BASE_MEMORY_ADDRESS, CE_TAG_ARRAY_ADDRESS, TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file';
+import {
+  CacheFileEngine,
+  CE_BASE_MEMORY_ADDRESS,
+  CE_TAG_ARRAY_ADDRESS,
+  MCC_BASE_MEMORY_ADDRESS,
+  MCC_TAG_ARRAY_ADDRESS,
+  TAG_DATA_HEADER_PC_SIZE,
+  TAG_ENTRY_SIZE,
+} from '../constants/cache-file';
 import { readCString } from '../binary/strings';
 import { CorruptMapError, UnexpectedTagArrayAddressError } from './errors';
 import type { CacheFileHeader } from './header';
@@ -88,9 +96,11 @@ export function parseTagIndex(buffer: Buffer, header: CacheFileHeader): TagIndex
   const vertexSize = buffer.readUInt32LE(tagDataHeaderOffset + 0x1c);
   const modelDataSize = buffer.readUInt32LE(tagDataHeaderOffset + 0x20);
 
-  if (tagArrayAddress !== CE_TAG_ARRAY_ADDRESS) throw new UnexpectedTagArrayAddressError(tagArrayAddress, CE_TAG_ARRAY_ADDRESS);
+  const isMcc = header.engine === CacheFileEngine.MCC_CEA || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS;
+  const expectedTagArrayAddress = isMcc ? MCC_TAG_ARRAY_ADDRESS : CE_TAG_ARRAY_ADDRESS;
+  if (tagArrayAddress !== expectedTagArrayAddress) throw new UnexpectedTagArrayAddressError(tagArrayAddress, expectedTagArrayAddress);
   const tagArrayFileOffset = tagDataHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
-  const baseMemoryAddress = CE_BASE_MEMORY_ADDRESS;
+  const baseMemoryAddress = isMcc ? MCC_BASE_MEMORY_ADDRESS : CE_BASE_MEMORY_ADDRESS;
 
   if (tagArrayFileOffset + tagCount * TAG_ENTRY_SIZE > buffer.length) {
     throw new CorruptMapError('Tag count from the tag index is out of bounds of the file (map may be corrupt).');

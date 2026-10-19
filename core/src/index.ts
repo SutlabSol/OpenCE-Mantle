@@ -37,3 +37,7 @@ export * from './render/bsp-geometry';
 export * from './render/model-geometry';
 export * from './render/bitmap-textures';
 export * from './render/scenario-objects';
+export * from './map/tag-reverse-dependencies';
+export * from './map/unicode-string-editor';
+export * from './map/tag-index-editor';
+export * from './map/bsp-swapper';

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode, OpenMapSummary, ConvertRepairChoice, ConvertResourcePaths } from './shared-types';
+import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode, OpenMapSummary, ConvertRepairChoice, ConvertResourcePaths, HaloBitmapVersion } from './shared-types';
 
 const api: OpenceApi = {
   openMapDialog: () => ipcRenderer.invoke('dialog:openMap'),
@@ -15,6 +15,12 @@ const api: OpenceApi = {
   finalizeBatchExtract: (request) => ipcRenderer.invoke('tags:finalizeBatchExtract', request),
   pickResourceMap: (kind: ResourceMapKind) => ipcRenderer.invoke('resourceMaps:pick', kind),
   getResourceMapStatuses: () => ipcRenderer.invoke('resourceMaps:getStatuses'),
+  identifyResourceMap: (filePath, expectedVersion) => ipcRenderer.invoke('resourceMaps:identify', filePath, expectedVersion),
+  setResourceMapPath: (kind, filePath) => ipcRenderer.invoke('resourceMaps:setPath', kind, filePath),
+  detectDefaultResourceMapPaths: () => ipcRenderer.invoke('resourceMaps:detectDefaultPaths'),
+  getVersionSettings: () => ipcRenderer.invoke('resourceMaps:getVersionSettings'),
+  setVersionSettings: (version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null }) =>
+    ipcRenderer.invoke('resourceMaps:setVersionSettings', version, maps),
   pickInjectContainer: () => ipcRenderer.invoke('tags:pickInjectContainer'),
   planInject: (containerPath: string, mode: InjectionMode) => ipcRenderer.invoke('tags:planInject', containerPath, mode),
   applyInject: () => ipcRenderer.invoke('tags:applyInject'),
@@ -26,10 +32,36 @@ const api: OpenceApi = {
   updateTagField: (tagIndex: number, fieldName: string, newValue: unknown) => ipcRenderer.invoke('tags:updateField', tagIndex, fieldName, newValue),
   getDependencySlots: (tagIndex: number) => ipcRenderer.invoke('tags:getDependencySlots', tagIndex),
   setDependencySlot: (tagIndex: number, fieldPath: string, newTagId: number | null) => ipcRenderer.invoke('tags:setDependencySlot', tagIndex, fieldPath, newTagId),
+  getReferencingTags: (tagIndex: number) => ipcRenderer.invoke('tags:getReferencingTags', tagIndex),
+  getUnicodeStrings: (tagIndex: number) => ipcRenderer.invoke('tags:getUnicodeStrings', tagIndex),
+  setUnicodeString: (tagIndex: number, stringIndex: number, newText: string) => ipcRenderer.invoke('tags:setUnicodeString', tagIndex, stringIndex, newText),
+  renameTag: (tagIndex: number, newPath: string) => ipcRenderer.invoke('tags:renameTag', tagIndex, newPath),
+  duplicateTag: (tagIndex: number, newPath: string) => ipcRenderer.invoke('tags:duplicateTag', tagIndex, newPath),
+  pickBspSourceMap: () => ipcRenderer.invoke('dialog:pickBspSourceMap'),
+  bspSwapPreflight: (sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number) =>
+    ipcRenderer.invoke('bsp:swapPreflight', sourceFilePath, sourceBspIndex, targetBspIndex),
+  performBspSwap: (sourceFilePath: string, options: any) =>
+    ipcRenderer.invoke('bsp:performSwap', sourceFilePath, options),
   getBspRenderMesh: (bspIndex?: number) => ipcRenderer.invoke('render:getBspMesh', bspIndex),
   getBitmapTexture: (bitmapTagId: number, imageIndex?: number) => ipcRenderer.invoke('render:getBitmapTexture', bitmapTagId, imageIndex),
   getScenarioObjects: () => ipcRenderer.invoke('render:getScenarioObjects'),
   getModelGeometry: (modelTagId: number, lod?: number) => ipcRenderer.invoke('render:getModelGeometry', modelTagId, lod),
+  updateScenarioPlacement: (placementId: string, updates: any) => ipcRenderer.invoke('render:updateScenarioPlacement', placementId, updates),
+  duplicateScenarioPlacement: (placementId: string, offsetDelta?: [number, number, number]) =>
+    ipcRenderer.invoke('render:duplicateScenarioPlacement', placementId, offsetDelta),
+  addScenarioPlacement: (
+    kind: any,
+    paletteIndex: number,
+    position: [number, number, number],
+    rotation?: [number, number, number],
+    teamIndex?: number,
+  ) => ipcRenderer.invoke('render:addScenarioPlacement', kind, paletteIndex, position, rotation, teamIndex),
+  swapScenarioPlacement: (
+    placementId: string,
+    newKind: any,
+    newPaletteIndex: number,
+  ) => ipcRenderer.invoke('render:swapScenarioPlacement', placementId, newKind, newPaletteIndex),
+  deleteScenarioPlacement: (placementId: string) => ipcRenderer.invoke('render:deleteScenarioPlacement', placementId),
   convertPreflight: (source: 'open' | 'pick', resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convertPreflight', source, resourcePaths),
   convertMap: (acknowledgeScripts: boolean, repairs: ConvertRepairChoice, resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convert', acknowledgeScripts, repairs, resourcePaths),
   pickConvertResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickConvertResource', kind),

@@ -46,6 +46,22 @@ import {
   BITM_FOURCC,
   extractScenarioPlacements,
   extractModelRenderGeometry,
+  updateScenarioPlacement,
+  duplicateScenarioPlacement,
+  addScenarioPlacement,
+  swapScenarioPlacement,
+  deleteScenarioPlacement,
+  findReferencingTags,
+  readUnicodeStringList,
+  writeUnicodeString,
+  UnicodeStringEditorError,
+  renameTagInMap,
+  duplicateTagInMap,
+  TagIndexEditorError,
+  CacheFileEngine,
+  bspSwapPreflight,
+  performBspSwap,
+  type BspSwapOptions,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -86,6 +102,18 @@ import type {
   GetScenarioObjectsResult,
   GetModelRenderGeometryResult,
   ModelRenderGeometry,
+  UpdateScenarioPlacementResult,
+  DuplicateScenarioPlacementResult,
+  AddScenarioPlacementResult,
+  SwapScenarioPlacementResult,
+  DeleteScenarioPlacementResult,
+  ScenarioObjectKind,
+  GetReferencingTagsResult,
+  GetUnicodeStringsResult,
+  SetUnicodeStringResult,
+  RenameTagResult,
+  DuplicateTagResult,
+  HaloBitmapVersion,
 } from './shared-types';
 import {
   sanitizeMapName,
@@ -230,6 +258,30 @@ function diskStatOf(filePath: string): { size: number; mtimeMs: number } {
 /** What the renderer shows for the held map. `fileSizeOnDisk` is the in-memory size (what Save would write). */
 export function summarizeOpenMap(map: LoadedMap): OpenMapSummary {
   const sizes = sizeByIndex(map.header, map.tagIndex);
+  const engine = map.header.engine;
+  let mapEdition: HaloBitmapVersion = 'ce';
+  const fpLower = (map.filePath || '').toLowerCase();
+  if (engine === CacheFileEngine.MCC_CEA || fpLower.includes('mcc')) {
+    mapEdition = 'mcc';
+  } else if (fpLower.includes('halomd')) {
+    mapEdition = 'halomd';
+  } else if (engine === 7) {
+    mapEdition = 'pc';
+  } else {
+    try {
+      const layout = classifyMapLayout(map.buffer);
+      if (layout.kind === 'demo') {
+        mapEdition = 'demo';
+      } else if (layout.kind === 'mcc') {
+        mapEdition = 'mcc';
+      } else if (layout.kind === 'retail') {
+        mapEdition = fpLower.includes('halomd') ? 'halomd' : 'pc';
+      }
+    } catch {
+      // default to ce
+    }
+  }
+
   return {
     status: 'ok',
     filePath: map.filePath,
@@ -244,6 +296,8 @@ export function summarizeOpenMap(map: LoadedMap): OpenMapSummary {
       decompressedFileSize: map.header.decompressedFileSize,
       fileSizeOnDisk: map.buffer.length,
       tagCount: map.tagIndex.tagCount,
+      engine,
+      mapEdition,
     },
     tags: map.tagIndex.entries.map((e) => ({
       index: e.index,
@@ -270,10 +324,10 @@ export async function runInspect(task: { requestId: string; filePath: string }) 
   progress(task.requestId, 'Parsing header and tag index', 50);
   currentInject = null;
 
-  // Layouts the converter knows are reported as unsupported (with Convert offered for version 7)
-  // before the CE reader sees them; the true demo layout would otherwise fail as "not a Halo map".
+  // Demo maps and non-convertible retail maps are reported as unsupported (with Convert offered for demo).
+  // Standard PC retail maps (convertible layout at 0x40440000) are opened and editable directly.
   const layout = classifyMapLayout(buffer);
-  if (layout.kind === 'retail' || layout.kind === 'demo') {
+  if (layout.kind === 'demo' || (layout.kind === 'retail' && !isConvertibleRetailLayout(layout))) {
     currentMap = null;
     progress(task.requestId, 'Done', 100);
     return sendResult(task.requestId, {
@@ -281,8 +335,7 @@ export async function runInspect(task: { requestId: string; filePath: string }) 
       filePath: task.filePath,
       message: describeUnsupportedLayout(layout)!,
       layout: layout.kind,
-      // Retail maps are convertible only at the CE base; a true demo map always converts via the Phase 2 demo converter.
-      convertible: layout.kind === 'demo' ? true : isConvertibleRetailLayout(layout),
+      convertible: layout.kind === 'demo',
     } satisfies LoadMapResult);
   }
 
@@ -1129,6 +1182,275 @@ export function runGetModelGeometry(task: { requestId: string; modelTagId: numbe
   }
 }
 
+/** Step 9: Updates a placed scenario object in the open map in memory. */
+export function runUpdateScenarioPlacement(task: {
+  requestId: string;
+  placementId: string;
+  position?: [number, number, number];
+  rotation?: [number, number, number];
+  paletteIndex?: number;
+  teamIndex?: number;
+  multiplayerSpawnFlags?: number;
+  forceSpawn?: boolean;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const summary = updateScenarioPlacement(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.placementId, {
+      position: task.position,
+      rotation: task.rotation,
+      paletteIndex: task.paletteIndex,
+      teamIndex: task.teamIndex,
+      multiplayerSpawnFlags: task.multiplayerSpawnFlags,
+      forceSpawn: task.forceSpawn,
+    });
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary,
+      map: summarizeOpenMap(currentMap),
+    } satisfies UpdateScenarioPlacementResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Step 9: Duplicates an existing placed scenario object in the open map. */
+export function runDuplicateScenarioPlacement(task: {
+  requestId: string;
+  placementId: string;
+  offsetDelta?: [number, number, number];
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = duplicateScenarioPlacement(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.placementId, task.offsetDelta);
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary: res.summary,
+      newPlacement: res.newPlacement,
+      map: summarizeOpenMap(currentMap),
+    } satisfies DuplicateScenarioPlacementResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Step 9: Adds a new placed scenario object to the open map. */
+export function runAddScenarioPlacement(task: {
+  requestId: string;
+  kind: ScenarioObjectKind;
+  paletteIndex: number;
+  position: [number, number, number];
+  rotation?: [number, number, number];
+  teamIndex?: number;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = addScenarioPlacement(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.kind,
+      task.paletteIndex,
+      task.position,
+      task.rotation,
+      task.teamIndex,
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary: res.summary,
+      newPlacement: res.newPlacement,
+      map: summarizeOpenMap(currentMap),
+    } satisfies AddScenarioPlacementResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Step 9: Swaps an existing placed scenario object in the open map. */
+export function runSwapScenarioPlacement(task: {
+  requestId: string;
+  placementId: string;
+  newKind: ScenarioObjectKind;
+  newPaletteIndex: number;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = swapScenarioPlacement(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.placementId,
+      task.newKind,
+      task.newPaletteIndex,
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary: res.summary,
+      newPlacement: res.newPlacement,
+      map: summarizeOpenMap(currentMap),
+    } satisfies SwapScenarioPlacementResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Step 9: Deletes a placed scenario object from the open map. */
+export function runDeleteScenarioPlacement(task: {
+  requestId: string;
+  placementId: string;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const summary = deleteScenarioPlacement(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.placementId);
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary,
+      map: summarizeOpenMap(currentMap),
+    } satisfies DeleteScenarioPlacementResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Milestone 9: Reverse dependency lookup ("Referencing Tags"). */
+export function runGetReferencingTags(task: { requestId: string; tagIndex: number }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const referencingTags = findReferencingTags(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
+    sendResult(task.requestId, { ok: true, referencingTags } satisfies GetReferencingTagsResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Milestone 9: Reads unicode strings from a ustr tag. */
+export function runGetUnicodeStrings(task: { requestId: string; tagIndex: number }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const result = readUnicodeStringList(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
+    sendResult(task.requestId, { ok: true, result } satisfies GetUnicodeStringsResult);
+  } catch (err) {
+    if (err instanceof UnicodeStringEditorError) return sendError(task.requestId, 'UNICODE_STRING_ERROR', err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Milestone 9: In-place edit of a unicode string in a ustr tag. */
+export function runSetUnicodeString(task: { requestId: string; tagIndex: number; stringIndex: number; newText: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = writeUnicodeString(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.stringIndex, task.newText);
+    currentMap.modified = true;
+    sendResult(task.requestId, { ok: true, newText: res.newText, map: summarizeOpenMap(currentMap) } satisfies SetUnicodeStringResult);
+  } catch (err) {
+    if (err instanceof UnicodeStringEditorError) return sendError(task.requestId, 'UNICODE_STRING_ERROR', err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Milestone 9: Rename a tag path in the open map. */
+export function runRenameTag(task: { requestId: string; tagIndex: number; newPath: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = renameTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.newPath);
+    currentMap.buffer = res.buffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== 'ok') {
+      return sendError(task.requestId, 'TAG_INDEX_ERROR', 'Failed to inspect map after renaming.');
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, { ok: true, path: res.path, map: summarizeOpenMap(currentMap) } satisfies RenameTagResult);
+  } catch (err) {
+    if (err instanceof TagIndexEditorError) return sendError(task.requestId, 'TAG_INDEX_ERROR', err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Milestone 9: Duplicate a tag in the open map tag index. */
+export function runDuplicateTag(task: { requestId: string; tagIndex: number; newPath: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = duplicateTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.newPath);
+    currentMap.buffer = res.buffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== 'ok') {
+      return sendError(task.requestId, 'TAG_INDEX_ERROR', 'Failed to inspect map after duplicating.');
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      newTagIndex: res.newTagIndex,
+      newTagId: res.newTagId,
+      path: res.path,
+      map: summarizeOpenMap(currentMap),
+    } satisfies DuplicateTagResult);
+  } catch (err) {
+    if (err instanceof TagIndexEditorError) return sendError(task.requestId, 'TAG_INDEX_ERROR', err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Milestone 10: Preflight BSP Swap. */
+export async function runBspSwapPreflight(task: {
+  requestId: string;
+  sourceFilePath: string;
+  sourceBspIndex?: number;
+  targetBspIndex?: number;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
+    const result = bspSwapPreflight(sourceBuffer, currentMap.buffer, task.sourceBspIndex, task.targetBspIndex);
+    sendResult(task.requestId, result);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Milestone 10: Perform BSP Swap in-memory. */
+export async function runPerformBspSwap(task: {
+  requestId: string;
+  sourceFilePath: string;
+  options: BspSwapOptions;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
+    const result = performBspSwap(sourceBuffer, currentMap.buffer, task.options);
+    if (!result.ok) {
+      return sendError(task.requestId, 'BSP_SWAP_ERROR', result.error || 'Failed to perform BSP swap.');
+    }
+    currentMap.buffer = result.buffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== 'ok') {
+      return sendError(task.requestId, 'BSP_SWAP_ERROR', 'Failed to inspect map after BSP swap.');
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ...result,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -1155,6 +1477,18 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'getBitmapTexture') runGetBitmapTexture(task);
     else if (task.type === 'getScenarioObjects') runGetScenarioObjects(task);
     else if (task.type === 'getModelGeometry') runGetModelGeometry(task);
+    else if (task.type === 'updateScenarioPlacement') runUpdateScenarioPlacement(task);
+    else if (task.type === 'duplicateScenarioPlacement') runDuplicateScenarioPlacement(task);
+    else if (task.type === 'addScenarioPlacement') runAddScenarioPlacement(task);
+    else if (task.type === 'swapScenarioPlacement') runSwapScenarioPlacement(task);
+    else if (task.type === 'deleteScenarioPlacement') runDeleteScenarioPlacement(task);
+    else if (task.type === 'getReferencingTags') runGetReferencingTags(task);
+    else if (task.type === 'getUnicodeStrings') runGetUnicodeStrings(task);
+    else if (task.type === 'setUnicodeString') runSetUnicodeString(task);
+    else if (task.type === 'renameTag') runRenameTag(task);
+    else if (task.type === 'duplicateTag') runDuplicateTag(task);
+    else if (task.type === 'bspSwapPreflight') await runBspSwapPreflight(task);
+    else if (task.type === 'performBspSwap') await runPerformBspSwap(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

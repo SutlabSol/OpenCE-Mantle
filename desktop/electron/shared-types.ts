@@ -5,8 +5,16 @@ import type { TagFieldDescriptor, TagFieldsResult, TagFieldKind, TagReflexiveEle
 import type { TagDependencySlot } from '../../core/src/map/tag-dependency-swapper';
 import type { BspRenderMesh } from '../../core/src/render/bsp-geometry';
 import type { DecodedRgbaTexture } from '../../core/src/render/bitmap-textures';
-import type { ScenarioObjectPlacement, ScenarioPlacementsSummary } from '../../core/src/render/scenario-objects';
+import type {
+  ScenarioObjectPlacement,
+  ScenarioPlacementsSummary,
+  ScenarioObjectKind,
+  ScenarioPaletteItem,
+} from '../../core/src/render/scenario-objects';
 import type { ModelRenderGeometry } from '../../core/src/render/model-geometry';
+import type { ReferencingTagSummary } from '../../core/src/map/tag-reverse-dependencies';
+import type { UnicodeStringItem, UnicodeStringListResult } from '../../core/src/map/unicode-string-editor';
+import type { BspInfo, BspSwapPreflightResult, BspSwapOptions, BspSwapResult } from '../../core/src/map/bsp-swapper';
 
 export type {
   TagFieldDescriptor,
@@ -18,7 +26,16 @@ export type {
   DecodedRgbaTexture,
   ScenarioObjectPlacement,
   ScenarioPlacementsSummary,
+  ScenarioObjectKind,
+  ScenarioPaletteItem,
   ModelRenderGeometry,
+  ReferencingTagSummary,
+  UnicodeStringItem,
+  UnicodeStringListResult,
+  BspInfo,
+  BspSwapPreflightResult,
+  BspSwapOptions,
+  BspSwapResult,
 };
 
 export interface MapHeaderSummary {
@@ -31,6 +48,8 @@ export interface MapHeaderSummary {
   decompressedFileSize: number;
   fileSizeOnDisk: number;
   tagCount: number;
+  engine?: number;
+  mapEdition?: HaloBitmapVersion;
 }
 
 export interface TagEntrySummary {
@@ -225,9 +244,15 @@ export interface FinalizeBatchExtractRequest {
   summary?: BatchExtractSummary;
 }
 
+export interface VersionResourceMaps {
+  bitmaps: string | null;
+  sounds: string | null;
+}
+
 export interface AppSettings {
   lastExtractDir: string | null;
   resourceMaps: { bitmaps: string | null; sounds: string | null; loc: string | null };
+  versionResourceMaps?: Partial<Record<HaloBitmapVersion, VersionResourceMaps>>;
 }
 
 /* ------------------------------- M5 Step A: ADD-mode injection ------------------------------- */
@@ -241,6 +266,35 @@ export type ResourceMapStatus =
   | { state: 'ok'; path: string; fileSizeBytes: number; entryCount: number };
 
 export type ResourceMapPickResult = { ok: true; status: ResourceMapStatus } | { ok: false; code: 'CANCELLED' } | { ok: false; code: string; message: string };
+
+export type HaloBitmapVersion = 'halomd' | 'ce' | 'pc' | 'demo' | 'mcc';
+
+export interface BitmapIdentificationEntry {
+  index: number;
+  name: string;
+  dataOffset: number;
+  size: number;
+}
+
+export interface BitmapIdentificationResult {
+  ok: boolean;
+  error?: string;
+  filePath: string;
+  fileSizeBytes: number;
+  entryCount: number;
+  tableOffset: number;
+  detectedVersion: HaloBitmapVersion | 'unknown';
+  versionMatchConfidence: 'exact' | 'likely' | 'mismatch';
+  entries: BitmapIdentificationEntry[];
+  compatibility?: {
+    hasOpenMap: boolean;
+    openMapName?: string;
+    totalExternalBitmaps: number;
+    matchedExternalBitmaps: number;
+    missingBitmaps: string[];
+    isCompatible: boolean;
+  };
+}
 
 export interface InjectPlanTagSummary {
   path: string;
@@ -376,7 +430,72 @@ export type WorkerRequest =
   | { type: 'getBitmapTexture'; requestId: string; bitmapTagId: number; imageIndex?: number; bitmapsPath?: string }
   | { type: 'getScenarioObjects'; requestId: string }
   | { type: 'getModelGeometry'; requestId: string; modelTagId: number; lod?: number }
+  | {
+      type: 'updateScenarioPlacement';
+      requestId: string;
+      placementId: string;
+      position?: [number, number, number];
+      rotation?: [number, number, number];
+      paletteIndex?: number;
+      teamIndex?: number;
+      multiplayerSpawnFlags?: number;
+      forceSpawn?: boolean;
+    }
+  | {
+      type: 'duplicateScenarioPlacement';
+      requestId: string;
+      placementId: string;
+      offsetDelta?: [number, number, number];
+    }
+  | {
+      type: 'addScenarioPlacement';
+      requestId: string;
+      kind: ScenarioObjectKind;
+      paletteIndex: number;
+      position: [number, number, number];
+      rotation?: [number, number, number];
+      teamIndex?: number;
+    }
+  | {
+      type: 'swapScenarioPlacement';
+      requestId: string;
+      placementId: string;
+      newKind: ScenarioObjectKind;
+      newPaletteIndex: number;
+    }
+  | {
+      type: 'deleteScenarioPlacement';
+      requestId: string;
+      placementId: string;
+    }
+  | { type: 'getReferencingTags'; requestId: string; tagIndex: number }
+  | { type: 'getUnicodeStrings'; requestId: string; tagIndex: number }
+  | { type: 'setUnicodeString'; requestId: string; tagIndex: number; stringIndex: number; newText: string }
+  | { type: 'renameTag'; requestId: string; tagIndex: number; newPath: string }
+  | { type: 'duplicateTag'; requestId: string; tagIndex: number; newPath: string }
+  | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number }
+  | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions }
   | { type: 'cancel'; requestId: string };
+
+export type GetReferencingTagsResult =
+  | { ok: true; referencingTags: ReferencingTagSummary[] }
+  | { ok: false; code: string; message: string };
+
+export type GetUnicodeStringsResult =
+  | { ok: true; result: UnicodeStringListResult }
+  | { ok: false; code: string; message: string };
+
+export type SetUnicodeStringResult =
+  | { ok: true; newText: string; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
+
+export type RenameTagResult =
+  | { ok: true; path: string; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
+
+export type DuplicateTagResult =
+  | { ok: true; newTagIndex: number; newTagId: number; path: string; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
 
 export type GetBspRenderMeshResult =
   | { ok: true; mesh: BspRenderMesh }
@@ -392,6 +511,26 @@ export type GetScenarioObjectsResult =
 
 export type GetModelRenderGeometryResult =
   | { ok: true; geometry: ModelRenderGeometry }
+  | { ok: false; code: string; message: string };
+
+export type UpdateScenarioPlacementResult =
+  | { ok: true; summary: ScenarioPlacementsSummary; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
+
+export type DuplicateScenarioPlacementResult =
+  | { ok: true; summary: ScenarioPlacementsSummary; newPlacement: ScenarioObjectPlacement; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
+
+export type AddScenarioPlacementResult =
+  | { ok: true; summary: ScenarioPlacementsSummary; newPlacement: ScenarioObjectPlacement; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
+
+export type SwapScenarioPlacementResult =
+  | { ok: true; summary: ScenarioPlacementsSummary; newPlacement: ScenarioObjectPlacement; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
+
+export type DeleteScenarioPlacementResult =
+  | { ok: true; summary: ScenarioPlacementsSummary; map: OpenMapSummary }
   | { ok: false; code: string; message: string };
 
 export type GetDependencySlotsResult =
@@ -482,6 +621,61 @@ export interface OpenceApi {
   getScenarioObjects(): Promise<GetScenarioObjectsResult>;
   /** Step 8.5: Extract 3D model geometry for a gbxmodel tag. */
   getModelGeometry(modelTagId: number, lod?: number): Promise<GetModelRenderGeometryResult>;
+  /** Step 9: Update a placed scenario object in memory in the open map. */
+  updateScenarioPlacement(
+    placementId: string,
+    updates: {
+      position?: [number, number, number];
+      rotation?: [number, number, number];
+      paletteIndex?: number;
+      teamIndex?: number;
+      multiplayerSpawnFlags?: number;
+      forceSpawn?: boolean;
+    },
+  ): Promise<UpdateScenarioPlacementResult>;
+  /** Step 9: Duplicate an existing placed scenario object in the open map. */
+  duplicateScenarioPlacement(
+    placementId: string,
+    offsetDelta?: [number, number, number],
+  ): Promise<DuplicateScenarioPlacementResult>;
+  /** Step 9: Add a new placed scenario object to the open map. */
+  addScenarioPlacement(
+    kind: ScenarioObjectKind,
+    paletteIndex: number,
+    position: [number, number, number],
+    rotation?: [number, number, number],
+    teamIndex?: number,
+  ): Promise<AddScenarioPlacementResult>;
+  /** Step 9: Swap an existing placed scenario object with another object. */
+  swapScenarioPlacement(
+    placementId: string,
+    newKind: ScenarioObjectKind,
+    newPaletteIndex: number,
+  ): Promise<SwapScenarioPlacementResult>;
+  /** Step 9: Delete a placed scenario object from the open map. */
+  deleteScenarioPlacement(placementId: string): Promise<DeleteScenarioPlacementResult>;
+  /** Milestone 9: Reverse dependency lookup ("Referencing Tags"). */
+  getReferencingTags(tagIndex: number): Promise<GetReferencingTagsResult>;
+  /** Milestone 9: Fetch unicode strings from a ustr tag. */
+  getUnicodeStrings(tagIndex: number): Promise<GetUnicodeStringsResult>;
+  /** Milestone 9: In-place edit a unicode string in a ustr tag. */
+  setUnicodeString(tagIndex: number, stringIndex: number, newText: string): Promise<SetUnicodeStringResult>;
+  /** Milestone 9: Rename a tag in the map. */
+  renameTag(tagIndex: number, newPath: string): Promise<RenameTagResult>;
+  /** Milestone 9: Duplicate a tag in the map. */
+  duplicateTag(tagIndex: number, newPath: string): Promise<DuplicateTagResult>;
+  /** Milestone 10: BSP Swapper - pick a source map file. */
+  pickBspSourceMap(): Promise<{ path: string | null }>;
+  /** Milestone 10: BSP Swapper - preflight swap between source and target map. */
+  bspSwapPreflight(sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number): Promise<BspSwapPreflightResult>;
+  /** Milestone 10: BSP Swapper - perform swap into currently open map. */
+  performBspSwap(sourceFilePath: string, options: BspSwapOptions): Promise<BspSwapResult>;
+  /** Tools > Identify Bitmaps: reads and validates a bitmaps.map file for a specific Halo edition. */
+  identifyResourceMap(filePath: string, expectedVersion?: HaloBitmapVersion): Promise<BitmapIdentificationResult>;
+  setResourceMapPath(kind: ResourceMapKind, filePath: string): Promise<{ ok: boolean }>;
+  detectDefaultResourceMapPaths(): Promise<Record<HaloBitmapVersion, string | null>>;
+  getVersionSettings?(): Promise<Partial<Record<HaloBitmapVersion, VersionResourceMaps>>>;
+  setVersionSettings?(version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null }): Promise<{ ok: boolean }>;
   getPathForFile(file: File): string;
 }
 
