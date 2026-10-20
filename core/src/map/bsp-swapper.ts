@@ -804,12 +804,12 @@ export function performBspSwap(
 
                     const validPlaced: Buffer[] = [];
                     for (let i = 0; i < srcPlacedSceneryCount; i++) {
-                      const sOff = srcPlacedSceneryOffset + i * 32;
+                      const sOff = srcPlacedSceneryOffset + i * 72;
                       const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
                       const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
                       if (targetPalIdx !== undefined) {
-                        const sBytes = Buffer.alloc(32);
-                        sourceBuffer.copy(sBytes, 0, sOff, sOff + 32);
+                        const sBytes = Buffer.alloc(72);
+                        sourceBuffer.copy(sBytes, 0, sOff, sOff + 72);
                         sBytes.writeInt16LE(targetPalIdx, 0);
                         sBytes.writeInt16LE(-1, 2);
                         validPlaced.push(sBytes);

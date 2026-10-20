@@ -208,16 +208,27 @@ export default function BspPreviewViewport({
     const container = containerRef.current;
     if (!container || !webGLSupported) return;
 
-    const width = container.clientWidth || 600;
+    const getDimensions = () => {
+      const w = container.clientWidth || 600;
+      const h =
+        typeof height === 'number' && height > 0
+          ? height
+          : container.clientHeight > 50
+          ? container.clientHeight
+          : 450;
+      return { w, h };
+    };
+
+    const { w: width, h: initialHeight } = getDimensions();
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x090d16);
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.5, 5000);
+    const camera = new THREE.PerspectiveCamera(45, width / initialHeight, 0.5, 5000);
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    renderer.setSize(width, height);
+    renderer.setSize(width, initialHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     rendererRef.current = renderer;
 
@@ -252,17 +263,22 @@ export default function BspPreviewViewport({
 
     const handleResize = () => {
       if (!container || !rendererRef.current || !cameraRef.current) return;
-      const w = container.clientWidth || 600;
-      cameraRef.current.aspect = w / height;
+      const { w, h } = getDimensions();
+      cameraRef.current.aspect = w / h;
       cameraRef.current.updateProjectionMatrix();
-      rendererRef.current.setSize(w, height);
+      rendererRef.current.setSize(w, h);
     };
 
     window.addEventListener('resize', handleResize);
+    const resizeObserver = new ResizeObserver(() => {
+      handleResize();
+    });
+    resizeObserver.observe(container);
 
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
       renderer.dispose();
       if (container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
