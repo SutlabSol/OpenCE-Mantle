@@ -449,7 +449,7 @@ Because we have the full source of **[OpenCommunityEdition/OpenCE](https://githu
 | **Phase 2B** | **M10.1** | **Automated BSP Swapper, Shader Harvesting & Stripping** | **✅ Completed** | Automated SP-to-MP BSP Swapper with automatic shader, lightmap, and bitmap harvesting from donor maps (preventing grey textures), interactive toggles and lists for stripping Detail Objects (`DOBC`) and Runtime Decals, and in-place scenario name renaming. |
 | **Phase 2C** | **M10.2** | **Multi-BSP Combining, 3D Viewport & Scenery/Door Importing** | **✅ Completed** | Merging multiple single-player campaign BSPs (e.g. `a30` or `b30`) into a single cohesive multiplayer map BSP (`bsp-merger.ts`, `mergeStructureBsps`). Features interactive 3D multi-BSP preview in swapper dialog (`BspPreviewViewport.tsx`), CE 23 MiB cache ceiling rebasing (`rebaseStructureBspPointers`), 32-bit aligned PVS bitmatrix sizing, robust in-place dependency rewriting (`rewriteBspDependencies`), and automatic importing of scenery props & functional doors/bridges with automatic multiplayer opening flags. |
 | **Phase 2D** | **M12** | **"Launch Map In OpenCE Tag Test" (Tier 1 & Live Control Deck)** | **✅ Completed** | 1. `desktop/electron/tag-test-runner.ts` (stages in-memory `.map` to `custom_maps\_opence_tag_test.map`, writes `init.txt`, spawns `halo.exe` with `HALO_TELNET_CONSOLE=1`).<br/>2. `desktop/src/components/TagTestPanel.tsx` (live TCP `127.0.0.1:2323` cheat/debug toggles, game speed slider, 1-click hot-reload in <1s, interactive HS console, and live `debug.txt` parser with clickable tag links). |
-| **Phase 2E** | **M13** | **Built-In Asset Editors (Bitmaps, Sounds, 3D Models, Curves & HUD)** | **Planned** | 1. **Bitmap Editor**: PNG/DDS/TIF export & import, DXT1/3/5 & RGBA encoder, cubemap/3D slice viewer, `plate` sprite sheet packer, and internal `.map` embedding.<br/>2. **Sound Editor**: Web Audio player, WAV/OGG export & import, Xbox ADPCM 36-byte block encoder (`custom_edition_sounds.c`), and internal `.map` embedding.<br/>3. **3D Model & BSP Editor**: GLTF/OBJ/JMS export & import, `.wrl` geometry error overlay, and `gbxmodel` injection (`Reclaimer`).<br/>4. **Guerilla Curve Graph & WYSIWYG HUD Previewer** inside `TagEditorDialog.tsx`. |
+| **Phase 2E** | **M13** | **Built-In Asset Editors (Bitmaps, Sounds, 3D Models, Curves & HUD)** | **✅ Completed** | 1. **Bitmap Editor**: Full interactive editor (`BitmapEditorDialog.tsx`), PNG/DDS export, PNG/DDS import with DXT1/DXT5 block encoder, sequence navigation, RGBA channels, hover pixel inspector, and internal map embedding.<br/>2. **Sound Auditor**: Web Audio player (`SoundAuditorDialog.tsx`), Xbox ADPCM & PCM 16-bit decoder and encoder, pitch/gain controls, WAV export, custom WAV import & map internalization.<br/>3. **3D Model & BSP Exporter**: glTF 2.0 Binary (`.glb`) & Wavefront OBJ/MTL exporters for all `gbxmodel` and `scenario_structure_bsp` geometry.<br/>4. **Curve Graph & WYSIWYG HUD Previewer**: Interactive Guerilla Curve Graph visualizer (`CurveGraphVisualizer.tsx`) and 2D canvas HUD previewer (`HudPreviewerDialog.tsx`) with 16:9/4:3 safe frames, animated shields/health/ammo, reticles, radar, and weapon simulation. |
 | **Phase 2F** | **M14** | **Halo Script (`hsc`) Decompiler, IDE & Bytecode Compiler** | **Planned** | 1. `core/src/map/hs-decompiler.ts`: Reconstructs full `.hsc` source code from any `.map`'s `scnr.script_syntax_data` and `script_string_data`.<br/>2. `core/src/map/hs-compiler.ts` & `ScriptEditorPanel.tsx`: Autocomplete for all 543 HS functions, OpenCE compatibility linter (`begin_random` & allowlist check), and in-map bytecode compilation. |
 | **Phase 2G** | **M15** | **Xbox Single Player & Multiplayer Map Support** | **Planned** | Transparent uncompression (`inflate`) upon opening and recompression (`deflate`) upon saving Xbox `.map` files; automatic tag index and virtual memory rebasing (`0x80000000` Xbox vs `0x40440000` PC); endianness conversions where applicable. |
 | **Phase 2H** | **M16** | **OpenCE Mod Packager & UI Modernization** | **Planned** | 1. Export any tag or edited asset as an **OpenCE Mod (`mod.toml` + HEK binary `.tag`)** or XML (`c_xml_tag_exporter`).<br/>2. Responsive UI modernization based on custom ergonomic layout designs, keeping current dark cyberpunk styling while streamlining button placement. |
@@ -493,6 +493,33 @@ The next priority milestone connects OpenCE-Modding-Tool directly to the live Op
 3. **Live Diagnostic Log Streamer & Clickable Tag Links**:
    - Tails `<OpenCE_dir>\debug.txt` and `halo.log` in real-time.
    - Detects tag validation warnings, unmapped shaders, or script errors with clickable links that jump straight to that tag inside the Tag Field Editor.
+
+---
+
+### 5.4 Completed Milestone: Built-In Asset Editors (Bitmaps, Sounds, 3D Models, Curves & HUD) (M13)
+
+Milestone 13 delivers full in-app asset auditioning, editing, and injection for all major Halo CE asset types:
+
+1. **Bitmap / Texture Editor & Injector (`bitm`)**:
+   - Dedicated modal editor (`BitmapEditorDialog.tsx`) with 2D pan/zoom, checkerboard transparency background, RGBA channel toggles, and pixel hover inspector.
+   - Zero-dependency PNG and DirectDraw Surface (DDS) parser and exporter.
+   - Real-time DXT1 and DXT5 block compressors for importing and replacing image plates directly into the open map with automatic internalization.
+   - Sequence and multi-plate navigation for sprite sheets, cubemaps, and weapon HUD sequences.
+
+2. **Sound Audition Player & Injector (`snd!`)**:
+   - Web Audio player deck (`SoundAuditorDialog.tsx`) with real-time waveform canvas scrubber, gain slider, and pitch playback multiplier (0.5x–2.0x).
+   - Full Xbox ADPCM mono/stereo 36-byte block decoders and mono block encoder.
+   - Permutation table listing duration, sample rate, channels, size, and internalization status.
+   - 16-bit PCM WAV export and custom WAV import with automatic ADPCM encoding and map internalization.
+
+3. **3D Model & Structure BSP Exporter (`gbxmodel` / `sbsp`)**:
+   - Industry-standard **glTF 2.0 Binary (`.glb`)** exporter packing positions, normals, UVs, and indexed triangle primitives with PBR materials into a single self-contained binary file.
+   - **Wavefront OBJ + MTL (`.obj` / `.mtl`)** exporter with correct 1-based indexing, texture coordinate flipping, and material grouping.
+   - One-click context menu and header actions in Tag Browser, Tag Editor, and BSP Swapper dialogs.
+
+4. **Guerilla Curve Graph & WYSIWYG HUD Previewer (`wphi` / `unhi`)**:
+   - Interactive mathematical curve visualizer (`CurveGraphVisualizer.tsx`) plotting all 8 Halo transition functions (`linear`, `early`, `very early`, `late`, `very late`, `cosine`, `one`, `zero`) with exponent, scale, and frequency sliders.
+   - WYSIWYG 2D canvas HUD previewer (`HudPreviewerDialog.tsx`) with 16:9 / 4:3 aspect ratio toggles, Title Safe (80%) and Action Safe (90%) guidelines, animated shield and health bars, digital ammo counters, overheat gauge, and interactive weapon firing/reloading simulation.
 
 ---
 

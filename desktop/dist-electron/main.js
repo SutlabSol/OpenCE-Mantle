@@ -35981,6 +35981,110 @@ async function replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat) 
   }
   return result;
 }
+async function pickExportSoundPathFlow(defaultName) {
+  if (!mainWindow) return { path: null };
+  const res = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    title: "Export Sound as WAV",
+    defaultPath: `${defaultName}.wav`,
+    filters: [{ name: "WAV Audio (*.wav)", extensions: ["wav"] }]
+  });
+  return { path: res.canceled ? null : res.filePath ?? null };
+}
+async function pickImportSoundPathFlow() {
+  if (!mainWindow) return { path: null };
+  const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    title: "Import WAV Audio",
+    filters: [{ name: "WAV Audio (*.wav)", extensions: ["wav"] }],
+    properties: ["openFile"]
+  });
+  return { path: res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0] };
+}
+async function getSoundInfoFlow(tagIndex) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const soundsPath = settings.resourceMaps.sounds ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "getSoundInfo", tagIndex, soundsPath },
+    sendLog
+  );
+  return promise;
+}
+async function getSoundWavFlow(tagIndex, pitchRangeIndex, permutationIndex) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const soundsPath = settings.resourceMaps.sounds ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "getSoundWav", tagIndex, pitchRangeIndex, permutationIndex, soundsPath },
+    sendLog
+  );
+  return promise;
+}
+async function exportSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, outputPath) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const soundsPath = settings.resourceMaps.sounds ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "exportSound", tagIndex, pitchRangeIndex, permutationIndex, outputPath, soundsPath },
+    sendLog
+  );
+  return promise;
+}
+async function replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const soundsPath = settings.resourceMaps.sounds ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "replaceSound", tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat, soundsPath },
+    sendLog
+  );
+  const result = await promise;
+  if (result.ok && result.map) {
+    setOpenMapState(result.map);
+  }
+  return result;
+}
+async function pickExport3dPathFlow(defaultName, format) {
+  if (!mainWindow) return { path: null };
+  const ext = format === "glb" ? "glb" : "obj";
+  const filterName = format === "glb" ? "glTF 2.0 Binary (*.glb)" : "Wavefront OBJ (*.obj)";
+  const res = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    title: `Export 3D ${format.toUpperCase()}`,
+    defaultPath: defaultName,
+    filters: [
+      { name: filterName, extensions: [ext] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  });
+  return { path: res.canceled ? null : res.filePath };
+}
+async function exportModel3dFlow(modelTagId, lod, format, outputPath) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const { promise } = sendWorkerRequest(
+    { type: "exportModel3d", modelTagId, lod, format, outputPath },
+    sendLog
+  );
+  return promise;
+}
+async function exportBsp3dFlow(bspIndex, format, outputPath) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const { promise } = sendWorkerRequest(
+    { type: "exportBsp3d", bspIndex, format, outputPath },
+    sendLog
+  );
+  return promise;
+}
 async function updateScenarioPlacementFlow(placementId, updates) {
   if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
@@ -36689,6 +36793,30 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle(
     "bitmap:replace",
     (_e, tagIndex, imageIndex, inputPath, targetFormat) => replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat)
+  );
+  import_electron3.ipcMain.handle("sound:getInfo", (_e, tagIndex) => getSoundInfoFlow(tagIndex));
+  import_electron3.ipcMain.handle(
+    "sound:getWav",
+    (_e, tagIndex, pitchRangeIndex, permutationIndex) => getSoundWavFlow(tagIndex, pitchRangeIndex, permutationIndex)
+  );
+  import_electron3.ipcMain.handle("dialog:pickExportSoundPath", (_e, defaultName) => pickExportSoundPathFlow(defaultName));
+  import_electron3.ipcMain.handle(
+    "sound:export",
+    (_e, tagIndex, pitchRangeIndex, permutationIndex, outputPath) => exportSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, outputPath)
+  );
+  import_electron3.ipcMain.handle("dialog:pickImportSoundPath", () => pickImportSoundPathFlow());
+  import_electron3.ipcMain.handle(
+    "sound:replace",
+    (_e, tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat) => replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat)
+  );
+  import_electron3.ipcMain.handle("dialog:pickExport3dPath", (_e, defaultName, format) => pickExport3dPathFlow(defaultName, format));
+  import_electron3.ipcMain.handle(
+    "3d:exportModel",
+    (_e, modelTagId, lod, format, outputPath) => exportModel3dFlow(modelTagId, lod, format, outputPath)
+  );
+  import_electron3.ipcMain.handle(
+    "3d:exportBsp",
+    (_e, bspIndex, format, outputPath) => exportBsp3dFlow(bspIndex, format, outputPath)
   );
   import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);

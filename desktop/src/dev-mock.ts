@@ -965,6 +965,11 @@ export function installDevMock() {
     exportSoundWav: async () => ({ ok: true, filePath: 'C:\\exports\\sound.wav' }),
     pickImportSoundPath: async () => ({ path: 'C:\\imports\\sound.wav' }),
     replaceSoundWav: async () => ({ ok: true, map: currentMock! }),
+
+    // M13.3: 3D Model & BSP Exporter
+    pickExport3dPath: async (_name: string, format: 'obj' | 'glb') => ({ path: `C:\\exports\\model.${format}` }),
+    exportModel3d: async () => ({ ok: true, filePath: 'C:\\exports\\model.glb' }),
+    exportBsp3d: async () => ({ ok: true, filePath: 'C:\\exports\\bsp.glb' }),
     getPathForFile: (file) => (file as unknown as { path?: string }).path ?? file.name,
   };
 

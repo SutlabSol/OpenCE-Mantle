@@ -22,6 +22,7 @@ interface Props {
   onDuplicateTag?: (tag: TagEntrySummary) => void;
   onOpenBitmapEditor?: (tag: TagEntrySummary) => void;
   onOpenSoundAuditor?: (tag: TagEntrySummary) => void;
+  onOpenHudPreviewer?: (tag: TagEntrySummary) => void;
 }
 
 type GroupMode = 'class' | 'folder';
@@ -68,6 +69,7 @@ export default function TagBrowser({
   onDuplicateTag,
   onOpenBitmapEditor,
   onOpenSoundAuditor,
+  onOpenHudPreviewer,
 }: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
@@ -95,6 +97,28 @@ export default function TagBrowser({
   }, [contextMenu]);
 
   const isSearching = search.trim().length > 0;
+
+  const handleExportModel = async (t: TagEntrySummary, format: 'obj' | 'glb') => {
+    try {
+      const baseName = t.path.split('\\').pop() || 'model';
+      const pickRes = await window.opence.pickExport3dPath(baseName, format);
+      if (!pickRes || !pickRes.path) return;
+      await window.opence.exportModel3d(t.tagId, 4, format, pickRes.path);
+    } catch (err) {
+      console.error('Failed to export 3D model:', err);
+    }
+  };
+
+  const handleExportBsp = async (t: TagEntrySummary, format: 'obj' | 'glb') => {
+    try {
+      const baseName = t.path.split('\\').pop() || 'bsp';
+      const pickRes = await window.opence.pickExport3dPath(baseName, format);
+      if (!pickRes || !pickRes.path) return;
+      await window.opence.exportBsp3d(0, format, pickRes.path);
+    } catch (err) {
+      console.error('Failed to export BSP:', err);
+    }
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -384,6 +408,76 @@ export default function TagBrowser({
               style={{ ...menuItemStyle(false), color: '#38bdf8' }}
             >
               Sound Audition & Injector...
+            </button>
+          )}
+          {contextMenuTag?.primaryClassName === 'gbxmodel' && (
+            <>
+              <button
+                data-testid="tag-row-context-export-model-glb"
+                onClick={() => {
+                  const t = contextMenuTag;
+                  setContextMenu(null);
+                  if (t) handleExportModel(t, 'glb');
+                }}
+                style={{ ...menuItemStyle(false), color: '#c084fc' }}
+              >
+                Export 3D Model (.glb)...
+              </button>
+              <button
+                data-testid="tag-row-context-export-model-obj"
+                onClick={() => {
+                  const t = contextMenuTag;
+                  setContextMenu(null);
+                  if (t) handleExportModel(t, 'obj');
+                }}
+                style={{ ...menuItemStyle(false), color: '#c084fc' }}
+              >
+                Export 3D Model (.obj)...
+              </button>
+            </>
+          )}
+          {contextMenuTag?.primaryClassName === 'scenario_structure_bsp' && (
+            <>
+              <button
+                data-testid="tag-row-context-export-bsp-glb"
+                onClick={() => {
+                  const t = contextMenuTag;
+                  setContextMenu(null);
+                  if (t) handleExportBsp(t, 'glb');
+                }}
+                style={{ ...menuItemStyle(false), color: '#c084fc' }}
+              >
+                Export BSP (.glb)...
+              </button>
+              <button
+                data-testid="tag-row-context-export-bsp-obj"
+                onClick={() => {
+                  const t = contextMenuTag;
+                  setContextMenu(null);
+                  if (t) handleExportBsp(t, 'obj');
+                }}
+                style={{ ...menuItemStyle(false), color: '#c084fc' }}
+              >
+                Export BSP (.obj)...
+              </button>
+            </>
+          )}
+          {["weapon_hud_interface", "unit_hud_interface", "grenade_hud_interface", "hud_globals"].includes(
+            contextMenuTag?.primaryClassName ?? "",
+          ) && (
+            <button
+              data-testid="tag-row-context-hud-previewer"
+              onClick={() => {
+                const t = contextMenuTag;
+                setContextMenu(null);
+                if (t) {
+                  focusRow(t);
+                  onOpenHudPreviewer?.(t);
+                }
+              }}
+              style={{ ...menuItemStyle(false), color: "#34d399" }}
+            >
+              WYSIWYG HUD Previewer...
             </button>
           )}
           <button

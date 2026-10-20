@@ -1391,6 +1391,52 @@ async function replaceSoundFlow(
   return result;
 }
 
+async function pickExport3dPathFlow(defaultName: string, format: 'obj' | 'glb'): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const ext = format === 'glb' ? 'glb' : 'obj';
+  const filterName = format === 'glb' ? 'glTF 2.0 Binary (*.glb)' : 'Wavefront OBJ (*.obj)';
+  const res = await dialog.showSaveDialog(mainWindow, {
+    title: `Export 3D ${format.toUpperCase()}`,
+    defaultPath: defaultName,
+    filters: [
+      { name: filterName, extensions: [ext] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  });
+  return { path: res.canceled ? null : res.filePath };
+}
+
+async function exportModel3dFlow(
+  modelTagId: number,
+  lod: number | undefined,
+  format: 'obj' | 'glb',
+  outputPath: string,
+): Promise<Export3dResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const { promise } = sendWorkerRequest<Export3dResult>(
+    { type: 'exportModel3d', modelTagId, lod, format, outputPath },
+    sendLog,
+  );
+  return promise;
+}
+
+async function exportBsp3dFlow(
+  bspIndex: number,
+  format: 'obj' | 'glb',
+  outputPath: string,
+): Promise<Export3dResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const { promise } = sendWorkerRequest<Export3dResult>(
+    { type: 'exportBsp3d', bspIndex, format, outputPath },
+    sendLog,
+  );
+  return promise;
+}
+
 /** Step 9: Updates a placed scenario object in memory. */
 async function updateScenarioPlacementFlow(
   placementId: string,
@@ -2215,6 +2261,13 @@ app.whenReady().then(() => {
   ipcMain.handle('dialog:pickImportSoundPath', () => pickImportSoundPathFlow());
   ipcMain.handle('sound:replace', (_e, tagIndex: number, pitchRangeIndex: number, permutationIndex: number, inputPath: string, targetFormat?: number) =>
     replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat),
+  );
+  ipcMain.handle('dialog:pickExport3dPath', (_e, defaultName: string, format: 'obj' | 'glb') => pickExport3dPathFlow(defaultName, format));
+  ipcMain.handle('3d:exportModel', (_e, modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
+    exportModel3dFlow(modelTagId, lod, format, outputPath),
+  );
+  ipcMain.handle('3d:exportBsp', (_e, bspIndex: number, format: 'obj' | 'glb', outputPath: string) =>
+    exportBsp3dFlow(bspIndex, format, outputPath),
   );
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);

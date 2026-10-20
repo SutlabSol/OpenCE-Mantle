@@ -44,3 +44,4 @@ export * from './map/bsp-swapper';
 export * from './map/bsp-merger';
 export * from './render/bitmap-codec';
 export * from './render/sound-codec';
+export * from './render/model-exporter';

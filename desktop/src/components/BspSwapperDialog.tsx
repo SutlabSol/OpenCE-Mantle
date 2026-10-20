@@ -991,6 +991,48 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
           <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
             Changes are applied in-memory. Use File &gt; Save to commit.
           </div>
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button
+              data-testid="bsp-export-3d-glb-btn"
+              type="button"
+              onClick={async () => {
+                const pickRes = await window.opence.pickExport3dPath(`bsp_${targetBspIndex}`, 'glb');
+                if (!pickRes || !pickRes.path) return;
+                await window.opence.exportBsp3d(targetBspIndex, 'glb', pickRes.path);
+              }}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(192,132,252,0.4)',
+                color: '#c084fc',
+                borderRadius: '4px',
+                padding: '4px 10px',
+                fontSize: '11px',
+                cursor: 'pointer',
+              }}
+            >
+              Export BSP (.glb)
+            </button>
+            <button
+              data-testid="bsp-export-3d-obj-btn"
+              type="button"
+              onClick={async () => {
+                const pickRes = await window.opence.pickExport3dPath(`bsp_${targetBspIndex}`, 'obj');
+                if (!pickRes || !pickRes.path) return;
+                await window.opence.exportBsp3d(targetBspIndex, 'obj', pickRes.path);
+              }}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(192,132,252,0.4)',
+                color: '#c084fc',
+                borderRadius: '4px',
+                padding: '4px 10px',
+                fontSize: '11px',
+                cursor: 'pointer',
+              }}
+            >
+              Export BSP (.obj)
+            </button>
+          </div>
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               data-testid="bsp-swapper-cancel-btn"

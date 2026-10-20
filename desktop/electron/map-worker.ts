@@ -78,6 +78,10 @@ import {
   decodeWavToPcm,
   encodeXboxAdpcmMono,
   SoundFormat,
+  exportModelToObj,
+  exportBspToObj,
+  exportModelToGlb,
+  exportBspToGlb,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -131,6 +135,7 @@ import type {
   RenameTagResult,
   DuplicateTagResult,
   HaloBitmapVersion,
+  Export3dResult,
 } from './shared-types';
 import {
   sanitizeMapName,
@@ -1613,6 +1618,60 @@ export function runGetModelGeometry(task: { requestId: string; modelTagId: numbe
   }
 }
 
+/** M13.3: Exports a 3D model tag (gbxmodel) to OBJ or glTF .glb format. */
+export function runExportModel3d(task: {
+  requestId: string;
+  modelTagId: number;
+  lod?: number;
+  format: 'obj' | 'glb';
+  outputPath: string;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const lod = task.lod ?? 4;
+    const geometry = extractModelRenderGeometry(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.modelTagId, lod);
+    if (task.format === 'glb') {
+      const glbBytes = exportModelToGlb(geometry);
+      fs.writeFileSync(task.outputPath, glbBytes);
+    } else {
+      const mtlFileName = path.basename(task.outputPath).replace(/\.obj$/i, '.mtl');
+      const objRes = exportModelToObj(geometry, { mtlFileName });
+      fs.writeFileSync(task.outputPath, objRes.objText, 'utf8');
+      const mtlPath = task.outputPath.replace(/\.obj$/i, '.mtl');
+      fs.writeFileSync(mtlPath, objRes.mtlText, 'utf8');
+    }
+    sendResult(task.requestId, { ok: true, filePath: task.outputPath } satisfies Export3dResult);
+  } catch (err) {
+    sendError(task.requestId, 'EXPORT_3D_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** M13.3: Exports Structure BSP geometry (sbsp) to OBJ or glTF .glb format. */
+export function runExportBsp3d(task: {
+  requestId: string;
+  bspIndex: number;
+  format: 'obj' | 'glb';
+  outputPath: string;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const mesh = extractBspRenderMesh(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.bspIndex);
+    if (task.format === 'glb') {
+      const glbBytes = exportBspToGlb(mesh);
+      fs.writeFileSync(task.outputPath, glbBytes);
+    } else {
+      const mtlFileName = path.basename(task.outputPath).replace(/\.obj$/i, '.mtl');
+      const objRes = exportBspToObj(mesh, { mtlFileName });
+      fs.writeFileSync(task.outputPath, objRes.objText, 'utf8');
+      const mtlPath = task.outputPath.replace(/\.obj$/i, '.mtl');
+      fs.writeFileSync(mtlPath, objRes.mtlText, 'utf8');
+    }
+    sendResult(task.requestId, { ok: true, filePath: task.outputPath } satisfies Export3dResult);
+  } catch (err) {
+    sendError(task.requestId, 'EXPORT_3D_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
 /** Step 9: Updates a placed scenario object in the open map in memory. */
 export function runUpdateScenarioPlacement(task: {
   requestId: string;
@@ -1965,6 +2024,8 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'getSoundWav') runGetSoundWav(task);
     else if (task.type === 'exportSound') runExportSound(task);
     else if (task.type === 'replaceSound') runReplaceSound(task);
+    else if (task.type === 'exportModel3d') runExportModel3d(task);
+    else if (task.type === 'exportBsp3d') runExportBsp3d(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

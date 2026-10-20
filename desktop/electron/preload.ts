@@ -100,6 +100,12 @@ const api: OpenceApi = {
   pickImportSoundPath: () => ipcRenderer.invoke('dialog:pickImportSoundPath'),
   replaceSoundWav: (tagIndex: number, pitchRangeIndex: number, permutationIndex: number, inputPath: string) =>
     ipcRenderer.invoke('sound:replace', tagIndex, pitchRangeIndex, permutationIndex, inputPath),
+  pickExport3dPath: (defaultName: string, format: 'obj' | 'glb') =>
+    ipcRenderer.invoke('dialog:pickExport3dPath', defaultName, format),
+  exportModel3d: (modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
+    ipcRenderer.invoke('3d:exportModel', modelTagId, lod, format, outputPath),
+  exportBsp3d: (bspIndex: number, format: 'obj' | 'glb', outputPath: string) =>
+    ipcRenderer.invoke('3d:exportBsp', bspIndex, format, outputPath),
   convertPreflight: (source: 'open' | 'pick', resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convertPreflight', source, resourcePaths),
   convertMap: (acknowledgeScripts: boolean, repairs: ConvertRepairChoice, resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convert', acknowledgeScripts, repairs, resourcePaths),
   pickConvertResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickConvertResource', kind),

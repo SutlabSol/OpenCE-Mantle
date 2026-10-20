@@ -48,6 +48,9 @@ __export(map_worker_exports, {
   runDuplicateScenarioPlacement: () => runDuplicateScenarioPlacement,
   runDuplicateTag: () => runDuplicateTag,
   runExportBitmap: () => runExportBitmap,
+  runExportBsp3d: () => runExportBsp3d,
+  runExportModel3d: () => runExportModel3d,
+  runExportSound: () => runExportSound,
   runExtractTags: () => runExtractTags,
   runGetBitmapInfo: () => runGetBitmapInfo,
   runGetBitmapRgba: () => runGetBitmapRgba,
@@ -58,6 +61,8 @@ __export(map_worker_exports, {
   runGetModelGeometry: () => runGetModelGeometry,
   runGetReferencingTags: () => runGetReferencingTags,
   runGetScenarioObjects: () => runGetScenarioObjects,
+  runGetSoundInfo: () => runGetSoundInfo,
+  runGetSoundWav: () => runGetSoundWav,
   runGetSourceBspMesh: () => runGetSourceBspMesh,
   runGetTagFields: () => runGetTagFields,
   runGetUnicodeStrings: () => runGetUnicodeStrings,
@@ -66,6 +71,7 @@ __export(map_worker_exports, {
   runPlanInject: () => runPlanInject,
   runRenameTag: () => runRenameTag,
   runReplaceBitmapImage: () => runReplaceBitmapImage,
+  runReplaceSound: () => runReplaceSound,
   runSaveMap: () => runSaveMap,
   runSaveMapAs: () => runSaveMapAs,
   runSetDependencySlot: () => runSetDependencySlot,
@@ -43695,6 +43701,940 @@ function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageI
   return outputBuffer;
 }
 
+// ../core/src/render/sound-codec.ts
+var SoundCodecError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SoundCodecError";
+  }
+};
+var SOUND_FORMAT_NAMES = {
+  [0 /* PCM16 */]: "16-bit PCM",
+  [1 /* XboxADPCM */]: "Xbox ADPCM",
+  [2 /* ImaADPCM */]: "IMA ADPCM",
+  [3 /* OggVorbis */]: "Ogg Vorbis"
+};
+var SOUND_CLASS_NAMES = {
+  0: "Projectile Impact",
+  1: "Projectile Detonation",
+  4: "Weapon Fire",
+  5: "Weapon Ready",
+  6: "Weapon Reload",
+  7: "Weapon Empty",
+  8: "Weapon Charge",
+  9: "Weapon Overheat",
+  10: "Weapon Idle",
+  13: "Object Impacts",
+  14: "Particle Impacts",
+  15: "Slow Particle Impacts",
+  18: "Unit Footsteps",
+  19: "Unit Dialog",
+  22: "Vehicle Collision",
+  23: "Vehicle Engine",
+  26: "Device Door",
+  27: "Device Force Field",
+  28: "Device Machinery",
+  29: "Device Nature",
+  30: "Device Computers",
+  32: "Music",
+  33: "Ambient Nature",
+  34: "Ambient Machinery",
+  35: "Ambient Computers",
+  39: "First Person Damage",
+  44: "Scripted Dialog Player",
+  45: "Scripted Effect",
+  46: "Scripted Dialog Other",
+  47: "Scripted Dialog Force Unspatialized",
+  50: "Game Event"
+};
+var STEP_TABLE = [
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  16,
+  17,
+  19,
+  21,
+  23,
+  25,
+  28,
+  31,
+  34,
+  37,
+  41,
+  45,
+  50,
+  55,
+  60,
+  66,
+  73,
+  80,
+  88,
+  97,
+  107,
+  118,
+  130,
+  143,
+  157,
+  173,
+  190,
+  209,
+  230,
+  253,
+  279,
+  307,
+  337,
+  371,
+  408,
+  449,
+  494,
+  544,
+  598,
+  658,
+  724,
+  796,
+  876,
+  963,
+  1060,
+  1166,
+  1282,
+  1411,
+  1552,
+  1707,
+  1878,
+  2066,
+  2272,
+  2499,
+  2749,
+  3024,
+  3327,
+  3660,
+  4026,
+  4428,
+  4871,
+  5358,
+  5894,
+  6484,
+  7132,
+  7845,
+  8630,
+  9493,
+  10442,
+  11487,
+  12635,
+  13899,
+  15289,
+  16818,
+  18500,
+  20350,
+  22385,
+  24623,
+  27086,
+  29794,
+  32767
+];
+var INDEX_TABLE = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+function decodeXboxAdpcmMono(buf, offset, size) {
+  const blocks = Math.floor(size / 36);
+  const out = new Int16Array(blocks * 64);
+  let outIdx = 0;
+  for (let b = 0; b < blocks; b++) {
+    const blockStart = offset + b * 36;
+    let sample = buf[blockStart] | buf[blockStart + 1] << 8;
+    if (sample >= 32768) sample -= 65536;
+    let stepIndex = Math.min(88, Math.max(0, buf[blockStart + 2]));
+    out[outIdx++] = sample;
+    for (let i = 0; i < 32; i++) {
+      const byte = buf[blockStart + 4 + i];
+      const nibbles = [byte & 15, byte >> 4 & 15];
+      for (const code of nibbles) {
+        if (outIdx >= out.length) break;
+        const step = STEP_TABLE[stepIndex];
+        let diff = step >> 3;
+        if (code & 4) diff += step;
+        if (code & 2) diff += step >> 1;
+        if (code & 1) diff += step >> 2;
+        if (code & 8) sample -= diff;
+        else sample += diff;
+        sample = Math.max(-32768, Math.min(32767, sample));
+        stepIndex = Math.max(0, Math.min(88, stepIndex + INDEX_TABLE[code]));
+        out[outIdx++] = sample;
+      }
+    }
+  }
+  return out;
+}
+function decodeXboxAdpcmStereo(buf, offset, size) {
+  const blocks = Math.floor(size / 72);
+  const out = new Int16Array(blocks * 64 * 2);
+  let outIdx = 0;
+  for (let b = 0; b < blocks; b++) {
+    const leftBlock = offset + b * 72;
+    const rightBlock = leftBlock + 36;
+    const leftSamples = decodeXboxAdpcmMono(buf, leftBlock, 36);
+    const rightSamples = decodeXboxAdpcmMono(buf, rightBlock, 36);
+    for (let i = 0; i < 64; i++) {
+      out[outIdx++] = leftSamples[i];
+      out[outIdx++] = rightSamples[i];
+    }
+  }
+  return out;
+}
+function encodeXboxAdpcmMono(pcm) {
+  const numBlocks = Math.ceil(pcm.length / 64);
+  const out = new Uint8Array(numBlocks * 36);
+  let pcmIdx = 0;
+  let stepIndex = 0;
+  for (let b = 0; b < numBlocks; b++) {
+    const blockStart = b * 36;
+    let sample = pcmIdx < pcm.length ? pcm[pcmIdx++] : 0;
+    out[blockStart + 0] = sample & 255;
+    out[blockStart + 1] = sample >> 8 & 255;
+    out[blockStart + 2] = stepIndex & 255;
+    out[blockStart + 3] = 0;
+    for (let i = 0; i < 32; i++) {
+      let byteVal = 0;
+      for (let n = 0; n < 2; n++) {
+        const nextSample = pcmIdx < pcm.length ? pcm[pcmIdx++] : sample;
+        let diff = nextSample - sample;
+        let code = 0;
+        if (diff < 0) {
+          code = 8;
+          diff = -diff;
+        }
+        const step = STEP_TABLE[stepIndex];
+        let delta = step >> 3;
+        if (diff >= step) {
+          code |= 4;
+          diff -= step;
+          delta += step;
+        }
+        if (diff >= step >> 1) {
+          code |= 2;
+          diff -= step >> 1;
+          delta += step >> 1;
+        }
+        if (diff >= step >> 2) {
+          code |= 1;
+          delta += step >> 2;
+        }
+        if (code & 8) sample -= delta;
+        else sample += delta;
+        sample = Math.max(-32768, Math.min(32767, sample));
+        stepIndex = Math.max(0, Math.min(88, stepIndex + INDEX_TABLE[code]));
+        if (n === 0) byteVal |= code & 15;
+        else byteVal |= (code & 15) << 4;
+      }
+      out[blockStart + 4 + i] = byteVal;
+    }
+  }
+  return out;
+}
+function encodePcmToWav(pcmSamples, sampleRate, channels) {
+  const byteRate = sampleRate * channels * 2;
+  const blockAlign = channels * 2;
+  const dataSize = pcmSamples.length * 2;
+  const totalSize = 36 + dataSize;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, 4, "ascii");
+  header.writeUInt32LE(totalSize, 4);
+  header.write("WAVE", 8, 4, "ascii");
+  header.write("fmt ", 12, 4, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, 4, "ascii");
+  header.writeUInt32LE(dataSize, 40);
+  const dataBuffer = Buffer.from(pcmSamples.buffer, pcmSamples.byteOffset, pcmSamples.byteLength);
+  return Buffer.concat([header, dataBuffer]);
+}
+function decodeWavToPcm(wavBuffer) {
+  if (wavBuffer.length < 44 || wavBuffer.toString("ascii", 0, 4) !== "RIFF" || wavBuffer.toString("ascii", 8, 12) !== "WAVE") {
+    throw new SoundCodecError("Invalid WAV file container.");
+  }
+  let offset = 12;
+  let sampleRate = 22050;
+  let channels = 1;
+  let bitsPerSample = 16;
+  let dataOffset = 0;
+  let dataSize = 0;
+  while (offset + 8 <= wavBuffer.length) {
+    const chunkId = wavBuffer.toString("ascii", offset, offset + 4);
+    const chunkSize = wavBuffer.readUInt32LE(offset + 4);
+    offset += 8;
+    if (chunkId === "fmt ") {
+      channels = wavBuffer.readUInt16LE(offset + 2);
+      sampleRate = wavBuffer.readUInt32LE(offset + 4);
+      bitsPerSample = wavBuffer.readUInt16LE(offset + 14);
+    } else if (chunkId === "data") {
+      dataOffset = offset;
+      dataSize = Math.min(chunkSize, wavBuffer.length - offset);
+      break;
+    }
+    offset += chunkSize;
+  }
+  if (dataOffset === 0) {
+    throw new SoundCodecError('No "data" chunk found in WAV.');
+  }
+  if (bitsPerSample !== 16) {
+    throw new SoundCodecError(`Only 16-bit WAV supported (file is ${bitsPerSample}-bit).`);
+  }
+  const numSamples = Math.floor(dataSize / 2);
+  const pcmSamples = new Int16Array(numSamples);
+  for (let i = 0; i < numSamples; i++) {
+    pcmSamples[i] = wavBuffer.readInt16LE(dataOffset + i * 2);
+  }
+  return { sampleRate, channels, pcmSamples };
+}
+function inspectSoundTag(mapBuffer, header, tagIndex, soundTagId, externalSoundsBuffer) {
+  const entryIdx = soundTagId & 65535;
+  const entry = tagIndex.entries[entryIdx];
+  if (!entry || entry.tagId !== soundTagId) {
+    throw new SoundCodecError(`Sound tag ID 0x${soundTagId.toString(16)} not found.`);
+  }
+  let tagStart = 0;
+  let isExternal = entry.isExternal;
+  let srcBuf = mapBuffer;
+  if (isExternal) {
+    if (!externalSoundsBuffer) {
+      throw new SoundCodecError(`External sounds.map buffer required for tag "${entry.path}".`);
+    }
+    const resMap = parseResourceMap(externalSoundsBuffer);
+    let matchedOffset = 0;
+    for (const r of resMap.entries) {
+      let name = "";
+      for (let i = r.pathOffset; externalSoundsBuffer[i] !== 0; i++) {
+        name += String.fromCharCode(externalSoundsBuffer[i]);
+      }
+      if (name === entry.path) {
+        matchedOffset = r.dataOffset;
+        break;
+      }
+    }
+    if (matchedOffset === 0) {
+      throw new SoundCodecError(`Sound tag "${entry.path}" not found in sounds.map resource table.`);
+    }
+    tagStart = matchedOffset;
+    srcBuf = externalSoundsBuffer;
+  } else {
+    tagStart = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  }
+  const soundClass = srcBuf.readUInt16LE(tagStart + 4);
+  const sampleRateCode = srcBuf.readUInt16LE(tagStart + 6);
+  const sampleRate = sampleRateCode === 1 ? 44100 : 22050;
+  const channelCount = srcBuf.readUInt16LE(tagStart + 104) === 1 ? 2 : 1;
+  const pitchCount = srcBuf.readUInt32LE(tagStart + 152);
+  const pitchPtr = srcBuf.readUInt32LE(tagStart + 156);
+  const pitchRanges = [];
+  if (pitchCount > 0 && pitchCount < 32) {
+    const pitchBase = isExternal ? tagStart + 164 : header.tagDataOffset + (pitchPtr - tagIndex.baseMemoryAddress);
+    const pitchStructSize = 72;
+    for (let p = 0; p < pitchCount; p++) {
+      const pOffset = pitchBase + p * pitchStructSize;
+      if (pOffset + pitchStructSize <= srcBuf.length) {
+        let pName = "";
+        for (let b = 0; b < 32; b++) {
+          const ch = srcBuf[pOffset + b];
+          if (ch === 0) break;
+          pName += String.fromCharCode(ch);
+        }
+        const naturalPitch = srcBuf.readFloatLE(pOffset + 32);
+        const bendMin = srcBuf.readFloatLE(pOffset + 36);
+        const bendMax = srcBuf.readFloatLE(pOffset + 40);
+        const permCount = srcBuf.readUInt32LE(pOffset + 60);
+        const permPtr = srcBuf.readUInt32LE(pOffset + 64);
+        const permutations = [];
+        if (permCount > 0 && permCount < 256) {
+          const permBase = isExternal ? pOffset + pitchStructSize : header.tagDataOffset + (permPtr - tagIndex.baseMemoryAddress);
+          const permStructSize = 124;
+          for (let m = 0; m < permCount; m++) {
+            const mOffset = permBase + m * permStructSize;
+            if (mOffset + permStructSize <= srcBuf.length) {
+              let mName = "";
+              for (let b = 0; b < 32; b++) {
+                const ch = srcBuf[mOffset + b];
+                if (ch === 0) break;
+                mName += String.fromCharCode(ch);
+              }
+              const skipFraction = srcBuf.readFloatLE(mOffset + 32);
+              const gain = srcBuf.readFloatLE(mOffset + 36);
+              const format = srcBuf.readUInt16LE(mOffset + 40);
+              const sampleSize = srcBuf.readUInt32LE(mOffset + 64);
+              const sampleExt = srcBuf.readUInt32LE(mOffset + 68);
+              const sampleOffset = srcBuf.readUInt32LE(mOffset + 72);
+              const permExternal = (sampleExt & 1) !== 0 || isExternal;
+              let durationSeconds = 0;
+              if (format === 1 /* XboxADPCM */) {
+                const samplesPerChannel = Math.floor(sampleSize / (36 * channelCount)) * 64;
+                durationSeconds = samplesPerChannel / sampleRate;
+              } else if (format === 0 /* PCM16 */) {
+                const samplesPerChannel = Math.floor(sampleSize / (2 * channelCount));
+                durationSeconds = samplesPerChannel / sampleRate;
+              }
+              permutations.push({
+                index: m,
+                name: mName.trim() || `permutation_${m}`,
+                skipFraction,
+                gain,
+                format,
+                formatName: SOUND_FORMAT_NAMES[format] ?? `Format ${format}`,
+                sampleSize,
+                sampleOffset,
+                isExternal: permExternal,
+                durationSeconds: Math.round(durationSeconds * 100) / 100
+              });
+            }
+          }
+        }
+        pitchRanges.push({
+          index: p,
+          name: pName.trim() || `range_${p}`,
+          naturalPitch,
+          bendBoundsMin: bendMin,
+          bendBoundsMax: bendMax,
+          permutations
+        });
+      }
+    }
+  }
+  return {
+    tagId: soundTagId,
+    tagIndex: entryIdx,
+    path: entry.path,
+    soundClass,
+    soundClassName: SOUND_CLASS_NAMES[soundClass] ?? `Class ${soundClass}`,
+    channelCount,
+    sampleRate,
+    isExternal,
+    pitchRanges
+  };
+}
+function decodeSoundPermutationPcm(mapBuffer, header, tagIndex, soundTagId, pitchRangeIndex = 0, permutationIndex = 0, externalSoundsBuffer) {
+  const summary = inspectSoundTag(mapBuffer, header, tagIndex, soundTagId, externalSoundsBuffer);
+  const range = summary.pitchRanges[pitchRangeIndex];
+  if (!range) throw new SoundCodecError(`Pitch range ${pitchRangeIndex} not found.`);
+  const perm = range.permutations[permutationIndex];
+  if (!perm) throw new SoundCodecError(`Permutation ${permutationIndex} not found.`);
+  const srcBuf = perm.isExternal ? externalSoundsBuffer : mapBuffer;
+  if (!srcBuf) throw new SoundCodecError(`Missing audio buffer for permutation ${perm.name}.`);
+  if (perm.sampleOffset + perm.sampleSize > srcBuf.length) {
+    throw new CorruptMapError(
+      `Audio samples (offset 0x${perm.sampleOffset.toString(16)}, size ${perm.sampleSize}) out of bounds (${srcBuf.length}).`
+    );
+  }
+  let pcmSamples;
+  if (perm.format === 1 /* XboxADPCM */) {
+    if (summary.channelCount === 2) {
+      pcmSamples = decodeXboxAdpcmStereo(srcBuf, perm.sampleOffset, perm.sampleSize);
+    } else {
+      pcmSamples = decodeXboxAdpcmMono(srcBuf, perm.sampleOffset, perm.sampleSize);
+    }
+  } else if (perm.format === 0 /* PCM16 */) {
+    const numSamples = Math.floor(perm.sampleSize / 2);
+    pcmSamples = new Int16Array(numSamples);
+    for (let i = 0; i < numSamples; i++) {
+      pcmSamples[i] = srcBuf.readInt16LE(perm.sampleOffset + i * 2);
+    }
+  } else {
+    throw new SoundCodecError(`Decoding format ${perm.formatName} is not yet supported.`);
+  }
+  const durationSeconds = pcmSamples.length / (summary.channelCount * summary.sampleRate);
+  return {
+    sampleRate: summary.sampleRate,
+    channels: summary.channelCount,
+    pcmSamples,
+    durationSeconds
+  };
+}
+function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pitchRangeIndex, permutationIndex, newSamples, newFormat, externalSoundsBuffer) {
+  const entryIdx = soundTagId & 65535;
+  const entry = tagIndex.entries[entryIdx];
+  if (!entry) throw new SoundCodecError(`Sound tag 0x${soundTagId.toString(16)} not found.`);
+  if (entry.isExternal) {
+    if (!externalSoundsBuffer) {
+      throw new SoundCodecError(`External sounds.map buffer required to internalize sound tag "${entry.path}".`);
+    }
+    const resMap = parseResourceMap(externalSoundsBuffer);
+    let matchedOffset = 0;
+    let matchedSize = 0;
+    for (const r of resMap.entries) {
+      let name = "";
+      for (let i = r.pathOffset; externalSoundsBuffer[i] !== 0; i++) {
+        name += String.fromCharCode(externalSoundsBuffer[i]);
+      }
+      if (name === entry.path) {
+        matchedOffset = r.dataOffset;
+        matchedSize = r.size;
+        break;
+      }
+    }
+    if (matchedOffset === 0) {
+      throw new SoundCodecError(`Sound tag "${entry.path}" not found in sounds.map.`);
+    }
+    const tagCopy = Buffer.from(externalSoundsBuffer.subarray(matchedOffset, matchedOffset + matchedSize));
+    const tagStartInMap = mapBuffer.length + 3 & ~3;
+    const tagVirtualAddress = tagIndex.baseMemoryAddress + (tagStartInMap - header.tagDataOffset);
+    const pitchCount = tagCopy.readUInt32LE(152);
+    const pitchOffsetRel = 164;
+    tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel, 156);
+    const permOffsetRel = 164 + 72;
+    tagCopy.writeUInt32LE(tagVirtualAddress + permOffsetRel, pitchOffsetRel + 64);
+    const audioStartInMap = tagStartInMap + tagCopy.length + 3 & ~3;
+    const targetPermOffset = permOffsetRel + permutationIndex * 124;
+    tagCopy.writeUInt16LE(newFormat, targetPermOffset + 40);
+    tagCopy.writeUInt32LE(newSamples.length, targetPermOffset + 64);
+    tagCopy.writeUInt32LE(0, targetPermOffset + 68);
+    tagCopy.writeUInt32LE(audioStartInMap, targetPermOffset + 72);
+    const totalNewLength = audioStartInMap + newSamples.length;
+    const outBuffer = Buffer.alloc(totalNewLength);
+    mapBuffer.copy(outBuffer, 0);
+    tagCopy.copy(outBuffer, tagStartInMap);
+    Buffer.from(newSamples).copy(outBuffer, audioStartInMap);
+    const tagArrayOffset = header.tagDataOffset + 40;
+    const entryOffset = tagArrayOffset + entryIdx * 32;
+    outBuffer.writeUInt32LE(tagVirtualAddress, entryOffset + 20);
+    outBuffer.writeUInt32LE(0, entryOffset + 24);
+    entry.tagDataPointerOrResourceIndex = tagVirtualAddress;
+    entry.isExternal = false;
+    const newTagDataSize = totalNewLength - header.tagDataOffset;
+    outBuffer.writeUInt32LE(totalNewLength, 8);
+    outBuffer.writeUInt32LE(newTagDataSize, 20);
+    header.tagDataSize = newTagDataSize;
+    header.decompressedFileSize = totalNewLength;
+    return outBuffer;
+  }
+  const tagStart = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  const pitchPtr = mapBuffer.readUInt32LE(tagStart + 156);
+  const pitchBase = header.tagDataOffset + (pitchPtr - tagIndex.baseMemoryAddress);
+  const pOffset = pitchBase + pitchRangeIndex * 72;
+  const permPtr = mapBuffer.readUInt32LE(pOffset + 64);
+  const permBase = header.tagDataOffset + (permPtr - tagIndex.baseMemoryAddress);
+  const mOffset = permBase + permutationIndex * 124;
+  const oldSize = mapBuffer.readUInt32LE(mOffset + 64);
+  const oldOffset = mapBuffer.readUInt32LE(mOffset + 72);
+  const oldExt = mapBuffer.readUInt32LE(mOffset + 68);
+  let outputBuffer = mapBuffer;
+  let targetOffset = oldOffset;
+  if ((oldExt & 1) === 0 && newSamples.length <= oldSize && oldOffset + newSamples.length <= mapBuffer.length) {
+    Buffer.from(newSamples).copy(outputBuffer, oldOffset);
+  } else {
+    const alignedAppendOffset = mapBuffer.length + 3 & ~3;
+    const newBuf = Buffer.alloc(alignedAppendOffset + newSamples.length);
+    mapBuffer.copy(newBuf, 0);
+    Buffer.from(newSamples).copy(newBuf, alignedAppendOffset);
+    outputBuffer = newBuf;
+    targetOffset = alignedAppendOffset;
+    const newTagDataSize = outputBuffer.length - header.tagDataOffset;
+    outputBuffer.writeUInt32LE(outputBuffer.length, 8);
+    outputBuffer.writeUInt32LE(newTagDataSize, 20);
+    header.tagDataSize = newTagDataSize;
+    header.decompressedFileSize = outputBuffer.length;
+  }
+  outputBuffer.writeUInt16LE(newFormat, mOffset + 40);
+  outputBuffer.writeUInt32LE(newSamples.length, mOffset + 64);
+  outputBuffer.writeUInt32LE(0, mOffset + 68);
+  outputBuffer.writeUInt32LE(targetOffset, mOffset + 72);
+  return outputBuffer;
+}
+
+// ../core/src/render/model-exporter.ts
+function exportModelToObj(geometry, options = {}) {
+  const flipV = options.flipV ?? true;
+  const mtlName = options.mtlFileName ?? `${geometry.modelPath.split("\\").pop() || "model"}.mtl`;
+  const objLines = [
+    `# OpenCE Modding Tool - gbxmodel Wavefront OBJ Exporter`,
+    `# Model: ${geometry.modelPath} (LOD ${geometry.lodLevel})`,
+    `# Total Vertices: ${geometry.totalVertices}, Total Triangles: ${geometry.totalTriangles}`,
+    `mtllib ${mtlName}`,
+    ""
+  ];
+  const mtlLines = [
+    `# OpenCE Modding Tool - Material Library`,
+    `# Model: ${geometry.modelPath}`,
+    ""
+  ];
+  const definedMaterials = /* @__PURE__ */ new Set();
+  let vertexOffset = 1;
+  for (let sIdx = 0; sIdx < geometry.submeshes.length; sIdx++) {
+    const sub = geometry.submeshes[sIdx];
+    const matName = `mat_shader_${sub.shaderTagId !== void 0 && sub.shaderTagId !== 4294967295 ? (sub.shaderTagId >>> 0).toString(16) : `part_${sIdx}`}`;
+    if (!definedMaterials.has(matName)) {
+      definedMaterials.add(matName);
+      mtlLines.push(
+        `newmtl ${matName}`,
+        `Ka 0.200000 0.200000 0.200000`,
+        `Kd 0.800000 0.800000 0.800000`,
+        `Ks 0.100000 0.100000 0.100000`,
+        `d 1.000000`,
+        `illum 2`,
+        ""
+      );
+    }
+    objLines.push(`g part_${sub.partIndex}`);
+    objLines.push(`usemtl ${matName}`);
+    const vertStride = 8;
+    for (let v = 0; v < sub.vertexCount; v++) {
+      const idx = v * vertStride;
+      const x = sub.vertices[idx];
+      const y = sub.vertices[idx + 1];
+      const z = sub.vertices[idx + 2];
+      const nx = sub.vertices[idx + 3];
+      const ny = sub.vertices[idx + 4];
+      const nz = sub.vertices[idx + 5];
+      const u = sub.vertices[idx + 6];
+      let uvV = sub.vertices[idx + 7];
+      if (flipV) uvV = 1 - uvV;
+      objLines.push(`v ${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)}`);
+      objLines.push(`vn ${nx.toFixed(6)} ${ny.toFixed(6)} ${nz.toFixed(6)}`);
+      objLines.push(`vt ${u.toFixed(6)} ${uvV.toFixed(6)}`);
+    }
+    for (let t = 0; t < sub.indices.length; t += 3) {
+      const i0 = vertexOffset + sub.indices[t];
+      const i1 = vertexOffset + sub.indices[t + 1];
+      const i2 = vertexOffset + sub.indices[t + 2];
+      objLines.push(`f ${i0}/${i0}/${i0} ${i1}/${i1}/${i1} ${i2}/${i2}/${i2}`);
+    }
+    vertexOffset += sub.vertexCount;
+    objLines.push("");
+  }
+  return {
+    objText: objLines.join("\n"),
+    mtlText: mtlLines.join("\n")
+  };
+}
+function exportBspToObj(mesh, options = {}) {
+  const flipV = options.flipV ?? true;
+  const bspLabel = mesh.bspNames?.[mesh.bspIndex] || `bsp_${mesh.bspIndex}`;
+  const mtlName = options.mtlFileName ?? `${bspLabel.split("\\").pop() || "bsp"}.mtl`;
+  const objLines = [
+    `# OpenCE Modding Tool - Structure BSP Wavefront OBJ Exporter`,
+    `# BSP: ${bspLabel} (Index ${mesh.bspIndex})`,
+    `# Total Vertices: ${mesh.totalVertices}, Total Triangles: ${mesh.totalTriangles}`,
+    `mtllib ${mtlName}`,
+    ""
+  ];
+  const mtlLines = [
+    `# OpenCE Modding Tool - Material Library`,
+    `# BSP: ${bspLabel}`,
+    ""
+  ];
+  const definedMaterials = /* @__PURE__ */ new Set();
+  let vertexOffset = 1;
+  for (let sIdx = 0; sIdx < mesh.submeshes.length; sIdx++) {
+    const sub = mesh.submeshes[sIdx];
+    const matName = `mat_shader_${sub.shaderTagId !== 4294967295 ? (sub.shaderTagId >>> 0).toString(16) : `submesh_${sIdx}`}`;
+    if (!definedMaterials.has(matName)) {
+      definedMaterials.add(matName);
+      mtlLines.push(
+        `newmtl ${matName}`,
+        `Ka 0.200000 0.200000 0.200000`,
+        `Kd 0.800000 0.800000 0.800000`,
+        `Ks 0.050000 0.050000 0.050000`,
+        `d 1.000000`,
+        `illum 2`,
+        ""
+      );
+    }
+    objLines.push(`g submesh_${sub.submeshIndex}_lightmap_${sub.lightmapIndex}`);
+    objLines.push(`usemtl ${matName}`);
+    const vertStride = 8;
+    for (let v = 0; v < sub.vertexCount; v++) {
+      const idx = v * vertStride;
+      const x = sub.vertices[idx];
+      const y = sub.vertices[idx + 1];
+      const z = sub.vertices[idx + 2];
+      const nx = sub.vertices[idx + 3];
+      const ny = sub.vertices[idx + 4];
+      const nz = sub.vertices[idx + 5];
+      const u = sub.vertices[idx + 6];
+      let uvV = sub.vertices[idx + 7];
+      if (flipV) uvV = 1 - uvV;
+      objLines.push(`v ${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)}`);
+      objLines.push(`vn ${nx.toFixed(6)} ${ny.toFixed(6)} ${nz.toFixed(6)}`);
+      objLines.push(`vt ${u.toFixed(6)} ${uvV.toFixed(6)}`);
+    }
+    for (let t = 0; t < sub.indices.length; t += 3) {
+      const i0 = vertexOffset + sub.indices[t];
+      const i1 = vertexOffset + sub.indices[t + 1];
+      const i2 = vertexOffset + sub.indices[t + 2];
+      objLines.push(`f ${i0}/${i0}/${i0} ${i1}/${i1}/${i1} ${i2}/${i2}/${i2}`);
+    }
+    vertexOffset += sub.vertexCount;
+    objLines.push("");
+  }
+  return {
+    objText: objLines.join("\n"),
+    mtlText: mtlLines.join("\n")
+  };
+}
+function buildGlbBinary(modelName, submeshes) {
+  const bufferChunks = [];
+  let currentOffset = 0;
+  const accessors = [];
+  const bufferViews = [];
+  const materials = [];
+  const primitives = [];
+  const matMap = /* @__PURE__ */ new Map();
+  for (let s = 0; s < submeshes.length; s++) {
+    const sub = submeshes[s];
+    if (sub.vertexCount === 0 || sub.indices.length === 0) continue;
+    const tagId = sub.shaderTagId ?? 4294967295;
+    let matIndex;
+    if (matMap.has(tagId)) {
+      matIndex = matMap.get(tagId);
+    } else {
+      matIndex = materials.length;
+      materials.push({
+        name: `shader_${tagId !== 4294967295 ? (tagId >>> 0).toString(16) : `part_${s}`}`,
+        pbrMetallicRoughness: {
+          baseColorFactor: [0.8, 0.8, 0.8, 1],
+          metallicFactor: 0.1,
+          roughnessFactor: 0.8
+        },
+        doubleSided: true
+      });
+      matMap.set(tagId, matIndex);
+    }
+    const positions = new Float32Array(sub.vertexCount * 3);
+    const normals = new Float32Array(sub.vertexCount * 3);
+    const uvs = new Float32Array(sub.vertexCount * 2);
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let v = 0; v < sub.vertexCount; v++) {
+      const srcIdx = v * 8;
+      const x = sub.vertices[srcIdx];
+      const y = sub.vertices[srcIdx + 1];
+      const z = sub.vertices[srcIdx + 2];
+      const nx = sub.vertices[srcIdx + 3];
+      const ny = sub.vertices[srcIdx + 4];
+      const nz = sub.vertices[srcIdx + 5];
+      const u = sub.vertices[srcIdx + 6];
+      const uvV = sub.vertices[srcIdx + 7];
+      positions[v * 3] = x;
+      positions[v * 3 + 1] = y;
+      positions[v * 3 + 2] = z;
+      normals[v * 3] = nx;
+      normals[v * 3 + 1] = ny;
+      normals[v * 3 + 2] = nz;
+      uvs[v * 2] = u;
+      uvs[v * 2 + 1] = uvV;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    }
+    const align4 = (bytes) => {
+      const rem = bytes.byteLength % 4;
+      if (rem === 0) return bytes;
+      const padded = new Uint8Array(bytes.byteLength + (4 - rem));
+      padded.set(bytes);
+      return padded;
+    };
+    const posBytes = align4(new Uint8Array(positions.buffer, positions.byteOffset, positions.byteLength));
+    const posViewIdx = bufferViews.length;
+    bufferViews.push({
+      buffer: 0,
+      byteOffset: currentOffset,
+      byteLength: positions.byteLength,
+      target: 34962
+      // ARRAY_BUFFER
+    });
+    bufferChunks.push(posBytes);
+    currentOffset += posBytes.byteLength;
+    const posAccIdx = accessors.length;
+    accessors.push({
+      bufferView: posViewIdx,
+      byteOffset: 0,
+      componentType: 5126,
+      // FLOAT
+      count: sub.vertexCount,
+      type: "VEC3",
+      max: [maxX, maxY, maxZ],
+      min: [minX, minY, minZ]
+    });
+    const normBytes = align4(new Uint8Array(normals.buffer, normals.byteOffset, normals.byteLength));
+    const normViewIdx = bufferViews.length;
+    bufferViews.push({
+      buffer: 0,
+      byteOffset: currentOffset,
+      byteLength: normals.byteLength,
+      target: 34962
+      // ARRAY_BUFFER
+    });
+    bufferChunks.push(normBytes);
+    currentOffset += normBytes.byteLength;
+    const normAccIdx = accessors.length;
+    accessors.push({
+      bufferView: normViewIdx,
+      byteOffset: 0,
+      componentType: 5126,
+      // FLOAT
+      count: sub.vertexCount,
+      type: "VEC3"
+    });
+    const uvBytes = align4(new Uint8Array(uvs.buffer, uvs.byteOffset, uvs.byteLength));
+    const uvViewIdx = bufferViews.length;
+    bufferViews.push({
+      buffer: 0,
+      byteOffset: currentOffset,
+      byteLength: uvs.byteLength,
+      target: 34962
+      // ARRAY_BUFFER
+    });
+    bufferChunks.push(uvBytes);
+    currentOffset += uvBytes.byteLength;
+    const uvAccIdx = accessors.length;
+    accessors.push({
+      bufferView: uvViewIdx,
+      byteOffset: 0,
+      componentType: 5126,
+      // FLOAT
+      count: sub.vertexCount,
+      type: "VEC2"
+    });
+    const is32Bit = sub.vertexCount > 65535;
+    const indicesTyped = is32Bit ? sub.indices instanceof Uint32Array ? sub.indices : new Uint32Array(sub.indices) : sub.indices instanceof Uint16Array ? sub.indices : new Uint16Array(sub.indices);
+    const indexBytes = align4(new Uint8Array(indicesTyped.buffer, indicesTyped.byteOffset, indicesTyped.byteLength));
+    const idxViewIdx = bufferViews.length;
+    bufferViews.push({
+      buffer: 0,
+      byteOffset: currentOffset,
+      byteLength: indicesTyped.byteLength,
+      target: 34963
+      // ELEMENT_ARRAY_BUFFER
+    });
+    bufferChunks.push(indexBytes);
+    currentOffset += indexBytes.byteLength;
+    const idxAccIdx = accessors.length;
+    accessors.push({
+      bufferView: idxViewIdx,
+      byteOffset: 0,
+      componentType: is32Bit ? 5125 : 5123,
+      // UNSIGNED_INT (5125) or UNSIGNED_SHORT (5123)
+      count: sub.indices.length,
+      type: "SCALAR"
+    });
+    primitives.push({
+      attributes: {
+        POSITION: posAccIdx,
+        NORMAL: normAccIdx,
+        TEXCOORD_0: uvAccIdx
+      },
+      indices: idxAccIdx,
+      material: matIndex,
+      mode: 4
+      // TRIANGLES
+    });
+  }
+  const binBuffer = new Uint8Array(currentOffset);
+  let writePtr = 0;
+  for (const chunk of bufferChunks) {
+    binBuffer.set(chunk, writePtr);
+    writePtr += chunk.byteLength;
+  }
+  const gltfJson = {
+    asset: {
+      version: "2.0",
+      generator: "OpenCE Modding Tool glTF 2.0 Exporter"
+    },
+    scene: 0,
+    scenes: [
+      {
+        name: "Scene",
+        nodes: [0]
+      }
+    ],
+    nodes: [
+      {
+        name: modelName,
+        mesh: 0
+      }
+    ],
+    meshes: [
+      {
+        name: modelName,
+        primitives
+      }
+    ],
+    materials,
+    accessors,
+    bufferViews,
+    buffers: [
+      {
+        byteLength: binBuffer.byteLength
+      }
+    ]
+  };
+  const jsonStr = JSON.stringify(gltfJson);
+  const jsonBuf = Buffer.from(jsonStr, "utf8");
+  const jsonPadding = (4 - jsonBuf.byteLength % 4) % 4;
+  const jsonChunkLength = jsonBuf.byteLength + jsonPadding;
+  const binPadding = (4 - binBuffer.byteLength % 4) % 4;
+  const binChunkLength = binBuffer.byteLength + binPadding;
+  const totalGlbLength = 12 + 8 + jsonChunkLength + 8 + binChunkLength;
+  const glb = Buffer.alloc(totalGlbLength);
+  let p = 0;
+  glb.writeUInt32LE(1179937895, p);
+  p += 4;
+  glb.writeUInt32LE(2, p);
+  p += 4;
+  glb.writeUInt32LE(totalGlbLength, p);
+  p += 4;
+  glb.writeUInt32LE(jsonChunkLength, p);
+  p += 4;
+  glb.writeUInt32LE(1313821514, p);
+  p += 4;
+  jsonBuf.copy(glb, p);
+  p += jsonBuf.byteLength;
+  for (let i = 0; i < jsonPadding; i++) {
+    glb.writeUInt8(32, p++);
+  }
+  glb.writeUInt32LE(binChunkLength, p);
+  p += 4;
+  glb.writeUInt32LE(5130562, p);
+  p += 4;
+  Buffer.from(binBuffer.buffer, binBuffer.byteOffset, binBuffer.byteLength).copy(glb, p);
+  p += binBuffer.byteLength;
+  for (let i = 0; i < binPadding; i++) {
+    glb.writeUInt8(0, p++);
+  }
+  return new Uint8Array(glb.buffer, glb.byteOffset, glb.byteLength);
+}
+function exportModelToGlb(geometry) {
+  const submeshes = geometry.submeshes.map((s) => ({
+    vertexCount: s.vertexCount,
+    vertices: s.vertices,
+    indices: s.indices,
+    shaderTagId: s.shaderTagId,
+    name: `part_${s.partIndex}`
+  }));
+  const name = geometry.modelPath.split("\\").pop() || "model";
+  return buildGlbBinary(name, submeshes);
+}
+function exportBspToGlb(mesh) {
+  const submeshes = mesh.submeshes.map((s) => ({
+    vertexCount: s.vertexCount,
+    vertices: s.vertices,
+    indices: s.indices,
+    shaderTagId: s.shaderTagId,
+    name: `submesh_${s.submeshIndex}`
+  }));
+  const label = mesh.bspNames?.[mesh.bspIndex] || `bsp_${mesh.bspIndex}`;
+  const name = label.split("\\").pop() || "bsp";
+  return buildGlbBinary(name, submeshes);
+}
+
 // ../core/src/map/write-map.ts
 var import_crypto2 = require("crypto");
 var baseName = (p) => p.split(/[\\/]/).pop() ?? p;
@@ -44770,6 +45710,28 @@ function getBitmapsBuffer(bitmapsPath) {
     return void 0;
   }
 }
+var cachedSoundsMap = null;
+function getSoundsBuffer(soundsPath) {
+  let resolved = soundsPath;
+  if (!resolved && currentMap?.filePath) {
+    const candidate = path2.join(path2.dirname(currentMap.filePath), "sounds.map");
+    if (fs2.existsSync(candidate)) {
+      resolved = candidate;
+    }
+  }
+  if (!resolved || !fs2.existsSync(resolved)) return void 0;
+  try {
+    const stat = fs2.statSync(resolved);
+    if (cachedSoundsMap && cachedSoundsMap.filePath === resolved && cachedSoundsMap.mtimeMs === stat.mtimeMs) {
+      return cachedSoundsMap.buffer;
+    }
+    const buffer = fs2.readFileSync(resolved);
+    cachedSoundsMap = { filePath: resolved, mtimeMs: stat.mtimeMs, buffer };
+    return buffer;
+  } catch {
+    return void 0;
+  }
+}
 function runGetBspRenderMesh(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
@@ -44935,6 +45897,112 @@ function runReplaceBitmapImage(task) {
     sendError(task.requestId, "BITMAP_REPLACE_ERROR", err instanceof Error ? err.message : String(err));
   }
 }
+function runGetSoundInfo(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, "TAG_NOT_FOUND", `Tag #${task.tagIndex} not found.`);
+    const externalSounds = getSoundsBuffer(task.soundsPath);
+    const summary = inspectSoundTag(currentMap.buffer, currentMap.header, currentMap.tagIndex, entry.tagId, externalSounds);
+    sendResult(task.requestId, { ok: true, summary });
+  } catch (err) {
+    sendError(task.requestId, "SOUND_INFO_ERROR", err instanceof Error ? err.message : String(err));
+  }
+}
+function runGetSoundWav(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, "TAG_NOT_FOUND", `Tag #${task.tagIndex} not found.`);
+    const externalSounds = getSoundsBuffer(task.soundsPath);
+    const audio = decodeSoundPermutationPcm(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      task.pitchRangeIndex,
+      task.permutationIndex,
+      externalSounds
+    );
+    const wavBuffer = encodePcmToWav(audio.pcmSamples, audio.sampleRate, audio.channels);
+    const dataUrl = `data:audio/wav;base64,${wavBuffer.toString("base64")}`;
+    sendResult(task.requestId, {
+      ok: true,
+      dataUrl,
+      sampleRate: audio.sampleRate,
+      channels: audio.channels,
+      durationSeconds: audio.durationSeconds
+    });
+  } catch (err) {
+    sendError(task.requestId, "SOUND_WAV_ERROR", err instanceof Error ? err.message : String(err));
+  }
+}
+function runExportSound(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, "TAG_NOT_FOUND", `Tag #${task.tagIndex} not found.`);
+    const externalSounds = getSoundsBuffer(task.soundsPath);
+    const audio = decodeSoundPermutationPcm(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      task.pitchRangeIndex,
+      task.permutationIndex,
+      externalSounds
+    );
+    const wavBuffer = encodePcmToWav(audio.pcmSamples, audio.sampleRate, audio.channels);
+    fs2.writeFileSync(task.outputPath, wavBuffer);
+    sendResult(task.requestId, { ok: true, filePath: task.outputPath });
+  } catch (err) {
+    sendError(task.requestId, "SOUND_EXPORT_ERROR", err instanceof Error ? err.message : String(err));
+  }
+}
+function runReplaceSound(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, "TAG_NOT_FOUND", `Tag #${task.tagIndex} not found.`);
+    if (!fs2.existsSync(task.inputPath)) return sendError(task.requestId, "FILE_NOT_FOUND", `Input file "${task.inputPath}" does not exist.`);
+    const wavFileBuf = fs2.readFileSync(task.inputPath);
+    const decodedWav = decodeWavToPcm(wavFileBuf);
+    const externalSounds = getSoundsBuffer(task.soundsPath);
+    let chosenFormat = task.targetFormat ?? 1 /* XboxADPCM */;
+    let newSamples;
+    if (chosenFormat === 1 /* XboxADPCM */) {
+      newSamples = encodeXboxAdpcmMono(decodedWav.pcmSamples);
+    } else {
+      chosenFormat = 0 /* PCM16 */;
+      newSamples = new Uint8Array(decodedWav.pcmSamples.buffer, decodedWav.pcmSamples.byteOffset, decodedWav.pcmSamples.byteLength);
+    }
+    const updatedBuffer = replaceSoundPermutationData(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      task.pitchRangeIndex,
+      task.permutationIndex,
+      newSamples,
+      chosenFormat,
+      externalSounds
+    );
+    currentMap.buffer = updatedBuffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== "ok") {
+      return sendError(task.requestId, "REINSPECT_FAILED", "Failed to inspect map after replacing sound.");
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendError(task.requestId, "SOUND_REPLACE_ERROR", err instanceof Error ? err.message : String(err));
+  }
+}
 function runGetScenarioObjects(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
@@ -44957,6 +46025,45 @@ function runGetModelGeometry(task) {
     sendResult(task.requestId, { ok: true, geometry });
   } catch (err) {
     handleTaskError(task.requestId, err);
+  }
+}
+function runExportModel3d(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const lod = task.lod ?? 4;
+    const geometry = extractModelRenderGeometry(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.modelTagId, lod);
+    if (task.format === "glb") {
+      const glbBytes = exportModelToGlb(geometry);
+      fs2.writeFileSync(task.outputPath, glbBytes);
+    } else {
+      const mtlFileName = path2.basename(task.outputPath).replace(/\.obj$/i, ".mtl");
+      const objRes = exportModelToObj(geometry, { mtlFileName });
+      fs2.writeFileSync(task.outputPath, objRes.objText, "utf8");
+      const mtlPath = task.outputPath.replace(/\.obj$/i, ".mtl");
+      fs2.writeFileSync(mtlPath, objRes.mtlText, "utf8");
+    }
+    sendResult(task.requestId, { ok: true, filePath: task.outputPath });
+  } catch (err) {
+    sendError(task.requestId, "EXPORT_3D_ERROR", err instanceof Error ? err.message : String(err));
+  }
+}
+function runExportBsp3d(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const mesh = extractBspRenderMesh(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.bspIndex);
+    if (task.format === "glb") {
+      const glbBytes = exportBspToGlb(mesh);
+      fs2.writeFileSync(task.outputPath, glbBytes);
+    } else {
+      const mtlFileName = path2.basename(task.outputPath).replace(/\.obj$/i, ".mtl");
+      const objRes = exportBspToObj(mesh, { mtlFileName });
+      fs2.writeFileSync(task.outputPath, objRes.objText, "utf8");
+      const mtlPath = task.outputPath.replace(/\.obj$/i, ".mtl");
+      fs2.writeFileSync(mtlPath, objRes.mtlText, "utf8");
+    }
+    sendResult(task.requestId, { ok: true, filePath: task.outputPath });
+  } catch (err) {
+    sendError(task.requestId, "EXPORT_3D_ERROR", err instanceof Error ? err.message : String(err));
   }
 }
 function runUpdateScenarioPlacement(task) {
@@ -45237,6 +46344,12 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "getBitmapRgba") runGetBitmapRgba(task);
     else if (task.type === "exportBitmap") runExportBitmap(task);
     else if (task.type === "replaceBitmap") runReplaceBitmapImage(task);
+    else if (task.type === "getSoundInfo") runGetSoundInfo(task);
+    else if (task.type === "getSoundWav") runGetSoundWav(task);
+    else if (task.type === "exportSound") runExportSound(task);
+    else if (task.type === "replaceSound") runReplaceSound(task);
+    else if (task.type === "exportModel3d") runExportModel3d(task);
+    else if (task.type === "exportBsp3d") runExportBsp3d(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -45267,6 +46380,9 @@ try {
   runDuplicateScenarioPlacement,
   runDuplicateTag,
   runExportBitmap,
+  runExportBsp3d,
+  runExportModel3d,
+  runExportSound,
   runExtractTags,
   runGetBitmapInfo,
   runGetBitmapRgba,
@@ -45277,6 +46393,8 @@ try {
   runGetModelGeometry,
   runGetReferencingTags,
   runGetScenarioObjects,
+  runGetSoundInfo,
+  runGetSoundWav,
   runGetSourceBspMesh,
   runGetTagFields,
   runGetUnicodeStrings,
@@ -45285,6 +46403,7 @@ try {
   runPlanInject,
   runRenameTag,
   runReplaceBitmapImage,
+  runReplaceSound,
   runSaveMap,
   runSaveMapAs,
   runSetDependencySlot,

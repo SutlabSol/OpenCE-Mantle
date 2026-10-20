@@ -475,6 +475,13 @@ export interface ReplaceSoundResult {
   message?: string;
 }
 
+export interface Export3dResult {
+  ok: boolean;
+  filePath?: string;
+  code?: string;
+  message?: string;
+}
+
 export type WorkerRequest =
   | { type: 'inspect'; requestId: string; filePath: string }
   | { type: 'compress' | 'decompress'; requestId: string; filePath: string; outputPath: string }
@@ -559,6 +566,8 @@ export type WorkerRequest =
   | { type: 'getSoundWav'; requestId: string; tagIndex: number; pitchRangeIndex: number; permutationIndex: number; soundsPath?: string }
   | { type: 'exportSound'; requestId: string; tagIndex: number; pitchRangeIndex: number; permutationIndex: number; outputPath: string; soundsPath?: string }
   | { type: 'replaceSound'; requestId: string; tagIndex: number; pitchRangeIndex: number; permutationIndex: number; inputPath: string; targetFormat?: number; soundsPath?: string }
+  | { type: 'exportModel3d'; requestId: string; modelTagId: number; lod?: number; format: 'obj' | 'glb'; outputPath: string }
+  | { type: 'exportBsp3d'; requestId: string; bspIndex: number; format: 'obj' | 'glb'; outputPath: string }
   | { type: 'cancel'; requestId: string };
 
 export type GetReferencingTagsResult =
@@ -831,6 +840,10 @@ export interface OpenceApi {
   exportSoundWav(tagIndex: number, pitchRangeIndex: number, permutationIndex: number, outputPath: string): Promise<ExportSoundResult>;
   pickImportSoundPath(): Promise<{ path: string | null }>;
   replaceSoundWav(tagIndex: number, pitchRangeIndex: number, permutationIndex: number, inputPath: string, targetFormat?: number): Promise<ReplaceSoundResult>;
+  /** M13.3: 3D Model & BSP Exporter */
+  exportModel3d(modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string): Promise<Export3dResult>;
+  exportBsp3d(bspIndex: number, format: 'obj' | 'glb', outputPath: string): Promise<Export3dResult>;
+  pickExport3dPath(defaultName: string, format: 'obj' | 'glb'): Promise<{ path: string | null }>;
   getPathForFile(file: File): string;
 }
 
