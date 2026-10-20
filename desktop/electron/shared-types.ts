@@ -682,6 +682,7 @@ export interface OpenceApi {
   duplicateTag(tagIndex: number, newPath: string): Promise<DuplicateTagResult>;
   /** Milestone 10: BSP Swapper - pick a source map file. */
   pickBspSourceMap(): Promise<{ path: string | null }>;
+  pickBspResource?(kind: 'bitmaps' | 'sounds'): Promise<{ path: string | null }>;
   /** Milestone 10: BSP Swapper - preflight swap between source and target map. */
   bspSwapPreflight(sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number): Promise<BspSwapPreflightResult>;
   /** Milestone 10: BSP Swapper - perform swap into currently open map. */

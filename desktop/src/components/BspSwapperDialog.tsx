@@ -16,6 +16,8 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
   const [stripDobcAndDecals, setStripDobcAndDecals] = useState(true);
   const [stripDobc, setStripDobc] = useState(true);
   const [stripDecals, setStripDecals] = useState(true);
+  const [customBitmapsPath, setCustomBitmapsPath] = useState<string | null>(null);
+  const [customSoundsPath, setCustomSoundsPath] = useState<string | null>(null);
   const [showDobcInfo, setShowDobcInfo] = useState(false);
   const [showDecalsInfo, setShowDecalsInfo] = useState(false);
   const [newScenarioName, setNewScenarioName] = useState('');
@@ -35,6 +37,8 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
       setNewScenarioName('');
       setShowDobcInfo(false);
       setShowDecalsInfo(false);
+      setCustomBitmapsPath(null);
+      setCustomSoundsPath(null);
     }
   }, [isOpen]);
 
@@ -82,6 +86,24 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
     setSelectedTargetBspIndex(idx);
     if (sourcePath) {
       runPreflight(sourcePath, selectedSourceBspIndex, idx);
+    }
+  };
+
+  const handlePickBitmaps = async () => {
+    try {
+      const res = await window.opence.pickBspResource?.('bitmaps');
+      if (res && res.path) setCustomBitmapsPath(res.path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handlePickSounds = async () => {
+    try {
+      const res = await window.opence.pickBspResource?.('sounds');
+      if (res && res.path) setCustomSoundsPath(res.path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 

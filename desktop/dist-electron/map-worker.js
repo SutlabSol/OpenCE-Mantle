@@ -41988,6 +41988,67 @@ function scanBspDependencies(buffer, structName, fileOffset, bspStart, bspSize, 
     }
   }
 }
+function shiftExistingRawDataOffsets(buffer, tagDataOffset, tagIndex, cutoffOffset, delta) {
+  if (delta === 0) return;
+  const base = tagIndex.baseMemoryAddress;
+  for (const entry of tagIndex.entries) {
+    if (entry.isExternal) continue;
+    const tagFileOffset = tagDataOffset + (entry.tagDataPointerOrResourceIndex - base);
+    if (tagFileOffset < 0 || tagFileOffset + 16 > buffer.length) continue;
+    if (entry.primaryClassName === "bitmap") {
+      try {
+        const decoded = decodeStruct(buffer, tagFileOffset, "Bitmap");
+        const bDataRefl = decoded.get("bitmap data");
+        if (bDataRefl && bDataRefl.kind === "reflexive" && bDataRefl.value.count > 0) {
+          const arrOffset = tagDataOffset + (bDataRefl.value.pointerLow - base);
+          const bDataSize = resolveStruct("BitmapData").totalSize;
+          for (let i = 0; i < bDataRefl.value.count; i++) {
+            const itemOffset = arrOffset + i * bDataSize;
+            if (itemOffset + 32 <= buffer.length) {
+              const flags = buffer.readUInt16LE(itemOffset + 14);
+              const isExternal = (flags & 256) !== 0;
+              if (!isExternal) {
+                const curPixOff = buffer.readUInt32LE(itemOffset + 24);
+                if (curPixOff >= cutoffOffset) {
+                  buffer.writeUInt32LE(curPixOff + delta, itemOffset + 24);
+                }
+              }
+            }
+          }
+        }
+      } catch {
+      }
+    } else if (entry.primaryClassName === "sound") {
+      try {
+        const decoded = decodeStruct(buffer, tagFileOffset, "Sound");
+        const pitchRefl = decoded.get("pitch ranges");
+        if (pitchRefl && pitchRefl.kind === "reflexive" && pitchRefl.value.count > 0) {
+          const pitchArrOffset = tagDataOffset + (pitchRefl.value.pointerLow - base);
+          const pitchSize = resolveStruct("SoundPitchRange").totalSize;
+          for (let p = 0; p < pitchRefl.value.count; p++) {
+            const pOffset = pitchArrOffset + p * pitchSize;
+            const pDecoded = decodeStruct(buffer, pOffset, "SoundPitchRange");
+            const permRefl = pDecoded.get("permutations");
+            if (permRefl && permRefl.kind === "reflexive" && permRefl.value.count > 0) {
+              const permArrOffset = tagDataOffset + (permRefl.value.pointerLow - base);
+              const permSize = resolveStruct("SoundPermutation").totalSize;
+              for (let m = 0; m < permRefl.value.count; m++) {
+                const mOffset = permArrOffset + m * permSize;
+                if (mOffset + 20 <= buffer.length) {
+                  const curSampleOff = buffer.readUInt32LE(mOffset + 12);
+                  if (curSampleOff >= cutoffOffset && curSampleOff !== 4294967295) {
+                    buffer.writeUInt32LE(curSampleOff + delta, mOffset + 12);
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch {
+      }
+    }
+  }
+}
 function performBspSwap(sourceBuffer, targetBuffer, options) {
   const sourceInspected = inspectCustomEditionMap(sourceBuffer);
   let targetInspected = inspectCustomEditionMap(targetBuffer);
@@ -42030,6 +42091,48 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       error: `Invalid target BSP index ${dstIdx}.`
     };
   }
+  const delta = srcBsp.bspSize - dstBsp.bspSize;
+  const newLength = targetBuffer.length + delta;
+  let out = Buffer.alloc(newLength);
+  targetBuffer.copy(out, 0, 0, dstBsp.bspStart);
+  sourceBuffer.copy(out, dstBsp.bspStart, srcBsp.bspStart, srcBsp.bspStart + srcBsp.bspSize);
+  targetBuffer.copy(out, dstBsp.bspStart + srcBsp.bspSize, dstBsp.bspStart + dstBsp.bspSize);
+  const oldFileSize = targetBuffer.readUInt32LE(8);
+  out.writeUInt32LE(oldFileSize + delta, 8);
+  const oldTagDataOffset = targetBuffer.readUInt32LE(16);
+  const newTagDataOffset = oldTagDataOffset + delta;
+  out.writeUInt32LE(newTagDataOffset, 16);
+  const oldModelDataOffset = targetBuffer.readUInt32LE(oldTagDataOffset + 20);
+  out.writeUInt32LE(oldModelDataOffset + delta, newTagDataOffset + 20);
+  const { header, tagIndex } = targetInspected;
+  const scnrEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  const scnrOffset = newTagDataOffset + (scnrEntry.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+  const decodedScnr = decodeStruct(out, scnrOffset, "Scenario");
+  const bspsField = decodedScnr.get("structure bsps");
+  if (!bspsField || bspsField.kind !== "reflexive") {
+    return {
+      ok: false,
+      buffer: targetBuffer,
+      summary: { sourceBspName: srcBsp.path, targetBspName: dstBsp.path, oldSize: targetBuffer.length, newSize: targetBuffer.length, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
+      error: "Target scenario structure bsps reflexive missing."
+    };
+  }
+  const scenarioBspSize = resolveStruct("ScenarioBSP").totalSize;
+  const bspArrayOffset = newTagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+  const targetEntryOffset = bspArrayOffset + dstIdx * scenarioBspSize;
+  out.writeUInt32LE(dstBsp.bspStart, targetEntryOffset + 0);
+  out.writeUInt32LE(srcBsp.bspSize, targetEntryOffset + 4);
+  out.writeUInt32LE(srcBsp.bspAddress, targetEntryOffset + 8);
+  shiftExistingRawDataOffsets(out, newTagDataOffset, tagIndex, dstBsp.bspStart + dstBsp.bspSize, delta);
+  let reinspected = inspectCustomEditionMap(out);
+  if (reinspected.status !== "ok") {
+    return {
+      ok: false,
+      buffer: targetBuffer,
+      summary: { sourceBspName: srcBsp.path, targetBspName: dstBsp.path, oldSize: targetBuffer.length, newSize: targetBuffer.length, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
+      error: "Failed to inspect map after BSP copy."
+    };
+  }
   let harvestedShaders = 0;
   let harvestedBitmaps = 0;
   const tagIdMap = /* @__PURE__ */ new Map();
@@ -42067,26 +42170,24 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
             const containerBuf = serializeContainer(extracted, "harvested_bsp_assets");
             const container = deserializeContainer(containerBuf);
             const planResult = planAddInjection(
-              { buffer: targetBuffer, header: targetInspected.header, tagIndex: targetInspected.tagIndex },
+              { buffer: out, header: reinspected.header, tagIndex: reinspected.tagIndex },
               container,
               {},
               { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true }
             );
             if (planResult.kind !== "refused") {
               const plan = planResult;
-              targetBuffer = applyAddInjection(
-                targetBuffer,
-                targetInspected.header,
-                targetInspected.tagIndex,
+              out = applyAddInjection(
+                out,
+                reinspected.header,
+                reinspected.tagIndex,
                 container,
                 plan,
                 { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true }
               );
-              const reinspected = inspectCustomEditionMap(targetBuffer);
-              if (reinspected.status === "ok") {
-                targetInspected = reinspected;
-                targetBsps = getMapBsps(targetBuffer);
-                dstBsp = targetBsps[dstIdx] ?? dstBsp;
+              const afterInject = inspectCustomEditionMap(out);
+              if (afterInject.status === "ok") {
+                reinspected = afterInject;
               }
               for (let i = 0; i < container.tags.length; i++) {
                 const cTag = container.tags[i];
@@ -42106,38 +42207,6 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       }
     }
   }
-  const delta = srcBsp.bspSize - dstBsp.bspSize;
-  const newLength = targetBuffer.length + delta;
-  const out = Buffer.alloc(newLength);
-  targetBuffer.copy(out, 0, 0, dstBsp.bspStart);
-  sourceBuffer.copy(out, dstBsp.bspStart, srcBsp.bspStart, srcBsp.bspStart + srcBsp.bspSize);
-  targetBuffer.copy(out, dstBsp.bspStart + srcBsp.bspSize, dstBsp.bspStart + dstBsp.bspSize);
-  const oldFileSize = targetBuffer.readUInt32LE(8);
-  out.writeUInt32LE(oldFileSize + delta, 8);
-  const oldTagDataOffset = targetBuffer.readUInt32LE(16);
-  const newTagDataOffset = oldTagDataOffset + delta;
-  out.writeUInt32LE(newTagDataOffset, 16);
-  const oldModelDataOffset = targetBuffer.readUInt32LE(oldTagDataOffset + 20);
-  out.writeUInt32LE(oldModelDataOffset + delta, newTagDataOffset + 20);
-  const { header, tagIndex } = targetInspected;
-  const scnrEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
-  const scnrOffset = newTagDataOffset + (scnrEntry.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
-  const decodedScnr = decodeStruct(out, scnrOffset, "Scenario");
-  const bspsField = decodedScnr.get("structure bsps");
-  if (!bspsField || bspsField.kind !== "reflexive") {
-    return {
-      ok: false,
-      buffer: targetBuffer,
-      summary: { sourceBspName: srcBsp.path, targetBspName: dstBsp.path, oldSize: targetBuffer.length, newSize: targetBuffer.length, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
-      error: "Target scenario structure bsps reflexive missing."
-    };
-  }
-  const scenarioBspSize = resolveStruct("ScenarioBSP").totalSize;
-  const bspArrayOffset = newTagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
-  const targetEntryOffset = bspArrayOffset + dstIdx * scenarioBspSize;
-  out.writeUInt32LE(dstBsp.bspStart, targetEntryOffset + 0);
-  out.writeUInt32LE(srcBsp.bspSize, targetEntryOffset + 4);
-  out.writeUInt32LE(srcBsp.bspAddress, targetEntryOffset + 8);
   if (options.newScenarioName && options.newScenarioName.trim().length > 0) {
     const nameStr = options.newScenarioName.trim().slice(0, 31);
     const nameBuf = Buffer.alloc(32);
@@ -42212,7 +42281,7 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       sourceBspName: srcBsp.path,
       targetBspName: dstBsp.path,
       oldSize: targetBuffer.length,
-      newSize: newLength,
+      newSize: out.length,
       delta,
       strippedDobc,
       strippedDecals,

@@ -1,3 +1,5 @@
+import { classifyMapLayout } from '../../core/src/map/convert/classify';
+import { CacheFileEngine } from '../../core/src/constants/cache-file';
 import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -1457,25 +1459,135 @@ async function pickBspSourceMapFlow(): Promise<{ path: string | null }> {
   return { path: filePaths[0] };
 }
 
+function detectSourceMapEdition(filePath: string): HaloBitmapVersion {
+  const fpLower = (filePath || '').toLowerCase();
+  let buf = Buffer.alloc(2048);
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buf, 0, 2048, 0);
+    fs.closeSync(fd);
+  } catch {
+    return 'ce';
+  }
+  if (buf.length < 2048) return 'ce';
+  const engine = buf.readUInt32LE(0x4);
+  if (engine === CacheFileEngine.MCC_CEA || fpLower.includes('mcc')) return 'mcc';
+  if (fpLower.includes('halomd')) return 'halomd';
+  if (engine === CacheFileEngine.RETAIL) return fpLower.includes('halomd') ? 'halomd' : 'pc';
+  try {
+    const layout = classifyMapLayout(buf);
+    if (layout.kind === 'demo') return 'demo';
+    if (layout.kind === 'mcc') return 'mcc';
+    if (layout.kind === 'retail') return fpLower.includes('halomd') ? 'halomd' : 'pc';
+  } catch {}
+  return 'ce';
+}
+
+const EDITION_DISPLAY_NAMES: Record<HaloBitmapVersion, string> = {
+  pc: 'Halo PC Retail (v7)',
+  ce: 'Halo Custom Edition (v609)',
+  demo: 'Halo Mac Demo (v6)',
+  halomd: 'HaloMD (v7)',
+  mcc: 'Halo MCC (CEA)',
+};
+
+function resolveResourceMapsForSource(sourceFilePath: string, options?: BspSwapOptions): {
+  edition: HaloBitmapVersion;
+  editionName: string;
+  bitmapsPath: string | null;
+  soundsPath: string | null;
+  resourceMapPaths: Partial<Record<ResourceMapKind, string>>;
+} {
+  const edition = detectSourceMapEdition(sourceFilePath);
+  const editionName = EDITION_DISPLAY_NAMES[edition] || edition.toUpperCase();
+  const settings = getSettings();
+  const defaults = detectDefaultResourceMapPathsFlow();
+
+  let bitmapsPath: string | null = options?.customBitmapsPath || null;
+  let soundsPath: string | null = options?.customSoundsPath || null;
+
+  // 1. Check user configured versionResourceMaps
+  if (!bitmapsPath) {
+    const userVer = settings.versionResourceMaps?.[edition];
+    if (userVer?.bitmaps && fs.existsSync(userVer.bitmaps)) {
+      bitmapsPath = userVer.bitmaps;
+    }
+  }
+  if (!soundsPath) {
+    const userVer = settings.versionResourceMaps?.[edition];
+    if (userVer?.sounds && fs.existsSync(userVer.sounds)) {
+      soundsPath = userVer.sounds;
+    }
+  }
+
+  // 2. If CE, check general resourceMaps
+  if (edition === 'ce') {
+    if (!bitmapsPath && settings.resourceMaps.bitmaps && fs.existsSync(settings.resourceMaps.bitmaps)) {
+      bitmapsPath = settings.resourceMaps.bitmaps;
+    }
+    if (!soundsPath && settings.resourceMaps.sounds && fs.existsSync(settings.resourceMaps.sounds)) {
+      soundsPath = settings.resourceMaps.sounds;
+    }
+  }
+
+  // 3. Check alongside sourceFilePath
+  const donorDir = path.dirname(sourceFilePath);
+  if (!bitmapsPath) {
+    const localBmp = path.join(donorDir, 'bitmaps.map');
+    if (fs.existsSync(localBmp)) bitmapsPath = localBmp;
+  }
+  if (!soundsPath) {
+    const localSnd = path.join(donorDir, 'sounds.map');
+    if (fs.existsSync(localSnd)) soundsPath = localSnd;
+  }
+
+  // 4. Check detectDefaultResourceMapPathsFlow
+  if (!bitmapsPath && defaults[edition] && fs.existsSync(defaults[edition]!)) {
+    bitmapsPath = defaults[edition];
+  }
+  if (!soundsPath && bitmapsPath) {
+    const siblingSnd = path.join(path.dirname(bitmapsPath), 'sounds.map');
+    if (fs.existsSync(siblingSnd)) soundsPath = siblingSnd;
+  }
+
+  // 5. Fallback for MCC sounds: MCC often shares sounds with CE
+  if (edition === 'mcc' && !soundsPath) {
+    const ceSounds = settings.versionResourceMaps?.ce?.sounds || settings.resourceMaps.sounds;
+    if (ceSounds && fs.existsSync(ceSounds)) {
+      soundsPath = ceSounds;
+    }
+  }
+
+  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
+  if (bitmapsPath) resourceMapPaths.bitmaps = bitmapsPath;
+  if (soundsPath) resourceMapPaths.sounds = soundsPath;
+
+  return { edition, editionName, bitmapsPath, soundsPath, resourceMapPaths };
+}
+
 async function bspSwapPreflightFlow(
   sourceFilePath: string,
   sourceBspIndex?: number,
   targetBspIndex?: number,
 ): Promise<BspSwapPreflightResult> {
+  const resolved = resolveResourceMapsForSource(sourceFilePath);
   const { promise } = sendWorkerRequest<BspSwapPreflightResult>(
     { type: 'bspSwapPreflight', sourceFilePath, sourceBspIndex, targetBspIndex },
     sendLog,
   );
-  return await promise;
+  const res = await promise;
+  return {
+    ...res,
+    sourceEdition: resolved.edition,
+    sourceEditionName: resolved.editionName,
+    sourceBitmapsPath: resolved.bitmapsPath,
+    sourceSoundsPath: resolved.soundsPath,
+  };
 }
 
 async function performBspSwapFlow(sourceFilePath: string, options: BspSwapOptions): Promise<BspSwapResult> {
-  const settings = getSettings();
-  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
-  for (const kind of ['bitmaps', 'sounds', 'loc'] as ResourceMapKind[]) {
-    const p = settings.resourceMaps[kind];
-    if (p) resourceMapPaths[kind] = p;
-  }
+  const resolved = resolveResourceMapsForSource(sourceFilePath, options);
+  const resourceMapPaths = resolved.resourceMapPaths;
   const { promise } = sendWorkerRequest<BspSwapResult & { map?: OpenMapSummary }>(
     { type: 'performBspSwap', sourceFilePath, options, resourceMapPaths },
     sendLog,
@@ -1865,6 +1977,16 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:renameTag', (_e, tagIndex: number, newPath: string) => renameTagFlow(tagIndex, newPath));
   ipcMain.handle('tags:duplicateTag', (_e, tagIndex: number, newPath: string) => duplicateTagFlow(tagIndex, newPath));
   ipcMain.handle('dialog:pickBspSourceMap', () => pickBspSourceMapFlow());
+  ipcMain.handle('dialog:pickBspResource', async (_e, kind: 'bitmaps' | 'sounds') => {
+    if (!mainWindow) return { path: null };
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: `Select ${kind === 'bitmaps' ? 'bitmaps.map' : 'sounds.map'} for Donor Map`,
+      filters: [{ name: 'Halo Resource Map', extensions: ['map'] }],
+      properties: ['openFile'],
+    });
+    if (canceled || filePaths.length === 0) return { path: null };
+    return { path: filePaths[0] };
+  });
   ipcMain.handle('bsp:swapPreflight', (_e, sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number) =>
     bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex),
   );

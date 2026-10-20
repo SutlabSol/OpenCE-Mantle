@@ -22,20 +22,39 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// electron/main.ts
-var import_electron3 = require("electron");
-var path9 = __toESM(require("path"));
-var fs7 = __toESM(require("fs"));
-
 // ../core/src/constants/cache-file.ts
 var CHIMERA_COMPRESSED_ENGINE_MASK = 2249850880;
 var TAG_STRING_SIZE = 32;
+var CACHE_FILE_HEADER_SIZE = 2048;
 var TAG_DATA_HEADER_PC_SIZE = 40;
 var CE_BASE_MEMORY_ADDRESS = 1078198272;
 var CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 var MCC_BASE_MEMORY_ADDRESS = 1342177280;
 var MCC_TAG_ARRAY_ADDRESS = MCC_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 var CE_TAG_SPACE_SIZE = 23 * 1024 * 1024;
+
+// ../core/src/map/errors.ts
+var CorruptMapError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CorruptMapError";
+  }
+};
+
+// ../core/src/map/header.ts
+function hasValidMagic(buffer) {
+  if (buffer.length < CACHE_FILE_HEADER_SIZE) {
+    return false;
+  }
+  return buffer.readUInt32LE(0) === 1751474532 /* HEAD */ && buffer.readUInt32LE(2044) === 1718579060 /* FOOT */;
+}
+function isChimeraCompressedCustomEdition(buffer) {
+  if (!hasValidMagic(buffer)) {
+    return false;
+  }
+  const engine = buffer.readUInt32LE(4);
+  return (engine & 4294901760) >>> 0 === CHIMERA_COMPRESSED_ENGINE_MASK && (engine & 65535) === 609 /* CUSTOM_EDITION */;
+}
 
 // ../core/src/constants/tag-classes.ts
 function fourCCFromString(code) {
@@ -131,13 +150,40 @@ var TAG_CLASSES = [
 var CLASS_BY_FOURCC = new Map(TAG_CLASSES.map((c) => [fourCCFromString(c.groupId), c]));
 var CLASS_BY_NAME = new Map(TAG_CLASSES.map((c) => [c.name, c]));
 
-// ../core/src/map/errors.ts
-var CorruptMapError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "CorruptMapError";
+// ../core/src/map/tag-index.ts
+function inferBaseMemoryAddressForClassifier(tagArrayAddress) {
+  return tagArrayAddress - TAG_DATA_HEADER_PC_SIZE >>> 0;
+}
+
+// ../core/src/map/convert/classify.ts
+var DEMO_HEAD_OFFSET = 704;
+var DEMO_VERSION_OFFSET = 1416;
+var DEMO_FOOT_OFFSET = 1520;
+function classifyMapLayout(buffer) {
+  if (buffer.length < CACHE_FILE_HEADER_SIZE) return { kind: "notAMap" };
+  if (isChimeraCompressedCustomEdition(buffer)) return { kind: "customEditionCompressed" };
+  const standard = buffer.readUInt32LE(0) === 1751474532 /* HEAD */ && buffer.readUInt32LE(2044) === 1718579060 /* FOOT */;
+  if (standard) {
+    const version = buffer.readUInt32LE(4);
+    if (version === 609 /* CUSTOM_EDITION */) return { kind: "customEdition" };
+    if (version === 13 /* MCC_CEA */) return { kind: "mcc" };
+    if (version === 7 /* RETAIL */) {
+      const tagDataOffset = buffer.readUInt32LE(16);
+      const inferredBase = tagDataOffset + 4 <= buffer.length ? inferBaseMemoryAddressForClassifier(buffer.readUInt32LE(tagDataOffset)) : null;
+      return { kind: "retail", version, inferredBase };
+    }
+    return { kind: "otherVersion", version };
   }
-};
+  if (buffer.readUInt32LE(DEMO_HEAD_OFFSET) === 1164469604 /* HEAD_DEMO */ && buffer.readUInt32LE(DEMO_FOOT_OFFSET) === 1197895540 /* FOOT_DEMO */) {
+    return { kind: "demo", version: buffer.readUInt32LE(DEMO_VERSION_OFFSET) };
+  }
+  return { kind: "notAMap" };
+}
+
+// electron/main.ts
+var import_electron3 = require("electron");
+var path9 = __toESM(require("path"));
+var fs7 = __toESM(require("fs"));
 
 // ../core/src/map/tag-footprints.ts
 var SCENARIO_STRUCTURE_BSP_FOURCC = fourCCFromString("sbsp");
@@ -35620,20 +35666,109 @@ async function pickBspSourceMapFlow() {
   if (canceled || filePaths.length === 0) return { path: null };
   return { path: filePaths[0] };
 }
+function detectSourceMapEdition(filePath) {
+  const fpLower = (filePath || "").toLowerCase();
+  let buf = Buffer.alloc(2048);
+  try {
+    const fd = fs7.openSync(filePath, "r");
+    fs7.readSync(fd, buf, 0, 2048, 0);
+    fs7.closeSync(fd);
+  } catch {
+    return "ce";
+  }
+  if (buf.length < 2048) return "ce";
+  const engine = buf.readUInt32LE(4);
+  if (engine === 13 /* MCC_CEA */ || fpLower.includes("mcc")) return "mcc";
+  if (fpLower.includes("halomd")) return "halomd";
+  if (engine === 7 /* RETAIL */) return fpLower.includes("halomd") ? "halomd" : "pc";
+  try {
+    const layout = classifyMapLayout(buf);
+    if (layout.kind === "demo") return "demo";
+    if (layout.kind === "mcc") return "mcc";
+    if (layout.kind === "retail") return fpLower.includes("halomd") ? "halomd" : "pc";
+  } catch {
+  }
+  return "ce";
+}
+var EDITION_DISPLAY_NAMES = {
+  pc: "Halo PC Retail (v7)",
+  ce: "Halo Custom Edition (v609)",
+  demo: "Halo Mac Demo (v6)",
+  halomd: "HaloMD (v7)",
+  mcc: "Halo MCC (CEA)"
+};
+function resolveResourceMapsForSource(sourceFilePath, options) {
+  const edition = detectSourceMapEdition(sourceFilePath);
+  const editionName = EDITION_DISPLAY_NAMES[edition] || edition.toUpperCase();
+  const settings = getSettings();
+  const defaults = detectDefaultResourceMapPathsFlow();
+  let bitmapsPath = options?.customBitmapsPath || null;
+  let soundsPath = options?.customSoundsPath || null;
+  if (!bitmapsPath) {
+    const userVer = settings.versionResourceMaps?.[edition];
+    if (userVer?.bitmaps && fs7.existsSync(userVer.bitmaps)) {
+      bitmapsPath = userVer.bitmaps;
+    }
+  }
+  if (!soundsPath) {
+    const userVer = settings.versionResourceMaps?.[edition];
+    if (userVer?.sounds && fs7.existsSync(userVer.sounds)) {
+      soundsPath = userVer.sounds;
+    }
+  }
+  if (edition === "ce") {
+    if (!bitmapsPath && settings.resourceMaps.bitmaps && fs7.existsSync(settings.resourceMaps.bitmaps)) {
+      bitmapsPath = settings.resourceMaps.bitmaps;
+    }
+    if (!soundsPath && settings.resourceMaps.sounds && fs7.existsSync(settings.resourceMaps.sounds)) {
+      soundsPath = settings.resourceMaps.sounds;
+    }
+  }
+  const donorDir = path9.dirname(sourceFilePath);
+  if (!bitmapsPath) {
+    const localBmp = path9.join(donorDir, "bitmaps.map");
+    if (fs7.existsSync(localBmp)) bitmapsPath = localBmp;
+  }
+  if (!soundsPath) {
+    const localSnd = path9.join(donorDir, "sounds.map");
+    if (fs7.existsSync(localSnd)) soundsPath = localSnd;
+  }
+  if (!bitmapsPath && defaults[edition] && fs7.existsSync(defaults[edition])) {
+    bitmapsPath = defaults[edition];
+  }
+  if (!soundsPath && bitmapsPath) {
+    const siblingSnd = path9.join(path9.dirname(bitmapsPath), "sounds.map");
+    if (fs7.existsSync(siblingSnd)) soundsPath = siblingSnd;
+  }
+  if (edition === "mcc" && !soundsPath) {
+    const ceSounds = settings.versionResourceMaps?.ce?.sounds || settings.resourceMaps.sounds;
+    if (ceSounds && fs7.existsSync(ceSounds)) {
+      soundsPath = ceSounds;
+    }
+  }
+  const resourceMapPaths = {};
+  if (bitmapsPath) resourceMapPaths.bitmaps = bitmapsPath;
+  if (soundsPath) resourceMapPaths.sounds = soundsPath;
+  return { edition, editionName, bitmapsPath, soundsPath, resourceMapPaths };
+}
 async function bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex) {
+  const resolved = resolveResourceMapsForSource(sourceFilePath);
   const { promise } = sendWorkerRequest(
     { type: "bspSwapPreflight", sourceFilePath, sourceBspIndex, targetBspIndex },
     sendLog
   );
-  return await promise;
+  const res = await promise;
+  return {
+    ...res,
+    sourceEdition: resolved.edition,
+    sourceEditionName: resolved.editionName,
+    sourceBitmapsPath: resolved.bitmapsPath,
+    sourceSoundsPath: resolved.soundsPath
+  };
 }
 async function performBspSwapFlow(sourceFilePath, options) {
-  const settings = getSettings();
-  const resourceMapPaths = {};
-  for (const kind of ["bitmaps", "sounds", "loc"]) {
-    const p = settings.resourceMaps[kind];
-    if (p) resourceMapPaths[kind] = p;
-  }
+  const resolved = resolveResourceMapsForSource(sourceFilePath, options);
+  const resourceMapPaths = resolved.resourceMapPaths;
   const { promise } = sendWorkerRequest(
     { type: "performBspSwap", sourceFilePath, options, resourceMapPaths },
     sendLog,
@@ -35991,6 +36126,16 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("tags:renameTag", (_e, tagIndex, newPath) => renameTagFlow(tagIndex, newPath));
   import_electron3.ipcMain.handle("tags:duplicateTag", (_e, tagIndex, newPath) => duplicateTagFlow(tagIndex, newPath));
   import_electron3.ipcMain.handle("dialog:pickBspSourceMap", () => pickBspSourceMapFlow());
+  import_electron3.ipcMain.handle("dialog:pickBspResource", async (_e, kind) => {
+    if (!mainWindow) return { path: null };
+    const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+      title: `Select ${kind === "bitmaps" ? "bitmaps.map" : "sounds.map"} for Donor Map`,
+      filters: [{ name: "Halo Resource Map", extensions: ["map"] }],
+      properties: ["openFile"]
+    });
+    if (canceled || filePaths.length === 0) return { path: null };
+    return { path: filePaths[0] };
+  });
   import_electron3.ipcMain.handle(
     "bsp:swapPreflight",
     (_e, sourceFilePath, sourceBspIndex, targetBspIndex) => bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex)

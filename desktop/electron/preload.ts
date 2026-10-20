@@ -40,6 +40,7 @@ const api: OpenceApi = {
   renameTag: (tagIndex: number, newPath: string) => ipcRenderer.invoke('tags:renameTag', tagIndex, newPath),
   duplicateTag: (tagIndex: number, newPath: string) => ipcRenderer.invoke('tags:duplicateTag', tagIndex, newPath),
   pickBspSourceMap: () => ipcRenderer.invoke('dialog:pickBspSourceMap'),
+  pickBspResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickBspResource', kind),
   bspSwapPreflight: (sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number) =>
     ipcRenderer.invoke('bsp:swapPreflight', sourceFilePath, sourceBspIndex, targetBspIndex),
   performBspSwap: (sourceFilePath: string, options: any) =>

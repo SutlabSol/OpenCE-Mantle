@@ -745,6 +745,7 @@ export function installDevMock() {
       return { ok: true, newTagIndex, newTagId, path: newPath, map: currentMock! };
     },
     pickBspSourceMap: async () => ({ path: 'C:\\HaloPC\\maps\\b30.map' }),
+    pickBspResource: async () => ({ path: 'C:\\HaloPC\\maps\\bitmaps.map' }),
     bspSwapPreflight: async (_sourceFilePath, _srcIdx, _dstIdx) => ({
       ok: true,
       sourceBsps: [

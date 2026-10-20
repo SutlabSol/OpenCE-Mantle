@@ -39,6 +39,7 @@ var api = {
   renameTag: (tagIndex, newPath) => import_electron.ipcRenderer.invoke("tags:renameTag", tagIndex, newPath),
   duplicateTag: (tagIndex, newPath) => import_electron.ipcRenderer.invoke("tags:duplicateTag", tagIndex, newPath),
   pickBspSourceMap: () => import_electron.ipcRenderer.invoke("dialog:pickBspSourceMap"),
+  pickBspResource: (kind) => import_electron.ipcRenderer.invoke("dialog:pickBspResource", kind),
   bspSwapPreflight: (sourceFilePath, sourceBspIndex, targetBspIndex) => import_electron.ipcRenderer.invoke("bsp:swapPreflight", sourceFilePath, sourceBspIndex, targetBspIndex),
   performBspSwap: (sourceFilePath, options) => import_electron.ipcRenderer.invoke("bsp:performSwap", sourceFilePath, options),
   getBspRenderMesh: (bspIndex) => import_electron.ipcRenderer.invoke("render:getBspMesh", bspIndex),
