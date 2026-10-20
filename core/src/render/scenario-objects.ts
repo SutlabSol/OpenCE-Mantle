@@ -989,19 +989,41 @@ export function extractScenarioPlacements(
       const usageId = (item.get('usage id')?.value as number) ?? 0;
       const flagName = NETGAME_FLAG_TYPES[typeIdx] || `Flag Type ${typeIdx}`;
 
+      let displayName = `${flagName} #${i}`;
+      let displayPath = `${flagName} (${usageId})`;
+      if (typeIdx === 6) {
+        displayName = `Teleport Origin #${usageId}`;
+        displayPath = `Teleport Origin (ID: ${usageId})`;
+      } else if (typeIdx === 7) {
+        displayName = `Teleport Destination #${usageId}`;
+        displayPath = `Teleport Destination (ID: ${usageId})`;
+      } else if (typeIdx === 8) {
+        displayName = `KOTH Hill Marker #${i} (Hill ${usageId})`;
+        displayPath = `KOTH Hill Point (Hill ID: ${usageId})`;
+      } else if (typeIdx === 3) {
+        displayName = `Race Checkpoint #${usageId}`;
+        displayPath = `Race Track Marker (ID: ${usageId})`;
+      } else if (typeIdx === 2) {
+        displayName = `Oddball Spawn #${usageId}`;
+        displayPath = `Oddball Spawn (ID: ${usageId})`;
+      } else if (typeIdx === 0) {
+        displayName = `CTF Flag (${usageId === 0 ? "Red" : "Blue"})`;
+        displayPath = `CTF Flag (${usageId === 0 ? "Red" : "Blue"})`;
+      }
+
       placements.push({
         id: `netgame_flag-${i}`,
         kind: 'netgame_flag',
         paletteIndex: typeIdx,
         nameIndex: -1,
         objectTagId: 0xffffffff,
-        objectPath: `${flagName} (${usageId === 0 ? 'Red' : usageId === 1 ? 'Blue' : usageId})`,
+        objectPath: displayPath,
         modelTagId: 0xffffffff,
         position: pos,
         rotation: [facing, 0, 0],
         teamIndex: usageId,
         flagType: flagName,
-        name: `${flagName} #${i}`,
+        name: displayName,
       });
       counts.netgameFlags = (counts.netgameFlags || 0) + 1;
     }
@@ -1224,6 +1246,9 @@ export function updateScenarioPlacement(
     if (updates.rotation) {
       buffer.writeFloatLE(updates.rotation[0], itemOffset + 12);
     }
+    if (updates.paletteIndex !== undefined) {
+      buffer.writeInt16LE(updates.paletteIndex, itemOffset + 16);
+    }
     if (updates.teamIndex !== undefined) {
       buffer.writeInt16LE(updates.teamIndex, itemOffset + 18);
     }
@@ -1374,7 +1399,7 @@ export function duplicateScenarioPlacement(
   const newItemBytes = Buffer.from(sourceBytes);
 
   // Offset position slightly so it doesn't z-fight with original
-  if (kind === 'spawn') {
+  if (kind === 'spawn' || kind === 'netgame_flag') {
     const curX = newItemBytes.readFloatLE(0);
     const curY = newItemBytes.readFloatLE(4);
     const curZ = newItemBytes.readFloatLE(8);
@@ -1442,10 +1467,36 @@ export function addScenarioPlacement(
     newItemBytes.writeFloatLE(position[2], 8);
     newItemBytes.writeFloatLE(rotation[0], 12);
     newItemBytes.writeInt16LE(teamIndex ?? 0, 16);
+    newItemBytes.writeInt16LE(0, 18); // bsp index = 0
+    newItemBytes.writeInt16LE(12, 20); // type 0 = 12 (all games - player can spawn in all gametypes)
+    newItemBytes.writeInt16LE(0, 22);  // type 1 = 0 (none)
+    newItemBytes.writeInt16LE(0, 24);  // type 2 = 0 (none)
+    newItemBytes.writeInt16LE(0, 26);  // type 3 = 0 (none)
 
     const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
     const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
     const newId = `spawn-${info.count}`;
+    const newPlacement = summary.objects.find((o) => o.id === newId)!;
+    return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+  }
+
+  if (kind === 'netgame_flag') {
+    const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'netgame_flag');
+    const newItemBytes = Buffer.alloc(info.structSize, 0);
+    newItemBytes.writeFloatLE(position[0], 0);
+    newItemBytes.writeFloatLE(position[1], 4);
+    newItemBytes.writeFloatLE(position[2], 8);
+    newItemBytes.writeFloatLE(rotation[0], 12);
+    newItemBytes.writeInt16LE(paletteIndex, 16); // flag type: 6=teleport from, 7=teleport to, 8=hill flag, 3=race track, 2=oddball spawn
+    newItemBytes.writeInt16LE(teamIndex ?? 0, 18); // usage id: Teleport ID, KOTH ID, Race ID, Oddball ID
+    newItemBytes.writeUInt32LE(0xffffffff, 20);
+    newItemBytes.writeUInt32LE(0xffffffff, 24);
+    newItemBytes.writeUInt32LE(0xffffffff, 28);
+    newItemBytes.writeUInt32LE(0xffffffff, 32);
+
+    const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+    const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+    const newId = `netgame_flag-${info.count}`;
     const newPlacement = summary.objects.find((o) => o.id === newId)!;
     return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
   }

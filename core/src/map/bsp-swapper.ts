@@ -650,7 +650,7 @@ export function performBspSwap(
 
 
     const shouldHarvestShaders = options.harvestShaders !== false;
-    const shouldImportObjects = options.importSceneryAndMachines !== false;
+    const shouldImportObjects = Boolean(options.importSceneryAndMachines);
 
     if ((shouldHarvestShaders && bspDeps.length > 0) || shouldImportObjects) {
       const srcTagIndex = sourceInspected.tagIndex;
@@ -972,7 +972,11 @@ export function performBspSwap(
   // 6. Relocate player spawns and netgame equipment if requested
   let relocatedSpawns = 0;
   if (options.relocateGroundObjects ?? true) {
+    const minX = srcWorldBounds[0];
+    const minY = srcWorldBounds[1];
     const minZ = srcWorldBounds[2];
+    const maxX = srcWorldBounds[3];
+    const maxY = srcWorldBounds[4];
     const maxZ = srcWorldBounds[5];
     const defaultGroundZ = minZ + 0.5;
 
@@ -983,26 +987,55 @@ export function performBspSwap(
       const spawnsOffset = newTagDataOffset + (spawnsReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
       for (let s = 0; s < spawnsReflexive.value.count; s++) {
         const sOff = spawnsOffset + s * spawnSize;
-        const curZ = out.readFloatLE(sOff + 8);
-        if (curZ < minZ || curZ > maxZ) {
-          out.writeFloatLE(defaultGroundZ, sOff + 8);
-          relocatedSpawns++;
+        let curX = out.readFloatLE(sOff + 0);
+        let curY = out.readFloatLE(sOff + 4);
+        let curZ = out.readFloatLE(sOff + 8);
+        let changed = false;
+        if (curX < minX || curX > maxX) {
+          curX = Math.min(Math.max(curX, minX + 2), maxX - 2);
+          out.writeFloatLE(curX, sOff + 0);
+          changed = true;
         }
+        if (curY < minY || curY > maxY) {
+          curY = Math.min(Math.max(curY, minY + 2), maxY - 2);
+          out.writeFloatLE(curY, sOff + 4);
+          changed = true;
+        }
+        if (curZ < minZ || curZ > maxZ) {
+          curZ = defaultGroundZ;
+          out.writeFloatLE(curZ, sOff + 8);
+          changed = true;
+        }
+        if (changed) relocatedSpawns++;
       }
     }
 
     // Netgame equipment at 0x384
     const equipReflexive = decodedScnr.get('netgame equipment');
     if (equipReflexive && equipReflexive.kind === 'reflexive' && equipReflexive.value.count > 0) {
-      const equipSize = 48; // Netgame equipment struct
+      const equipSize = 144; // ScenarioNetgameEquipment struct
       const equipOffset = newTagDataOffset + (equipReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
       for (let e = 0; e < equipReflexive.value.count; e++) {
         const eOff = equipOffset + e * equipSize;
-        const curZ = out.readFloatLE(eOff + 8);
-        if (curZ < minZ || curZ > maxZ) {
-          out.writeFloatLE(defaultGroundZ, eOff + 8);
-          relocatedSpawns++;
+        let curX = out.readFloatLE(eOff + 64);
+        let curY = out.readFloatLE(eOff + 68);
+        let curZ = out.readFloatLE(eOff + 72);
+        let changed = false;
+        if (curX < minX || curX > maxX) {
+          curX = Math.min(Math.max(curX, minX + 2), maxX - 2);
+          out.writeFloatLE(curX, eOff + 64);
+          changed = true;
         }
+        if (curY < minY || curY > maxY) {
+          curY = Math.min(Math.max(curY, minY + 2), maxY - 2);
+          out.writeFloatLE(curY, eOff + 68);
+          changed = true;
+        }
+        if (curZ < minZ || curZ > maxZ) {
+          out.writeFloatLE(defaultGroundZ, eOff + 72);
+          changed = true;
+        }
+        if (changed) relocatedSpawns++;
       }
     }
   }

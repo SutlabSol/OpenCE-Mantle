@@ -114,6 +114,42 @@ const mockScenarioSummary: ScenarioPlacementsSummary = {
       position: [5, 5, 0],
       rotation: [0, 0, 0],
     },
+    {
+      id: 'netgame_flag-0',
+      kind: 'netgame_flag',
+      paletteIndex: 6,
+      nameIndex: -1,
+      objectTagId: 0xffffffff,
+      objectPath: 'Teleport Origin (ID: 0)',
+      modelTagId: 0xffffffff,
+      position: [20, 20, 0],
+      rotation: [0, 0, 0],
+      teamIndex: 0,
+    },
+    {
+      id: 'netgame_flag-1',
+      kind: 'netgame_flag',
+      paletteIndex: 7,
+      nameIndex: -1,
+      objectTagId: 0xffffffff,
+      objectPath: 'Teleport Destination (ID: 0)',
+      modelTagId: 0xffffffff,
+      position: [40, 40, 0],
+      rotation: [0, 0, 0],
+      teamIndex: 0,
+    },
+    {
+      id: 'netgame_flag-2',
+      kind: 'netgame_flag',
+      paletteIndex: 8,
+      nameIndex: -1,
+      objectTagId: 0xffffffff,
+      objectPath: 'KOTH Hill Point (Hill ID: 1)',
+      modelTagId: 0xffffffff,
+      position: [-5, -5, 0],
+      rotation: [0, 0, 0],
+      teamIndex: 1,
+    },
   ],
 };
 
@@ -512,5 +548,104 @@ describe('ScenarioViewport', () => {
     fireEvent.click(screen.getByTestId('inspector-swap-btn'));
 
     expect(window.opence.swapScenarioPlacement).toHaveBeenCalledWith('vehicle-0', 'scenery', 0);
+  });
+
+  it('renders View Cube / Orientation Gizmo with +X, -X, +Y, -Y, +Z, -Z, ISO buttons', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('viewport-orientation-gizmo')).toBeInTheDocument();
+    });
+
+    const btnTop = screen.getByTestId('orientation-btn-top');
+    const btnIso = screen.getByTestId('orientation-btn-iso');
+    const btnFront = screen.getByTestId('orientation-btn-front');
+    const btnBack = screen.getByTestId('orientation-btn-back');
+    const btnLeft = screen.getByTestId('orientation-btn-left');
+    const btnRight = screen.getByTestId('orientation-btn-right');
+    const btnBottom = screen.getByTestId('orientation-btn-bottom');
+
+    expect(btnTop).toBeInTheDocument();
+    expect(btnIso).toBeInTheDocument();
+    expect(btnFront).toBeInTheDocument();
+    expect(btnBack).toBeInTheDocument();
+    expect(btnLeft).toBeInTheDocument();
+    expect(btnRight).toBeInTheDocument();
+    expect(btnBottom).toBeInTheDocument();
+
+    fireEvent.click(btnTop);
+    fireEvent.click(btnFront);
+    fireEvent.click(btnIso);
+  });
+
+  it('renders Snap Spawns to Ground button in the toolbar', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('viewport-snap-spawns-btn')).toBeInTheDocument();
+    });
+  });
+
+  it('displays Teleporter Pair controls with ID input and Switch buttons when teleporter is selected', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-tab-outliner')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('inspector-tab-outliner'));
+    const item = screen.getByTestId('outliner-item-netgame_flag-0');
+    fireEvent.click(item);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-teleport-controls')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-teleport-id-input')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-teleport-switch-origin')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-teleport-switch-dest')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('inspector-teleport-switch-dest'));
+    fireEvent.click(screen.getByTestId('inspector-teleport-switch-origin'));
+  });
+
+  it('displays KOTH Zone controls with KOTH ID, Add Point, Remove Point, and Remove KOTH Zone buttons', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-tab-outliner')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('inspector-tab-outliner'));
+    const item = screen.getByTestId('outliner-item-netgame_flag-2');
+    fireEvent.click(item);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-koth-controls')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-koth-id-input')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-koth-add-point')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-koth-remove-point')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-koth-remove-zone')).toBeInTheDocument();
+    });
+  });
+
+  it('includes teleporters, KOTH zone, race, and oddball in Add Object modal categories', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('viewport-add-object-btn')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('viewport-add-object-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('add-modal-kind-select')).toBeInTheDocument();
+    });
+
+    const kindSelect = screen.getByTestId('add-modal-kind-select') as HTMLSelectElement;
+    const optionValues = Array.from(kindSelect.options).map((o) => o.value);
+    expect(optionValues).toContain('teleport');
+    expect(optionValues).toContain('koth');
+    expect(optionValues).toContain('race');
+    expect(optionValues).toContain('oddball');
   });
 });

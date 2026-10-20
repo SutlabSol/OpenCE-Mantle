@@ -203,6 +203,58 @@ describe.skipIf(!hasSampleMaps(['bloodgulch.map']))('Scenario Object Placements 
       expect(moved!.position[0]).toBeCloseTo(12.34, 2);
     }
   });
+
+  it('adds player spawn with all-games flag (type 0 = 12) and netgame flags', () => {
+    const testBuf = Buffer.from(buffer);
+    const addedSpawn = addScenarioPlacement(testBuf, header, tagIndex, 'spawn', 0, [10, 20, 30], [1.57, 0, 0], 0);
+    expect(addedSpawn.newPlacement).toBeDefined();
+    expect(addedSpawn.newPlacement.position).toEqual([10, 20, 30]);
+
+    // Add Teleport Origin and Destination pair
+    const addedTeleOrigin = addScenarioPlacement(
+      addedSpawn.buffer,
+      addedSpawn.header,
+      tagIndex,
+      'netgame_flag',
+      6, // Teleport Source
+      [15, 25, 35],
+      [0, 0, 0],
+      7, // Teleport ID
+    );
+    expect(addedTeleOrigin.newPlacement.flagType).toBe('Teleport Source');
+    expect(addedTeleOrigin.newPlacement.teamIndex).toBe(7);
+
+    const addedTeleDest = addScenarioPlacement(
+      addedTeleOrigin.buffer,
+      addedTeleOrigin.header,
+      tagIndex,
+      'netgame_flag',
+      7, // Teleport Dest
+      [45, 55, 65],
+      [0, 0, 0],
+      7, // Teleport ID matched
+    );
+    expect(addedTeleDest.newPlacement.flagType).toBe('Teleport Dest');
+    expect(addedTeleDest.newPlacement.teamIndex).toBe(7);
+
+    // Add KOTH point
+    const addedKoth = addScenarioPlacement(
+      addedTeleDest.buffer,
+      addedTeleDest.header,
+      tagIndex,
+      'netgame_flag',
+      8, // Hill Flag
+      [0, 0, 1],
+      [0, 0, 0],
+      3, // KOTH Hill ID
+    );
+    expect(addedKoth.newPlacement.flagType).toBe('Hill Flag');
+    expect(addedKoth.newPlacement.teamIndex).toBe(3);
+
+    // Test deleting netgame flag
+    const deleted = deleteScenarioPlacement(addedKoth.buffer, addedKoth.header, tagIndex, addedKoth.newPlacement.id);
+    expect(deleted.objects.find((o) => o.id === addedKoth.newPlacement.id)).toBeUndefined();
+  });
 });
 
 describe.skipIf(!hasSampleMaps(['coldsnap.map']))('Scenario Object Placements Extractor (Step 8.5) – coldsnap', () => {

@@ -123,14 +123,20 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   }, [bspDropdownOpen]);
 
   // Editing & Selection State (Step 9)
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+  const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([]);
+  const selectedObjectId = selectedObjectIds[selectedObjectIds.length - 1] || null;
+  const setSelectedObjectId = useCallback((id: string | null) => {
+    setSelectedObjectIds(id ? [id] : []);
+  }, []);
+  const selectedObjectIdsRef = useRef<string[]>([]);
+  selectedObjectIdsRef.current = selectedObjectIds;
   const [gizmoMode, setGizmoMode] = useState<GizmoMode>('translate');
   const [showInspector, setShowInspector] = useState<boolean>(true);
   const [inspectorTab, setInspectorTab] = useState<'properties' | 'outliner'>('properties');
   const [outlinerFilter, setOutlinerFilter] = useState<'all' | ScenarioObjectKind>('all');
   const [outlinerSearch, setOutlinerSearch] = useState<string>('');
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
-  const [addKind, setAddKind] = useState<ScenarioObjectKind>('vehicle');
+  const [addKind, setAddKind] = useState<ScenarioObjectKind | 'teleport' | 'koth' | 'race' | 'oddball'>('vehicle');
   const [addPaletteIndex, setAddPaletteIndex] = useState<number>(0);
   const [addTeam, setAddTeam] = useState<number>(0);
 
@@ -163,7 +169,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   // Gizmo & selection refs
   const transformControlsRef = useRef<TransformControls | null>(null);
   const selectionBoxHelperRef = useRef<THREE.BoxHelper | null>(null);
+  const partnerBoxHelperRef = useRef<THREE.BoxHelper | null>(null);
+  const kothZoneHelpersRef = useRef<THREE.BoxHelper[]>([]);
+  const multiSelectionHelpersRef = useRef<THREE.BoxHelper[]>([]);
   const isTransformDraggingRef = useRef<boolean>(false);
+  const dragStartPositionsRef = useRef<Map<string, { pos: THREE.Vector3; rot: THREE.Euler }>>(new Map());
   const pointerDownPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
   // Camera fly controls state
@@ -221,6 +231,73 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
     const speed = Math.max(20, Math.min(350, Math.round(maxSpan * 0.4)));
     setCameraSpeed(speed);
+  }, [combinedBounds]);
+
+  // Orientation gizmo alignment: rotates camera to orthogonal or isometric view and frames BSPs
+  const alignCameraView = useCallback((dir: 'x' | '-x' | 'y' | '-y' | 'z' | '-z' | 'iso') => {
+    const b = combinedBounds;
+    if (!b || !cameraRef.current) return;
+    const [minX, minY, minZ, maxX, maxY, maxZ] = b;
+    const cx = (minX + maxX) / 2;
+    const cy = (minZ + maxZ) / 2;
+    const cz = -(minY + maxY) / 2;
+    const spanX = Math.abs(maxX - minX);
+    const spanY = Math.abs(maxZ - minZ);
+    const spanZ = Math.abs(maxY - minY);
+    const maxSpan = Math.max(spanX, spanY, spanZ, 40);
+    const dist = maxSpan * 0.95;
+
+    let eyeX = cx;
+    let eyeY = cy;
+    let eyeZ = cz;
+    let yaw = 0;
+    let pitch = 0;
+
+    switch (dir) {
+      case 'x': // Front (+X in Halo)
+        eyeX = cx + dist;
+        yaw = -Math.PI / 2;
+        pitch = 0;
+        break;
+      case '-x': // Back (-X in Halo)
+        eyeX = cx - dist;
+        yaw = Math.PI / 2;
+        pitch = 0;
+        break;
+      case 'y': // Left (+Y in Halo: Three.js World -Z)
+        eyeZ = cz - dist;
+        yaw = 0;
+        pitch = 0;
+        break;
+      case '-y': // Right (-Y in Halo: Three.js World +Z)
+        eyeZ = cz + dist;
+        yaw = Math.PI;
+        pitch = 0;
+        break;
+      case 'z': // Top (+Z in Halo: Three.js World +Y)
+        eyeY = cy + dist;
+        yaw = 0;
+        pitch = -Math.PI / 2 + 0.001;
+        break;
+      case '-z': // Bottom (-Z in Halo: Three.js World -Y)
+        eyeY = cy - dist;
+        yaw = 0;
+        pitch = Math.PI / 2 - 0.001;
+        break;
+      case 'iso':
+      default:
+        eyeX = cx + dist * 0.6;
+        eyeY = cy + dist * 0.55;
+        eyeZ = cz + dist * 0.6;
+        yaw = -Math.PI / 4;
+        pitch = -Math.PI / 6;
+        break;
+    }
+
+    camPosRef.current.set(eyeX, eyeY, eyeZ);
+    camEulerRef.current.yaw = yaw;
+    camEulerRef.current.pitch = pitch;
+    cameraRef.current.position.set(eyeX, eyeY, eyeZ);
   }, [combinedBounds]);
 
   // Focus camera on an object
@@ -286,31 +363,131 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   const handleDeletePlacement = useCallback(
     async (placementId: string) => {
       try {
+        const obj = scenarioData?.objects.find((o) => o.id === placementId);
+        let partnerId: string | null = null;
+        if (obj && obj.kind === 'netgame_flag' && (obj.paletteIndex === 6 || obj.paletteIndex === 7)) {
+          const partnerType = obj.paletteIndex === 6 ? 7 : 6;
+          const partner = scenarioData?.objects.find(
+            (o) => o.kind === 'netgame_flag' && o.paletteIndex === partnerType && o.teamIndex === obj.teamIndex && o.id !== placementId,
+          );
+          if (partner) {
+            partnerId = partner.id;
+          }
+        }
+
         const res = await window.opence.deleteScenarioPlacement(placementId);
         if (res && res.ok) {
-          setScenarioData(res.summary);
-          if (selectedObjectId === placementId) {
-            setSelectedObjectId(null);
+          let finalSummary = res.summary;
+          if (partnerId) {
+            const partnerIndex = parseInt(partnerId.split('-')[1], 10);
+            const myIndex = parseInt(placementId.split('-')[1], 10);
+            const adjustedPartnerId = partnerIndex > myIndex ? `netgame_flag-${partnerIndex - 1}` : partnerId;
+            const res2 = await window.opence.deleteScenarioPlacement(adjustedPartnerId);
+            if (res2 && res2.ok) {
+              finalSummary = res2.summary;
+            }
           }
+          setScenarioData(finalSummary);
+          setSelectedObjectIds((prev) => prev.filter((id) => id !== placementId && id !== partnerId));
         }
       } catch (err) {
         console.error('Failed to delete scenario placement:', err);
       }
     },
-    [selectedObjectId],
+    [scenarioData],
   );
 
   const handleAddPlacement = useCallback(
     async (
-      kind: ScenarioObjectKind,
+      kind: ScenarioObjectKind | 'teleport' | 'koth' | 'race' | 'oddball',
       paletteIndex: number,
       position: [number, number, number],
       rotation: [number, number, number] = [0, 0, 0],
       teamIndex?: number,
     ) => {
       try {
+        if (kind === 'teleport') {
+          // Find next available Teleport ID
+          const existing = (scenarioData?.objects || []).filter(
+            (o) => o.kind === 'netgame_flag' && (o.paletteIndex === 6 || o.paletteIndex === 7),
+          );
+          const nextId = existing.length > 0 ? Math.max(...existing.map((o) => o.teamIndex ?? 0)) + 1 : 0;
+
+          // 1. Place Origin (type 6)
+          const resOrigin = await window.opence.addScenarioPlacement('netgame_flag', 6, position, rotation, nextId);
+          if (resOrigin && resOrigin.ok) {
+            // 2. Place Destination (type 7) offset by 5m
+            const destPos: [number, number, number] = [position[0] + 5, position[1], position[2]];
+            const resDest = await window.opence.addScenarioPlacement('netgame_flag', 7, destPos, rotation, nextId);
+            if (resDest && resDest.ok) {
+              setScenarioData(resDest.summary);
+            } else {
+              setScenarioData(resOrigin.summary);
+            }
+            setSelectedObjectId(resOrigin.newPlacement.id);
+            setShowAddModal(false);
+          }
+          return;
+        }
+
+        if (kind === 'koth') {
+          // Find next available KOTH Hill ID
+          const existing = (scenarioData?.objects || []).filter(
+            (o) => o.kind === 'netgame_flag' && o.paletteIndex === 8,
+          );
+          const nextHillId = existing.length > 0 ? Math.max(...existing.map((o) => o.teamIndex ?? 0)) + 1 : 0;
+
+          // Spawn 8 points in a 5m diameter circle (radius = 2.5m)
+          let lastRes = null;
+          let firstId = null;
+          for (let k = 0; k < 8; k++) {
+            const angle = (k * 2 * Math.PI) / 8;
+            const px = position[0] + 2.5 * Math.cos(angle);
+            const py = position[1] + 2.5 * Math.sin(angle);
+            const pz = position[2];
+            lastRes = await window.opence.addScenarioPlacement('netgame_flag', 8, [px, py, pz], rotation, nextHillId);
+            if (k === 0 && lastRes && lastRes.ok) {
+              firstId = lastRes.newPlacement.id;
+            }
+          }
+          if (lastRes && lastRes.ok) {
+            setScenarioData(lastRes.summary);
+            if (firstId) setSelectedObjectId(firstId);
+            setShowAddModal(false);
+          }
+          return;
+        }
+
+        if (kind === 'race') {
+          const existing = (scenarioData?.objects || []).filter(
+            (o) => o.kind === 'netgame_flag' && (o.paletteIndex === 3 || o.paletteIndex === 4),
+          );
+          const nextId = existing.length > 0 ? Math.max(...existing.map((o) => o.teamIndex ?? 0)) + 1 : 0;
+          const res = await window.opence.addScenarioPlacement('netgame_flag', 3, position, rotation, nextId);
+          if (res && res.ok) {
+            setScenarioData(res.summary);
+            setSelectedObjectId(res.newPlacement.id);
+            setShowAddModal(false);
+          }
+          return;
+        }
+
+        if (kind === 'oddball') {
+          const existing = (scenarioData?.objects || []).filter(
+            (o) => o.kind === 'netgame_flag' && o.paletteIndex === 2,
+          );
+          const nextId = existing.length > 0 ? Math.max(...existing.map((o) => o.teamIndex ?? 0)) + 1 : 0;
+          const res = await window.opence.addScenarioPlacement('netgame_flag', 2, position, rotation, nextId);
+          if (res && res.ok) {
+            setScenarioData(res.summary);
+            setSelectedObjectId(res.newPlacement.id);
+            setShowAddModal(false);
+          }
+          return;
+        }
+
         const res = await window.opence.addScenarioPlacement(
-          kind,
+          kind as ScenarioObjectKind,
           paletteIndex,
           position,
           rotation,
@@ -325,7 +502,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         console.error('Failed to add scenario placement:', err);
       }
     },
-    [],
+    [scenarioData],
   );
 
   const handleSwapPlacement = useCallback(
@@ -342,6 +519,30 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     },
     [],
   );
+
+  // Snap all player spawns and netgame equipment down to the BSP surface
+  const snapAllSpawnsToGround = useCallback(async () => {
+    if (!scenarioData || submeshMeshesRef.current.length === 0) return;
+    const bspMeshesList = submeshMeshesRef.current
+      .filter((s) => s.mesh.parent?.visible !== false)
+      .map((s) => s.mesh);
+    if (bspMeshesList.length === 0) return;
+
+    const targets = scenarioData.objects.filter((o) => o.kind === 'spawn' || o.kind === 'equipment');
+    let snappedCount = 0;
+
+    for (const obj of targets) {
+      const [curX, curY, curZ] = obj.position;
+      const origin = new THREE.Vector3(curX, curZ + 100, -curY);
+      const raycaster = new THREE.Raycaster(origin, new THREE.Vector3(0, -1, 0), 0.1, 1000);
+      const hits = raycaster.intersectObjects(bspMeshesList, false);
+      if (hits.length > 0) {
+        const groundZ = hits[0].point.y + 0.05;
+        await handleUpdatePlacement(obj.id, { position: [curX, curY, groundZ] });
+        snappedCount++;
+      }
+    }
+  }, [scenarioData, handleUpdatePlacement]);
 
   // Ground Snapping: casts a ray straight down from above the object onto the BSP geometry
   const snapSelectedToGround = useCallback(async () => {
@@ -669,20 +870,97 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           const flagMarker = new THREE.Group();
           flagMarker.userData = { id: obj.id };
 
-          const isTeleport = (obj.objectPath || '').toLowerCase().includes('teleport');
-          if (isTeleport) {
-            const torusGeom = new THREE.TorusGeometry(0.7, 0.08, 8, 24);
+          const isTeleOrigin = obj.paletteIndex === 6 || (obj.objectPath || '').toLowerCase().includes('origin') || (obj.objectPath || '').toLowerCase().includes('source');
+          const isTeleDest = obj.paletteIndex === 7 || (obj.objectPath || '').toLowerCase().includes('dest');
+          const isKoth = obj.paletteIndex === 8 || (obj.objectPath || '').toLowerCase().includes('hill');
+          const isRace = obj.paletteIndex === 3 || obj.paletteIndex === 4 || (obj.objectPath || '').toLowerCase().includes('race');
+          const isOddball = obj.paletteIndex === 2 || (obj.objectPath || '').toLowerCase().includes('oddball');
+
+          if (isKoth) {
+            // KOTH marker: Orange box cube (size of AR ~0.7m)
+            const cubeGeom = new THREE.BoxGeometry(0.7, 0.7, 0.7);
+            cubeGeom.translate(0, 0, 0.35);
+            const cubeMat = new THREE.MeshStandardMaterial({
+              color: 0xff9800,
+              emissive: 0xff6d00,
+              emissiveIntensity: 0.4,
+              roughness: 0.3,
+            });
+            const cubeMesh = new THREE.Mesh(cubeGeom, cubeMat);
+            cubeMesh.userData = { id: obj.id };
+            flagMarker.add(cubeMesh);
+          } else if (isRace) {
+            // Race marker: Red box cube
+            const cubeGeom = new THREE.BoxGeometry(0.7, 0.7, 0.7);
+            cubeGeom.translate(0, 0, 0.35);
+            const cubeMat = new THREE.MeshStandardMaterial({
+              color: 0xf44336,
+              emissive: 0xd50000,
+              emissiveIntensity: 0.4,
+              roughness: 0.3,
+            });
+            const cubeMesh = new THREE.Mesh(cubeGeom, cubeMat);
+            cubeMesh.userData = { id: obj.id };
+            flagMarker.add(cubeMesh);
+          } else if (isOddball) {
+            // Oddball skull spawn: Purple box cube
+            const cubeGeom = new THREE.BoxGeometry(0.7, 0.7, 0.7);
+            cubeGeom.translate(0, 0, 0.35);
+            const cubeMat = new THREE.MeshStandardMaterial({
+              color: 0xba68c8,
+              emissive: 0xaa00ff,
+              emissiveIntensity: 0.4,
+              roughness: 0.3,
+            });
+            const cubeMesh = new THREE.Mesh(cubeGeom, cubeMat);
+            cubeMesh.userData = { id: obj.id };
+            flagMarker.add(cubeMesh);
+          } else if (isTeleOrigin) {
+            // Teleport Origin: Cyan glowing portal ring
+            const torusGeom = new THREE.TorusGeometry(0.75, 0.08, 8, 24);
             torusGeom.translate(0, 0, 0.08);
             const torusMat = new THREE.MeshStandardMaterial({
               color: 0x00e5ff,
               emissive: 0x00b0ff,
-              emissiveIntensity: 0.4,
+              emissiveIntensity: 0.5,
               roughness: 0.2,
             });
             const torusMesh = new THREE.Mesh(torusGeom, torusMat);
             torusMesh.userData = { id: obj.id };
             flagMarker.add(torusMesh);
+
+            // Energy beam
+            const beamGeom = new THREE.CylinderGeometry(0.12, 0.12, 1.8, 8);
+            beamGeom.rotateX(Math.PI / 2);
+            beamGeom.translate(0, 0, 0.9);
+            const beamMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff, transparent: true, opacity: 0.4 });
+            const beamMesh = new THREE.Mesh(beamGeom, beamMat);
+            beamMesh.userData = { id: obj.id };
+            flagMarker.add(beamMesh);
+          } else if (isTeleDest) {
+            // Teleport Destination: Green/Lime glowing portal ring
+            const torusGeom = new THREE.TorusGeometry(0.75, 0.08, 8, 24);
+            torusGeom.translate(0, 0, 0.08);
+            const torusMat = new THREE.MeshStandardMaterial({
+              color: 0x76ff03,
+              emissive: 0x64dd17,
+              emissiveIntensity: 0.5,
+              roughness: 0.2,
+            });
+            const torusMesh = new THREE.Mesh(torusGeom, torusMat);
+            torusMesh.userData = { id: obj.id };
+            flagMarker.add(torusMesh);
+
+            // Energy beam
+            const beamGeom = new THREE.CylinderGeometry(0.12, 0.12, 1.8, 8);
+            beamGeom.rotateX(Math.PI / 2);
+            beamGeom.translate(0, 0, 0.9);
+            const beamMat = new THREE.MeshBasicMaterial({ color: 0x76ff03, transparent: true, opacity: 0.4 });
+            const beamMesh = new THREE.Mesh(beamGeom, beamMat);
+            beamMesh.userData = { id: obj.id };
+            flagMarker.add(beamMesh);
           } else {
+            // Standard flag pole with banner (CTF etc.)
             const poleGeom = new THREE.CylinderGeometry(0.04, 0.04, 2.2, 8);
             poleGeom.rotateX(Math.PI / 2);
             poleGeom.translate(0, 0, 1.1);
@@ -901,19 +1179,35 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     }
   }, [gizmoMode]);
 
-  // Attach/Detach TransformControls & Selection BoxHelper on selectedObjectId change
+  // Attach/Detach TransformControls & Selection BoxHelper on selectedObjectIds change
   useEffect(() => {
     const tc = transformControlsRef.current;
     const scene = sceneRef.current;
     if (!tc || !scene) return;
 
+    // Clean up previous selection helpers
     if (selectionBoxHelperRef.current) {
       scene.remove(selectionBoxHelperRef.current);
       selectionBoxHelperRef.current.dispose();
       selectionBoxHelperRef.current = null;
     }
+    if (partnerBoxHelperRef.current) {
+      scene.remove(partnerBoxHelperRef.current);
+      partnerBoxHelperRef.current.dispose();
+      partnerBoxHelperRef.current = null;
+    }
+    for (const h of kothZoneHelpersRef.current) {
+      scene.remove(h);
+      h.dispose();
+    }
+    kothZoneHelpersRef.current = [];
+    for (const h of multiSelectionHelpersRef.current) {
+      scene.remove(h);
+      h.dispose();
+    }
+    multiSelectionHelpersRef.current = [];
 
-    if (!selectedObjectId || !layerGroupsRef.current) {
+    if (selectedObjectIds.length === 0 || !layerGroupsRef.current) {
       tc.detach();
       return;
     }
@@ -929,11 +1223,12 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       ...layerGroupsRef.current.cutsceneCameras.children,
       ...layerGroupsRef.current.netgameFlags.children,
     ];
-    const targetGroup = allGroups.find((g) => g.userData?.id === selectedObjectId);
 
-    if (targetGroup) {
-      tc.attach(targetGroup);
-      const boxHelper = new THREE.BoxHelper(targetGroup, 0x39ff14);
+    const primaryGroup = allGroups.find((g) => g.userData?.id === selectedObjectId);
+
+    if (primaryGroup) {
+      tc.attach(primaryGroup);
+      const boxHelper = new THREE.BoxHelper(primaryGroup, 0x39ff14);
       const boxMat = boxHelper.material as THREE.LineBasicMaterial;
       boxMat.depthTest = false;
       boxMat.transparent = true;
@@ -942,10 +1237,69 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       boxHelper.renderOrder = 9999;
       scene.add(boxHelper);
       selectionBoxHelperRef.current = boxHelper;
+
+      // Other multi-selected objects outline
+      for (const id of selectedObjectIds) {
+        if (id === selectedObjectId) continue;
+        const group = allGroups.find((g) => g.userData?.id === id);
+        if (group) {
+          const mHelper = new THREE.BoxHelper(group, 0x00e5ff);
+          const mMat = mHelper.material as THREE.LineBasicMaterial;
+          mMat.depthTest = false;
+          mMat.transparent = true;
+          mMat.opacity = 0.85;
+          mHelper.renderOrder = 9998;
+          scene.add(mHelper);
+          multiSelectionHelpersRef.current.push(mHelper);
+        }
+      }
+
+      // Check if primary is a teleporter: outline its paired partner in green outline
+      const primaryObj = scenarioData?.objects.find((o) => o.id === selectedObjectId);
+      if (primaryObj && primaryObj.kind === 'netgame_flag' && (primaryObj.paletteIndex === 6 || primaryObj.paletteIndex === 7)) {
+        const partnerType = primaryObj.paletteIndex === 6 ? 7 : 6;
+        const partner = scenarioData?.objects.find(
+          (o) => o.kind === 'netgame_flag' && o.paletteIndex === partnerType && o.teamIndex === primaryObj.teamIndex,
+        );
+        if (partner) {
+          const partnerGroup = allGroups.find((g) => g.userData?.id === partner.id);
+          if (partnerGroup) {
+            const pHelper = new THREE.BoxHelper(partnerGroup, 0x00ff88);
+            const pMat = pHelper.material as THREE.LineBasicMaterial;
+            pMat.depthTest = false;
+            pMat.transparent = true;
+            pMat.opacity = 1.0;
+            pMat.linewidth = 2;
+            pHelper.renderOrder = 9999;
+            scene.add(pHelper);
+            partnerBoxHelperRef.current = pHelper;
+          }
+        }
+      }
+
+      // Check if primary is a KOTH marker: outline all other markers of the same Hill ID in orange
+      if (primaryObj && primaryObj.kind === 'netgame_flag' && primaryObj.paletteIndex === 8) {
+        const zonePoints = (scenarioData?.objects || []).filter(
+          (o) => o.kind === 'netgame_flag' && o.paletteIndex === 8 && o.teamIndex === primaryObj.teamIndex && o.id !== selectedObjectId,
+        );
+        for (const pt of zonePoints) {
+          const ptGroup = allGroups.find((g) => g.userData?.id === pt.id);
+          if (ptGroup) {
+            const kHelper = new THREE.BoxHelper(ptGroup, 0xffa500);
+            const kMat = kHelper.material as THREE.LineBasicMaterial;
+            kMat.depthTest = false;
+            kMat.transparent = true;
+            kMat.opacity = 0.85;
+            kHelper.renderOrder = 9997;
+            scene.add(kHelper);
+            kothZoneHelpersRef.current.push(kHelper);
+          }
+        }
+      }
     } else {
       tc.detach();
     }
-  }, [selectedObjectId, scenarioData]);
+  }, [selectedObjectId, selectedObjectIds, scenarioData]);
 
   // Synchronize multi-BSP geometries with Three.js scene
   const syncBspMeshes = useCallback(() => {
@@ -1126,18 +1480,68 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
     transformControls.addEventListener('dragging-changed', (event) => {
       isTransformDraggingRef.current = !!event.value;
+      if (event.value) {
+        // Record start positions of all selected objects for multi-transform
+        dragStartPositionsRef.current.clear();
+        const allGroups = [
+          ...(layerGroupsRef.current?.vehicles.children || []),
+          ...(layerGroupsRef.current?.scenery.children || []),
+          ...(layerGroupsRef.current?.spawns.children || []),
+          ...(layerGroupsRef.current?.items.children || []),
+          ...(layerGroupsRef.current?.encounters.children || []),
+          ...(layerGroupsRef.current?.firingPositions.children || []),
+          ...(layerGroupsRef.current?.triggerVolumes.children || []),
+          ...(layerGroupsRef.current?.cutsceneCameras.children || []),
+          ...(layerGroupsRef.current?.netgameFlags.children || []),
+        ];
+        for (const id of selectedObjectIdsRef.current) {
+          const g = allGroups.find((grp) => grp.userData?.id === id);
+          if (g) {
+            dragStartPositionsRef.current.set(id, {
+              pos: g.position.clone(),
+              rot: new THREE.Euler().setFromQuaternion(g.quaternion, 'ZYX'),
+            });
+          }
+        }
+      }
     });
 
     transformControls.addEventListener('mouseUp', async () => {
       const attached = transformControls.object;
       if (!attached || !attached.userData?.id) return;
-      const id = attached.userData.id as string;
+      const primaryId = attached.userData.id as string;
 
-      const newPos: [number, number, number] = [attached.position.x, attached.position.y, attached.position.z];
-      const euler = new THREE.Euler().setFromQuaternion(attached.quaternion, 'ZYX');
-      const newRot: [number, number, number] = [euler.z, euler.y, euler.x];
+      const start = dragStartPositionsRef.current.get(primaryId);
+      const deltaPos = start ? attached.position.clone().sub(start.pos) : new THREE.Vector3();
 
-      callbacksRef.current.handleUpdatePlacement(id, { position: newPos, rotation: newRot });
+      const idsToUpdate = selectedObjectIdsRef.current.length > 0 ? selectedObjectIdsRef.current : [primaryId];
+      const allGroups = [
+        ...(layerGroupsRef.current?.vehicles.children || []),
+        ...(layerGroupsRef.current?.scenery.children || []),
+        ...(layerGroupsRef.current?.spawns.children || []),
+        ...(layerGroupsRef.current?.items.children || []),
+        ...(layerGroupsRef.current?.encounters.children || []),
+        ...(layerGroupsRef.current?.firingPositions.children || []),
+        ...(layerGroupsRef.current?.triggerVolumes.children || []),
+        ...(layerGroupsRef.current?.cutsceneCameras.children || []),
+        ...(layerGroupsRef.current?.netgameFlags.children || []),
+      ];
+
+      for (const id of idsToUpdate) {
+        const grp = allGroups.find((g) => g.userData?.id === id);
+        if (grp) {
+          if (id !== primaryId && start) {
+            const myStart = dragStartPositionsRef.current.get(id);
+            if (myStart) {
+              grp.position.copy(myStart.pos.clone().add(deltaPos));
+            }
+          }
+          const newPos: [number, number, number] = [grp.position.x, grp.position.y, grp.position.z];
+          const euler = new THREE.Euler().setFromQuaternion(grp.quaternion, 'ZYX');
+          const newRot: [number, number, number] = [euler.z, euler.y, euler.x];
+          await callbacksRef.current.handleUpdatePlacement(id, { position: newPos, rotation: newRot });
+        }
+      }
     });
 
     // 6. Build BSP submeshes for visible BSPs
@@ -1268,13 +1672,32 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                 curr = curr.parent;
               }
               if (curr && curr.userData?.id) {
-                setSelectedObjectId(curr.userData.id);
+                const clickedId = curr.userData.id as string;
+                if (e.ctrlKey || e.metaKey) {
+                  // Multi-select with Ctrl: toggle clicked object if of the same entity kind
+                  setSelectedObjectIds((prev) => {
+                    if (prev.length === 0) return [clickedId];
+                    const [prevKind] = prev[0].split('-');
+                    const [clickedKind] = clickedId.split('-');
+                    if (prevKind !== clickedKind) {
+                      return [clickedId]; // Switch category selection
+                    }
+                    if (prev.includes(clickedId)) {
+                      return prev.filter((id) => id !== clickedId);
+                    }
+                    return [...prev, clickedId];
+                  });
+                } else {
+                  setSelectedObjectIds([clickedId]);
+                }
                 return;
               }
             }
           }
           // Clicked empty background: deselect
-          setSelectedObjectId(null);
+          if (!e.ctrlKey && !e.metaKey) {
+            setSelectedObjectIds([]);
+          }
         }
       }
     };
@@ -1836,6 +2259,25 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             [R] Frame Scene
           </button>
 
+          {/* Snap Spawns to Ground */}
+          <button
+            data-testid="viewport-snap-spawns-btn"
+            onClick={snapAllSpawnsToGround}
+            style={{
+              background: 'var(--bg-panel)',
+              color: 'var(--accent-cyan)',
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Move and snap all player spawns and items down onto the BSP ground surface"
+          >
+            Snap Spawns to Ground
+          </button>
+
           {/* Inspector Panel Toggle Button */}
           <button
             data-testid="viewport-toggle-inspector-btn"
@@ -1872,6 +2314,194 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             outline: 'none',
           }}
         />
+
+        {/* View Cube / Orientation XYZ Gizmo (Top-Right of Viewport) */}
+        <div
+          data-testid="viewport-orientation-gizmo"
+          style={{
+            position: 'absolute',
+            top: 12,
+            right: showInspector ? 342 : 12,
+            zIndex: 10,
+            background: 'rgba(21, 25, 33, 0.85)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '6px 8px',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 4,
+            boxShadow: '0 4px 14px rgba(0,0,0,0.5)',
+          }}
+        >
+          <div style={{ fontSize: 9.5, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            View Orientation
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 26px)', gap: 3, justifyContent: 'center' }}>
+            {/* Top row */}
+            <div />
+            <button
+              data-testid="orientation-btn-top"
+              title="Top View (+Z)"
+              onClick={() => { alignCameraView('z'); frameScene(); }}
+              style={{
+                width: 26,
+                height: 24,
+                background: 'var(--bg-main)',
+                color: '#42a5f5',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              }}
+            >
+              +Z
+            </button>
+            <button
+              data-testid="orientation-btn-iso"
+              title="Isometric View"
+              onClick={() => { alignCameraView('iso'); frameScene(); }}
+              style={{
+                width: 26,
+                height: 24,
+                background: 'var(--bg-main)',
+                color: 'var(--accent-cyan)',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                fontSize: 9,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              }}
+            >
+              ISO
+            </button>
+
+            {/* Middle row */}
+            <button
+              data-testid="orientation-btn-left"
+              title="Left View (+Y)"
+              onClick={() => { alignCameraView('y'); frameScene(); }}
+              style={{
+                width: 26,
+                height: 24,
+                background: 'var(--bg-main)',
+                color: '#66bb6a',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              }}
+            >
+              +Y
+            </button>
+            <button
+              data-testid="orientation-btn-front"
+              title="Front View (+X)"
+              onClick={() => { alignCameraView('x'); frameScene(); }}
+              style={{
+                width: 26,
+                height: 24,
+                background: 'var(--bg-main)',
+                color: '#ef5350',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              }}
+            >
+              +X
+            </button>
+            <button
+              data-testid="orientation-btn-right"
+              title="Right View (-Y)"
+              onClick={() => { alignCameraView('-y'); frameScene(); }}
+              style={{
+                width: 26,
+                height: 24,
+                background: 'var(--bg-main)',
+                color: '#66bb6a',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              }}
+            >
+              -Y
+            </button>
+
+            {/* Bottom row */}
+            <div />
+            <button
+              data-testid="orientation-btn-back"
+              title="Back View (-X)"
+              onClick={() => { alignCameraView('-x'); frameScene(); }}
+              style={{
+                width: 26,
+                height: 24,
+                background: 'var(--bg-main)',
+                color: '#ef5350',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              }}
+            >
+              -X
+            </button>
+            <button
+              data-testid="orientation-btn-bottom"
+              title="Bottom View (-Z)"
+              onClick={() => { alignCameraView('-z'); frameScene(); }}
+              style={{
+                width: 26,
+                height: 24,
+                background: 'var(--bg-main)',
+                color: '#42a5f5',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                fontSize: 10,
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+              }}
+            >
+              -Z
+            </button>
+          </div>
+        </div>
 
         {/* Collapsible Inspector / Outliner Side Panel (Step 9) */}
         {showInspector && (
@@ -2173,6 +2803,347 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                         </div>
                         <div style={{ fontSize: 11, fontFamily: 'var(--mono-font)', color: 'var(--accent-cyan)' }}>
                           {(((selectedPlacement.fieldOfView || 1.22) * 180) / Math.PI).toFixed(1)}° ({((selectedPlacement.fieldOfView || 1.22)).toFixed(3)} rad)
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Teleporter Pair Controls */}
+                    {selectedPlacement.kind === 'netgame_flag' && (selectedPlacement.paletteIndex === 6 || selectedPlacement.paletteIndex === 7) && (
+                      <div
+                        data-testid="inspector-teleport-controls"
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          padding: 8,
+                          background: 'rgba(0, 229, 255, 0.08)',
+                          border: '1px solid rgba(0, 229, 255, 0.3)',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--accent-cyan)', textTransform: 'uppercase' }}>
+                            Teleporter Pair ({selectedPlacement.paletteIndex === 6 ? 'Origin' : 'Destination'})
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 600 }}>
+                            Teleporter ID:
+                          </span>
+                          <input
+                            data-testid="inspector-teleport-id-input"
+                            type="number"
+                            min="0"
+                            value={selectedPlacement.teamIndex ?? 0}
+                            onChange={async (e) => {
+                              const newId = parseInt(e.target.value, 10);
+                              if (!isNaN(newId)) {
+                                const oldId = selectedPlacement.teamIndex;
+                                const partnerType = selectedPlacement.paletteIndex === 6 ? 7 : 6;
+                                const partner = scenarioData?.objects.find(
+                                  (o) => o.kind === 'netgame_flag' && o.paletteIndex === partnerType && o.teamIndex === oldId,
+                                );
+                                await handleUpdatePlacement(selectedPlacement.id, { teamIndex: newId });
+                                if (partner) {
+                                  await handleUpdatePlacement(partner.id, { teamIndex: newId });
+                                }
+                              }
+                            }}
+                            style={{
+                              width: 70,
+                              background: 'var(--bg-main)',
+                              color: 'var(--text-primary)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 3,
+                              padding: '3px 5px',
+                              fontSize: 11,
+                              fontFamily: 'var(--mono-font)',
+                            }}
+                          />
+                        </div>
+                        <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+                          <button
+                            data-testid="inspector-teleport-switch-origin"
+                            onClick={() => {
+                              const origin = scenarioData?.objects.find(
+                                (o) => o.kind === 'netgame_flag' && o.paletteIndex === 6 && o.teamIndex === selectedPlacement.teamIndex,
+                              );
+                              if (origin) {
+                                setSelectedObjectId(origin.id);
+                                focusOnObject(origin.id);
+                              }
+                            }}
+                            style={{
+                              flex: 1,
+                              padding: '4px 6px',
+                              fontSize: 10.5,
+                              fontWeight: 600,
+                              background: selectedPlacement.paletteIndex === 6 ? 'var(--accent-cyan)' : 'var(--bg-main)',
+                              color: selectedPlacement.paletteIndex === 6 ? '#000' : 'var(--text-primary)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 3,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Switch to Origin
+                          </button>
+                          <button
+                            data-testid="inspector-teleport-switch-dest"
+                            onClick={() => {
+                              const dest = scenarioData?.objects.find(
+                                (o) => o.kind === 'netgame_flag' && o.paletteIndex === 7 && o.teamIndex === selectedPlacement.teamIndex,
+                              );
+                              if (dest) {
+                                setSelectedObjectId(dest.id);
+                                focusOnObject(dest.id);
+                              }
+                            }}
+                            style={{
+                              flex: 1,
+                              padding: '4px 6px',
+                              fontSize: 10.5,
+                              fontWeight: 600,
+                              background: selectedPlacement.paletteIndex === 7 ? '#76ff03' : 'var(--bg-main)',
+                              color: selectedPlacement.paletteIndex === 7 ? '#000' : 'var(--text-primary)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 3,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Switch to Destination
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* King of the Hill (KOTH Zone) Controls */}
+                    {selectedPlacement.kind === 'netgame_flag' && selectedPlacement.paletteIndex === 8 && (
+                      <div
+                        data-testid="inspector-koth-controls"
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          padding: 8,
+                          background: 'rgba(255, 152, 0, 0.08)',
+                          border: '1px solid rgba(255, 152, 0, 0.35)',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: '#ffa726', textTransform: 'uppercase' }}>
+                          King of the Hill (KOTH Zone)
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 600 }}>
+                            KOTH ID:
+                          </span>
+                          <input
+                            data-testid="inspector-koth-id-input"
+                            type="number"
+                            min="0"
+                            value={selectedPlacement.teamIndex ?? 0}
+                            onChange={async (e) => {
+                              const newId = parseInt(e.target.value, 10);
+                              if (!isNaN(newId)) {
+                                const oldId = selectedPlacement.teamIndex;
+                                const zone = (scenarioData?.objects || []).filter(
+                                  (o) => o.kind === 'netgame_flag' && o.paletteIndex === 8 && o.teamIndex === oldId,
+                                );
+                                for (const pt of zone) {
+                                  await handleUpdatePlacement(pt.id, { teamIndex: newId });
+                                }
+                              }
+                            }}
+                            style={{
+                              width: 70,
+                              background: 'var(--bg-main)',
+                              color: 'var(--text-primary)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 3,
+                              padding: '3px 5px',
+                              fontSize: 11,
+                              fontFamily: 'var(--mono-font)',
+                            }}
+                          />
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <button
+                              data-testid="inspector-koth-add-point"
+                              onClick={async () => {
+                                const pos = selectedPlacement.position;
+                                await window.opence.addScenarioPlacement(
+                                  'netgame_flag',
+                                  8,
+                                  [pos[0] + 1.0, pos[1], pos[2]],
+                                  selectedPlacement.rotation,
+                                  selectedPlacement.teamIndex ?? 0,
+                                );
+                                const res = await window.opence.getScenarioPlacements();
+                                if (res && res.ok) setScenarioData(res.summary);
+                              }}
+                              style={{
+                                flex: 1,
+                                padding: '4px 6px',
+                                fontSize: 10.5,
+                                fontWeight: 600,
+                                background: 'var(--bg-main)',
+                                color: '#ffa726',
+                                border: '1px solid rgba(255, 152, 0, 0.4)',
+                                borderRadius: 3,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              + Add Point
+                            </button>
+                            <button
+                              data-testid="inspector-koth-remove-point"
+                              onClick={() => handleDeletePlacement(selectedPlacement.id)}
+                              style={{
+                                flex: 1,
+                                padding: '4px 6px',
+                                fontSize: 10.5,
+                                fontWeight: 600,
+                                background: 'var(--bg-main)',
+                                color: '#ff6b6b',
+                                border: '1px solid rgba(255, 107, 107, 0.4)',
+                                borderRadius: 3,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              Remove Point
+                            </button>
+                          </div>
+                          <button
+                            data-testid="inspector-koth-remove-zone"
+                            onClick={async () => {
+                              const oldId = selectedPlacement.teamIndex;
+                              const zone = (scenarioData?.objects || []).filter(
+                                (o) => o.kind === 'netgame_flag' && o.paletteIndex === 8 && o.teamIndex === oldId,
+                              );
+                              // Delete in reverse order
+                              const sorted = [...zone].sort((a, b) => {
+                                const ai = parseInt(a.id.split('-')[1], 10);
+                                const bi = parseInt(b.id.split('-')[1], 10);
+                                return bi - ai;
+                              });
+                              for (const pt of sorted) {
+                                await window.opence.deleteScenarioPlacement(pt.id);
+                              }
+                              const res = await window.opence.getScenarioPlacements();
+                              if (res && res.ok) {
+                                setScenarioData(res.summary);
+                              }
+                              setSelectedObjectIds([]);
+                            }}
+                            style={{
+                              width: '100%',
+                              padding: '4px 6px',
+                              fontSize: 10.5,
+                              fontWeight: 600,
+                              background: 'rgba(255, 80, 80, 0.15)',
+                              color: '#ff6b6b',
+                              border: '1px solid rgba(255, 80, 80, 0.4)',
+                              borderRadius: 3,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Remove KOTH Zone
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Race Marker Controls */}
+                    {selectedPlacement.kind === 'netgame_flag' && (selectedPlacement.paletteIndex === 3 || selectedPlacement.paletteIndex === 4) && (
+                      <div
+                        data-testid="inspector-race-controls"
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          padding: 8,
+                          background: 'rgba(244, 67, 54, 0.08)',
+                          border: '1px solid rgba(244, 67, 54, 0.35)',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: '#ef5350', textTransform: 'uppercase' }}>
+                          Race Track Checkpoint
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 600 }}>
+                            Race Checkpoint ID:
+                          </span>
+                          <input
+                            data-testid="inspector-race-id-input"
+                            type="number"
+                            min="0"
+                            value={selectedPlacement.teamIndex ?? 0}
+                            onChange={(e) => {
+                              const newId = parseInt(e.target.value, 10);
+                              if (!isNaN(newId)) {
+                                handleUpdatePlacement(selectedPlacement.id, { teamIndex: newId });
+                              }
+                            }}
+                            style={{
+                              width: 70,
+                              background: 'var(--bg-main)',
+                              color: 'var(--text-primary)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 3,
+                              padding: '3px 5px',
+                              fontSize: 11,
+                              fontFamily: 'var(--mono-font)',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Oddball Spawn Controls */}
+                    {selectedPlacement.kind === 'netgame_flag' && selectedPlacement.paletteIndex === 2 && (
+                      <div
+                        data-testid="inspector-oddball-controls"
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          padding: 8,
+                          background: 'rgba(186, 104, 200, 0.08)',
+                          border: '1px solid rgba(186, 104, 200, 0.35)',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: '#ba68c8', textTransform: 'uppercase' }}>
+                          Oddball Ball Spawn
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 600 }}>
+                            Oddball Spawn ID:
+                          </span>
+                          <input
+                            data-testid="inspector-oddball-id-input"
+                            type="number"
+                            min="0"
+                            value={selectedPlacement.teamIndex ?? 0}
+                            onChange={(e) => {
+                              const newId = parseInt(e.target.value, 10);
+                              if (!isNaN(newId)) {
+                                handleUpdatePlacement(selectedPlacement.id, { teamIndex: newId });
+                              }
+                            }}
+                            style={{
+                              width: 70,
+                              background: 'var(--bg-main)',
+                              color: 'var(--text-primary)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 3,
+                              padding: '3px 5px',
+                              fontSize: 11,
+                              fontFamily: 'var(--mono-font)',
+                            }}
+                          />
                         </div>
                       </div>
                     )}
@@ -2681,6 +3652,10 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                 <option value="weapon">Weapon</option>
                 <option value="equipment">Equipment</option>
                 <option value="biped">Biped</option>
+                <option value="teleport">Teleporters (Origin & Destination Pair)</option>
+                <option value="koth">King of the Hill (KOTH 8-Point Zone)</option>
+                <option value="race">Race Track Checkpoint</option>
+                <option value="oddball">Oddball Skull Spawn</option>
               </select>
             </div>
 

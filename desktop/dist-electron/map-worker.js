@@ -40924,19 +40924,40 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
       const typeIdx = item.get("type")?.value ?? 0;
       const usageId = item.get("usage id")?.value ?? 0;
       const flagName = NETGAME_FLAG_TYPES[typeIdx] || `Flag Type ${typeIdx}`;
+      let displayName = `${flagName} #${i}`;
+      let displayPath = `${flagName} (${usageId})`;
+      if (typeIdx === 6) {
+        displayName = `Teleport Origin #${usageId}`;
+        displayPath = `Teleport Origin (ID: ${usageId})`;
+      } else if (typeIdx === 7) {
+        displayName = `Teleport Destination #${usageId}`;
+        displayPath = `Teleport Destination (ID: ${usageId})`;
+      } else if (typeIdx === 8) {
+        displayName = `KOTH Hill Marker #${i} (Hill ${usageId})`;
+        displayPath = `KOTH Hill Point (Hill ID: ${usageId})`;
+      } else if (typeIdx === 3) {
+        displayName = `Race Checkpoint #${usageId}`;
+        displayPath = `Race Track Marker (ID: ${usageId})`;
+      } else if (typeIdx === 2) {
+        displayName = `Oddball Spawn #${usageId}`;
+        displayPath = `Oddball Spawn (ID: ${usageId})`;
+      } else if (typeIdx === 0) {
+        displayName = `CTF Flag (${usageId === 0 ? "Red" : "Blue"})`;
+        displayPath = `CTF Flag (${usageId === 0 ? "Red" : "Blue"})`;
+      }
       placements.push({
         id: `netgame_flag-${i}`,
         kind: "netgame_flag",
         paletteIndex: typeIdx,
         nameIndex: -1,
         objectTagId: 4294967295,
-        objectPath: `${flagName} (${usageId === 0 ? "Red" : usageId === 1 ? "Blue" : usageId})`,
+        objectPath: displayPath,
         modelTagId: 4294967295,
         position: pos,
         rotation: [facing, 0, 0],
         teamIndex: usageId,
         flagType: flagName,
-        name: `${flagName} #${i}`
+        name: displayName
       });
       counts.netgameFlags = (counts.netgameFlags || 0) + 1;
     }
@@ -41116,6 +41137,9 @@ function updateScenarioPlacement(buffer, header, tagIndex, placementId, updates)
     if (updates.rotation) {
       buffer.writeFloatLE(updates.rotation[0], itemOffset + 12);
     }
+    if (updates.paletteIndex !== void 0) {
+      buffer.writeInt16LE(updates.paletteIndex, itemOffset + 16);
+    }
     if (updates.teamIndex !== void 0) {
       buffer.writeInt16LE(updates.teamIndex, itemOffset + 18);
     }
@@ -41246,7 +41270,7 @@ function duplicateScenarioPlacement(buffer, header, tagIndex, placementId, offse
   const sourceItemOffset = info.baseOffset + index * info.structSize;
   const sourceBytes = buffer.subarray(sourceItemOffset, sourceItemOffset + info.structSize);
   const newItemBytes = Buffer.from(sourceBytes);
-  if (kind === "spawn") {
+  if (kind === "spawn" || kind === "netgame_flag") {
     const curX = newItemBytes.readFloatLE(0);
     const curY = newItemBytes.readFloatLE(4);
     const curZ = newItemBytes.readFloatLE(8);
@@ -41292,9 +41316,33 @@ function addScenarioPlacement(buffer, header, tagIndex, kind, paletteIndex, posi
     newItemBytes2.writeFloatLE(position[2], 8);
     newItemBytes2.writeFloatLE(rotation[0], 12);
     newItemBytes2.writeInt16LE(teamIndex ?? 0, 16);
+    newItemBytes2.writeInt16LE(0, 18);
+    newItemBytes2.writeInt16LE(12, 20);
+    newItemBytes2.writeInt16LE(0, 22);
+    newItemBytes2.writeInt16LE(0, 24);
+    newItemBytes2.writeInt16LE(0, 26);
     const appended2 = appendReflexiveElement(curBuf, curHdr, tagIndex, info2.reflexiveFieldOffset, newItemBytes2);
     const summary2 = extractScenarioPlacements(appended2.buffer, appended2.header, tagIndex);
     const newId2 = `spawn-${info2.count}`;
+    const newPlacement2 = summary2.objects.find((o) => o.id === newId2);
+    return { buffer: appended2.buffer, header: appended2.header, summary: summary2, newPlacement: newPlacement2 };
+  }
+  if (kind === "netgame_flag") {
+    const info2 = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, "netgame_flag");
+    const newItemBytes2 = Buffer.alloc(info2.structSize, 0);
+    newItemBytes2.writeFloatLE(position[0], 0);
+    newItemBytes2.writeFloatLE(position[1], 4);
+    newItemBytes2.writeFloatLE(position[2], 8);
+    newItemBytes2.writeFloatLE(rotation[0], 12);
+    newItemBytes2.writeInt16LE(paletteIndex, 16);
+    newItemBytes2.writeInt16LE(teamIndex ?? 0, 18);
+    newItemBytes2.writeUInt32LE(4294967295, 20);
+    newItemBytes2.writeUInt32LE(4294967295, 24);
+    newItemBytes2.writeUInt32LE(4294967295, 28);
+    newItemBytes2.writeUInt32LE(4294967295, 32);
+    const appended2 = appendReflexiveElement(curBuf, curHdr, tagIndex, info2.reflexiveFieldOffset, newItemBytes2);
+    const summary2 = extractScenarioPlacements(appended2.buffer, appended2.header, tagIndex);
+    const newId2 = `netgame_flag-${info2.count}`;
     const newPlacement2 = summary2.objects.find((o) => o.id === newId2);
     return { buffer: appended2.buffer, header: appended2.header, summary: summary2, newPlacement: newPlacement2 };
   }
@@ -42659,7 +42707,7 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       }
     }
     const shouldHarvestShaders = options.harvestShaders !== false;
-    const shouldImportObjects = options.importSceneryAndMachines !== false;
+    const shouldImportObjects = Boolean(options.importSceneryAndMachines);
     if (shouldHarvestShaders && bspDeps.length > 0 || shouldImportObjects) {
       const srcTagIndex = sourceInspected.tagIndex;
       const rootIndicesSet = /* @__PURE__ */ new Set();
@@ -42938,7 +42986,11 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   }
   let relocatedSpawns = 0;
   if (options.relocateGroundObjects ?? true) {
+    const minX = srcWorldBounds[0];
+    const minY = srcWorldBounds[1];
     const minZ = srcWorldBounds[2];
+    const maxX = srcWorldBounds[3];
+    const maxY = srcWorldBounds[4];
     const maxZ = srcWorldBounds[5];
     const defaultGroundZ = minZ + 0.5;
     const spawnsReflexive = decodedScnr.get("player starting locations");
@@ -42947,24 +42999,53 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       const spawnsOffset = newTagDataOffset + (spawnsReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
       for (let s = 0; s < spawnsReflexive.value.count; s++) {
         const sOff = spawnsOffset + s * spawnSize;
-        const curZ = out.readFloatLE(sOff + 8);
-        if (curZ < minZ || curZ > maxZ) {
-          out.writeFloatLE(defaultGroundZ, sOff + 8);
-          relocatedSpawns++;
+        let curX = out.readFloatLE(sOff + 0);
+        let curY = out.readFloatLE(sOff + 4);
+        let curZ = out.readFloatLE(sOff + 8);
+        let changed = false;
+        if (curX < minX || curX > maxX) {
+          curX = Math.min(Math.max(curX, minX + 2), maxX - 2);
+          out.writeFloatLE(curX, sOff + 0);
+          changed = true;
         }
+        if (curY < minY || curY > maxY) {
+          curY = Math.min(Math.max(curY, minY + 2), maxY - 2);
+          out.writeFloatLE(curY, sOff + 4);
+          changed = true;
+        }
+        if (curZ < minZ || curZ > maxZ) {
+          curZ = defaultGroundZ;
+          out.writeFloatLE(curZ, sOff + 8);
+          changed = true;
+        }
+        if (changed) relocatedSpawns++;
       }
     }
     const equipReflexive = decodedScnr.get("netgame equipment");
     if (equipReflexive && equipReflexive.kind === "reflexive" && equipReflexive.value.count > 0) {
-      const equipSize = 48;
+      const equipSize = 144;
       const equipOffset = newTagDataOffset + (equipReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
       for (let e = 0; e < equipReflexive.value.count; e++) {
         const eOff = equipOffset + e * equipSize;
-        const curZ = out.readFloatLE(eOff + 8);
-        if (curZ < minZ || curZ > maxZ) {
-          out.writeFloatLE(defaultGroundZ, eOff + 8);
-          relocatedSpawns++;
+        let curX = out.readFloatLE(eOff + 64);
+        let curY = out.readFloatLE(eOff + 68);
+        let curZ = out.readFloatLE(eOff + 72);
+        let changed = false;
+        if (curX < minX || curX > maxX) {
+          curX = Math.min(Math.max(curX, minX + 2), maxX - 2);
+          out.writeFloatLE(curX, eOff + 64);
+          changed = true;
         }
+        if (curY < minY || curY > maxY) {
+          curY = Math.min(Math.max(curY, minY + 2), maxY - 2);
+          out.writeFloatLE(curY, eOff + 68);
+          changed = true;
+        }
+        if (curZ < minZ || curZ > maxZ) {
+          out.writeFloatLE(defaultGroundZ, eOff + 72);
+          changed = true;
+        }
+        if (changed) relocatedSpawns++;
       }
     }
   }
