@@ -86,6 +86,25 @@ var api = {
     import_electron.ipcRenderer.on("map:updated", listener);
     return () => import_electron.ipcRenderer.removeListener("map:updated", listener);
   },
+  // M12: OpenCE Tag Test
+  tagTestLaunch: (options) => import_electron.ipcRenderer.invoke("tagTest:launch", options),
+  tagTestStop: () => import_electron.ipcRenderer.invoke("tagTest:stop"),
+  tagTestSendCommand: (command) => import_electron.ipcRenderer.invoke("tagTest:sendCommand", command),
+  tagTestHotReload: () => import_electron.ipcRenderer.invoke("tagTest:hotReload"),
+  tagTestGetStatus: () => import_electron.ipcRenderer.invoke("tagTest:getStatus"),
+  onTagTestLog: (cb) => {
+    const listener = (_, data) => cb(data);
+    import_electron.ipcRenderer.on("tagTest:log", listener);
+    return () => import_electron.ipcRenderer.removeListener("tagTest:log", listener);
+  },
+  onTagTestStatusChange: (cb) => {
+    const listener = (_, data) => cb(data);
+    import_electron.ipcRenderer.on("tagTest:status", listener);
+    return () => import_electron.ipcRenderer.removeListener("tagTest:status", listener);
+  },
+  pickOpenCeDirectory: () => import_electron.ipcRenderer.invoke("tagTest:pickDir"),
+  getOpenCeConfig: () => import_electron.ipcRenderer.invoke("tagTest:getConfig"),
+  setOpenCeDirectory: (dir) => import_electron.ipcRenderer.invoke("tagTest:setDir", dir),
   getPathForFile: (file) => import_electron.webUtils.getPathForFile(file)
 };
 import_electron.contextBridge.exposeInMainWorld("opence", api);

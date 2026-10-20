@@ -66,6 +66,7 @@ __export(map_worker_exports, {
   runSaveMapAs: () => runSaveMapAs,
   runSetDependencySlot: () => runSetDependencySlot,
   runSetUnicodeString: () => runSetUnicodeString,
+  runStageTagTestMap: () => runStageTagTestMap,
   runSwapScenarioPlacement: () => runSwapScenarioPlacement,
   runUpdateScenarioPlacement: () => runUpdateScenarioPlacement,
   runUpdateTagField: () => runUpdateTagField,
@@ -43920,6 +43921,29 @@ function runSaveMapAs(task) {
     sendWriteError(task.requestId, err);
   }
 }
+function runStageTagTestMap(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    progress(task.requestId, "Staging map for OpenCE Tag Test", 25);
+    const target = task.targetPath;
+    const targetDir = path2.dirname(target);
+    if (!fs2.existsSync(targetDir)) {
+      fs2.mkdirSync(targetDir, { recursive: true });
+    }
+    const bufferCopy = Buffer.from(currentMap.buffer);
+    progress(task.requestId, "Writing staged map", 60);
+    const finalized = writeFinalizedMap2(bufferCopy, target, "Staging for OpenCE Tag Test");
+    progress(task.requestId, "Done", 100);
+    sendResult(task.requestId, {
+      ok: true,
+      targetPath: target,
+      crc32: finalized.crc32,
+      scenarioName: finalized.scenarioName
+    });
+  } catch (err) {
+    sendWriteError(task.requestId, err);
+  }
+}
 var samePath = (a, b) => path2.resolve(a).toLowerCase() === path2.resolve(b).toLowerCase();
 function runConvertPreflight(task) {
   const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
@@ -44447,6 +44471,7 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "getSourceBspMesh") await runGetSourceBspMesh(task);
     else if (task.type === "bspSwapPreflight") await runBspSwapPreflight(task);
     else if (task.type === "performBspSwap") await runPerformBspSwap(task);
+    else if (task.type === "stageTagTestMap") runStageTagTestMap(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -44495,6 +44520,7 @@ try {
   runSaveMapAs,
   runSetDependencySlot,
   runSetUnicodeString,
+  runStageTagTestMap,
   runSwapScenarioPlacement,
   runUpdateScenarioPlacement,
   runUpdateTagField,

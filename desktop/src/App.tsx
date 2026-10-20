@@ -290,6 +290,9 @@ export default function App() {
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
               { label: '', separator: true },
+              { label: 'Launch In OpenCE (F5)', onClick: () => window.opence.tagTestLaunch({ windowed: true }), disabled: !canExtract },
+              { label: 'Hot-Reload OpenCE (Ctrl+F5)', onClick: () => window.opence.tagTestHotReload(), disabled: !canExtract },
+              { label: '', separator: true },
               {
                 label: 'Identify Bitmaps',
                 submenu: [
@@ -345,7 +348,25 @@ export default function App() {
               onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
               onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
             />
-            <CenterWorkspace header={mapState.header} />
+            <CenterWorkspace
+              header={mapState.header}
+              onOpenTagEditor={(tagIndexOrPath) => {
+                if (mapState?.status !== 'ok') return;
+                const target =
+                  typeof tagIndexOrPath === 'number'
+                    ? mapState.tags[tagIndexOrPath]
+                    : mapState.tags.find(
+                        (t) =>
+                          t.path.toLowerCase() === tagIndexOrPath.toLowerCase() ||
+                          t.path.toLowerCase().endsWith(tagIndexOrPath.toLowerCase()),
+                      );
+                if (target) {
+                  setFocusedTag(target);
+                  setSelectedTagIndices(new Set([target.index]));
+                  setEditingTag(target);
+                }
+              }}
+            />
             <PropertiesPalette
               focusedTag={focusedTag}
               allTags={mapState.tags}

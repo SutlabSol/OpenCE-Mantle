@@ -942,6 +942,31 @@ export function runSaveMapAs(task: { requestId: string; outputPath: string }) {
   }
 }
 
+/** Stages the current in-memory map to targetPath (e.g. custom_maps/_opence_tag_test.map) without altering the open map state. */
+export function runStageTagTestMap(task: { requestId: string; targetPath: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    progress(task.requestId, 'Staging map for OpenCE Tag Test', 25);
+    const target = task.targetPath;
+    const targetDir = path.dirname(target);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    const bufferCopy = Buffer.from(currentMap.buffer);
+    progress(task.requestId, 'Writing staged map', 60);
+    const finalized = writeFinalizedMap(bufferCopy, target, 'Staging for OpenCE Tag Test');
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      targetPath: target,
+      crc32: finalized.crc32,
+      scenarioName: finalized.scenarioName,
+    });
+  } catch (err) {
+    sendWriteError(task.requestId, err);
+  }
+}
+
 const samePath = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
 /** Convert to Custom Edition, step 1: the read-only pre-flight report. Doesn't touch the held map. */
@@ -1584,6 +1609,7 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'getSourceBspMesh') await runGetSourceBspMesh(task);
     else if (task.type === 'bspSwapPreflight') await runBspSwapPreflight(task);
     else if (task.type === 'performBspSwap') await runPerformBspSwap(task);
+    else if (task.type === 'stageTagTestMap') runStageTagTestMap(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

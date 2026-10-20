@@ -11,6 +11,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   lastExtractDir: null,
   resourceMaps: { bitmaps: null, sounds: null, loc: null },
   versionResourceMaps: {},
+  openCeDirectory: null,
+  openCeExecutablePath: null,
 };
 
 export function getSettings(): AppSettings {
@@ -28,10 +30,12 @@ export function getSettings(): AppSettings {
         parsed.versionResourceMaps && typeof parsed.versionResourceMaps === 'object'
           ? parsed.versionResourceMaps
           : {},
+      openCeDirectory: typeof parsed.openCeDirectory === 'string' ? parsed.openCeDirectory : detectOpenCeDirectory(),
+      openCeExecutablePath: typeof parsed.openCeExecutablePath === 'string' ? parsed.openCeExecutablePath : null,
     };
   } catch {
     // Missing or corrupt settings.json falls back to defaults - never crashes the app.
-    return { ...DEFAULT_SETTINGS, resourceMaps: { ...DEFAULT_SETTINGS.resourceMaps }, versionResourceMaps: {} };
+    return { ...DEFAULT_SETTINGS, resourceMaps: { ...DEFAULT_SETTINGS.resourceMaps }, versionResourceMaps: {}, openCeDirectory: detectOpenCeDirectory() };
   }
 }
 
@@ -71,4 +75,35 @@ export function setVersionResourceMaps(
     },
   };
   writeSettings(updated);
+}
+
+export function detectOpenCeDirectory(): string | null {
+  try {
+    const home = app.getPath('home');
+    const candidates = [
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE',
+      path.join(home, 'Desktop', 'Halo CE Related', 'Halo CE - OpenCE'),
+      'C:\\Halo CE - OpenCE',
+      'C:\\OpenCE',
+      'C:\\Games\\OpenCE',
+    ];
+    for (const c of candidates) {
+      if (fs.existsSync(c) && fs.existsSync(path.join(c, 'halo.exe'))) {
+        return c;
+      }
+    }
+  } catch {
+    // Ignore fs/app errors during detection
+  }
+  return null;
+}
+
+export function setOpenCeDirectory(dir: string | null): void {
+  const current = getSettings();
+  const exe = dir ? path.join(dir, 'halo.exe') : null;
+  writeSettings({
+    ...current,
+    openCeDirectory: dir,
+    openCeExecutablePath: exe && fs.existsSync(exe) ? exe : null,
+  });
 }

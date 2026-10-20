@@ -1,5 +1,20 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { OpenceApi, ProgressEvent, LogEvent, LoadMapResult, ExtractTagsRequest, ResourceMapKind, InjectionMode, OpenMapSummary, ConvertRepairChoice, ConvertResourcePaths, HaloBitmapVersion } from './shared-types';
+import type {
+  OpenceApi,
+  ProgressEvent,
+  LogEvent,
+  LoadMapResult,
+  ExtractTagsRequest,
+  ResourceMapKind,
+  InjectionMode,
+  OpenMapSummary,
+  ConvertRepairChoice,
+  ConvertResourcePaths,
+  HaloBitmapVersion,
+  TagTestStatus,
+  TagTestLaunchOptions,
+  TagTestLogEntry,
+} from './shared-types';
 
 const api: OpenceApi = {
   openMapDialog: () => ipcRenderer.invoke('dialog:openMap'),
@@ -101,6 +116,25 @@ const api: OpenceApi = {
     ipcRenderer.on('map:updated', listener);
     return () => ipcRenderer.removeListener('map:updated', listener);
   },
+  // M12: OpenCE Tag Test
+  tagTestLaunch: (options?: TagTestLaunchOptions) => ipcRenderer.invoke('tagTest:launch', options),
+  tagTestStop: () => ipcRenderer.invoke('tagTest:stop'),
+  tagTestSendCommand: (command: string) => ipcRenderer.invoke('tagTest:sendCommand', command),
+  tagTestHotReload: () => ipcRenderer.invoke('tagTest:hotReload'),
+  tagTestGetStatus: () => ipcRenderer.invoke('tagTest:getStatus'),
+  onTagTestLog: (cb: (entry: TagTestLogEntry) => void) => {
+    const listener = (_: unknown, data: TagTestLogEntry) => cb(data);
+    ipcRenderer.on('tagTest:log', listener);
+    return () => ipcRenderer.removeListener('tagTest:log', listener);
+  },
+  onTagTestStatusChange: (cb: (status: TagTestStatus) => void) => {
+    const listener = (_: unknown, data: TagTestStatus) => cb(data);
+    ipcRenderer.on('tagTest:status', listener);
+    return () => ipcRenderer.removeListener('tagTest:status', listener);
+  },
+  pickOpenCeDirectory: () => ipcRenderer.invoke('tagTest:pickDir'),
+  getOpenCeConfig: () => ipcRenderer.invoke('tagTest:getConfig'),
+  setOpenCeDirectory: (dir: string | null) => ipcRenderer.invoke('tagTest:setDir', dir),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
 };
 

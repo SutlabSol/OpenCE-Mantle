@@ -19,19 +19,15 @@ function formatStatus(status: ResourceMapStatus | undefined): { text: string; to
   return { text: `${status.path} (${status.entryCount} entries)`, tone: 'ok' };
 }
 
-/**
- * Resource Maps settings: 3 native-file-picker rows (bitmaps.map/sounds.map/loc.map). Main
- * process owns the picker and settings.json end-to-end - this component only ever receives a
- * status back, never a path. A 4th state ("configured but not matching THIS map") is contextual
- * per-injection, not shown here - see InjectDialog's "External resource map references" group.
- */
 export default function SettingsDialog({ onClose }: Props) {
   const [statuses, setStatuses] = useState<Record<ResourceMapKind, ResourceMapStatus> | null>(null);
   const [busyKind, setBusyKind] = useState<ResourceMapKind | null>(null);
+  const [openCeConfig, setOpenCeConfig] = useState<{ directory: string | null; executable: string | null; exists: boolean } | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     window.opence.getResourceMapStatuses().then(setStatuses);
+    window.opence.getOpenCeConfig().then(setOpenCeConfig);
   }, []);
 
   useEffect(() => {
@@ -43,6 +39,14 @@ export default function SettingsDialog({ onClose }: Props) {
     const res = await window.opence.pickResourceMap(kind);
     setBusyKind(null);
     if (res.ok) setStatuses((prev) => (prev ? { ...prev, [kind]: res.status } : prev));
+  };
+
+  const handlePickOpenCeDir = async () => {
+    const res = await window.opence.pickOpenCeDirectory();
+    if (res.path) {
+      const cfg = await window.opence.getOpenCeConfig();
+      setOpenCeConfig(cfg);
+    }
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
@@ -61,18 +65,53 @@ export default function SettingsDialog({ onClose }: Props) {
         aria-modal="true"
         tabIndex={-1}
         onKeyDown={handleKeyDown}
-        style={{ width: 560, background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 4, boxShadow: '0 10px 40px rgba(0,0,0,0.5)', overflow: 'hidden' }}
+        style={{ width: 580, maxHeight: '90vh', display: 'flex', flexDirection: 'column', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 4, boxShadow: '0 10px 40px rgba(0,0,0,0.5)', overflow: 'hidden' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: 'var(--bg-panel-header)', borderBottom: '1px solid var(--border)' }}>
-          <span style={{ fontSize: 13, fontWeight: 600 }}>Settings - Resource Maps</span>
-          <button data-testid="settings-dialog-close" onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-dim)', fontSize: 16, lineHeight: 1 }}>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>Settings</span>
+          <button data-testid="settings-dialog-close" onClick={onClose} style={{ background: 'transparent', border: 'none', color: 'var(--text-dim)', fontSize: 16, lineHeight: 1, cursor: 'pointer' }}>
             ×
           </button>
         </div>
-        <div style={{ padding: 16 }}>
+        <div style={{ padding: 16, overflowY: 'auto', flex: 1 }}>
+          {/* OpenCE Engine Section */}
+          <div style={{ marginBottom: 18, paddingBottom: 14, borderBottom: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 600 }}>OpenCE Installation Directory</span>
+              <button data-testid="settings-pick-opence-dir" onClick={handlePickOpenCeDir} style={buttonStyle()}>
+                Browse Folder...
+              </button>
+            </div>
+            <div
+              data-testid="settings-status-opence-dir"
+              style={{
+                fontSize: 11.5,
+                fontFamily: 'var(--mono-font)',
+                color: openCeConfig?.exists ? 'var(--success-text)' : 'var(--error-text)',
+                wordBreak: 'break-all',
+                marginBottom: 4,
+              }}
+            >
+              {openCeConfig?.directory ? (
+                openCeConfig.exists ? (
+                  `✓ ${openCeConfig.directory} (halo.exe found)`
+                ) : (
+                  `✗ ${openCeConfig.directory} (halo.exe missing)`
+                )
+              ) : (
+                'Not configured (OpenCE directory not found)'
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+              Folder containing halo.exe and custom_maps\. Required for "Launch Map In OpenCE Tag Test" (F5) and live Telnet control.
+            </div>
+          </div>
+
+          {/* Resource Maps Section */}
+          <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 8 }}>Resource Maps</div>
           <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 14 }}>
-            Point OpenCE at your own Halo CE install's bitmaps.map/sounds.map/loc.map. Never guessed or auto-scanned - pick the exact files. Used to verify tags with
-            external resource data before injecting them into a map (see "External resource map references" in the Inject dialog).
+            Point OpenCE at your Halo CE install's bitmaps.map/sounds.map/loc.map. Used to verify tags with
+            external resource data before injecting them into a map.
           </div>
           {ROWS.map((row) => {
             const status = formatStatus(statuses?.[row.kind]);
@@ -119,5 +158,6 @@ function buttonStyle(primary = false) {
     borderRadius: 2,
     padding: '6px 14px',
     fontSize: 12,
+    cursor: 'pointer',
   } as const;
 }

@@ -253,6 +253,8 @@ export interface AppSettings {
   lastExtractDir: string | null;
   resourceMaps: { bitmaps: string | null; sounds: string | null; loc: string | null };
   versionResourceMaps?: Partial<Record<HaloBitmapVersion, VersionResourceMaps>>;
+  openCeDirectory?: string | null;
+  openCeExecutablePath?: string | null;
 }
 
 /* ------------------------------- M5 Step A: ADD-mode injection ------------------------------- */
@@ -479,6 +481,7 @@ export type WorkerRequest =
   | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number; sourceBspIndices?: number[] }
   | { type: 'getSourceBspMesh'; requestId: string; sourceFilePath: string; bspIndex?: number }
   | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions; resourceMapPaths?: Partial<Record<ResourceMapKind, string | undefined>> }
+  | { type: 'stageTagTestMap'; requestId: string; targetPath: string }
   | { type: 'cancel'; requestId: string };
 
 export type GetReferencingTagsResult =
@@ -569,6 +572,36 @@ export type WorkerResponse =
   | { type: 'progress'; requestId: string; stage: string; percent: number }
   | { type: 'result'; requestId: string; payload: unknown }
   | { type: 'error'; requestId: string; code: string; message: string };
+
+/* -------------------------------- M12: OpenCE Tag Test -------------------------------- */
+
+export interface TagTestStatus {
+  state: 'stopped' | 'launching' | 'running' | 'error';
+  pid?: number;
+  telnetConnected: boolean;
+  error?: string;
+  mapName?: string;
+}
+
+export interface TagTestLaunchOptions {
+  windowed?: boolean;
+  resolution?: string;
+}
+
+export interface TagTestLogEntry {
+  source: 'telnet' | 'stdout' | 'debug_txt';
+  text: string;
+  timestamp: number;
+  tagPathLink?: string;
+  tagIndexLink?: number;
+}
+
+export interface StageTagTestMapResult {
+  ok: true;
+  targetPath: string;
+  crc32: number;
+  scenarioName: string;
+}
 
 /* --------------------------------------------- API --------------------------------------------- */
 
@@ -696,6 +729,17 @@ export interface OpenceApi {
   detectDefaultResourceMapPaths(): Promise<Record<HaloBitmapVersion, string | null>>;
   getVersionSettings?(): Promise<Partial<Record<HaloBitmapVersion, VersionResourceMaps>>>;
   setVersionSettings?(version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null }): Promise<{ ok: boolean }>;
+  /** M12: OpenCE Tag Test runner & live control deck */
+  tagTestLaunch(options?: TagTestLaunchOptions): Promise<{ ok: boolean; error?: string }>;
+  tagTestStop(): Promise<{ ok: boolean; error?: string }>;
+  tagTestSendCommand(command: string): Promise<{ ok: boolean; response?: string; error?: string }>;
+  tagTestHotReload(): Promise<{ ok: boolean; error?: string }>;
+  tagTestGetStatus(): Promise<TagTestStatus>;
+  onTagTestLog(cb: (entry: TagTestLogEntry) => void): () => void;
+  onTagTestStatusChange(cb: (status: TagTestStatus) => void): () => void;
+  pickOpenCeDirectory(): Promise<{ path: string | null }>;
+  getOpenCeConfig(): Promise<{ directory: string | null; executable: string | null; exists: boolean }>;
+  setOpenCeDirectory(dir: string | null): Promise<{ ok: boolean }>;
   getPathForFile(file: File): string;
 }
 

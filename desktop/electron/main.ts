@@ -14,7 +14,8 @@ import {
   type RandomAccessFile,
 } from '../../core/src/index';
 import { getRecentMaps, addRecentMap } from './recent-maps';
-import { getSettings, setLastExtractDir, setResourceMapPath, setVersionResourceMaps } from './settings';
+import { getSettings, setLastExtractDir, setResourceMapPath, setVersionResourceMaps, setOpenCeDirectory } from './settings';
+import { tagTestRunner } from './tag-test-runner';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
 import { saveMapAsFlow, registerSaveMapAsIpc, type SaveMapAsDeps } from './save-map-as';
 import { saveMapFlow, confirmUnsavedChanges, SAVE_MAP_CHANNEL, type SaveMapDeps } from './save-map';
@@ -2036,11 +2037,45 @@ app.whenReady().then(() => {
   ipcMain.on('app:notImplemented', (_e, feature: string) => sendLog('warn', `${feature} is not implemented yet (coming in a later milestone).`));
   ipcMain.handle('app:showAbout', () => showAboutDialog());
 
+  // M12: OpenCE Tag Test IPC
+  tagTestRunner.onStatusChange((status) => {
+    mainWindow?.webContents.send('tagTest:status', status);
+  });
+  tagTestRunner.onLog((entry) => {
+    mainWindow?.webContents.send('tagTest:log', entry);
+  });
+
+  ipcMain.handle('tagTest:launch', (_e, options) => tagTestRunner.launch(options));
+  ipcMain.handle('tagTest:stop', () => tagTestRunner.stop());
+  ipcMain.handle('tagTest:sendCommand', (_e, cmd: string) => tagTestRunner.sendCommand(cmd));
+  ipcMain.handle('tagTest:hotReload', () => tagTestRunner.hotReload());
+  ipcMain.handle('tagTest:getStatus', () => tagTestRunner.getStatus());
+  ipcMain.handle('tagTest:getConfig', () => tagTestRunner.getOpenCeConfig());
+  ipcMain.handle('tagTest:setDir', (_e, dir: string | null) => {
+    setOpenCeDirectory(dir);
+    return { ok: true };
+  });
+  ipcMain.handle('tagTest:pickDir', async () => {
+    if (!mainWindow) return { path: null };
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select OpenCE Directory (containing halo.exe)',
+      properties: ['openDirectory'],
+    });
+    if (res.canceled || !res.filePaths[0]) return { path: null };
+    const dir = res.filePaths[0];
+    setOpenCeDirectory(dir);
+    return { path: dir };
+  });
+
   createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('before-quit', () => {
+  tagTestRunner.stop();
 });
 
 app.on('window-all-closed', () => {
