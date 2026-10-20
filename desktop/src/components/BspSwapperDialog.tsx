@@ -25,6 +25,8 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
   const [newScenarioName, setNewScenarioName] = useState('');
   const [relocateGroundObjects, setRelocateGroundObjects] = useState(true);
   const [harvestShaders, setHarvestShaders] = useState(true);
+  const [importSceneryAndMachines, setImportSceneryAndMachines] = useState(true);
+  const [makeDoorsAutomatic, setMakeDoorsAutomatic] = useState(true);
   const [isSwapping, setIsSwapping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successSummary, setSuccessSummary] = useState<string | null>(null);
@@ -157,6 +159,8 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         stripDobcAndDecals: stripDobc && stripDecals,
         relocateGroundObjects,
         harvestShaders,
+        importSceneryAndMachines,
+        makeDoorsAutomatic,
       };
       if (selectedSourceBspIndices.length > 1) {
         payload.sourceBspIndices = selectedSourceBspIndices;
@@ -188,8 +192,12 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         const multiMsg = selectedSourceBspIndices.length > 1
           ? ` Fused ${selectedSourceBspIndices.length} Structure BSPs into structure_bsps[${selectedTargetBspIndex}].`
           : '';
+        const sceneryMsg =
+          (res.summary.importedScenery ?? 0) > 0 || (res.summary.importedMachines ?? 0) > 0
+            ? ` Imported ${res.summary.importedScenery ?? 0} scenery object(s) and ${res.summary.importedMachines ?? 0} door(s)/bridge(s).`
+            : '';
         setSuccessSummary(
-          `Swapped BSP successfully!${multiMsg} New map size: ${(res.summary.newSize / (1024 * 1024)).toFixed(2)} MB (${deltaSign}${deltaMb} MB). Relocated ${res.summary.relocatedSpawns} spawn/item placement(s).${harvestMsg}`,
+          `Swapped BSP successfully!${multiMsg} New map size: ${(res.summary.newSize / (1024 * 1024)).toFixed(2)} MB (${deltaSign}${deltaMb} MB). Relocated ${res.summary.relocatedSpawns} spawn/item placement(s).${harvestMsg}${sceneryMsg}`,
         );
         onSuccess();
       } else {
@@ -811,6 +819,49 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                     <strong>Harvest Shaders & Bitmaps</strong> (Recommended: imports missing terrain textures & shaders into target map)
                   </span>
                 </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    data-testid="bsp-swapper-import-scenery-checkbox"
+                    type="checkbox"
+                    checked={importSceneryAndMachines}
+                    onChange={(e) => setImportSceneryAndMachines(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Import Scenery & Doors/Bridges</strong> (Imports props, rocks, trees, and doors/bridges)
+                  </span>
+                </label>
+
+                {importSceneryAndMachines && (
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontSize: '12px',
+                      marginLeft: '20px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      data-testid="bsp-swapper-doors-automatic-checkbox"
+                      type="checkbox"
+                      checked={makeDoorsAutomatic}
+                      onChange={(e) => setMakeDoorsAutomatic(e.target.checked)}
+                    />
+                    <span>
+                      <strong>Make Doors Automatic</strong> (Enables auto-opening in multiplayer without campaign scripts)
+                    </span>
+                  </label>
+                )}
               </div>
 
               {/* Warnings */}

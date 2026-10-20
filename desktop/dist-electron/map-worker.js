@@ -40360,6 +40360,42 @@ function appendReflexiveElement(buffer, header, tagIndex, reflexiveFieldOffset, 
     newIndex: refl.count
   };
 }
+function appendReflexiveElements(buffer, header, tagIndex, reflexiveFieldOffset, elementsBytes, countToAdd) {
+  if (countToAdd <= 0 || elementsBytes.length === 0) {
+    const refl2 = decodeReflexive(buffer, reflexiveFieldOffset);
+    return { buffer, header, startIndex: refl2.count };
+  }
+  const refl = decodeReflexive(buffer, reflexiveFieldOffset);
+  const elementSize = elementsBytes.length / countToAdd;
+  const newCount = refl.count + countToAdd;
+  const oldArrayBytes = refl.count > 0 ? buffer.subarray(
+    resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress),
+    resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress) + refl.count * elementSize
+  ) : Buffer.alloc(0);
+  const newArrayBytes = Buffer.concat([oldArrayBytes, elementsBytes]);
+  const alignedPad = (4 - buffer.length % 4) % 4;
+  const padBuffer = alignedPad > 0 ? Buffer.alloc(alignedPad, 0) : Buffer.alloc(0);
+  const newArrayFileOffset = buffer.length + padBuffer.length;
+  const newArrayVirtualAddress = tagIndex.baseMemoryAddress + (newArrayFileOffset - header.tagDataOffset);
+  const newBuffer = Buffer.concat([buffer, padBuffer, newArrayBytes]);
+  const newHeader = {
+    ...header,
+    tagDataSize: newBuffer.length - header.tagDataOffset,
+    decompressedFileSize: newBuffer.length
+  };
+  newBuffer.writeUInt32LE(newBuffer.length, 8);
+  newBuffer.writeUInt32LE(newHeader.tagDataSize, 20);
+  encodeReflexive(newBuffer, reflexiveFieldOffset, {
+    count: newCount,
+    pointerLow: newArrayVirtualAddress,
+    pointerHigh: 0
+  });
+  return {
+    buffer: newBuffer,
+    header: newHeader,
+    startIndex: refl.count
+  };
+}
 function ensurePaletteEntry(buffer, header, tagIndex, paletteFieldName, paletteStructName, tagId, classFourCC) {
   const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
   if (!scenarioEntry) {
@@ -42125,7 +42161,7 @@ function mergeStructureBsps(sourceBuffer, bspIndices) {
   }
   appendOffset += currSurfOff - combinedSurfacesDestOff + 15 & ~15;
   const totalClusters = cumulativeClusterCount;
-  const pvsBytesPerCluster = Math.ceil(totalClusters / 8);
+  const pvsBytesPerCluster = totalClusters > 0 ? Math.ceil(totalClusters / 32) * 4 : 0;
   const pvsTotalSize = totalClusters * pvsBytesPerCluster;
   const pvsDestOff = appendOffset;
   merged.fill(255, pvsDestOff, pvsDestOff + pvsTotalSize);
@@ -42599,6 +42635,8 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   }
   let harvestedShaders = 0;
   let harvestedBitmaps = 0;
+  let importedScenery = 0;
+  let importedMachines = 0;
   const tagIdMap = /* @__PURE__ */ new Map();
   const bspDeps = [];
   if (sourceInspected.status === "ok") {
@@ -42620,15 +42658,70 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
         );
       }
     }
-    if (options.harvestShaders !== false && bspDeps.length > 0) {
+    const shouldHarvestShaders = options.harvestShaders !== false;
+    const shouldImportObjects = options.importSceneryAndMachines !== false;
+    if (shouldHarvestShaders && bspDeps.length > 0 || shouldImportObjects) {
       const srcTagIndex = sourceInspected.tagIndex;
-      const rootIndices = Array.from(
-        new Set(
-          bspDeps.map((d) => d.tagId & 65535).filter(
-            (idx) => idx < srcTagIndex.entries.length && srcTagIndex.entries[idx].primaryClassName !== "" && srcTagIndex.entries[idx].primaryClassName !== "sbsp" && srcTagIndex.entries[idx].primaryClassName !== "scenario_structure_bsp"
-          )
-        )
-      );
+      const rootIndicesSet = /* @__PURE__ */ new Set();
+      if (shouldHarvestShaders) {
+        for (const dep of bspDeps) {
+          const idx = dep.tagId & 65535;
+          if (idx < srcTagIndex.entries.length && srcTagIndex.entries[idx].primaryClassName !== "" && srcTagIndex.entries[idx].primaryClassName !== "sbsp" && srcTagIndex.entries[idx].primaryClassName !== "scenario_structure_bsp") {
+            rootIndicesSet.add(idx);
+          }
+        }
+      }
+      let srcSceneryPalCount = 0;
+      let srcSceneryPalOffset = 0;
+      let srcPlacedSceneryCount = 0;
+      let srcPlacedSceneryOffset = 0;
+      let srcMachinePalCount = 0;
+      let srcMachinePalOffset = 0;
+      let srcPlacedMachinesCount = 0;
+      let srcPlacedMachinesOffset = 0;
+      if (shouldImportObjects) {
+        const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 65535];
+        if (srcScnrEntry) {
+          const srcScnrOffset = resolveTagDataPointer(
+            srcScnrEntry.tagDataPointerOrResourceIndex,
+            sourceInspected.header,
+            srcTagIndex.baseMemoryAddress
+          );
+          const scenPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 540);
+          srcSceneryPalCount = scenPalRefl.count;
+          if (scenPalRefl.count > 0) {
+            srcSceneryPalOffset = sourceInspected.header.tagDataOffset + (scenPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+            for (let i = 0; i < scenPalRefl.count; i++) {
+              const tagId = sourceBuffer.readUInt32LE(srcSceneryPalOffset + i * 48 + 12);
+              if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
+                rootIndicesSet.add(tagId & 65535);
+              }
+            }
+          }
+          const scenRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 528);
+          srcPlacedSceneryCount = scenRefl.count;
+          if (scenRefl.count > 0) {
+            srcPlacedSceneryOffset = sourceInspected.header.tagDataOffset + (scenRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+          }
+          const machPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 672);
+          srcMachinePalCount = machPalRefl.count;
+          if (machPalRefl.count > 0) {
+            srcMachinePalOffset = sourceInspected.header.tagDataOffset + (machPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+            for (let i = 0; i < machPalRefl.count; i++) {
+              const tagId = sourceBuffer.readUInt32LE(srcMachinePalOffset + i * 48 + 12);
+              if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
+                rootIndicesSet.add(tagId & 65535);
+              }
+            }
+          }
+          const machRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 660);
+          srcPlacedMachinesCount = machRefl.count;
+          if (machRefl.count > 0) {
+            srcPlacedMachinesOffset = sourceInspected.header.tagDataOffset + (machRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+          }
+        }
+      }
+      const rootIndices = Array.from(rootIndicesSet);
       if (rootIndices.length > 0) {
         try {
           const extracted = extractTagSet(sourceBuffer, sourceInspected.header, srcTagIndex, rootIndices, {
@@ -42666,6 +42759,134 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                 if (targetTagId !== void 0) {
                   tagIdMap.set(donorTagId, targetTagId);
                   tagIdMap.set(cTag.originalIndex, targetTagId);
+                }
+              }
+              if (shouldImportObjects) {
+                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+                if (targetScnrEntry) {
+                  if (srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
+                    const donorToTargetScenPal = /* @__PURE__ */ new Map();
+                    for (let i = 0; i < srcSceneryPalCount; i++) {
+                      const entryOff = srcSceneryPalOffset + i * 48;
+                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
+                      if (targetTagId !== void 0 && targetTagId !== 4294967295) {
+                        const palRes = ensurePaletteEntry(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          "scenery palette",
+                          "ScenarioSceneryPalette",
+                          targetTagId,
+                          1935893870
+                          // 'scen'
+                        );
+                        out = palRes.buffer;
+                        reinspected.header = palRes.header;
+                        donorToTargetScenPal.set(i, palRes.paletteIndex);
+                      }
+                    }
+                    const validPlaced = [];
+                    for (let i = 0; i < srcPlacedSceneryCount; i++) {
+                      const sOff = srcPlacedSceneryOffset + i * 32;
+                      const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
+                      const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
+                      if (targetPalIdx !== void 0) {
+                        const sBytes = Buffer.alloc(32);
+                        sourceBuffer.copy(sBytes, 0, sOff, sOff + 32);
+                        sBytes.writeInt16LE(targetPalIdx, 0);
+                        sBytes.writeInt16LE(-1, 2);
+                        validPlaced.push(sBytes);
+                      }
+                    }
+                    if (validPlaced.length > 0) {
+                      const curScnrOff = resolveTagDataPointer(
+                        targetScnrEntry.tagDataPointerOrResourceIndex,
+                        reinspected.header,
+                        reinspected.tagIndex.baseMemoryAddress
+                      );
+                      const appendRes = appendReflexiveElements(
+                        out,
+                        reinspected.header,
+                        reinspected.tagIndex,
+                        curScnrOff + 528,
+                        Buffer.concat(validPlaced),
+                        validPlaced.length
+                      );
+                      out = appendRes.buffer;
+                      reinspected.header = appendRes.header;
+                      importedScenery = validPlaced.length;
+                    }
+                  }
+                  if (srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
+                    const donorToTargetMachPal = /* @__PURE__ */ new Map();
+                    for (let i = 0; i < srcMachinePalCount; i++) {
+                      const entryOff = srcMachinePalOffset + i * 48;
+                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
+                      if (targetTagId !== void 0 && targetTagId !== 4294967295) {
+                        const palRes = ensurePaletteEntry(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          "machine palette",
+                          "ScenarioMachinePalette",
+                          targetTagId,
+                          1835098984
+                          // 'mach'
+                        );
+                        out = palRes.buffer;
+                        reinspected.header = palRes.header;
+                        donorToTargetMachPal.set(i, palRes.paletteIndex);
+                      }
+                    }
+                    const validMachPlaced = [];
+                    const makeAutomatic = options.makeDoorsAutomatic !== false;
+                    for (let i = 0; i < srcPlacedMachinesCount; i++) {
+                      const mOff = srcPlacedMachinesOffset + i * 64;
+                      const donorPalIdx = sourceBuffer.readInt16LE(mOff + 0);
+                      const targetPalIdx = donorToTargetMachPal.get(donorPalIdx);
+                      if (targetPalIdx !== void 0) {
+                        const mBytes = Buffer.alloc(64);
+                        sourceBuffer.copy(mBytes, 0, mOff, mOff + 64);
+                        mBytes.writeInt16LE(targetPalIdx, 0);
+                        mBytes.writeInt16LE(-1, 2);
+                        mBytes.writeInt16LE(-1, 40);
+                        mBytes.writeInt16LE(-1, 42);
+                        if (makeAutomatic) {
+                          let devFlags = mBytes.readUInt32LE(44);
+                          devFlags &= ~1;
+                          mBytes.writeUInt32LE(devFlags, 44);
+                          let machFlags = mBytes.readUInt32LE(48);
+                          machFlags &= ~1;
+                          mBytes.writeUInt32LE(machFlags, 48);
+                        }
+                        validMachPlaced.push(mBytes);
+                      }
+                    }
+                    if (validMachPlaced.length > 0) {
+                      const curScnrOff = resolveTagDataPointer(
+                        targetScnrEntry.tagDataPointerOrResourceIndex,
+                        reinspected.header,
+                        reinspected.tagIndex.baseMemoryAddress
+                      );
+                      const appendRes = appendReflexiveElements(
+                        out,
+                        reinspected.header,
+                        reinspected.tagIndex,
+                        curScnrOff + 660,
+                        Buffer.concat(validMachPlaced),
+                        validMachPlaced.length
+                      );
+                      out = appendRes.buffer;
+                      reinspected.header = appendRes.header;
+                      importedMachines = validMachPlaced.length;
+                    }
+                  }
+                  const finalRe = inspectCustomEditionMap(out);
+                  if (finalRe.status === "ok") {
+                    reinspected = finalRe;
+                  }
                 }
               }
             }
@@ -42760,7 +42981,9 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       strippedDecals,
       relocatedSpawns,
       harvestedShaders,
-      harvestedBitmaps
+      harvestedBitmaps,
+      importedScenery,
+      importedMachines
     }
   };
 }

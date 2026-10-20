@@ -456,7 +456,9 @@ export function mergeStructureBsps(sourceBuffer: Buffer, bspIndices: number[]): 
 
   // Write All-Visible Clusters & PVS
   const totalClusters = cumulativeClusterCount;
-  const pvsBytesPerCluster = Math.ceil(totalClusters / 8);
+  // Halo CE PVS bitvectors are 32-bit (4-byte) aligned rows: ((clusters + 31) >> 5) * 4.
+  // Halo's structure_bsp_load verifies: cluster_data.size >= clusters.count * (((clusters.count + 31) >> 3) & ~3).
+  const pvsBytesPerCluster = totalClusters > 0 ? Math.ceil(totalClusters / 32) * 4 : 0;
   const pvsTotalSize = totalClusters * pvsBytesPerCluster;
   const pvsDestOff = appendOffset;
   merged.fill(0xff, pvsDestOff, pvsDestOff + pvsTotalSize);

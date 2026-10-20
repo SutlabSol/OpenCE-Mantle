@@ -9,6 +9,9 @@ import type { RandomAccessFile } from './convert/resource-files';
 import { serializeContainer, deserializeContainer } from './container';
 import { planAddInjection, applyAddInjection, type InjectionPlan } from './tag-injector';
 import { mergeStructureBsps, rebaseStructureBspPointers } from './bsp-merger';
+import { decodeReflexive } from './definitions/codec';
+import { resolveTagDataPointer } from './tag-index';
+import { ensurePaletteEntry, appendReflexiveElements } from '../render/scenario-objects';
 
 export interface BspInfo {
   index: number;
@@ -52,6 +55,8 @@ export interface BspSwapOptions {
   relocateGroundObjects?: boolean;
   newScenarioName?: string;
   harvestShaders?: boolean;
+  importSceneryAndMachines?: boolean;
+  makeDoorsAutomatic?: boolean;
   resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile };
   customBitmapsPath?: string | null;
   customSoundsPath?: string | null;
@@ -71,6 +76,8 @@ export interface BspSwapResult {
     relocatedSpawns: number;
     harvestedShaders?: number;
     harvestedBitmaps?: number;
+    importedScenery?: number;
+    importedMachines?: number;
   };
   error?: string;
 }
@@ -615,6 +622,8 @@ export function performBspSwap(
   // 2. Harvest Shaders & Bitmaps from source BSP into target map if requested
   let harvestedShaders = 0;
   let harvestedBitmaps = 0;
+  let importedScenery = 0;
+  let importedMachines = 0;
   const tagIdMap = new Map<number, number>();
   const bspDeps: BspDependencyOccurrence[] = [];
 
@@ -638,22 +647,90 @@ export function performBspSwap(
       }
     }
 
-    if (options.harvestShaders !== false && bspDeps.length > 0) {
-      const srcTagIndex = sourceInspected.tagIndex;
-      const rootIndices = Array.from(
-        new Set(
-          bspDeps
-            .map((d) => d.tagId & 0xffff)
-            .filter(
-              (idx) =>
-                idx < srcTagIndex.entries.length &&
-                srcTagIndex.entries[idx].primaryClassName !== '' &&
-                srcTagIndex.entries[idx].primaryClassName !== 'sbsp' &&
-                srcTagIndex.entries[idx].primaryClassName !== 'scenario_structure_bsp',
-            ),
-        ),
-      );
 
+
+    const shouldHarvestShaders = options.harvestShaders !== false;
+    const shouldImportObjects = options.importSceneryAndMachines !== false;
+
+    if ((shouldHarvestShaders && bspDeps.length > 0) || shouldImportObjects) {
+      const srcTagIndex = sourceInspected.tagIndex;
+      const rootIndicesSet = new Set<number>();
+
+      if (shouldHarvestShaders) {
+        for (const dep of bspDeps) {
+          const idx = dep.tagId & 0xffff;
+          if (
+            idx < srcTagIndex.entries.length &&
+            srcTagIndex.entries[idx].primaryClassName !== '' &&
+            srcTagIndex.entries[idx].primaryClassName !== 'sbsp' &&
+            srcTagIndex.entries[idx].primaryClassName !== 'scenario_structure_bsp'
+          ) {
+            rootIndicesSet.add(idx);
+          }
+        }
+      }
+
+      // Read donor Scenery & Machines info from Scenario tag
+      let srcSceneryPalCount = 0;
+      let srcSceneryPalOffset = 0;
+      let srcPlacedSceneryCount = 0;
+      let srcPlacedSceneryOffset = 0;
+
+      let srcMachinePalCount = 0;
+      let srcMachinePalOffset = 0;
+      let srcPlacedMachinesCount = 0;
+      let srcPlacedMachinesOffset = 0;
+
+      if (shouldImportObjects) {
+        const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 0xffff];
+        if (srcScnrEntry) {
+          const srcScnrOffset = resolveTagDataPointer(
+            srcScnrEntry.tagDataPointerOrResourceIndex,
+            sourceInspected.header,
+            srcTagIndex.baseMemoryAddress,
+          );
+
+          // Scenery palette (0x21c) and scenery placements (0x210)
+          const scenPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x21c);
+          srcSceneryPalCount = scenPalRefl.count;
+          if (scenPalRefl.count > 0) {
+            srcSceneryPalOffset = sourceInspected.header.tagDataOffset + (scenPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+            for (let i = 0; i < scenPalRefl.count; i++) {
+              const tagId = sourceBuffer.readUInt32LE(srcSceneryPalOffset + i * 48 + 12);
+              if (tagId !== 0xffffffff && (tagId & 0xffff) < srcTagIndex.entries.length) {
+                rootIndicesSet.add(tagId & 0xffff);
+              }
+            }
+          }
+
+          const scenRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x210);
+          srcPlacedSceneryCount = scenRefl.count;
+          if (scenRefl.count > 0) {
+            srcPlacedSceneryOffset = sourceInspected.header.tagDataOffset + (scenRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+          }
+
+          // Machine palette (0x2a0) and machine placements (0x294)
+          const machPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x2a0);
+          srcMachinePalCount = machPalRefl.count;
+          if (machPalRefl.count > 0) {
+            srcMachinePalOffset = sourceInspected.header.tagDataOffset + (machPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+            for (let i = 0; i < machPalRefl.count; i++) {
+              const tagId = sourceBuffer.readUInt32LE(srcMachinePalOffset + i * 48 + 12);
+              if (tagId !== 0xffffffff && (tagId & 0xffff) < srcTagIndex.entries.length) {
+                rootIndicesSet.add(tagId & 0xffff);
+              }
+            }
+          }
+
+          const machRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x294);
+          srcPlacedMachinesCount = machRefl.count;
+          if (machRefl.count > 0) {
+            srcPlacedMachinesOffset = sourceInspected.header.tagDataOffset + (machRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+          }
+        }
+      }
+
+      const rootIndices = Array.from(rootIndicesSet);
       if (rootIndices.length > 0) {
         try {
           const extracted = extractTagSet(sourceBuffer, sourceInspected.header, srcTagIndex, rootIndices, {
@@ -695,6 +772,142 @@ export function performBspSwap(
                 if (targetTagId !== undefined) {
                   tagIdMap.set(donorTagId, targetTagId);
                   tagIdMap.set(cTag.originalIndex, targetTagId);
+                }
+              }
+
+              // Import Scenery & Doors into target scenario
+              if (shouldImportObjects) {
+                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+                if (targetScnrEntry) {
+                  // 1. Scenery Palette & Placed Scenery
+                  if (srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
+                    const donorToTargetScenPal = new Map<number, number>();
+                    for (let i = 0; i < srcSceneryPalCount; i++) {
+                      const entryOff = srcSceneryPalOffset + i * 48;
+                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
+                      if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
+                        const palRes = ensurePaletteEntry(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          'scenery palette',
+                          'ScenarioSceneryPalette',
+                          targetTagId,
+                          0x7363656e, // 'scen'
+                        );
+                        out = palRes.buffer;
+                        reinspected.header = palRes.header;
+                        donorToTargetScenPal.set(i, palRes.paletteIndex);
+                      }
+                    }
+
+                    const validPlaced: Buffer[] = [];
+                    for (let i = 0; i < srcPlacedSceneryCount; i++) {
+                      const sOff = srcPlacedSceneryOffset + i * 32;
+                      const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
+                      const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
+                      if (targetPalIdx !== undefined) {
+                        const sBytes = Buffer.alloc(32);
+                        sourceBuffer.copy(sBytes, 0, sOff, sOff + 32);
+                        sBytes.writeInt16LE(targetPalIdx, 0);
+                        sBytes.writeInt16LE(-1, 2);
+                        validPlaced.push(sBytes);
+                      }
+                    }
+
+                    if (validPlaced.length > 0) {
+                      const curScnrOff = resolveTagDataPointer(
+                        targetScnrEntry.tagDataPointerOrResourceIndex,
+                        reinspected.header,
+                        reinspected.tagIndex.baseMemoryAddress,
+                      );
+                      const appendRes = appendReflexiveElements(
+                        out,
+                        reinspected.header,
+                        reinspected.tagIndex,
+                        curScnrOff + 0x210,
+                        Buffer.concat(validPlaced),
+                        validPlaced.length,
+                      );
+                        out = appendRes.buffer;
+                        reinspected.header = appendRes.header;
+                        importedScenery = validPlaced.length;
+                    }
+                  }
+
+                  // 2. Machine Palette & Placed Machines (Doors, Bridges)
+                  if (srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
+                    const donorToTargetMachPal = new Map<number, number>();
+                    for (let i = 0; i < srcMachinePalCount; i++) {
+                      const entryOff = srcMachinePalOffset + i * 48;
+                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
+                      if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
+                        const palRes = ensurePaletteEntry(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          'machine palette',
+                          'ScenarioMachinePalette',
+                          targetTagId,
+                          0x6d616368, // 'mach'
+                        );
+                        out = palRes.buffer;
+                        reinspected.header = palRes.header;
+                        donorToTargetMachPal.set(i, palRes.paletteIndex);
+                      }
+                    }
+
+                    const validMachPlaced: Buffer[] = [];
+                    const makeAutomatic = options.makeDoorsAutomatic !== false;
+                    for (let i = 0; i < srcPlacedMachinesCount; i++) {
+                      const mOff = srcPlacedMachinesOffset + i * 64;
+                      const donorPalIdx = sourceBuffer.readInt16LE(mOff + 0);
+                      const targetPalIdx = donorToTargetMachPal.get(donorPalIdx);
+                      if (targetPalIdx !== undefined) {
+                        const mBytes = Buffer.alloc(64);
+                        sourceBuffer.copy(mBytes, 0, mOff, mOff + 64);
+                        mBytes.writeInt16LE(targetPalIdx, 0);
+                        mBytes.writeInt16LE(-1, 2);
+                        mBytes.writeInt16LE(-1, 40);
+                        mBytes.writeInt16LE(-1, 42);
+                        if (makeAutomatic) {
+                          let devFlags = mBytes.readUInt32LE(44);
+                          devFlags &= ~1;
+                          mBytes.writeUInt32LE(devFlags, 44);
+                          let machFlags = mBytes.readUInt32LE(48);
+                          machFlags &= ~1;
+                          mBytes.writeUInt32LE(machFlags, 48);
+                        }
+                        validMachPlaced.push(mBytes);
+                      }
+                    }
+
+                    if (validMachPlaced.length > 0) {
+                      const curScnrOff = resolveTagDataPointer(
+                        targetScnrEntry.tagDataPointerOrResourceIndex,
+                        reinspected.header,
+                        reinspected.tagIndex.baseMemoryAddress,
+                      );
+                      const appendRes = appendReflexiveElements(
+                        out,
+                        reinspected.header,
+                        reinspected.tagIndex,
+                        curScnrOff + 0x294,
+                        Buffer.concat(validMachPlaced),
+                        validMachPlaced.length,
+                      );
+                      out = appendRes.buffer;
+                      reinspected.header = appendRes.header;
+                      importedMachines = validMachPlaced.length;
+                    }
+                  }
+
+                  const finalRe = inspectCustomEditionMap(out);
+                  if (finalRe.status === 'ok') {
+                    reinspected = finalRe;
+                  }
                 }
               }
             }
@@ -808,6 +1021,8 @@ export function performBspSwap(
       relocatedSpawns,
       harvestedShaders,
       harvestedBitmaps,
+      importedScenery,
+      importedMachines,
     },
   };
 }

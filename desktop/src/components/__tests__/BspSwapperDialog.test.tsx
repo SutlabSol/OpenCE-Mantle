@@ -173,6 +173,8 @@ describe('BspSwapperDialog', () => {
         stripDobcAndDecals: true,
         relocateGroundObjects: true,
         harvestShaders: true,
+        importSceneryAndMachines: true,
+        makeDoorsAutomatic: true,
       });
       expect(mockOnSuccess).toHaveBeenCalledTimes(1);
       expect(screen.getByTestId('bsp-swapper-success')).toBeInTheDocument();

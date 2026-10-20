@@ -325,13 +325,69 @@ export function appendReflexiveElement(
 }
 
 /**
+ * Appends multiple elements to an existing scenario reflexive array in a single allocation.
+ */
+export function appendReflexiveElements(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  reflexiveFieldOffset: number,
+  elementsBytes: Buffer,
+  countToAdd: number,
+): { buffer: Buffer; header: CacheFileHeader; startIndex: number } {
+  if (countToAdd <= 0 || elementsBytes.length === 0) {
+    const refl = decodeReflexive(buffer, reflexiveFieldOffset);
+    return { buffer, header, startIndex: refl.count };
+  }
+  const refl = decodeReflexive(buffer, reflexiveFieldOffset);
+  const elementSize = elementsBytes.length / countToAdd;
+  const newCount = refl.count + countToAdd;
+
+  const oldArrayBytes =
+    refl.count > 0
+      ? buffer.subarray(
+          resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress),
+          resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress) + refl.count * elementSize,
+        )
+      : Buffer.alloc(0);
+  const newArrayBytes = Buffer.concat([oldArrayBytes, elementsBytes]);
+
+  const alignedPad = (4 - (buffer.length % 4)) % 4;
+  const padBuffer = alignedPad > 0 ? Buffer.alloc(alignedPad, 0) : Buffer.alloc(0);
+
+  const newArrayFileOffset = buffer.length + padBuffer.length;
+  const newArrayVirtualAddress = tagIndex.baseMemoryAddress + (newArrayFileOffset - header.tagDataOffset);
+
+  const newBuffer = Buffer.concat([buffer, padBuffer, newArrayBytes]);
+  const newHeader: CacheFileHeader = {
+    ...header,
+    tagDataSize: newBuffer.length - header.tagDataOffset,
+    decompressedFileSize: newBuffer.length,
+  };
+  newBuffer.writeUInt32LE(newBuffer.length, 0x08);
+  newBuffer.writeUInt32LE(newHeader.tagDataSize, 0x14);
+
+  encodeReflexive(newBuffer, reflexiveFieldOffset, {
+    count: newCount,
+    pointerLow: newArrayVirtualAddress,
+    pointerHigh: 0,
+  });
+
+  return {
+    buffer: newBuffer,
+    header: newHeader,
+    startIndex: refl.count,
+  };
+}
+
+/**
  * Ensures that a tag is present in a scenario palette reflexive, appending a 48-byte palette entry if missing.
  */
 export function ensurePaletteEntry(
   buffer: Buffer,
   header: CacheFileHeader,
   tagIndex: TagIndex,
-  paletteFieldName: 'vehicle palette' | 'scenery palette' | 'biped palette' | 'weapon palette' | 'equipment palette',
+  paletteFieldName: 'vehicle palette' | 'scenery palette' | 'biped palette' | 'weapon palette' | 'equipment palette' | 'machine palette',
   paletteStructName: string,
   tagId: number,
   classFourCC: number,
