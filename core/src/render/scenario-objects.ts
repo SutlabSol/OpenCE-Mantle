@@ -15,7 +15,13 @@ export type ScenarioObjectKind =
   | 'biped'
   | 'weapon'
   | 'equipment'
-  | 'spawn';
+  | 'spawn'
+  | 'encounter'
+  | 'firing_position'
+  | 'trigger_volume'
+  | 'cutscene_camera'
+  | 'netgame_flag'
+  | 'decal';
 
 export interface ScenarioObjectPlacement {
   /** Unique identifier e.g. "vehicle-0", "scenery-12", "equipment-3", "spawn-3". */
@@ -23,9 +29,9 @@ export interface ScenarioObjectPlacement {
   kind: ScenarioObjectKind;
   paletteIndex: number;
   nameIndex: number;
-  /** Tag ID of the object tag (vehi, scen, bipd, weap, etc.), or 0xFFFFFFFF if spawn. */
+  /** Tag ID of the object tag (vehi, scen, bipd, weap, etc.), or 0xFFFFFFFF if spawn/trigger/camera. */
   objectTagId: number;
-  /** Human-readable path of the object tag, or spawn description. */
+  /** Human-readable path of the object tag, or entity description. */
   objectPath: string;
   /** Tag ID of the 3D model tag (`gbxmodel`/`mod2`), or 0xFFFFFFFF if none. */
   modelTagId: number;
@@ -39,6 +45,20 @@ export interface ScenarioObjectPlacement {
   multiplayerSpawnFlags?: number;
   /** Whether the object is forced/configured to spawn in multiplayer gametypes. */
   forceSpawn?: boolean;
+  /** Optional human-readable name (for trigger volumes, cutscene cameras, encounters). */
+  name?: string;
+  /** Extents [dx, dy, dz] for 3D oriented bounding boxes (trigger volumes). */
+  extents?: [number, number, number];
+  /** Forward orientation vector for trigger volumes. */
+  forwardVector?: [number, number, number];
+  /** Up orientation vector for trigger volumes. */
+  upVector?: [number, number, number];
+  /** Group letter ('A'–'Z') for AI firing positions. */
+  groupLetter?: string;
+  /** Netgame flag type (CTF, Oddball, Teleporter, Hill, etc.). */
+  flagType?: string;
+  /** Field of view in radians (for cutscene camera points). */
+  fieldOfView?: number;
 }
 
 export interface ScenarioPaletteItem {
@@ -60,6 +80,12 @@ export interface ScenarioPlacementsSummary {
     weapons: number;
     equipment: number;
     spawns: number;
+    encounters?: number;
+    firingPositions?: number;
+    triggerVolumes?: number;
+    cutsceneCameras?: number;
+    netgameFlags?: number;
+    decals?: number;
   };
   palettes: {
     vehicles: ScenarioPaletteItem[];
@@ -191,6 +217,28 @@ export function getItemCollectionCategory(
   return 'equipment';
 }
 
+function resolveActorVariantModelTagId(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  actvTagId: number,
+): number {
+  if (actvTagId === 0xffffffff) return 0xffffffff;
+  const entry = tagIndex.entries[actvTagId & 0xffff];
+  if (!entry || entry.isExternal) return 0xffffffff;
+  try {
+    const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const actvStruct = decodeStruct(buffer, offset, 'ActorVariant');
+    const unitDep = actvStruct.get('unit');
+    if (unitDep && unitDep.kind === 'dependency' && unitDep.value.tagId !== 0xffffffff) {
+      return resolveObjectModelTagId(buffer, header, tagIndex, unitDep.value.tagId);
+    }
+  } catch {
+    // fallback
+  }
+  return 0xffffffff;
+}
+
 /**
  * Parses a scenario palette reflexive into an array of resolved palette entries.
  */
@@ -209,11 +257,14 @@ function parsePalette(
   for (let i = 0; i < paletteReflexive.count; i++) {
     try {
       const decoded = decodeStruct(buffer, baseOffset + i * structSize, structName);
-      const nameDep = decoded.get('name');
-      const tagId = nameDep && nameDep.kind === 'dependency' ? nameDep.value.tagId : 0xffffffff;
+      const depField = decoded.get('name') || decoded.get('reference');
+      const tagId = depField && depField.kind === 'dependency' ? depField.value.tagId : 0xffffffff;
       const entry = tagId !== 0xffffffff ? tagIndex.entries[tagId & 0xffff] : undefined;
       const path = entry ? entry.path : '';
-      const modelTagId = resolveObjectModelTagId(buffer, header, tagIndex, tagId);
+      let modelTagId = resolveObjectModelTagId(buffer, header, tagIndex, tagId);
+      if (modelTagId === 0xffffffff && entry && (entry.primaryClassName === 'actor_variant' || entry.primaryClassFourCC === 0x61637476)) {
+        modelTagId = resolveActorVariantModelTagId(buffer, header, tagIndex, tagId);
+      }
       palette.push({ tagId, path, modelTagId });
     } catch {
       palette.push({ tagId: 0xffffffff, path: '', modelTagId: 0xffffffff });
@@ -354,6 +405,12 @@ export function extractScenarioPlacements(
     weapons: 0,
     equipment: 0,
     spawns: 0,
+    encounters: 0,
+    firingPositions: 0,
+    triggerVolumes: 0,
+    cutsceneCameras: 0,
+    netgameFlags: 0,
+    decals: 0,
   };
 
   // 1. Vehicles
@@ -701,6 +758,227 @@ export function extractScenarioPlacements(
     }
   }
 
+  // 7. Encounters & AI Squad Starting Locations + Firing Positions
+  const actorPal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get('actor palette')?.value as { count: number; pointerLow: number } | undefined,
+    'ScenarioActorPalette',
+  );
+
+  const encountersRef = scnr.get('encounters')?.value as { count: number; pointerLow: number } | undefined;
+  if (encountersRef && encountersRef.count > 0) {
+    const encSize = resolveStruct('ScenarioEncounter').totalSize;
+    const encOffset = resolvePointer(encountersRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let eIdx = 0; eIdx < encountersRef.count; eIdx++) {
+      const encItem = decodeStruct(buffer, encOffset + eIdx * encSize, 'ScenarioEncounter');
+      const encName = (encItem.get('name')?.value as string) || `Encounter ${eIdx}`;
+      const encTeam = (encItem.get('team index')?.value as number) ?? 0;
+
+      // Squads & Starting Locations
+      const squadsRef = encItem.get('squads')?.value as { count: number; pointerLow: number } | undefined;
+      if (squadsRef && squadsRef.count > 0) {
+        const sqSize = resolveStruct('ScenarioSquad').totalSize;
+        const sqOffset = resolvePointer(squadsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        for (let sIdx = 0; sIdx < squadsRef.count; sIdx++) {
+          const sqItem = decodeStruct(buffer, sqOffset + sIdx * sqSize, 'ScenarioSquad');
+          const sqName = (sqItem.get('name')?.value as string) || `Squad ${sIdx}`;
+          const sqActorType = (sqItem.get('actor type')?.value as number) ?? 0;
+          const pal = actorPal[sqActorType];
+
+          const startLocsRef = sqItem.get('starting locations')?.value as { count: number; pointerLow: number } | undefined;
+          if (startLocsRef && startLocsRef.count > 0) {
+            const locSize = resolveStruct('ScenarioActorStartingLocation').totalSize;
+            const locOffset = resolvePointer(startLocsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+            for (let lIdx = 0; lIdx < startLocsRef.count; lIdx++) {
+              const locItem = decodeStruct(buffer, locOffset + lIdx * locSize, 'ScenarioActorStartingLocation');
+              const pos = (locItem.get('position')?.value as [number, number, number]) || [0, 0, 0];
+              const facing = (locItem.get('facing')?.value as number) ?? 0;
+              const locActorType = (locItem.get('actor type')?.value as number) ?? sqActorType;
+              const activePal = actorPal[locActorType] || pal || { tagId: 0xffffffff, path: 'AI Actor', modelTagId: 0xffffffff };
+
+              placements.push({
+                id: `encounter-${eIdx}-${sIdx}-${lIdx}`,
+                kind: 'encounter',
+                paletteIndex: locActorType,
+                nameIndex: -1,
+                objectTagId: activePal.tagId,
+                objectPath: activePal.path || `${encName} / ${sqName}`,
+                modelTagId: activePal.modelTagId,
+                position: pos,
+                rotation: [facing, 0, 0],
+                teamIndex: encTeam,
+                name: `${encName}: ${sqName} [${lIdx}]`,
+              });
+              counts.encounters = (counts.encounters || 0) + 1;
+            }
+          }
+        }
+      }
+
+      // Firing Positions
+      const fpRef = encItem.get('firing positions')?.value as { count: number; pointerLow: number } | undefined;
+      if (fpRef && fpRef.count > 0) {
+        const fpSize = resolveStruct('ScenarioFiringPosition').totalSize;
+        const fpOffset = resolvePointer(fpRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        for (let fIdx = 0; fIdx < fpRef.count; fIdx++) {
+          const fpItem = decodeStruct(buffer, fpOffset + fIdx * fpSize, 'ScenarioFiringPosition');
+          const pos = (fpItem.get('position')?.value as [number, number, number]) || [0, 0, 0];
+          const grpIdx = (fpItem.get('group index')?.value as number) ?? 0;
+          const letter = String.fromCharCode(65 + Math.min(25, Math.max(0, grpIdx)));
+
+          placements.push({
+            id: `firing_position-${eIdx}-${fIdx}`,
+            kind: 'firing_position',
+            paletteIndex: grpIdx,
+            nameIndex: -1,
+            objectTagId: 0xffffffff,
+            objectPath: `Firing Position ${letter}`,
+            modelTagId: 0xffffffff,
+            position: pos,
+            rotation: [0, 0, 0],
+            teamIndex: encTeam,
+            name: `${encName} Firing Pos ${letter} [${fIdx}]`,
+            groupLetter: letter,
+          });
+          counts.firingPositions = (counts.firingPositions || 0) + 1;
+        }
+      }
+    }
+  }
+
+  // 8. Trigger Volumes
+  const tvRef = scnr.get('trigger volumes')?.value as { count: number; pointerLow: number } | undefined;
+  if (tvRef && tvRef.count > 0) {
+    const tvSize = resolveStruct('ScenarioTriggerVolume').totalSize;
+    const tvOffset = resolvePointer(tvRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < tvRef.count; i++) {
+      const item = decodeStruct(buffer, tvOffset + i * tvSize, 'ScenarioTriggerVolume');
+      const name = (item.get('name')?.value as string) || `Trigger ${i}`;
+      const corner = (item.get('starting corner')?.value as [number, number, number]) || [0, 0, 0];
+      const extents = (item.get('ending corner offset')?.value as [number, number, number]) || [1, 1, 1];
+      const forward = (item.get('rotation vector forward')?.value as [number, number, number]) || [1, 0, 0];
+      const up = (item.get('rotation vector up')?.value as [number, number, number]) || [0, 0, 1];
+
+      placements.push({
+        id: `trigger_volume-${i}`,
+        kind: 'trigger_volume',
+        paletteIndex: i,
+        nameIndex: -1,
+        objectTagId: 0xffffffff,
+        objectPath: `Trigger: ${name}`,
+        modelTagId: 0xffffffff,
+        position: corner,
+        rotation: [0, 0, 0],
+        name,
+        extents,
+        forwardVector: forward,
+        upVector: up,
+      });
+      counts.triggerVolumes = (counts.triggerVolumes || 0) + 1;
+    }
+  }
+
+  // 9. Cutscene Camera Points
+  const camRef = scnr.get('cutscene camera points')?.value as { count: number; pointerLow: number } | undefined;
+  if (camRef && camRef.count > 0) {
+    const camSize = resolveStruct('ScenarioCutsceneCameraPoint').totalSize;
+    const camOffset = resolvePointer(camRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < camRef.count; i++) {
+      const item = decodeStruct(buffer, camOffset + i * camSize, 'ScenarioCutsceneCameraPoint');
+      const name = (item.get('name')?.value as string) || `Camera ${i}`;
+      const pos = (item.get('position')?.value as [number, number, number]) || [0, 0, 0];
+      const orient = (item.get('orientation')?.value as [number, number, number]) || [0, 0, 0];
+      const fov = (item.get('field of view')?.value as number) ?? 1.22;
+
+      placements.push({
+        id: `cutscene_camera-${i}`,
+        kind: 'cutscene_camera',
+        paletteIndex: i,
+        nameIndex: -1,
+        objectTagId: 0xffffffff,
+        objectPath: `Cutscene Cam: ${name}`,
+        modelTagId: 0xffffffff,
+        position: pos,
+        rotation: orient,
+        name,
+        fieldOfView: fov,
+      });
+      counts.cutsceneCameras = (counts.cutsceneCameras || 0) + 1;
+    }
+  }
+
+  // 10. Netgame Flags
+  const NETGAME_FLAG_TYPES = [
+    'CTF Flag',
+    'CTF Vehicle',
+    'Oddball Spawn',
+    'Race Track',
+    'Race Vehicle',
+    'Vegas Bank',
+    'Teleport Source',
+    'Teleport Dest',
+    'Hill Flag',
+  ];
+  const nfRef = scnr.get('netgame flags')?.value as { count: number; pointerLow: number } | undefined;
+  if (nfRef && nfRef.count > 0) {
+    const nfSize = resolveStruct('ScenarioNetgameFlags').totalSize;
+    const nfOffset = resolvePointer(nfRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < nfRef.count; i++) {
+      const item = decodeStruct(buffer, nfOffset + i * nfSize, 'ScenarioNetgameFlags');
+      const pos = (item.get('position')?.value as [number, number, number]) || [0, 0, 0];
+      const facing = (item.get('facing')?.value as number) ?? 0;
+      const typeIdx = (item.get('type')?.value as number) ?? 0;
+      const usageId = (item.get('usage id')?.value as number) ?? 0;
+      const flagName = NETGAME_FLAG_TYPES[typeIdx] || `Flag Type ${typeIdx}`;
+
+      placements.push({
+        id: `netgame_flag-${i}`,
+        kind: 'netgame_flag',
+        paletteIndex: typeIdx,
+        nameIndex: -1,
+        objectTagId: 0xffffffff,
+        objectPath: `${flagName} (${usageId === 0 ? 'Red' : usageId === 1 ? 'Blue' : usageId})`,
+        modelTagId: 0xffffffff,
+        position: pos,
+        rotation: [facing, 0, 0],
+        teamIndex: usageId,
+        flagType: flagName,
+        name: `${flagName} #${i}`,
+      });
+      counts.netgameFlags = (counts.netgameFlags || 0) + 1;
+    }
+  }
+
+  // 11. Decals
+  const decRef = scnr.get('decals')?.value as { count: number; pointerLow: number } | undefined;
+  if (decRef && decRef.count > 0) {
+    const decSize = resolveStruct('ScenarioDecal').totalSize;
+    const decOffset = resolvePointer(decRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < decRef.count; i++) {
+      const item = decodeStruct(buffer, decOffset + i * decSize, 'ScenarioDecal');
+      const pos = (item.get('position')?.value as [number, number, number]) || [0, 0, 0];
+      const typeIdx = (item.get('decal type')?.value as number) ?? 0;
+      const yaw = (item.get('yaw')?.value as number) ?? 0;
+      const pitch = (item.get('pitch')?.value as number) ?? 0;
+
+      placements.push({
+        id: `decal-${i}`,
+        kind: 'decal',
+        paletteIndex: typeIdx,
+        nameIndex: -1,
+        objectTagId: 0xffffffff,
+        objectPath: `Decal ${typeIdx}`,
+        modelTagId: 0xffffffff,
+        position: pos,
+        rotation: [(yaw / 128) * Math.PI, (pitch / 128) * Math.PI, 0],
+        name: `Decal #${i}`,
+      });
+      counts.decals = (counts.decals || 0) + 1;
+    }
+  }
+
   return {
     scenarioTagId: tagIndex.scenarioTagId,
     scenarioPath: scenarioEntry.path,
@@ -751,6 +1029,12 @@ function getScenarioReflexiveInfo(
     weapon: { fieldName: 'weapons', structName: 'ScenarioWeapon' },
     equipment: { fieldName: 'netgame equipment', structName: 'ScenarioNetgameEquipment' },
     spawn: { fieldName: 'player starting locations', structName: 'ScenarioPlayerStartingLocation' },
+    encounter: { fieldName: 'encounters', structName: 'ScenarioEncounter' },
+    firing_position: { fieldName: 'encounters', structName: 'ScenarioEncounter' },
+    trigger_volume: { fieldName: 'trigger volumes', structName: 'ScenarioTriggerVolume' },
+    cutscene_camera: { fieldName: 'cutscene camera points', structName: 'ScenarioCutsceneCameraPoint' },
+    netgame_flag: { fieldName: 'netgame flags', structName: 'ScenarioNetgameFlags' },
+    decal: { fieldName: 'decals', structName: 'ScenarioDecal' },
   };
 
   const { fieldName, structName } = reflexiveNameMap[kind];
@@ -841,6 +1125,129 @@ export function updateScenarioPlacement(
         buffer.writeUInt32LE(0, itemOffset + 84);
         buffer.writeUInt32LE(0, itemOffset + 88);
         buffer.writeUInt32LE(chosen.tagId, itemOffset + 92);
+      }
+    }
+  } else if (kindStr === 'trigger_volume') {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, 'trigger_volume');
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range for trigger_volume.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 72);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 76);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 80);
+    }
+  } else if (kindStr === 'cutscene_camera') {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, 'cutscene_camera');
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range for cutscene_camera.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 40);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 44);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 48);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 52);
+      buffer.writeFloatLE(updates.rotation[1], itemOffset + 56);
+      buffer.writeFloatLE(updates.rotation[2], itemOffset + 60);
+    }
+  } else if (kindStr === 'netgame_flag') {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, 'netgame_flag');
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range for netgame_flag.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 0);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 4);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 8);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 12);
+    }
+    if (updates.teamIndex !== undefined) {
+      buffer.writeInt16LE(updates.teamIndex, itemOffset + 18);
+    }
+  } else if (kindStr === 'decal') {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, 'decal');
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range for decal.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 4);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 8);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 12);
+    }
+  } else if (kindStr === 'encounter') {
+    const parts = placementId.split('-');
+    const eIdx = parseInt(parts[1], 10);
+    const sIdx = parseInt(parts[2], 10);
+    const lIdx = parseInt(parts[3], 10);
+    const scnrDef = resolveStruct('Scenario');
+    const encField = scnrDef.fields.find((f) => f.name === 'encounters');
+    if (encField) {
+      const scenarioOffset = resolveTagDataPointer(
+        tagIndex.entries[tagIndex.scenarioTagId & 0xffff].tagDataPointerOrResourceIndex,
+        header,
+        tagIndex.baseMemoryAddress,
+      );
+      const encRefl = decodeReflexive(buffer, scenarioOffset + encField.offset);
+      if (eIdx >= 0 && eIdx < encRefl.count) {
+        const encBase = resolvePointer(encRefl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        const encItemOffset = encBase + eIdx * resolveStruct('ScenarioEncounter').totalSize;
+        const encItem = decodeStruct(buffer, encItemOffset, 'ScenarioEncounter');
+        const squadsRef = encItem.get('squads')?.value as { count: number; pointerLow: number } | undefined;
+        if (squadsRef && sIdx >= 0 && sIdx < squadsRef.count) {
+          const sqBase = resolvePointer(squadsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          const sqItemOffset = sqBase + sIdx * resolveStruct('ScenarioSquad').totalSize;
+          const sqItem = decodeStruct(buffer, sqItemOffset, 'ScenarioSquad');
+          const startLocsRef = sqItem.get('starting locations')?.value as { count: number; pointerLow: number } | undefined;
+          if (startLocsRef && lIdx >= 0 && lIdx < startLocsRef.count) {
+            const locBase = resolvePointer(startLocsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+            const locOffset = locBase + lIdx * resolveStruct('ScenarioActorStartingLocation').totalSize;
+            if (updates.position) {
+              buffer.writeFloatLE(updates.position[0], locOffset + 0);
+              buffer.writeFloatLE(updates.position[1], locOffset + 4);
+              buffer.writeFloatLE(updates.position[2], locOffset + 8);
+            }
+            if (updates.rotation) {
+              buffer.writeFloatLE(updates.rotation[0], locOffset + 12);
+            }
+          }
+        }
+      }
+    }
+  } else if (kindStr === 'firing_position') {
+    const parts = placementId.split('-');
+    const eIdx = parseInt(parts[1], 10);
+    const fIdx = parseInt(parts[2], 10);
+    const scnrDef = resolveStruct('Scenario');
+    const encField = scnrDef.fields.find((f) => f.name === 'encounters');
+    if (encField) {
+      const scenarioOffset = resolveTagDataPointer(
+        tagIndex.entries[tagIndex.scenarioTagId & 0xffff].tagDataPointerOrResourceIndex,
+        header,
+        tagIndex.baseMemoryAddress,
+      );
+      const encRefl = decodeReflexive(buffer, scenarioOffset + encField.offset);
+      if (eIdx >= 0 && eIdx < encRefl.count) {
+        const encBase = resolvePointer(encRefl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        const encItemOffset = encBase + eIdx * resolveStruct('ScenarioEncounter').totalSize;
+        const encItem = decodeStruct(buffer, encItemOffset, 'ScenarioEncounter');
+        const fpRef = encItem.get('firing positions')?.value as { count: number; pointerLow: number } | undefined;
+        if (fpRef && fIdx >= 0 && fIdx < fpRef.count) {
+          const fpBase = resolvePointer(fpRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          const fpOffset = fpBase + fIdx * resolveStruct('ScenarioFiringPosition').totalSize;
+          if (updates.position) {
+            buffer.writeFloatLE(updates.position[0], fpOffset + 0);
+            buffer.writeFloatLE(updates.position[1], fpOffset + 4);
+            buffer.writeFloatLE(updates.position[2], fpOffset + 8);
+          }
+        }
       }
     }
   } else {

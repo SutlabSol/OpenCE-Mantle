@@ -19,6 +19,11 @@ export interface VisibleLayers {
   scenery: boolean;
   spawns: boolean;
   items: boolean;
+  encounters: boolean;
+  firingPositions: boolean;
+  triggerVolumes: boolean;
+  cutsceneCameras: boolean;
+  netgameFlags: boolean;
 }
 
 export interface ScenarioViewportProps {
@@ -49,6 +54,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     scenery: true,
     spawns: true,
     items: true,
+    encounters: true,
+    firingPositions: true,
+    triggerVolumes: true,
+    cutsceneCameras: true,
+    netgameFlags: true,
   });
   const [renderMode, setRenderMode] = useState<RenderMode>('textured-wireframe');
   const [cameraSpeed, setCameraSpeed] = useState<number>(60);
@@ -139,6 +149,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     scenery: THREE.Group;
     spawns: THREE.Group;
     items: THREE.Group;
+    encounters: THREE.Group;
+    firingPositions: THREE.Group;
+    triggerVolumes: THREE.Group;
+    cutsceneCameras: THREE.Group;
+    netgameFlags: THREE.Group;
   } | null>(null);
   const submeshMeshesRef = useRef<{ mesh: THREE.Mesh; lines: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial; bspIndex?: number }[]>([]);
   const objectMeshesRef = useRef<{ mesh: THREE.Mesh; lines?: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial }[]>([]);
@@ -494,7 +509,17 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   // Populate 3D scene objects from scenario placements
   const populateScenarioObjects = useCallback(
     (summary: ScenarioPlacementsSummary, layers: NonNullable<typeof layerGroupsRef.current>) => {
-      const { vehicles, scenery, spawns, items } = layers;
+      const {
+        vehicles,
+        scenery,
+        spawns,
+        items,
+        encounters,
+        firingPositions,
+        triggerVolumes,
+        cutsceneCameras,
+        netgameFlags,
+      } = layers;
 
       const clearGroup = (group: THREE.Group) => {
         while (group.children.length > 0) {
@@ -505,6 +530,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       clearGroup(scenery);
       clearGroup(spawns);
       clearGroup(items);
+      clearGroup(encounters);
+      clearGroup(firingPositions);
+      clearGroup(triggerVolumes);
+      clearGroup(cutsceneCameras);
+      clearGroup(netgameFlags);
 
       for (const item of objectMeshesRef.current) {
         item.mesh.geometry.dispose();
@@ -528,6 +558,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         else if (obj.kind === 'scenery') targetLayer = scenery;
         else if (obj.kind === 'spawn') targetLayer = spawns;
         else if (obj.kind === 'weapon' || obj.kind === 'equipment') targetLayer = items;
+        else if (obj.kind === 'encounter') targetLayer = encounters;
+        else if (obj.kind === 'firing_position') targetLayer = firingPositions;
+        else if (obj.kind === 'trigger_volume') targetLayer = triggerVolumes;
+        else if (obj.kind === 'cutscene_camera') targetLayer = cutsceneCameras;
+        else if (obj.kind === 'netgame_flag') targetLayer = netgameFlags;
 
         if (obj.kind === 'spawn') {
           const color = obj.teamIndex === 0 ? 0xef5350 : obj.teamIndex === 1 ? 0x42a5f5 : 0xffca28;
@@ -551,6 +586,122 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           markerGroup.add(coneMesh);
 
           objGroup.add(markerGroup);
+          targetLayer.add(objGroup);
+        } else if (obj.kind === 'trigger_volume') {
+          const dx = Math.max(0.2, Math.abs(obj.extents?.[0] || 2));
+          const dy = Math.max(0.2, Math.abs(obj.extents?.[1] || 2));
+          const dz = Math.max(0.2, Math.abs(obj.extents?.[2] || 2));
+          const boxGeom = new THREE.BoxGeometry(dx, dy, dz);
+          boxGeom.translate((obj.extents?.[0] || 2) / 2, (obj.extents?.[1] || 2) / 2, (obj.extents?.[2] || 2) / 2);
+          const boxMat = new THREE.MeshStandardMaterial({
+            color: 0x00e676,
+            transparent: true,
+            opacity: 0.25,
+            roughness: 0.5,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          });
+          const boxMesh = new THREE.Mesh(boxGeom, boxMat);
+          boxMesh.userData = { id: obj.id };
+          objGroup.add(boxMesh);
+
+          const wireGeom = new THREE.WireframeGeometry(boxGeom);
+          const wireMat = new THREE.LineBasicMaterial({
+            color: 0x00ff88,
+            transparent: true,
+            opacity: 0.85,
+          });
+          const wireMesh = new THREE.LineSegments(wireGeom, wireMat);
+          objGroup.add(wireMesh);
+          targetLayer.add(objGroup);
+        } else if (obj.kind === 'firing_position') {
+          const fpMarker = new THREE.Group();
+          fpMarker.userData = { id: obj.id };
+
+          const sphereGeom = new THREE.SphereGeometry(0.35, 12, 12);
+          sphereGeom.translate(0, 0, 0.35);
+          const sphereMat = new THREE.MeshStandardMaterial({
+            color: 0xffd54f,
+            roughness: 0.3,
+            metalness: 0.2,
+            emissive: 0xffa000,
+            emissiveIntensity: 0.2,
+          });
+          const sphereMesh = new THREE.Mesh(sphereGeom, sphereMat);
+          sphereMesh.userData = { id: obj.id };
+          fpMarker.add(sphereMesh);
+
+          const coneGeom = new THREE.ConeGeometry(0.18, 0.45, 8);
+          coneGeom.rotateZ(-Math.PI / 2);
+          coneGeom.translate(0.4, 0, 0.35);
+          const coneMat = new THREE.MeshStandardMaterial({ color: 0xffb300, roughness: 0.4 });
+          const coneMesh = new THREE.Mesh(coneGeom, coneMat);
+          coneMesh.userData = { id: obj.id };
+          fpMarker.add(coneMesh);
+
+          objGroup.add(fpMarker);
+          targetLayer.add(objGroup);
+        } else if (obj.kind === 'cutscene_camera') {
+          const camMarker = new THREE.Group();
+          camMarker.userData = { id: obj.id };
+
+          const bodyGeom = new THREE.BoxGeometry(0.5, 0.35, 0.3);
+          const bodyMat = new THREE.MeshStandardMaterial({ color: 0xab47bc, roughness: 0.4 });
+          const bodyMesh = new THREE.Mesh(bodyGeom, bodyMat);
+          bodyMesh.userData = { id: obj.id };
+          camMarker.add(bodyMesh);
+
+          const frustumGeom = new THREE.ConeGeometry(0.5, 0.9, 4);
+          frustumGeom.rotateZ(-Math.PI / 2);
+          frustumGeom.rotateX(Math.PI / 4);
+          frustumGeom.translate(0.7, 0, 0);
+          const frustumMat = new THREE.MeshBasicMaterial({
+            color: 0xe1bee7,
+            wireframe: true,
+          });
+          const frustumMesh = new THREE.Mesh(frustumGeom, frustumMat);
+          frustumMesh.userData = { id: obj.id };
+          camMarker.add(frustumMesh);
+
+          objGroup.add(camMarker);
+          targetLayer.add(objGroup);
+        } else if (obj.kind === 'netgame_flag') {
+          const flagMarker = new THREE.Group();
+          flagMarker.userData = { id: obj.id };
+
+          const isTeleport = (obj.objectPath || '').toLowerCase().includes('teleport');
+          if (isTeleport) {
+            const torusGeom = new THREE.TorusGeometry(0.7, 0.08, 8, 24);
+            torusGeom.translate(0, 0, 0.08);
+            const torusMat = new THREE.MeshStandardMaterial({
+              color: 0x00e5ff,
+              emissive: 0x00b0ff,
+              emissiveIntensity: 0.4,
+              roughness: 0.2,
+            });
+            const torusMesh = new THREE.Mesh(torusGeom, torusMat);
+            torusMesh.userData = { id: obj.id };
+            flagMarker.add(torusMesh);
+          } else {
+            const poleGeom = new THREE.CylinderGeometry(0.04, 0.04, 2.2, 8);
+            poleGeom.rotateX(Math.PI / 2);
+            poleGeom.translate(0, 0, 1.1);
+            const poleMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.8, roughness: 0.2 });
+            const poleMesh = new THREE.Mesh(poleGeom, poleMat);
+            poleMesh.userData = { id: obj.id };
+            flagMarker.add(poleMesh);
+
+            const bannerColor = (obj.objectPath || '').toLowerCase().includes('red') ? 0xef5350 : 0x42a5f5;
+            const bannerGeom = new THREE.PlaneGeometry(0.8, 0.5);
+            bannerGeom.rotateY(Math.PI / 2);
+            bannerGeom.translate(0, 0.4, 1.8);
+            const bannerMat = new THREE.MeshStandardMaterial({ color: bannerColor, side: THREE.DoubleSide });
+            const bannerMesh = new THREE.Mesh(bannerGeom, bannerMat);
+            bannerMesh.userData = { id: obj.id };
+            flagMarker.add(bannerMesh);
+          }
+
+          objGroup.add(flagMarker);
           targetLayer.add(objGroup);
         } else if (obj.modelTagId && obj.modelTagId !== 0xffffffff) {
           targetLayer.add(objGroup);
@@ -625,6 +776,37 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
               }
             }
           });
+        } else if (obj.kind === 'encounter') {
+          // Fallback biped marker for AI encounter when gbxmodel is absent
+          const encColor = obj.teamIndex === 0 ? 0xef5350 : obj.teamIndex === 1 ? 0x42a5f5 : 0xba68c8;
+          const bipedMarker = new THREE.Group();
+          bipedMarker.userData = { id: obj.id };
+
+          const cylGeom = new THREE.CylinderGeometry(0.28, 0.28, 1.7, 12);
+          cylGeom.rotateX(Math.PI / 2);
+          cylGeom.translate(0, 0, 0.85);
+          const cylMat = new THREE.MeshStandardMaterial({ color: encColor, roughness: 0.45 });
+          const cylMesh = new THREE.Mesh(cylGeom, cylMat);
+          cylMesh.userData = { id: obj.id };
+          bipedMarker.add(cylMesh);
+
+          const headGeom = new THREE.SphereGeometry(0.22, 12, 12);
+          headGeom.translate(0, 0, 1.85);
+          const headMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 });
+          const headMesh = new THREE.Mesh(headGeom, headMat);
+          headMesh.userData = { id: obj.id };
+          bipedMarker.add(headMesh);
+
+          const coneGeom = new THREE.ConeGeometry(0.2, 0.5, 8);
+          coneGeom.rotateZ(-Math.PI / 2);
+          coneGeom.translate(0.45, 0, 1.3);
+          const coneMat = new THREE.MeshStandardMaterial({ color: encColor, roughness: 0.3 });
+          const coneMesh = new THREE.Mesh(coneGeom, coneMat);
+          coneMesh.userData = { id: obj.id };
+          bipedMarker.add(coneMesh);
+
+          objGroup.add(bipedMarker);
+          targetLayer.add(objGroup);
         } else {
           const dims =
             obj.kind === 'vehicle'
@@ -669,6 +851,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     layerGroupsRef.current.scenery.visible = visibleLayers.scenery;
     layerGroupsRef.current.spawns.visible = visibleLayers.spawns;
     layerGroupsRef.current.items.visible = visibleLayers.items;
+    layerGroupsRef.current.encounters.visible = visibleLayers.encounters;
+    layerGroupsRef.current.firingPositions.visible = visibleLayers.firingPositions;
+    layerGroupsRef.current.triggerVolumes.visible = visibleLayers.triggerVolumes;
+    layerGroupsRef.current.cutsceneCameras.visible = visibleLayers.cutsceneCameras;
+    layerGroupsRef.current.netgameFlags.visible = visibleLayers.netgameFlags;
   }, [visibleLayers]);
 
   // Update render mode materials
@@ -736,6 +923,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       ...layerGroupsRef.current.scenery.children,
       ...layerGroupsRef.current.spawns.children,
       ...layerGroupsRef.current.items.children,
+      ...layerGroupsRef.current.encounters.children,
+      ...layerGroupsRef.current.firingPositions.children,
+      ...layerGroupsRef.current.triggerVolumes.children,
+      ...layerGroupsRef.current.cutsceneCameras.children,
+      ...layerGroupsRef.current.netgameFlags.children,
     ];
     const targetGroup = allGroups.find((g) => g.userData?.id === selectedObjectId);
 
@@ -893,12 +1085,22 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     const sceneryGroup = new THREE.Group();
     const spawnsGroup = new THREE.Group();
     const itemsGroup = new THREE.Group();
+    const encountersGroup = new THREE.Group();
+    const firingPositionsGroup = new THREE.Group();
+    const triggerVolumesGroup = new THREE.Group();
+    const cutsceneCamerasGroup = new THREE.Group();
+    const netgameFlagsGroup = new THREE.Group();
 
     haloRoot.add(bspGroup);
     haloRoot.add(vehiclesGroup);
     haloRoot.add(sceneryGroup);
     haloRoot.add(spawnsGroup);
     haloRoot.add(itemsGroup);
+    haloRoot.add(encountersGroup);
+    haloRoot.add(firingPositionsGroup);
+    haloRoot.add(triggerVolumesGroup);
+    haloRoot.add(cutsceneCamerasGroup);
+    haloRoot.add(netgameFlagsGroup);
 
     const layerGroups = {
       bsp: bspGroup,
@@ -906,6 +1108,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       scenery: sceneryGroup,
       spawns: spawnsGroup,
       items: itemsGroup,
+      encounters: encountersGroup,
+      firingPositions: firingPositionsGroup,
+      triggerVolumes: triggerVolumesGroup,
+      cutsceneCameras: cutsceneCamerasGroup,
+      netgameFlags: netgameFlagsGroup,
     };
     layerGroupsRef.current = layerGroups;
 
@@ -957,6 +1164,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         ...layerGroupsRef.current.scenery.children,
         ...layerGroupsRef.current.spawns.children,
         ...layerGroupsRef.current.items.children,
+        ...layerGroupsRef.current.encounters.children,
+        ...layerGroupsRef.current.firingPositions.children,
+        ...layerGroupsRef.current.triggerVolumes.children,
+        ...layerGroupsRef.current.cutsceneCameras.children,
+        ...layerGroupsRef.current.netgameFlags.children,
       ];
       return allGroups.find((g) => g.userData?.id === id) || null;
     };
@@ -1008,7 +1220,6 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         isCtrlDraggingRef.current = false;
         isAltLeftDraggingRef.current = false;
         isAltRightDraggingRef.current = false;
-
         if (dragHasMovedRef.current && targetGroup && selectedObjectIdRef.current) {
           const newPos: [number, number, number] = [
             targetGroup.position.x,
@@ -1044,6 +1255,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
               ...layerGroupsRef.current.scenery.children,
               ...layerGroupsRef.current.spawns.children,
               ...layerGroupsRef.current.items.children,
+              ...layerGroupsRef.current.encounters.children,
+              ...layerGroupsRef.current.firingPositions.children,
+              ...layerGroupsRef.current.triggerVolumes.children,
+              ...layerGroupsRef.current.cutsceneCameras.children,
+              ...layerGroupsRef.current.netgameFlags.children,
             ];
             const hits = raycaster.intersectObjects(interactiveRoots, true);
             if (hits.length > 0) {
@@ -1352,6 +1568,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
               ['scenery', 'layer-toggle-scenery', 'Scenery', scenarioData?.counts.scenery],
               ['spawns', 'layer-toggle-spawns', 'Spawns', scenarioData?.counts.spawns],
               ['items', 'layer-toggle-items', 'Items', scenarioData ? scenarioData.counts.weapons + scenarioData.counts.equipment : null],
+              ['encounters', 'layer-toggle-encounters', 'AI Squads', scenarioData?.counts.encounters],
+              ['firingPositions', 'layer-toggle-firing-positions', 'Firing Points', scenarioData?.counts.firingPositions],
+              ['triggerVolumes', 'layer-toggle-trigger-volumes', 'Triggers', scenarioData?.counts.triggerVolumes],
+              ['cutsceneCameras', 'layer-toggle-cutscene-cameras', 'Cameras', scenarioData?.counts.cutsceneCameras],
+              ['netgameFlags', 'layer-toggle-netgame-flags', 'Flags', scenarioData?.counts.netgameFlags],
             ] as const
           ).map(([layerKey, testId, label, count]) => {
             const active = visibleLayers[layerKey];
@@ -1920,6 +2141,42 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                       </div>
                     )}
 
+                    {/* Trigger Volume Extents */}
+                    {selectedPlacement.kind === 'trigger_volume' && selectedPlacement.extents && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <div style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 600 }}>
+                          Volume Extents (dx, dy, dz)
+                        </div>
+                        <div style={{ fontSize: 11, fontFamily: 'var(--mono-font)', color: 'var(--accent-cyan)' }}>
+                          {selectedPlacement.extents.map((v) => v.toFixed(2)).join(' × ')} m
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Firing Position Group */}
+                    {selectedPlacement.kind === 'firing_position' && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <div style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 600 }}>
+                          Firing Position Group
+                        </div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: '#ffd54f' }}>
+                          Group {selectedPlacement.groupLetter || 'A'}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Cutscene Camera FOV */}
+                    {selectedPlacement.kind === 'cutscene_camera' && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <div style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 600 }}>
+                          Field of View
+                        </div>
+                        <div style={{ fontSize: 11, fontFamily: 'var(--mono-font)', color: 'var(--accent-cyan)' }}>
+                          {(((selectedPlacement.fieldOfView || 1.22) * 180) / Math.PI).toFixed(1)}° ({((selectedPlacement.fieldOfView || 1.22)).toFixed(3)} rad)
+                        </div>
+                      </div>
+                    )}
+
                     {/* Position Coordinates */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <div style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 600 }}>
@@ -2224,6 +2481,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                         ['spawn', 'Spawns'],
                         ['weapon', 'Weapons'],
                         ['equipment', 'Equipment'],
+                        ['encounter', 'AI Squads'],
+                        ['firing_position', 'Firing Points'],
+                        ['trigger_volume', 'Triggers'],
+                        ['cutscene_camera', 'Cameras'],
+                        ['netgame_flag', 'Flags'],
                       ] as const
                     ).map(([cat, label]) => (
                       <button

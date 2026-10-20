@@ -44,7 +44,11 @@ export default function ConfigureResourcesPromptDialog({
       .then((verSettings) => {
         const current = verSettings?.[mapEdition];
         if (current?.bitmaps) setBitmapsPath(current.bitmaps);
-        if (current?.sounds) setSoundsPath(current.sounds);
+        if (current?.sounds) {
+          setSoundsPath(current.sounds);
+        } else if (mapEdition === 'mcc' && verSettings?.ce?.sounds) {
+          setSoundsPath(verSettings.ce.sounds);
+        }
       })
       .catch(() => {});
 
@@ -52,7 +56,13 @@ export default function ConfigureResourcesPromptDialog({
     window.opence
       .detectDefaultResourceMapPaths?.()
       .then((defaults) => {
-        if (defaults) setDetectedDefaults(defaults);
+        if (defaults) {
+          setDetectedDefaults(defaults);
+          if (mapEdition === 'mcc' && !soundsPath) {
+            const ceSound = defaults.ce ? defaults.ce.replace(/bitmaps\.map$/i, 'sounds.map') : null;
+            if (ceSound) setSoundsPath(ceSound);
+          }
+        }
       })
       .catch(() => {});
   }, [isOpen, mapEdition]);
@@ -61,7 +71,16 @@ export default function ConfigureResourcesPromptDialog({
 
   const editionName = EDITION_NAMES[mapEdition] || mapEdition.toUpperCase();
   const defaultBitmap = detectedDefaults[mapEdition];
-  const defaultSound = defaultBitmap ? defaultBitmap.replace(/bitmaps\.map$/i, 'sounds.map') : null;
+  const defaultSound =
+    mapEdition === 'mcc'
+      ? detectedDefaults.ce
+        ? detectedDefaults.ce.replace(/bitmaps\.map$/i, 'sounds.map')
+        : defaultBitmap
+        ? defaultBitmap.replace(/bitmaps\.map$/i, 'sounds.map')
+        : null
+      : defaultBitmap
+      ? defaultBitmap.replace(/bitmaps\.map$/i, 'sounds.map')
+      : null;
 
   const handleApplyDefaults = () => {
     if (defaultBitmap) setBitmapsPath(defaultBitmap);

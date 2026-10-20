@@ -15,7 +15,7 @@ const api: OpenceApi = {
   finalizeBatchExtract: (request) => ipcRenderer.invoke('tags:finalizeBatchExtract', request),
   pickResourceMap: (kind: ResourceMapKind) => ipcRenderer.invoke('resourceMaps:pick', kind),
   getResourceMapStatuses: () => ipcRenderer.invoke('resourceMaps:getStatuses'),
-  identifyResourceMap: (filePath, expectedVersion) => ipcRenderer.invoke('resourceMaps:identify', filePath, expectedVersion),
+  identifyResourceMap: (filePath, expectedVersion, expectedKind) => ipcRenderer.invoke('resourceMaps:identify', filePath, expectedVersion, expectedKind),
   setResourceMapPath: (kind, filePath) => ipcRenderer.invoke('resourceMaps:setPath', kind, filePath),
   detectDefaultResourceMapPaths: () => ipcRenderer.invoke('resourceMaps:detectDefaultPaths'),
   getVersionSettings: () => ipcRenderer.invoke('resourceMaps:getVersionSettings'),
@@ -30,6 +30,8 @@ const api: OpenceApi = {
   verifyEmbeddedData: () => ipcRenderer.invoke('tags:verifyEmbeddedData'),
   getTagFields: (tagIndex: number) => ipcRenderer.invoke('tags:getFields', tagIndex),
   updateTagField: (tagIndex: number, fieldName: string, newValue: unknown) => ipcRenderer.invoke('tags:updateField', tagIndex, fieldName, newValue),
+  addReflexiveChunk: (tagIndex: number, reflexiveFieldPath: string, cloneFromIndex?: number) =>
+    ipcRenderer.invoke('tags:addReflexiveChunk', tagIndex, reflexiveFieldPath, cloneFromIndex),
   getDependencySlots: (tagIndex: number) => ipcRenderer.invoke('tags:getDependencySlots', tagIndex),
   setDependencySlot: (tagIndex: number, fieldPath: string, newTagId: number | null) => ipcRenderer.invoke('tags:setDependencySlot', tagIndex, fieldPath, newTagId),
   getReferencingTags: (tagIndex: number) => ipcRenderer.invoke('tags:getReferencingTags', tagIndex),

@@ -18,7 +18,7 @@
     "test": "vitest run",
     "build": "yarn build:renderer && yarn build:electron",
     "dist:win": "yarn build && electron-builder --win portable nsis",
-    "dist:win:portable": "yarn build && electron-builder --win portable"
+    "dist:win:portable": "node build-dist.js"
   },
   "dependencies": {
     "@mongodb-js/zstd": "^7.0.0",

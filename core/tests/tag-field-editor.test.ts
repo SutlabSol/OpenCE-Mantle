@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeAll } from 'vitest';
 import { inspectCustomEditionMap } from '../src/map/open-map';
-import { readTagFieldValues, writeTagFieldValue, TagFieldEditorError } from '../src/map/tag-field-editor';
+import { readTagFieldValues, writeTagFieldValue, addReflexiveChunk, TagFieldEditorError } from '../src/map/tag-field-editor';
 import { hasSampleMaps, missingSampleMapsMessage, readSampleMap } from './helpers/sample-maps';
 import { NULL_TAG_ID } from '../src/constants/tag-classes';
 
@@ -279,4 +279,52 @@ describe('core/src/map/tag-field-editor', () => {
     // An intermediate segment in the wrong form (no `[<index>]` step) must be rejected.
     expect(() => writeTagFieldValue(mapBuf, header, tagIndex, arIndex, 'magazines.rounds recharged', 1)).toThrow(TagFieldEditorError);
   });
+
+  it('clones and adds new reflexive chunks cleanly in tag data', () => {
+    if (!hasSampleMaps(SAMPLES)) return;
+    const hogIndex = tagIndex.entries.findIndex((e) => e.path === 'vehicles\\warthog\\mp_warthog');
+    expect(hogIndex).toBeGreaterThanOrEqual(0);
+
+    const initialResult = readTagFieldValues(mapBuf, header, tagIndex, hogIndex);
+    const seatsField = initialResult.fields.find((f) => f.name === 'seats' && f.kind === 'reflexive') as {
+      children?: readonly { fields: readonly (typeof initialResult.fields)[number][] }[];
+    };
+    expect(seatsField).toBeDefined();
+    const origCount = seatsField.children?.length ?? 0;
+    expect(origCount).toBe(3); // driver, passenger, gunner
+
+    // 1. Clone element 2 (gunner seat) to make a 4th seat
+    const cloneRes = addReflexiveChunk(mapBuf, header, tagIndex, hogIndex, 'seats', 2);
+    expect(cloneRes.newElementIndex).toBe(origCount);
+    expect(cloneRes.newCount).toBe(origCount + 1);
+    expect(cloneRes.buffer.length).toBeGreaterThan(mapBuf.length);
+
+    // Read back fields with the new buffer and header
+    const afterClone = readTagFieldValues(cloneRes.buffer, cloneRes.header, cloneRes.tagIndex, hogIndex);
+    const seatsAfterClone = afterClone.fields.find((f) => f.name === 'seats' && f.kind === 'reflexive') as {
+      children?: readonly { fields: readonly (typeof initialResult.fields)[number][] }[];
+    };
+    expect(seatsAfterClone.children?.length).toBe(origCount + 1);
+    // Cloned seat label should match original seat 2 label
+    const seat2Label = seatsField.children?.[2].fields.find((f) => f.name === 'label')?.value;
+    const seat3Label = seatsAfterClone.children?.[3].fields.find((f) => f.name === 'label')?.value;
+    expect(seat3Label).toBe(seat2Label);
+
+    // Write a new label to the cloned seat
+    writeTagFieldValue(cloneRes.buffer, cloneRes.header, cloneRes.tagIndex, hogIndex, `seats[${origCount}].label`, 'W-rear');
+    const afterLabelEdit = readTagFieldValues(cloneRes.buffer, cloneRes.header, cloneRes.tagIndex, hogIndex);
+    const seat3LabelEdited = (afterLabelEdit.fields.find((f) => f.name === 'seats' && f.kind === 'reflexive') as any)
+      .children?.[3].fields.find((f: any) => f.name === 'label')?.value;
+    expect(seat3LabelEdited).toBe('W-rear');
+
+    // 2. Add an empty (zero-filled) chunk
+    const emptyRes = addReflexiveChunk(cloneRes.buffer, cloneRes.header, cloneRes.tagIndex, hogIndex, 'seats', -1);
+    expect(emptyRes.newCount).toBe(origCount + 2);
+    const afterEmpty = readTagFieldValues(emptyRes.buffer, emptyRes.header, emptyRes.tagIndex, hogIndex);
+    const seatsAfterEmpty = (afterEmpty.fields.find((f) => f.name === 'seats' && f.kind === 'reflexive') as any).children;
+    expect(seatsAfterEmpty?.length).toBe(origCount + 2);
+    const seat4Label = seatsAfterEmpty?.[4].fields.find((f: any) => f.name === 'label')?.value;
+    expect(seat4Label).toBe('');
+  });
 });
+

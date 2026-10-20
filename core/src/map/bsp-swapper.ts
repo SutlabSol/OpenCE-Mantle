@@ -4,6 +4,10 @@ import { inspectCustomEditionMap } from './open-map';
 import type { CacheFileHeader } from './header';
 import type { TagIndex } from './tag-index';
 import { extractBspRenderMesh } from '../render/bsp-geometry';
+import { extractTagSet } from './tag-extractor';
+import type { RandomAccessFile } from './convert/resource-files';
+import { serializeContainer, deserializeContainer } from './container';
+import { planAddInjection, applyAddInjection, type InjectionPlan } from './tag-injector';
 
 export interface BspInfo {
   index: number;
@@ -36,7 +40,12 @@ export interface BspSwapOptions {
   sourceBspIndex: number;
   targetBspIndex?: number;
   stripDobcAndDecals?: boolean;
+  stripDobc?: boolean;
+  stripDecals?: boolean;
   relocateGroundObjects?: boolean;
+  newScenarioName?: string;
+  harvestShaders?: boolean;
+  resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile };
 }
 
 export interface BspSwapResult {
@@ -51,6 +60,8 @@ export interface BspSwapResult {
     strippedDobc: boolean;
     strippedDecals: boolean;
     relocatedSpawns: number;
+    harvestedShaders?: number;
+    harvestedBitmaps?: number;
   };
   error?: string;
 }
@@ -212,6 +223,77 @@ export function bspSwapPreflight(
   };
 }
 
+interface BspDependencyOccurrence {
+  bspRelativeOffset: number;
+  fourcc: number;
+  tagId: number;
+}
+
+function scanBspDependencies(
+  buffer: Buffer,
+  structName: string,
+  fileOffset: number,
+  bspStart: number,
+  bspSize: number,
+  bspAddress: number,
+  out: BspDependencyOccurrence[],
+  visitedOffsets: Set<number>,
+): void {
+  if (fileOffset < bspStart || fileOffset >= bspStart + bspSize || visitedOffsets.has(fileOffset)) return;
+  visitedOffsets.add(fileOffset);
+  let resolved;
+  try {
+    resolved = resolveStruct(structName);
+  } catch {
+    return;
+  }
+  if (fileOffset + resolved.totalSize > buffer.length) return;
+
+  for (const field of resolved.fields) {
+    const fieldOffset = fileOffset + field.offset;
+    if (field.def.type === 'TagDependency') {
+      if (fieldOffset + 16 <= buffer.length) {
+        const fourcc = buffer.readUInt32LE(fieldOffset + 0);
+        const tagId = buffer.readUInt32LE(fieldOffset + 12);
+        if (tagId !== 0xffffffff && tagId !== 0) {
+          out.push({
+            bspRelativeOffset: fieldOffset - bspStart,
+            fourcc,
+            tagId,
+          });
+        }
+      }
+    } else if (field.def.type === 'TagReflexive') {
+      if (fieldOffset + 12 <= buffer.length && field.def.struct) {
+        const count = buffer.readUInt32LE(fieldOffset + 0);
+        const pointerLow = buffer.readUInt32LE(fieldOffset + 4);
+        if (count > 0 && count < 20000 && pointerLow >= bspAddress) {
+          const childArrayOffset = bspStart + (pointerLow - bspAddress);
+          if (childArrayOffset >= bspStart && childArrayOffset < bspStart + bspSize) {
+            try {
+              const childSize = resolveStruct(field.def.struct).totalSize;
+              for (let i = 0; i < count; i++) {
+                scanBspDependencies(
+                  buffer,
+                  field.def.struct,
+                  childArrayOffset + i * childSize,
+                  bspStart,
+                  bspSize,
+                  bspAddress,
+                  out,
+                  visitedOffsets,
+                );
+              }
+            } catch {
+              // ignore unknown child struct
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 /**
  * Performs the BSP swap from source map into target map buffer in memory.
  */
@@ -220,7 +302,8 @@ export function performBspSwap(
   targetBuffer: Buffer,
   options: BspSwapOptions,
 ): BspSwapResult {
-  const targetInspected = inspectCustomEditionMap(targetBuffer);
+  const sourceInspected = inspectCustomEditionMap(sourceBuffer);
+  let targetInspected = inspectCustomEditionMap(targetBuffer);
   if (targetInspected.status !== 'ok') {
     return {
       ok: false,
@@ -240,13 +323,13 @@ export function performBspSwap(
   }
 
   const sourceBsps = getMapBsps(sourceBuffer);
-  const targetBsps = getMapBsps(targetBuffer);
+  let targetBsps = getMapBsps(targetBuffer);
 
   const srcIdx = options.sourceBspIndex ?? 0;
   const dstIdx = options.targetBspIndex ?? 0;
 
   const srcBsp = sourceBsps[srcIdx];
-  const dstBsp = targetBsps[dstIdx];
+  let dstBsp = targetBsps[dstIdx];
 
   if (!srcBsp) {
     return {
@@ -264,6 +347,98 @@ export function performBspSwap(
       summary: { sourceBspName: srcBsp.path, targetBspName: '', oldSize: targetBuffer.length, newSize: targetBuffer.length, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
       error: `Invalid target BSP index ${dstIdx}.`,
     };
+  }
+
+  // Harvest Shaders & Bitmaps from source BSP into target map if requested
+  let harvestedShaders = 0;
+  let harvestedBitmaps = 0;
+  const tagIdMap = new Map<number, number>();
+  const bspDeps: BspDependencyOccurrence[] = [];
+
+  if (sourceInspected.status === 'ok') {
+    const metaPointer = sourceBuffer.readUInt32LE(srcBsp.bspStart + 0);
+    const bspRootOffset = srcBsp.bspStart + (metaPointer - srcBsp.bspAddress);
+    if (bspRootOffset >= srcBsp.bspStart && bspRootOffset < srcBsp.bspStart + srcBsp.bspSize) {
+      scanBspDependencies(
+        sourceBuffer,
+        'ScenarioStructureBSP',
+        bspRootOffset,
+        srcBsp.bspStart,
+        srcBsp.bspSize,
+        srcBsp.bspAddress,
+        bspDeps,
+        new Set<number>(),
+      );
+    }
+
+    if (options.harvestShaders !== false && bspDeps.length > 0) {
+      const srcTagIndex = sourceInspected.tagIndex;
+      const rootIndices = Array.from(
+        new Set(
+          bspDeps
+            .map((d) => d.tagId & 0xffff)
+            .filter(
+              (idx) =>
+                idx < srcTagIndex.entries.length &&
+                srcTagIndex.entries[idx].primaryClassName !== '' &&
+                srcTagIndex.entries[idx].primaryClassName !== 'sbsp' &&
+                srcTagIndex.entries[idx].primaryClassName !== 'scenario_structure_bsp',
+            ),
+        ),
+      );
+
+      if (rootIndices.length > 0) {
+        try {
+          const extracted = extractTagSet(sourceBuffer, sourceInspected.header, srcTagIndex, rootIndices, {
+            resourceFiles: options.resourceFiles,
+          });
+          if (extracted.tags.length > 0) {
+            const containerBuf = serializeContainer(extracted, 'harvested_bsp_assets');
+            const container = deserializeContainer(containerBuf);
+
+            const planResult = planAddInjection(
+              { buffer: targetBuffer, header: targetInspected.header, tagIndex: targetInspected.tagIndex },
+              container,
+              {},
+              { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true },
+            );
+
+            if (planResult.kind !== 'refused') {
+              const plan = planResult as InjectionPlan;
+              targetBuffer = applyAddInjection(
+                targetBuffer,
+                targetInspected.header,
+                targetInspected.tagIndex,
+                container,
+                plan,
+                { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true },
+              );
+              const reinspected = inspectCustomEditionMap(targetBuffer);
+              if (reinspected.status === 'ok') {
+                targetInspected = reinspected;
+                targetBsps = getMapBsps(targetBuffer);
+                dstBsp = targetBsps[dstIdx] ?? dstBsp;
+              }
+
+              for (let i = 0; i < container.tags.length; i++) {
+                const cTag = container.tags[i];
+                if (cTag.group.startsWith('shader')) harvestedShaders++;
+                if (cTag.group === 'bitmap') harvestedBitmaps++;
+
+                const donorTagId = srcTagIndex.entries[cTag.originalIndex]?.tagId ?? (0xe1000000 | cTag.originalIndex);
+                const targetTagId = plan.resolvedTagIdByLocalIndex.get(i);
+                if (targetTagId !== undefined) {
+                  tagIdMap.set(donorTagId, targetTagId);
+                  tagIdMap.set(cTag.originalIndex, targetTagId);
+                }
+              }
+            }
+          }
+        } catch {
+          // If harvesting encounters an issue with any one tag, proceed with geometry swap
+        }
+      }
+    }
   }
 
   const delta = srcBsp.bspSize - dstBsp.bspSize;
@@ -315,18 +490,44 @@ export function performBspSwap(
   out.writeUInt32LE(srcBsp.bspSize, targetEntryOffset + 4);
   out.writeUInt32LE(srcBsp.bspAddress, targetEntryOffset + 8);
 
+  // Rename scenario in header if requested
+  if (options.newScenarioName && options.newScenarioName.trim().length > 0) {
+    const nameStr = options.newScenarioName.trim().slice(0, 31);
+    const nameBuf = Buffer.alloc(32);
+    nameBuf.write(nameStr, 'ascii');
+    nameBuf.copy(out, 0x20);
+  }
+
+  // Rewrite TagDependency tagId fields in the swapped BSP
+  if (tagIdMap.size > 0 && bspDeps.length > 0) {
+    for (const dep of bspDeps) {
+      const mapped = tagIdMap.get(dep.tagId) ?? tagIdMap.get(dep.tagId & 0xffff);
+      if (mapped !== undefined) {
+        const targetOffset = dstBsp.bspStart + dep.bspRelativeOffset;
+        if (targetOffset + 16 <= out.length) {
+          out.writeUInt32LE(mapped, targetOffset + 12);
+        }
+      }
+    }
+  }
+
   // 7. Strip DOBC & Decals if requested
   let strippedDobc = false;
   let strippedDecals = false;
-  if (options.stripDobcAndDecals ?? true) {
-    const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
-    const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBsp.bspAddress);
-    if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 0x260 <= dstBsp.bspStart + srcBsp.bspSize) {
+  const shouldStripDobc = options.stripDobc !== undefined ? options.stripDobc : (options.stripDobcAndDecals ?? true);
+  const shouldStripDecals = options.stripDecals !== undefined ? options.stripDecals : (options.stripDobcAndDecals ?? true);
+
+  const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
+  const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBsp.bspAddress);
+  if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 0x260 <= dstBsp.bspStart + srcBsp.bspSize) {
+    if (shouldStripDobc) {
       // detail objects reflexive at 0x24c: count = 0, pointerLow = 0
       out.writeUInt32LE(0, bspRootFileOffset + 0x24c);
       out.writeUInt32LE(0, bspRootFileOffset + 0x250);
       strippedDobc = true;
+    }
 
+    if (shouldStripDecals) {
       // runtime decals reflexive at 0x258: count = 0, pointerLow = 0
       out.writeUInt32LE(0, bspRootFileOffset + 0x258);
       out.writeUInt32LE(0, bspRootFileOffset + 0x25c);
@@ -384,6 +585,8 @@ export function performBspSwap(
       strippedDobc,
       strippedDecals,
       relocatedSpawns,
+      harvestedShaders,
+      harvestedBitmaps,
     },
   };
 }

@@ -34601,7 +34601,24 @@ async function loadMapAtPath(filePath, options) {
       sendLog("info", `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
       const edition = result.header.mapEdition ?? (result.header.engine === 7 ? "pc" : "ce");
       const settings = getSettings();
-      const versionMaps = settings.versionResourceMaps?.[edition];
+      let versionMaps = settings.versionResourceMaps?.[edition];
+      if ((!versionMaps?.bitmaps || !versionMaps?.sounds) && (edition === "pc" || edition === "halomd")) {
+        const altEdition = edition === "pc" ? "halomd" : "pc";
+        const altMaps = settings.versionResourceMaps?.[altEdition];
+        versionMaps = {
+          bitmaps: versionMaps?.bitmaps ?? altMaps?.bitmaps ?? null,
+          sounds: versionMaps?.sounds ?? altMaps?.sounds ?? null
+        };
+      }
+      if (edition === "mcc" && !versionMaps?.sounds) {
+        const ceSounds = settings.versionResourceMaps?.ce?.sounds;
+        if (ceSounds) {
+          versionMaps = {
+            bitmaps: versionMaps?.bitmaps ?? null,
+            sounds: ceSounds
+          };
+        }
+      }
       if (versionMaps?.bitmaps) {
         setResourceMapPath("bitmaps", versionMaps.bitmaps);
       }
@@ -34766,12 +34783,17 @@ async function extractTagsFlow(request) {
   }
   setLastExtractDir(path9.dirname(resolvedTarget));
   sendLog("info", `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
+  const resourceMapPaths = {};
+  if (settings.resourceMaps?.bitmaps) resourceMapPaths.bitmaps = settings.resourceMaps.bitmaps;
+  if (settings.resourceMaps?.sounds) resourceMapPaths.sounds = settings.resourceMaps.sounds;
+  if (settings.resourceMaps?.loc) resourceMapPaths.loc = settings.resourceMaps.loc;
   const { requestId, promise } = sendWorkerRequest(
     {
       type: "extractTags",
       originalIndices: request.originalIndices,
       outputPath: resolvedTarget,
-      sourceMapName: currentMapScenarioName ?? path9.basename(currentMapPath, ".map")
+      sourceMapName: currentMapScenarioName ?? path9.basename(currentMapPath, ".map"),
+      resourceMapPaths
     },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "extract", stage, percent })
@@ -35022,7 +35044,7 @@ function openRandomAccessFile(filePath) {
     return null;
   }
 }
-function identifyResourceMapFlow(filePath, expectedVersion) {
+function identifyResourceMapFlow(filePath, expectedVersion, expectedKind) {
   const handle = openRandomAccessFile(filePath);
   if (!handle) {
     return {
@@ -35038,7 +35060,31 @@ function identifyResourceMapFlow(filePath, expectedVersion) {
     };
   }
   try {
-    const res = readResourceTable(handle.file, "bitmaps");
+    if (handle.file.size < 16) {
+      return {
+        ok: false,
+        error: `${filePath} is too small to be a resource map.`,
+        filePath,
+        fileSizeBytes: handle.file.size,
+        entryCount: 0,
+        tableOffset: 0,
+        detectedVersion: "unknown",
+        versionMatchConfidence: "mismatch",
+        entries: []
+      };
+    }
+    const header = handle.file.read(0, 16);
+    const type = header.readUInt32LE(0);
+    const tableOffset = header.readUInt32LE(8);
+    let kind = "bitmaps";
+    if (expectedKind) {
+      kind = expectedKind;
+    } else if (type === 2 || path9.basename(filePath).toLowerCase().includes("sounds")) {
+      kind = "sounds";
+    } else {
+      kind = "bitmaps";
+    }
+    const res = readResourceTable(handle.file, kind);
     if (!res.ok) {
       return {
         ok: false,
@@ -35049,32 +35095,56 @@ function identifyResourceMapFlow(filePath, expectedVersion) {
         tableOffset: 0,
         detectedVersion: "unknown",
         versionMatchConfidence: "mismatch",
+        resourceKind: kind,
         entries: []
       };
     }
     const { table } = res;
-    const header = handle.file.read(0, 16);
-    const tableOffset = header.readUInt32LE(8);
-    let detectedVersion = "unknown";
+    const size = handle.file.size;
+    const count = table.entries.length;
     const fpLower = (filePath || "").toLowerCase();
-    if (expectedVersion === "mcc" || fpLower.includes("mcc") || handle.file.size > 170 * 1024 * 1024 && handle.file.size < 220 * 1024 * 1024 && table.entries.length > 1750 && table.entries.length < 1900) {
-      detectedVersion = "mcc";
-    } else if (handle.file.size > 250 * 1024 * 1024 || table.entries.length > 2e3) {
-      detectedVersion = "halomd";
-    } else if (handle.file.size < 25 * 1024 * 1024 || table.entries.length < 1e3) {
-      detectedVersion = "demo";
-    } else {
-      if (expectedVersion === "pc") {
-        detectedVersion = "pc";
-      } else {
+    let detectedVersion = "unknown";
+    let versionNote = void 0;
+    if (kind === "sounds") {
+      if (size > 200 * 1024 * 1024 && size < 235 * 1024 * 1024 && count > 1e4 || count === 11102) {
+        if (expectedVersion === "halomd" || fpLower.includes("halomd")) {
+          detectedVersion = "halomd";
+        } else {
+          detectedVersion = "pc";
+        }
+        versionNote = "Halo PC Retail and HaloMD share identical sounds.map (218 MB, 11,102 entries).";
+      } else if (size > 35 * 1024 * 1024 && size < 50 * 1024 * 1024 && count > 600 && count < 900 || count === 752) {
         detectedVersion = "ce";
+      } else if (size > 65 * 1024 * 1024 && size < 95 * 1024 * 1024 && count > 6500 && count < 8e3 || count === 7192 || fpLower.includes("demo")) {
+        detectedVersion = "demo";
+      } else {
+        detectedVersion = expectedVersion ?? "unknown";
+      }
+    } else {
+      if (expectedVersion === "mcc" || fpLower.includes("mcc") || size > 170 * 1024 * 1024 && size < 220 * 1024 * 1024 && count > 1750 && count < 1900 || count === 1818) {
+        detectedVersion = "mcc";
+      } else if (size > 300 * 1024 * 1024 && size < 335 * 1024 * 1024 && count > 3900 && count < 4300 || count === 4099) {
+        if (expectedVersion === "halomd" || fpLower.includes("halomd")) {
+          detectedVersion = "halomd";
+        } else {
+          detectedVersion = "pc";
+        }
+        versionNote = "Halo PC Retail and HaloMD share virtually identical bitmaps.map (317 MB, 4,099 entries).";
+      } else if (size > 110 * 1024 * 1024 && size < 140 * 1024 * 1024 && count > 1600 && count < 1800 || count === 1706 || size < 40 * 1024 * 1024 && count === 1568) {
+        detectedVersion = "ce";
+      } else if (size < 95 * 1024 * 1024 && (count <= 1300 || fpLower.includes("demo")) || count === 1107) {
+        detectedVersion = "demo";
+      } else {
+        detectedVersion = expectedVersion ?? "unknown";
       }
     }
     let versionMatchConfidence = "likely";
     if (expectedVersion) {
       if (expectedVersion === detectedVersion) {
         versionMatchConfidence = "exact";
-      } else if (expectedVersion === "ce" && detectedVersion === "pc" || expectedVersion === "pc" && detectedVersion === "ce") {
+      } else if (expectedVersion === "pc" && detectedVersion === "halomd" || expectedVersion === "halomd" && detectedVersion === "pc") {
+        versionMatchConfidence = "exact";
+      } else if (expectedVersion === "ce" && (detectedVersion === "pc" || detectedVersion === "halomd") || (expectedVersion === "pc" || expectedVersion === "halomd") && detectedVersion === "ce") {
         versionMatchConfidence = "likely";
       } else {
         versionMatchConfidence = "mismatch";
@@ -35090,10 +35160,12 @@ function identifyResourceMapFlow(filePath, expectedVersion) {
       ok: true,
       filePath,
       fileSizeBytes: handle.file.size,
+      resourceKind: kind,
       entryCount: table.entries.length,
       tableOffset,
       detectedVersion,
       versionMatchConfidence,
+      versionNote,
       entries
     };
   } finally {
@@ -35102,26 +35174,31 @@ function identifyResourceMapFlow(filePath, expectedVersion) {
 }
 function detectDefaultResourceMapPathsFlow() {
   const home = process.env.HOME || process.env.USERPROFILE || "";
+  const cwd = process.cwd();
   const candidates = {
     halomd: [
+      path9.join(cwd, "sample_maps/HaloMD/bitmaps.map"),
       path9.join(home, "Library/Application Support/HaloMD/GameData/Maps/bitmaps.map"),
-      path9.join(process.cwd(), "bitmaps.map")
+      path9.join(cwd, "bitmaps.map")
     ],
     ce: [
+      path9.join(cwd, "sample_maps/custom edition/bitmaps.map"),
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
-      path9.join(process.cwd(), "maps/bitmaps.map")
+      path9.join(cwd, "maps/bitmaps.map")
     ],
     pc: [
+      path9.join(cwd, "sample_maps/PC/bitmaps.map"),
       "C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo\\maps\\bitmaps.map"
     ],
     demo: [
+      path9.join(cwd, "sample_maps/MacDemo/bitmaps.map"),
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map",
       path9.join(home, "Applications/Halo Demo/Maps/bitmaps.map")
     ],
     mcc: [
-      path9.join(process.cwd(), "sample_maps/MCC/bitmaps.map"),
+      path9.join(cwd, "sample_maps/MCC/bitmaps.map"),
       "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
@@ -35256,6 +35333,27 @@ async function updateTagFieldFlow(tagIndex, fieldName, newValue) {
   } catch (err) {
     const e = err;
     sendLog("error", `Field update failed: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
+async function addReflexiveChunkFlow(tagIndex, reflexiveFieldPath, cloneFromIndex) {
+  if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
+  const { promise } = sendWorkerRequest(
+    { type: "addReflexiveChunk", tagIndex, reflexiveFieldPath, cloneFromIndex },
+    sendLog
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      const actionDesc = cloneFromIndex !== void 0 && cloneFromIndex >= 0 ? `Cloned element #${cloneFromIndex} in "${reflexiveFieldPath}" (element #${result.newElementIndex})` : `Added new element to "${reflexiveFieldPath}" (element #${result.newElementIndex})`;
+      sendLog("info", `${actionDesc} in tag #${tagIndex} (in memory). Use File > Save to write changes.`);
+    }
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Add/clone reflexive chunk failed: ${e.message}`);
     return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   }
 }
@@ -35530,8 +35628,14 @@ async function bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspInd
   return await promise;
 }
 async function performBspSwapFlow(sourceFilePath, options) {
+  const settings = getSettings();
+  const resourceMapPaths = {};
+  for (const kind of ["bitmaps", "sounds", "loc"]) {
+    const p = settings.resourceMaps[kind];
+    if (p) resourceMapPaths[kind] = p;
+  }
   const { promise } = sendWorkerRequest(
-    { type: "performBspSwap", sourceFilePath, options },
+    { type: "performBspSwap", sourceFilePath, options, resourceMapPaths },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "performBspSwap", stage, percent })
   );
@@ -35799,7 +35903,7 @@ function buildMenu() {
         { label: "Swap BSP...", click: () => mainWindow?.webContents.send("menu:action", "swap-bsp") },
         { type: "separator" },
         {
-          label: "Identify Bitmaps",
+          label: "Identify Resource Maps",
           submenu: [
             { label: "HaloMD...", click: () => mainWindow?.webContents.send("menu:action", "identify-bitmaps:halomd") },
             { label: "Custom Edition...", click: () => mainWindow?.webContents.send("menu:action", "identify-bitmaps:ce") },
@@ -35847,7 +35951,7 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("resourceMaps:getStatuses", () => getResourceMapStatusesFlow());
   import_electron3.ipcMain.handle(
     "resourceMaps:identify",
-    (_e, filePath, expectedVersion) => identifyResourceMapFlow(filePath, expectedVersion)
+    (_e, filePath, expectedVersion, expectedKind) => identifyResourceMapFlow(filePath, expectedVersion, expectedKind)
   );
   import_electron3.ipcMain.handle("resourceMaps:setPath", (_e, kind, filePath) => {
     setResourceMapPath(kind, filePath);
@@ -35875,6 +35979,10 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("tags:verifyEmbeddedData", () => verifyEmbeddedDataFlow());
   import_electron3.ipcMain.handle("tags:getFields", (_e, tagIndex) => getTagFieldsFlow(tagIndex));
   import_electron3.ipcMain.handle("tags:updateField", (_e, tagIndex, fieldName, newValue) => updateTagFieldFlow(tagIndex, fieldName, newValue));
+  import_electron3.ipcMain.handle(
+    "tags:addReflexiveChunk",
+    (_e, tagIndex, reflexiveFieldPath, cloneFromIndex) => addReflexiveChunkFlow(tagIndex, reflexiveFieldPath, cloneFromIndex)
+  );
   import_electron3.ipcMain.handle("tags:getDependencySlots", (_e, tagIndex) => getDependencySlotsFlow(tagIndex));
   import_electron3.ipcMain.handle("tags:setDependencySlot", (_e, tagIndex, fieldPath, newTagId) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
   import_electron3.ipcMain.handle("tags:getReferencingTags", (_e, tagIndex) => getReferencingTagsFlow(tagIndex));

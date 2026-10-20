@@ -142,6 +142,14 @@ describe('TagEditorDialog', () => {
         newValue: 0.25,
         map: { filePath: 'test.map', modified: true } as any,
       } satisfies UpdateTagFieldResult),
+      addReflexiveChunk: vi.fn().mockResolvedValue({
+        ok: true,
+        tagIndex: 5,
+        reflexiveFieldPath: 'magazines',
+        newElementIndex: 1,
+        newCount: 2,
+        map: { filePath: 'test.map', modified: true } as any,
+      }),
     } as any;
   });
 
@@ -254,4 +262,37 @@ describe('TagEditorDialog', () => {
 
     expect(window.opence.updateTagField).toHaveBeenCalledWith(5, 'magazines[0].rounds recharged', 25);
   });
+
+  it('displays unit badge and tooltip for engineering fields', async () => {
+    render(<TagEditorDialog tag={FOCUSED_TAG} allTags={ALL_TAGS} onClose={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('field-card-autoaim angle')).toBeInTheDocument();
+    });
+
+    // Degree badge rendered next to Angle
+    expect(screen.getByText('°')).toBeInTheDocument();
+    expect(screen.getByTitle('Angle in degrees (°)')).toBeInTheDocument();
+  });
+
+  it('supports adding and cloning reflexive chunks via UI buttons', async () => {
+    renderWithReflexive();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('reflexive-add-magazines')).toBeInTheDocument();
+    });
+
+    // 1. Click "+ Add Element" on block header (which also auto-expands the block)
+    await userEvent.click(screen.getByTestId('reflexive-add-magazines'));
+    expect(window.opence.addReflexiveChunk).toHaveBeenCalledWith(5, 'magazines', -1);
+
+    // 2. The block is auto-expanded, so element 0 and its "Clone" button are visible
+    await waitFor(() => {
+      expect(screen.getByTestId('reflexive-clone-magazines[0]')).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByTestId('reflexive-clone-magazines[0]'));
+    expect(window.opence.addReflexiveChunk).toHaveBeenCalledWith(5, 'magazines', 0);
+  });
 });
+

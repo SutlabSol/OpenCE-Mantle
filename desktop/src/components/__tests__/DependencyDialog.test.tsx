@@ -140,12 +140,14 @@ describe('DependencyDialog', () => {
     render(<DependencyDialog selectedIndices={[30]} onClose={vi.fn()} log={log} />);
 
     await waitFor(() => expect(screen.getByTestId('warning-group-cannot-be-captured-blocked-for-injection')).toBeInTheDocument());
-    for (const [slug, fragment] of [
-      ['cannot-be-captured-blocked-for-injection', 'model geometry part(s)'],
-      ['embedded-data-injection-blocked-while-embedded-relocation-is-disabled', 'embedded in this map'],
-      ['invalid-corrupt-layout-not-walked-blocked-for-injection', 'resolves outside this file'],
-    ]) {
-      expect(screen.getByTestId(`warning-group-${slug}`).textContent).toContain('NEEDS ATTENTION');
+    for (const [slug, fragment, severity] of [
+      ['cannot-be-captured-blocked-for-injection', 'model geometry part(s)', 'blocking'],
+      ['embedded-data-captured-and-relocated-for-injection', 'embedded in this map', 'info'],
+      ['invalid-corrupt-layout-not-walked-blocked-for-injection', 'resolves outside this file', 'blocking'],
+    ] as const) {
+      if (severity === 'blocking') {
+        expect(screen.getByTestId(`warning-group-${slug}`).textContent).toContain('NEEDS ATTENTION');
+      }
       await userEvent.click(screen.getByTestId(`warning-group-toggle-${slug}`));
       expect(screen.getByTestId(`warning-group-items-${slug}`).textContent).toContain(fragment);
     }
@@ -169,7 +171,7 @@ describe('DependencyDialog', () => {
     installMockOpence({ getDependencies: vi.fn(() => Promise.resolve({ ok: true as const, summary })), extractTags });
     render(<DependencyDialog selectedIndices={[30]} onClose={vi.fn()} log={log} />);
 
-    await waitFor(() => expect(screen.getByTestId('warning-group-embedded-data-injection-blocked-while-embedded-relocation-is-disabled')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('warning-group-embedded-data-captured-and-relocated-for-injection')).toBeInTheDocument());
     expect(screen.getAllByTestId(/^warning-group-toggle-/)).toHaveLength(1);
 
     const confirm = screen.getByTestId('dependency-confirm-button');

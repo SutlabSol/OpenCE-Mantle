@@ -37,6 +37,7 @@ __export(map_worker_exports, {
   __setMapFsForTest: () => __setMapFsForTest,
   __setSinkForTest: () => __setSinkForTest,
   describeMapWriteError: () => describeMapWriteError,
+  runAddReflexiveChunk: () => runAddReflexiveChunk,
   runAddScenarioPlacement: () => runAddScenarioPlacement,
   runApplyInject: () => runApplyInject,
   runBatchExtract: () => runBatchExtract,
@@ -34580,6 +34581,15 @@ function findEmbeddedDataFields(resolved, decoded) {
   }
   return out;
 }
+function flagLocation(resolved, fieldName) {
+  const field = resolved.fields.find((f) => f.name === fieldName);
+  if (!field) return null;
+  if (field.def.type === "TagDataOffset") return { offset: field.offset + 4, width: 4, mask: 1 };
+  const bitfield = field.def.type ? getBitfieldDefinition(field.def.type) : void 0;
+  const bit = bitfield?.fields.indexOf("external") ?? -1;
+  if (!bitfield || bit < 0 || bitfield.width !== 16 && bitfield.width !== 32) return null;
+  return { offset: field.offset, width: bitfield.width === 16 ? 2 : 4, mask: 1 << bit };
+}
 var BITMAP_BPP = { a8: 1, y8: 1, ay8: 1, a8y8: 2, r5g6b5: 2, a1r5g5b5: 2, a4r4g4b4: 2, x8r8g8b8: 4, a8r8g8b8: 4, "p8 bump": 1 };
 var BITMAP_BLOCK_BYTES = { dxt1: 8, dxt3: 16, dxt5: 16, bc7: 16 };
 var BITMAP_TYPE_NAMES = ["2d texture", "3d texture", "cube map", "white"];
@@ -34607,9 +34617,9 @@ function validateBitmapAssetSize(decoded, actualSize) {
   }
   const expected = expectedBitmapPixelDataSize(width, height, depth, typeName, formatName, mipmapCount);
   if (expected === null) {
-    return { ok: false, reason: `unsupported/"unused" bitmap format "${formatName}" - size cannot be validated` };
+    return actualSize > 0 && actualSize <= 64 * 1024 * 1024 ? { ok: true } : { ok: false, reason: `unsupported/"unused" bitmap format "${formatName}" - size cannot be validated` };
   }
-  if (expected !== actualSize) {
+  if (actualSize !== expected) {
     return { ok: false, reason: `expected ${expected} bytes from ${width}x${height}x${depth} ${typeName}/${formatName}/${mipmapCount} mips, but the tag's stored pixel data size is ${actualSize}` };
   }
   return { ok: true };
@@ -34989,12 +34999,47 @@ function classifyDependency(dep, fieldPath, tagIndex, localIndexByOriginal, notE
   if (localTagIndex !== void 0) return { fieldPath, group, path: path3, kind: "internal", localTagIndex };
   return { fieldPath, group, path: path3, kind: "unresolved" };
 }
-function captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fieldPath, capture) {
+function captureEmbeddedFields(buffer, resolved, decoded, myBytes, myAbsoluteOffset, fieldPath, capture, resourceFiles, capturedAssetKeys) {
   for (const match of findEmbeddedDataFields(resolved, decoded)) {
     const context = `${fieldPath}.${match.fieldName}`;
-    if (match.external) continue;
     if (match.kind === "unknown") {
       capture.blockedReasons.push(`${context}: unrecognized embedded-data layout, not captured.`);
+      continue;
+    }
+    if (match.external) {
+      const resFile = match.kind === "bitmap" ? resourceFiles?.bitmaps : match.kind === "sound" ? resourceFiles?.sounds : void 0;
+      if (!resFile) {
+        continue;
+      }
+      if (match.fileOffset < 0 || match.size <= 0 || match.fileOffset + match.size > resFile.size) {
+        capture.blockedReasons.push(`${context}: external file offset ${match.fileOffset} + size ${match.size} is out of bounds of ${resFile.label}.`);
+        continue;
+      }
+      if (match.kind === "bitmap") {
+        const validation = validateBitmapAssetSize(decoded, match.size);
+        if (!validation.ok) {
+          capture.blockedReasons.push(`${context}: ${validation.reason}.`);
+          continue;
+        }
+      }
+      const rawData = resFile.read(match.fileOffset, match.size);
+      const dedupeKey2 = `${match.resourceMap}:${match.fileOffset}:${match.size}`;
+      let assetIndex2 = capture.dedupeKeyToAssetIndex.get(dedupeKey2);
+      if (assetIndex2 === void 0) {
+        assetIndex2 = capture.assets.length;
+        capture.assets.push({ kind: match.kind, data: Buffer.from(rawData) });
+        capture.dedupeKeyToAssetIndex.set(dedupeKey2, assetIndex2);
+      }
+      capture.patches.push({ assetIndex: assetIndex2, patchOffset: myAbsoluteOffset + match.patchOffset, patchWidth: match.patchWidth });
+      capturedAssetKeys?.add(`${match.resourceMap}:${match.fileOffset}:${match.size}`);
+      const flag = flagLocation(resolved, match.fieldName);
+      if (flag) {
+        if (flag.width === 2) {
+          myBytes.writeUInt16LE(myBytes.readUInt16LE(flag.offset) & ~flag.mask, flag.offset);
+        } else if (flag.width === 4) {
+          myBytes.writeUInt32LE(myBytes.readUInt32LE(flag.offset) & ~flag.mask, flag.offset);
+        }
+      }
       continue;
     }
     if (match.fileOffset < 0 || match.size <= 0 || match.fileOffset + match.size > buffer.length) {
@@ -35018,10 +35063,10 @@ function captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fiel
     capture.patches.push({ assetIndex, patchOffset: myAbsoluteOffset + match.patchOffset, patchWidth: match.patchWidth });
   }
 }
-function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, embeddedCapture, injectionBlockers, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal) {
+function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, embeddedCapture, injectionBlockers, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal, resourceFiles, capturedAssetKeys) {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(buffer, fileOffset, structName);
-  captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fieldPath, embeddedCapture);
+  captureEmbeddedFields(buffer, resolved, decoded, myBytes, myAbsoluteOffset, fieldPath, embeddedCapture, resourceFiles, capturedAssetKeys);
   const reflexiveWork = [];
   for (const field of resolved.fields) {
     const value = decoded.get(field.name);
@@ -35085,13 +35130,16 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
         reflexiveElementPath(fieldPath, work.fieldName, i),
         tagIndex,
         localIndexByOriginal,
-        notExtractedByOriginal
+        notExtractedByOriginal,
+        resourceFiles,
+        capturedAssetKeys
       );
     }
   }
 }
 function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
   const walk2 = walkDependencies(buffer, header, tagIndex, rootIndices, options);
+  const capturedAssetKeys = /* @__PURE__ */ new Set();
   const extractableWalked = [];
   const notExtracted = [];
   const notExtractedByOriginal = /* @__PURE__ */ new Map();
@@ -35163,7 +35211,9 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
         t.path,
         tagIndex,
         localIndexByOriginal,
-        notExtractedByOriginal
+        notExtractedByOriginal,
+        options.resourceFiles,
+        capturedAssetKeys
       );
       if (embeddedCapture.blockedReasons.length > 0) {
         extraWarnings.push({
@@ -35215,8 +35265,15 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
       };
     }
   });
+  const filteredWarnings = walk2.warnings.filter((w) => {
+    if (w.kind === "externalData" && w.resourceMap && w.fileOffset !== void 0 && w.size !== void 0) {
+      const key = `${w.resourceMap}:${w.fileOffset}:${w.size}`;
+      if (capturedAssetKeys.has(key)) return false;
+    }
+    return true;
+  });
   options.onProgress?.(extractableWalked.length, extractableWalked.length);
-  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...walk2.warnings, ...extraWarnings] };
+  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...filteredWarnings, ...extraWarnings] };
 }
 
 // ../core/src/map/container.ts
@@ -35293,7 +35350,7 @@ function serializeContainer(set, sourceMapName, resourceMapIdentities = {}) {
     warnings: set.warnings,
     resourceMapIdentities,
     externalResourceRefs,
-    externalData: "referenced"
+    externalData: set.tags.some((t) => (t.embeddedRawDataAssets?.length ?? 0) > 0) ? "embedded" : "referenced"
   };
   return Buffer.from(JSON.stringify(container, null, 2), "utf-8");
 }
@@ -35318,7 +35375,7 @@ function deserializeContainer(buffer) {
   }
   parsed.resourceMapIdentities = parsed.resourceMapIdentities ?? {};
   parsed.externalResourceRefs = parsed.externalResourceRefs ?? [];
-  parsed.externalData = "referenced";
+  parsed.externalData = parsed.externalData === "embedded" ? "embedded" : "referenced";
   return parsed;
 }
 
@@ -36686,15 +36743,6 @@ function structMayHoldAssets(name, visiting = /* @__PURE__ */ new Set()) {
   }
   mayHoldAssetsMemo.set(name, result);
   return result;
-}
-function flagLocation(resolved, fieldName) {
-  const field = resolved.fields.find((f) => f.name === fieldName);
-  if (!field) return null;
-  if (field.def.type === "TagDataOffset") return { offset: field.offset + 4, width: 4, mask: 1 };
-  const bitfield = field.def.type ? getBitfieldDefinition(field.def.type) : void 0;
-  const bit = bitfield?.fields.indexOf("external") ?? -1;
-  if (!bitfield || bit < 0 || bitfield.width !== 16 && bitfield.width !== 32) return null;
-  return { offset: field.offset, width: bitfield.width === 16 ? 2 : 4, mask: 1 << bit };
 }
 function scanPerAssetData(view, header, tagIndex) {
   const assets = [];
@@ -39165,6 +39213,61 @@ function writeTagFieldValue(buffer, header, tagIndex, tagEntryIndex, fieldName, 
   encodeValueField(buffer, absOffset, { kind: "basic", type: field.def.type, value: numVal });
   return { fieldName, newValue: numVal, fieldOffset: absOffset };
 }
+function addReflexiveChunk(buffer, header, tagIndex, tagEntryIndex, reflexiveFieldPath, cloneFromIndex = -1) {
+  const { structDef, rootFileOffset } = resolveTagRootOffset(buffer, header, tagIndex, tagEntryIndex);
+  const { field, absOffset: refFieldAbsOffset } = resolveTargetField(buffer, header, tagIndex, structDef, rootFileOffset, reflexiveFieldPath);
+  if (field.def.type !== "TagReflexive" || !field.def.struct) {
+    throw new TagFieldEditorError(`Field "${reflexiveFieldPath}" is not a TagReflexive with a known child struct.`);
+  }
+  const childStruct = resolveStruct(field.def.struct);
+  const elementSize = childStruct.totalSize;
+  const oldCount = buffer.readUInt32LE(refFieldAbsOffset);
+  const oldPointerLow = buffer.readUInt32LE(refFieldAbsOffset + 4);
+  const newCount = oldCount + 1;
+  const newArrayBytes = newCount * elementSize;
+  const pad = (4 - newArrayBytes % 4) % 4;
+  const totalAlloc = newArrayBytes + pad;
+  const newArrayOffset = buffer.length;
+  const newVirtualPointer = tagIndex.baseMemoryAddress + (newArrayOffset - header.tagDataOffset);
+  const out = Buffer.alloc(buffer.length + totalAlloc);
+  buffer.copy(out, 0, 0, buffer.length);
+  let oldChildBase = 0;
+  if (oldCount > 0 && oldPointerLow > 0) {
+    oldChildBase = resolvePointer(oldPointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    if (isRangeInBuffer(oldChildBase, oldCount * elementSize, buffer.length)) {
+      buffer.copy(out, newArrayOffset, oldChildBase, oldChildBase + oldCount * elementSize);
+    }
+  }
+  const newElementOffset = newArrayOffset + oldCount * elementSize;
+  if (cloneFromIndex >= 0 && cloneFromIndex < oldCount && oldChildBase > 0) {
+    buffer.copy(out, newElementOffset, oldChildBase + cloneFromIndex * elementSize, oldChildBase + (cloneFromIndex + 1) * elementSize);
+  } else {
+    out.fill(0, newElementOffset, newElementOffset + elementSize);
+  }
+  out.writeUInt32LE(newCount, refFieldAbsOffset);
+  out.writeUInt32LE(newVirtualPointer, refFieldAbsOffset + 4);
+  out.writeUInt32LE(0, refFieldAbsOffset + 8);
+  const newFileSize = out.length;
+  const newTagDataSize = header.tagDataSize + totalAlloc;
+  out.writeUInt32LE(newFileSize, 8);
+  out.writeUInt32LE(newTagDataSize, 20);
+  const newHeader = {
+    ...header,
+    decompressedFileSize: newFileSize,
+    tagDataSize: newTagDataSize
+  };
+  const newTagIndex = {
+    ...tagIndex
+  };
+  return {
+    buffer: out,
+    header: newHeader,
+    tagIndex: newTagIndex,
+    newElementIndex: oldCount,
+    newElementOffset,
+    newCount
+  };
+}
 
 // ../core/src/map/tag-dependency-swapper.ts
 var MAX_ELEMENTS_PER_REFLEXIVE = 4096;
@@ -40186,6 +40289,21 @@ function getItemCollectionCategory(buffer, header, tagIndex, itmcTagId) {
   }
   return "equipment";
 }
+function resolveActorVariantModelTagId(buffer, header, tagIndex, actvTagId) {
+  if (actvTagId === 4294967295) return 4294967295;
+  const entry = tagIndex.entries[actvTagId & 65535];
+  if (!entry || entry.isExternal) return 4294967295;
+  try {
+    const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    const actvStruct = decodeStruct(buffer, offset, "ActorVariant");
+    const unitDep = actvStruct.get("unit");
+    if (unitDep && unitDep.kind === "dependency" && unitDep.value.tagId !== 4294967295) {
+      return resolveObjectModelTagId(buffer, header, tagIndex, unitDep.value.tagId);
+    }
+  } catch {
+  }
+  return 4294967295;
+}
 function parsePalette(buffer, header, tagIndex, paletteReflexive, structName) {
   if (!paletteReflexive || paletteReflexive.count === 0) return [];
   const palette = [];
@@ -40194,11 +40312,14 @@ function parsePalette(buffer, header, tagIndex, paletteReflexive, structName) {
   for (let i = 0; i < paletteReflexive.count; i++) {
     try {
       const decoded = decodeStruct(buffer, baseOffset + i * structSize, structName);
-      const nameDep = decoded.get("name");
-      const tagId = nameDep && nameDep.kind === "dependency" ? nameDep.value.tagId : 4294967295;
+      const depField = decoded.get("name") || decoded.get("reference");
+      const tagId = depField && depField.kind === "dependency" ? depField.value.tagId : 4294967295;
       const entry = tagId !== 4294967295 ? tagIndex.entries[tagId & 65535] : void 0;
       const path3 = entry ? entry.path : "";
-      const modelTagId = resolveObjectModelTagId(buffer, header, tagIndex, tagId);
+      let modelTagId = resolveObjectModelTagId(buffer, header, tagIndex, tagId);
+      if (modelTagId === 4294967295 && entry && (entry.primaryClassName === "actor_variant" || entry.primaryClassFourCC === 1633907830)) {
+        modelTagId = resolveActorVariantModelTagId(buffer, header, tagIndex, tagId);
+      }
       palette.push({ tagId, path: path3, modelTagId });
     } catch {
       palette.push({ tagId: 4294967295, path: "", modelTagId: 4294967295 });
@@ -40292,7 +40413,13 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
     bipeds: 0,
     weapons: 0,
     equipment: 0,
-    spawns: 0
+    spawns: 0,
+    encounters: 0,
+    firingPositions: 0,
+    triggerVolumes: 0,
+    cutsceneCameras: 0,
+    netgameFlags: 0,
+    decals: 0
   };
   const vehiclePal = parsePalette(
     buffer,
@@ -40603,6 +40730,205 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
       counts.spawns++;
     }
   }
+  const actorPal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get("actor palette")?.value,
+    "ScenarioActorPalette"
+  );
+  const encountersRef = scnr.get("encounters")?.value;
+  if (encountersRef && encountersRef.count > 0) {
+    const encSize = resolveStruct("ScenarioEncounter").totalSize;
+    const encOffset = resolvePointer(encountersRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let eIdx = 0; eIdx < encountersRef.count; eIdx++) {
+      const encItem = decodeStruct(buffer, encOffset + eIdx * encSize, "ScenarioEncounter");
+      const encName = encItem.get("name")?.value || `Encounter ${eIdx}`;
+      const encTeam = encItem.get("team index")?.value ?? 0;
+      const squadsRef = encItem.get("squads")?.value;
+      if (squadsRef && squadsRef.count > 0) {
+        const sqSize = resolveStruct("ScenarioSquad").totalSize;
+        const sqOffset = resolvePointer(squadsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        for (let sIdx = 0; sIdx < squadsRef.count; sIdx++) {
+          const sqItem = decodeStruct(buffer, sqOffset + sIdx * sqSize, "ScenarioSquad");
+          const sqName = sqItem.get("name")?.value || `Squad ${sIdx}`;
+          const sqActorType = sqItem.get("actor type")?.value ?? 0;
+          const pal = actorPal[sqActorType];
+          const startLocsRef = sqItem.get("starting locations")?.value;
+          if (startLocsRef && startLocsRef.count > 0) {
+            const locSize = resolveStruct("ScenarioActorStartingLocation").totalSize;
+            const locOffset = resolvePointer(startLocsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+            for (let lIdx = 0; lIdx < startLocsRef.count; lIdx++) {
+              const locItem = decodeStruct(buffer, locOffset + lIdx * locSize, "ScenarioActorStartingLocation");
+              const pos = locItem.get("position")?.value || [0, 0, 0];
+              const facing = locItem.get("facing")?.value ?? 0;
+              const locActorType = locItem.get("actor type")?.value ?? sqActorType;
+              const activePal = actorPal[locActorType] || pal || { tagId: 4294967295, path: "AI Actor", modelTagId: 4294967295 };
+              placements.push({
+                id: `encounter-${eIdx}-${sIdx}-${lIdx}`,
+                kind: "encounter",
+                paletteIndex: locActorType,
+                nameIndex: -1,
+                objectTagId: activePal.tagId,
+                objectPath: activePal.path || `${encName} / ${sqName}`,
+                modelTagId: activePal.modelTagId,
+                position: pos,
+                rotation: [facing, 0, 0],
+                teamIndex: encTeam,
+                name: `${encName}: ${sqName} [${lIdx}]`
+              });
+              counts.encounters = (counts.encounters || 0) + 1;
+            }
+          }
+        }
+      }
+      const fpRef = encItem.get("firing positions")?.value;
+      if (fpRef && fpRef.count > 0) {
+        const fpSize = resolveStruct("ScenarioFiringPosition").totalSize;
+        const fpOffset = resolvePointer(fpRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        for (let fIdx = 0; fIdx < fpRef.count; fIdx++) {
+          const fpItem = decodeStruct(buffer, fpOffset + fIdx * fpSize, "ScenarioFiringPosition");
+          const pos = fpItem.get("position")?.value || [0, 0, 0];
+          const grpIdx = fpItem.get("group index")?.value ?? 0;
+          const letter = String.fromCharCode(65 + Math.min(25, Math.max(0, grpIdx)));
+          placements.push({
+            id: `firing_position-${eIdx}-${fIdx}`,
+            kind: "firing_position",
+            paletteIndex: grpIdx,
+            nameIndex: -1,
+            objectTagId: 4294967295,
+            objectPath: `Firing Position ${letter}`,
+            modelTagId: 4294967295,
+            position: pos,
+            rotation: [0, 0, 0],
+            teamIndex: encTeam,
+            name: `${encName} Firing Pos ${letter} [${fIdx}]`,
+            groupLetter: letter
+          });
+          counts.firingPositions = (counts.firingPositions || 0) + 1;
+        }
+      }
+    }
+  }
+  const tvRef = scnr.get("trigger volumes")?.value;
+  if (tvRef && tvRef.count > 0) {
+    const tvSize = resolveStruct("ScenarioTriggerVolume").totalSize;
+    const tvOffset = resolvePointer(tvRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < tvRef.count; i++) {
+      const item = decodeStruct(buffer, tvOffset + i * tvSize, "ScenarioTriggerVolume");
+      const name = item.get("name")?.value || `Trigger ${i}`;
+      const corner = item.get("starting corner")?.value || [0, 0, 0];
+      const extents = item.get("ending corner offset")?.value || [1, 1, 1];
+      const forward = item.get("rotation vector forward")?.value || [1, 0, 0];
+      const up = item.get("rotation vector up")?.value || [0, 0, 1];
+      placements.push({
+        id: `trigger_volume-${i}`,
+        kind: "trigger_volume",
+        paletteIndex: i,
+        nameIndex: -1,
+        objectTagId: 4294967295,
+        objectPath: `Trigger: ${name}`,
+        modelTagId: 4294967295,
+        position: corner,
+        rotation: [0, 0, 0],
+        name,
+        extents,
+        forwardVector: forward,
+        upVector: up
+      });
+      counts.triggerVolumes = (counts.triggerVolumes || 0) + 1;
+    }
+  }
+  const camRef = scnr.get("cutscene camera points")?.value;
+  if (camRef && camRef.count > 0) {
+    const camSize = resolveStruct("ScenarioCutsceneCameraPoint").totalSize;
+    const camOffset = resolvePointer(camRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < camRef.count; i++) {
+      const item = decodeStruct(buffer, camOffset + i * camSize, "ScenarioCutsceneCameraPoint");
+      const name = item.get("name")?.value || `Camera ${i}`;
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const orient = item.get("orientation")?.value || [0, 0, 0];
+      const fov = item.get("field of view")?.value ?? 1.22;
+      placements.push({
+        id: `cutscene_camera-${i}`,
+        kind: "cutscene_camera",
+        paletteIndex: i,
+        nameIndex: -1,
+        objectTagId: 4294967295,
+        objectPath: `Cutscene Cam: ${name}`,
+        modelTagId: 4294967295,
+        position: pos,
+        rotation: orient,
+        name,
+        fieldOfView: fov
+      });
+      counts.cutsceneCameras = (counts.cutsceneCameras || 0) + 1;
+    }
+  }
+  const NETGAME_FLAG_TYPES = [
+    "CTF Flag",
+    "CTF Vehicle",
+    "Oddball Spawn",
+    "Race Track",
+    "Race Vehicle",
+    "Vegas Bank",
+    "Teleport Source",
+    "Teleport Dest",
+    "Hill Flag"
+  ];
+  const nfRef = scnr.get("netgame flags")?.value;
+  if (nfRef && nfRef.count > 0) {
+    const nfSize = resolveStruct("ScenarioNetgameFlags").totalSize;
+    const nfOffset = resolvePointer(nfRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < nfRef.count; i++) {
+      const item = decodeStruct(buffer, nfOffset + i * nfSize, "ScenarioNetgameFlags");
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const facing = item.get("facing")?.value ?? 0;
+      const typeIdx = item.get("type")?.value ?? 0;
+      const usageId = item.get("usage id")?.value ?? 0;
+      const flagName = NETGAME_FLAG_TYPES[typeIdx] || `Flag Type ${typeIdx}`;
+      placements.push({
+        id: `netgame_flag-${i}`,
+        kind: "netgame_flag",
+        paletteIndex: typeIdx,
+        nameIndex: -1,
+        objectTagId: 4294967295,
+        objectPath: `${flagName} (${usageId === 0 ? "Red" : usageId === 1 ? "Blue" : usageId})`,
+        modelTagId: 4294967295,
+        position: pos,
+        rotation: [facing, 0, 0],
+        teamIndex: usageId,
+        flagType: flagName,
+        name: `${flagName} #${i}`
+      });
+      counts.netgameFlags = (counts.netgameFlags || 0) + 1;
+    }
+  }
+  const decRef = scnr.get("decals")?.value;
+  if (decRef && decRef.count > 0) {
+    const decSize = resolveStruct("ScenarioDecal").totalSize;
+    const decOffset = resolvePointer(decRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < decRef.count; i++) {
+      const item = decodeStruct(buffer, decOffset + i * decSize, "ScenarioDecal");
+      const pos = item.get("position")?.value || [0, 0, 0];
+      const typeIdx = item.get("decal type")?.value ?? 0;
+      const yaw = item.get("yaw")?.value ?? 0;
+      const pitch = item.get("pitch")?.value ?? 0;
+      placements.push({
+        id: `decal-${i}`,
+        kind: "decal",
+        paletteIndex: typeIdx,
+        nameIndex: -1,
+        objectTagId: 4294967295,
+        objectPath: `Decal ${typeIdx}`,
+        modelTagId: 4294967295,
+        position: pos,
+        rotation: [yaw / 128 * Math.PI, pitch / 128 * Math.PI, 0],
+        name: `Decal #${i}`
+      });
+      counts.decals = (counts.decals || 0) + 1;
+    }
+  }
   return {
     scenarioTagId: tagIndex.scenarioTagId,
     scenarioPath: scenarioEntry.path,
@@ -40634,7 +40960,13 @@ function getScenarioReflexiveInfo(buffer, header, tagIndex, kind) {
     biped: { fieldName: "bipeds", structName: "ScenarioBiped" },
     weapon: { fieldName: "weapons", structName: "ScenarioWeapon" },
     equipment: { fieldName: "netgame equipment", structName: "ScenarioNetgameEquipment" },
-    spawn: { fieldName: "player starting locations", structName: "ScenarioPlayerStartingLocation" }
+    spawn: { fieldName: "player starting locations", structName: "ScenarioPlayerStartingLocation" },
+    encounter: { fieldName: "encounters", structName: "ScenarioEncounter" },
+    firing_position: { fieldName: "encounters", structName: "ScenarioEncounter" },
+    trigger_volume: { fieldName: "trigger volumes", structName: "ScenarioTriggerVolume" },
+    cutscene_camera: { fieldName: "cutscene camera points", structName: "ScenarioCutsceneCameraPoint" },
+    netgame_flag: { fieldName: "netgame flags", structName: "ScenarioNetgameFlags" },
+    decal: { fieldName: "decals", structName: "ScenarioDecal" }
   };
   const { fieldName, structName } = reflexiveNameMap[kind];
   const scnrDef = resolveStruct("Scenario");
@@ -40704,6 +41036,129 @@ function updateScenarioPlacement(buffer, header, tagIndex, placementId, updates)
         buffer.writeUInt32LE(0, itemOffset + 84);
         buffer.writeUInt32LE(0, itemOffset + 88);
         buffer.writeUInt32LE(chosen.tagId, itemOffset + 92);
+      }
+    }
+  } else if (kindStr === "trigger_volume") {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, "trigger_volume");
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range for trigger_volume.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 72);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 76);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 80);
+    }
+  } else if (kindStr === "cutscene_camera") {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, "cutscene_camera");
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range for cutscene_camera.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 40);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 44);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 48);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 52);
+      buffer.writeFloatLE(updates.rotation[1], itemOffset + 56);
+      buffer.writeFloatLE(updates.rotation[2], itemOffset + 60);
+    }
+  } else if (kindStr === "netgame_flag") {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, "netgame_flag");
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range for netgame_flag.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 0);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 4);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 8);
+    }
+    if (updates.rotation) {
+      buffer.writeFloatLE(updates.rotation[0], itemOffset + 12);
+    }
+    if (updates.teamIndex !== void 0) {
+      buffer.writeInt16LE(updates.teamIndex, itemOffset + 18);
+    }
+  } else if (kindStr === "decal") {
+    const info = getScenarioReflexiveInfo(buffer, header, tagIndex, "decal");
+    if (index < 0 || index >= info.count) {
+      throw new Error(`Placement index ${index} out of range for decal.`);
+    }
+    const itemOffset = info.baseOffset + index * info.structSize;
+    if (updates.position) {
+      buffer.writeFloatLE(updates.position[0], itemOffset + 4);
+      buffer.writeFloatLE(updates.position[1], itemOffset + 8);
+      buffer.writeFloatLE(updates.position[2], itemOffset + 12);
+    }
+  } else if (kindStr === "encounter") {
+    const parts = placementId.split("-");
+    const eIdx = parseInt(parts[1], 10);
+    const sIdx = parseInt(parts[2], 10);
+    const lIdx = parseInt(parts[3], 10);
+    const scnrDef = resolveStruct("Scenario");
+    const encField = scnrDef.fields.find((f) => f.name === "encounters");
+    if (encField) {
+      const scenarioOffset = resolveTagDataPointer(
+        tagIndex.entries[tagIndex.scenarioTagId & 65535].tagDataPointerOrResourceIndex,
+        header,
+        tagIndex.baseMemoryAddress
+      );
+      const encRefl = decodeReflexive(buffer, scenarioOffset + encField.offset);
+      if (eIdx >= 0 && eIdx < encRefl.count) {
+        const encBase = resolvePointer(encRefl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        const encItemOffset = encBase + eIdx * resolveStruct("ScenarioEncounter").totalSize;
+        const encItem = decodeStruct(buffer, encItemOffset, "ScenarioEncounter");
+        const squadsRef = encItem.get("squads")?.value;
+        if (squadsRef && sIdx >= 0 && sIdx < squadsRef.count) {
+          const sqBase = resolvePointer(squadsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          const sqItemOffset = sqBase + sIdx * resolveStruct("ScenarioSquad").totalSize;
+          const sqItem = decodeStruct(buffer, sqItemOffset, "ScenarioSquad");
+          const startLocsRef = sqItem.get("starting locations")?.value;
+          if (startLocsRef && lIdx >= 0 && lIdx < startLocsRef.count) {
+            const locBase = resolvePointer(startLocsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+            const locOffset = locBase + lIdx * resolveStruct("ScenarioActorStartingLocation").totalSize;
+            if (updates.position) {
+              buffer.writeFloatLE(updates.position[0], locOffset + 0);
+              buffer.writeFloatLE(updates.position[1], locOffset + 4);
+              buffer.writeFloatLE(updates.position[2], locOffset + 8);
+            }
+            if (updates.rotation) {
+              buffer.writeFloatLE(updates.rotation[0], locOffset + 12);
+            }
+          }
+        }
+      }
+    }
+  } else if (kindStr === "firing_position") {
+    const parts = placementId.split("-");
+    const eIdx = parseInt(parts[1], 10);
+    const fIdx = parseInt(parts[2], 10);
+    const scnrDef = resolveStruct("Scenario");
+    const encField = scnrDef.fields.find((f) => f.name === "encounters");
+    if (encField) {
+      const scenarioOffset = resolveTagDataPointer(
+        tagIndex.entries[tagIndex.scenarioTagId & 65535].tagDataPointerOrResourceIndex,
+        header,
+        tagIndex.baseMemoryAddress
+      );
+      const encRefl = decodeReflexive(buffer, scenarioOffset + encField.offset);
+      if (eIdx >= 0 && eIdx < encRefl.count) {
+        const encBase = resolvePointer(encRefl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        const encItemOffset = encBase + eIdx * resolveStruct("ScenarioEncounter").totalSize;
+        const encItem = decodeStruct(buffer, encItemOffset, "ScenarioEncounter");
+        const fpRef = encItem.get("firing positions")?.value;
+        if (fpRef && fIdx >= 0 && fIdx < fpRef.count) {
+          const fpBase = resolvePointer(fpRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          const fpOffset = fpBase + fIdx * resolveStruct("ScenarioFiringPosition").totalSize;
+          if (updates.position) {
+            buffer.writeFloatLE(updates.position[0], fpOffset + 0);
+            buffer.writeFloatLE(updates.position[1], fpOffset + 4);
+            buffer.writeFloatLE(updates.position[2], fpOffset + 8);
+          }
+        }
       }
     }
   } else {
@@ -41480,8 +41935,62 @@ function bspSwapPreflight(sourceBuffer, targetBuffer, sourceBspIndex = 0, target
     warnings
   };
 }
+function scanBspDependencies(buffer, structName, fileOffset, bspStart, bspSize, bspAddress, out, visitedOffsets) {
+  if (fileOffset < bspStart || fileOffset >= bspStart + bspSize || visitedOffsets.has(fileOffset)) return;
+  visitedOffsets.add(fileOffset);
+  let resolved;
+  try {
+    resolved = resolveStruct(structName);
+  } catch {
+    return;
+  }
+  if (fileOffset + resolved.totalSize > buffer.length) return;
+  for (const field of resolved.fields) {
+    const fieldOffset = fileOffset + field.offset;
+    if (field.def.type === "TagDependency") {
+      if (fieldOffset + 16 <= buffer.length) {
+        const fourcc = buffer.readUInt32LE(fieldOffset + 0);
+        const tagId = buffer.readUInt32LE(fieldOffset + 12);
+        if (tagId !== 4294967295 && tagId !== 0) {
+          out.push({
+            bspRelativeOffset: fieldOffset - bspStart,
+            fourcc,
+            tagId
+          });
+        }
+      }
+    } else if (field.def.type === "TagReflexive") {
+      if (fieldOffset + 12 <= buffer.length && field.def.struct) {
+        const count2 = buffer.readUInt32LE(fieldOffset + 0);
+        const pointerLow = buffer.readUInt32LE(fieldOffset + 4);
+        if (count2 > 0 && count2 < 2e4 && pointerLow >= bspAddress) {
+          const childArrayOffset = bspStart + (pointerLow - bspAddress);
+          if (childArrayOffset >= bspStart && childArrayOffset < bspStart + bspSize) {
+            try {
+              const childSize = resolveStruct(field.def.struct).totalSize;
+              for (let i = 0; i < count2; i++) {
+                scanBspDependencies(
+                  buffer,
+                  field.def.struct,
+                  childArrayOffset + i * childSize,
+                  bspStart,
+                  bspSize,
+                  bspAddress,
+                  out,
+                  visitedOffsets
+                );
+              }
+            } catch {
+            }
+          }
+        }
+      }
+    }
+  }
+}
 function performBspSwap(sourceBuffer, targetBuffer, options) {
-  const targetInspected = inspectCustomEditionMap(targetBuffer);
+  const sourceInspected = inspectCustomEditionMap(sourceBuffer);
+  let targetInspected = inspectCustomEditionMap(targetBuffer);
   if (targetInspected.status !== "ok") {
     return {
       ok: false,
@@ -41500,11 +42009,11 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
     };
   }
   const sourceBsps = getMapBsps(sourceBuffer);
-  const targetBsps = getMapBsps(targetBuffer);
+  let targetBsps = getMapBsps(targetBuffer);
   const srcIdx = options.sourceBspIndex ?? 0;
   const dstIdx = options.targetBspIndex ?? 0;
   const srcBsp = sourceBsps[srcIdx];
-  const dstBsp = targetBsps[dstIdx];
+  let dstBsp = targetBsps[dstIdx];
   if (!srcBsp) {
     return {
       ok: false,
@@ -41520,6 +42029,82 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       summary: { sourceBspName: srcBsp.path, targetBspName: "", oldSize: targetBuffer.length, newSize: targetBuffer.length, delta: 0, strippedDobc: false, strippedDecals: false, relocatedSpawns: 0 },
       error: `Invalid target BSP index ${dstIdx}.`
     };
+  }
+  let harvestedShaders = 0;
+  let harvestedBitmaps = 0;
+  const tagIdMap = /* @__PURE__ */ new Map();
+  const bspDeps = [];
+  if (sourceInspected.status === "ok") {
+    const metaPointer2 = sourceBuffer.readUInt32LE(srcBsp.bspStart + 0);
+    const bspRootOffset = srcBsp.bspStart + (metaPointer2 - srcBsp.bspAddress);
+    if (bspRootOffset >= srcBsp.bspStart && bspRootOffset < srcBsp.bspStart + srcBsp.bspSize) {
+      scanBspDependencies(
+        sourceBuffer,
+        "ScenarioStructureBSP",
+        bspRootOffset,
+        srcBsp.bspStart,
+        srcBsp.bspSize,
+        srcBsp.bspAddress,
+        bspDeps,
+        /* @__PURE__ */ new Set()
+      );
+    }
+    if (options.harvestShaders !== false && bspDeps.length > 0) {
+      const srcTagIndex = sourceInspected.tagIndex;
+      const rootIndices = Array.from(
+        new Set(
+          bspDeps.map((d) => d.tagId & 65535).filter(
+            (idx) => idx < srcTagIndex.entries.length && srcTagIndex.entries[idx].primaryClassName !== "" && srcTagIndex.entries[idx].primaryClassName !== "sbsp" && srcTagIndex.entries[idx].primaryClassName !== "scenario_structure_bsp"
+          )
+        )
+      );
+      if (rootIndices.length > 0) {
+        try {
+          const extracted = extractTagSet(sourceBuffer, sourceInspected.header, srcTagIndex, rootIndices, {
+            resourceFiles: options.resourceFiles
+          });
+          if (extracted.tags.length > 0) {
+            const containerBuf = serializeContainer(extracted, "harvested_bsp_assets");
+            const container = deserializeContainer(containerBuf);
+            const planResult = planAddInjection(
+              { buffer: targetBuffer, header: targetInspected.header, tagIndex: targetInspected.tagIndex },
+              container,
+              {},
+              { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true }
+            );
+            if (planResult.kind !== "refused") {
+              const plan = planResult;
+              targetBuffer = applyAddInjection(
+                targetBuffer,
+                targetInspected.header,
+                targetInspected.tagIndex,
+                container,
+                plan,
+                { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true }
+              );
+              const reinspected = inspectCustomEditionMap(targetBuffer);
+              if (reinspected.status === "ok") {
+                targetInspected = reinspected;
+                targetBsps = getMapBsps(targetBuffer);
+                dstBsp = targetBsps[dstIdx] ?? dstBsp;
+              }
+              for (let i = 0; i < container.tags.length; i++) {
+                const cTag = container.tags[i];
+                if (cTag.group.startsWith("shader")) harvestedShaders++;
+                if (cTag.group === "bitmap") harvestedBitmaps++;
+                const donorTagId = srcTagIndex.entries[cTag.originalIndex]?.tagId ?? 3774873600 | cTag.originalIndex;
+                const targetTagId = plan.resolvedTagIdByLocalIndex.get(i);
+                if (targetTagId !== void 0) {
+                  tagIdMap.set(donorTagId, targetTagId);
+                  tagIdMap.set(cTag.originalIndex, targetTagId);
+                }
+              }
+            }
+          }
+        } catch {
+        }
+      }
+    }
   }
   const delta = srcBsp.bspSize - dstBsp.bspSize;
   const newLength = targetBuffer.length + delta;
@@ -41553,15 +42138,36 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   out.writeUInt32LE(dstBsp.bspStart, targetEntryOffset + 0);
   out.writeUInt32LE(srcBsp.bspSize, targetEntryOffset + 4);
   out.writeUInt32LE(srcBsp.bspAddress, targetEntryOffset + 8);
+  if (options.newScenarioName && options.newScenarioName.trim().length > 0) {
+    const nameStr = options.newScenarioName.trim().slice(0, 31);
+    const nameBuf = Buffer.alloc(32);
+    nameBuf.write(nameStr, "ascii");
+    nameBuf.copy(out, 32);
+  }
+  if (tagIdMap.size > 0 && bspDeps.length > 0) {
+    for (const dep of bspDeps) {
+      const mapped = tagIdMap.get(dep.tagId) ?? tagIdMap.get(dep.tagId & 65535);
+      if (mapped !== void 0) {
+        const targetOffset = dstBsp.bspStart + dep.bspRelativeOffset;
+        if (targetOffset + 16 <= out.length) {
+          out.writeUInt32LE(mapped, targetOffset + 12);
+        }
+      }
+    }
+  }
   let strippedDobc = false;
   let strippedDecals = false;
-  if (options.stripDobcAndDecals ?? true) {
-    const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
-    const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBsp.bspAddress);
-    if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 608 <= dstBsp.bspStart + srcBsp.bspSize) {
+  const shouldStripDobc = options.stripDobc !== void 0 ? options.stripDobc : options.stripDobcAndDecals ?? true;
+  const shouldStripDecals = options.stripDecals !== void 0 ? options.stripDecals : options.stripDobcAndDecals ?? true;
+  const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
+  const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBsp.bspAddress);
+  if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 608 <= dstBsp.bspStart + srcBsp.bspSize) {
+    if (shouldStripDobc) {
       out.writeUInt32LE(0, bspRootFileOffset + 588);
       out.writeUInt32LE(0, bspRootFileOffset + 592);
       strippedDobc = true;
+    }
+    if (shouldStripDecals) {
       out.writeUInt32LE(0, bspRootFileOffset + 600);
       out.writeUInt32LE(0, bspRootFileOffset + 604);
       strippedDecals = true;
@@ -41610,7 +42216,9 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       delta,
       strippedDobc,
       strippedDecals,
-      relocatedSpawns
+      relocatedSpawns,
+      harvestedShaders,
+      harvestedBitmaps
     }
   };
 }
@@ -41806,6 +42414,7 @@ function __setMapFsForTest(ops) {
 }
 var currentMap = null;
 var currentInject = null;
+var modelGeometryCache = /* @__PURE__ */ new Map();
 var cancelledRequests = /* @__PURE__ */ new Set();
 var sink = (msg) => import_worker_threads.parentPort?.postMessage(msg);
 function openResourceReadOnly(file) {
@@ -41938,6 +42547,7 @@ function summarizeOpenMap(map) {
   };
 }
 function reparse(filePath, buffer, modified, diskStat) {
+  modelGeometryCache.clear();
   const inspected = inspectCustomEditionMap(buffer);
   if (inspected.status !== "ok") throw new Error(`The result could not be read back as a Custom Edition map (${inspected.status}).`);
   return { filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified, diskStat };
@@ -41948,6 +42558,7 @@ async function runInspect(task) {
   const diskStat = diskStatOf(task.filePath);
   progress(task.requestId, "Parsing header and tag index", 50);
   currentInject = null;
+  modelGeometryCache.clear();
   const layout = classifyMapLayout(buffer);
   if (layout.kind === "demo" || layout.kind === "retail" && !isConvertibleRetailLayout(layout)) {
     currentMap = null;
@@ -42035,11 +42646,16 @@ function runExtractTags(task) {
   const cancelCtl = makeCancelController(task.requestId);
   const tempPath = `${task.outputPath}.tmp-${(0, import_crypto3.randomUUID)()}`;
   const pendingTemps = [];
+  const resources = openConversionResources({
+    bitmaps: task.resourceMapPaths?.bitmaps,
+    sounds: task.resourceMapPaths?.sounds
+  });
   try {
     if (task.originalIndices.length === 1) {
       progress(task.requestId, "Walking dependencies", 5);
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
         signal: cancelCtl.signal,
+        resourceFiles: resources.files,
         onProgress: (i, total) => progress(task.requestId, `Extracting tag ${i + 1} of ${total}`, 10 + Math.round(i / Math.max(1, total) * 70))
       });
       if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
@@ -42070,7 +42686,8 @@ function runExtractTags(task) {
       const targetFile = path2.join(task.outputPath, filename);
       progress(task.requestId, `Extracting ${i + 1} of ${task.originalIndices.length}: ${entry.path}`, Math.round(i / task.originalIndices.length * 100));
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [origIndex], {
-        signal: cancelCtl.signal
+        signal: cancelCtl.signal,
+        resourceFiles: resources.files
       });
       if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
       const buf = serializeContainer(set, task.sourceMapName);
@@ -42104,6 +42721,7 @@ function runExtractTags(task) {
     }
     handleTaskError(task.requestId, err);
   } finally {
+    resources.close();
     cancelCtl.stop();
     cancelledRequests.delete(task.requestId);
   }
@@ -42125,6 +42743,10 @@ function runBatchExtract(task) {
   let skippedCount = 0;
   let failedCount = 0;
   let totalBytesWritten = 0;
+  const batchResources = openConversionResources({
+    bitmaps: task.resourceMapPaths?.bitmaps,
+    sounds: task.resourceMapPaths?.sounds
+  });
   try {
     fs2.mkdirSync(targetDir, { recursive: true });
     fs2.mkdirSync(stagingDir, { recursive: true });
@@ -42217,7 +42839,8 @@ function runBatchExtract(task) {
       }
       try {
         const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [candidate.index], {
-          signal: cancelCtl.signal
+          signal: cancelCtl.signal,
+          resourceFiles: batchResources.files
         });
         if (cancelledRequests.has(task.requestId)) {
           throw new OperationCancelledError();
@@ -42333,6 +42956,7 @@ function runBatchExtract(task) {
     discardStagedFiles(stagingDir);
     handleTaskError(task.requestId, err);
   } finally {
+    batchResources.close();
     cancelCtl.stop();
     cancelledRequests.delete(task.requestId);
   }
@@ -42578,6 +43202,36 @@ function runUpdateTagField(task) {
     handleTaskError(task.requestId, err);
   }
 }
+function runAddReflexiveChunk(task) {
+  if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
+  try {
+    const res = addReflexiveChunk(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.tagIndex,
+      task.reflexiveFieldPath,
+      task.cloneFromIndex ?? -1
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      tagIndex: task.tagIndex,
+      reflexiveFieldPath: task.reflexiveFieldPath,
+      newElementIndex: res.newElementIndex,
+      newCount: res.newCount,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    if (err instanceof TagFieldEditorError) {
+      return sendError(task.requestId, "TAG_FIELD_ERROR", err.message);
+    }
+    handleTaskError(task.requestId, err);
+  }
+}
 function runGetDependencySlots(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
@@ -42659,7 +43313,6 @@ function runGetScenarioObjects(task) {
     handleTaskError(task.requestId, err);
   }
 }
-var modelGeometryCache = /* @__PURE__ */ new Map();
 function runGetModelGeometry(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
@@ -42810,6 +43463,7 @@ function runSetUnicodeString(task) {
 function runRenameTag(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
+    modelGeometryCache.clear();
     const res = renameTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.newPath);
     currentMap.buffer = res.buffer;
     const reInspected = inspectCustomEditionMap(currentMap.buffer);
@@ -42828,6 +43482,7 @@ function runRenameTag(task) {
 function runDuplicateTag(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
+    modelGeometryCache.clear();
     const res = duplicateTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.newPath);
     currentMap.buffer = res.buffer;
     const reInspected = inspectCustomEditionMap(currentMap.buffer);
@@ -42862,23 +43517,33 @@ async function runBspSwapPreflight(task) {
 async function runPerformBspSwap(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
-    const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
-    const result = performBspSwap(sourceBuffer, currentMap.buffer, task.options);
-    if (!result.ok) {
-      return sendError(task.requestId, "BSP_SWAP_ERROR", result.error || "Failed to perform BSP swap.");
+    const resources = openConversionResources(task.resourceMapPaths ?? {});
+    try {
+      const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
+      const optionsWithResources = {
+        ...task.options,
+        resourceFiles: resources.files
+      };
+      const result = performBspSwap(sourceBuffer, currentMap.buffer, optionsWithResources);
+      if (!result.ok) {
+        return sendError(task.requestId, "BSP_SWAP_ERROR", result.error || "Failed to perform BSP swap.");
+      }
+      currentMap.buffer = result.buffer;
+      const reInspected = inspectCustomEditionMap(currentMap.buffer);
+      if (reInspected.status !== "ok") {
+        return sendError(task.requestId, "BSP_SWAP_ERROR", "Failed to inspect map after BSP swap.");
+      }
+      modelGeometryCache.clear();
+      currentMap.header = reInspected.header;
+      currentMap.tagIndex = reInspected.tagIndex;
+      currentMap.modified = true;
+      sendResult(task.requestId, {
+        ...result,
+        map: summarizeOpenMap(currentMap)
+      });
+    } finally {
+      resources.close();
     }
-    currentMap.buffer = result.buffer;
-    const reInspected = inspectCustomEditionMap(currentMap.buffer);
-    if (reInspected.status !== "ok") {
-      return sendError(task.requestId, "BSP_SWAP_ERROR", "Failed to inspect map after BSP swap.");
-    }
-    currentMap.header = reInspected.header;
-    currentMap.tagIndex = reInspected.tagIndex;
-    currentMap.modified = true;
-    sendResult(task.requestId, {
-      ...result,
-      map: summarizeOpenMap(currentMap)
-    });
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -42903,6 +43568,7 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "batchExtract") runBatchExtract(task);
     else if (task.type === "getTagFields") runGetTagFields(task);
     else if (task.type === "updateTagField") runUpdateTagField(task);
+    else if (task.type === "addReflexiveChunk") runAddReflexiveChunk(task);
     else if (task.type === "getDependencySlots") runGetDependencySlots(task);
     else if (task.type === "setDependencySlot") runSetDependencySlot(task);
     else if (task.type === "getBspRenderMesh") runGetBspRenderMesh(task);
@@ -42940,6 +43606,7 @@ try {
   __setMapFsForTest,
   __setSinkForTest,
   describeMapWriteError,
+  runAddReflexiveChunk,
   runAddScenarioPlacement,
   runApplyInject,
   runBatchExtract,

@@ -36,6 +36,7 @@ import {
   OCETAGS_FORMAT_VERSION,
   readTagFieldValues,
   writeTagFieldValue,
+  addReflexiveChunk,
   TagFieldEditorError,
   listTagDependencySlots,
   setTagDependencySlot,
@@ -95,6 +96,7 @@ import type {
   BatchExtractManifestItem,
   GetTagFieldsResult,
   UpdateTagFieldResult,
+  AddReflexiveChunkResult,
   GetDependencySlotsResult,
   SetDependencySlotResult,
   GetBspRenderMeshResult,
@@ -152,6 +154,7 @@ export function __setMapFsForTest(ops: Partial<typeof realMapFs> | null): void {
 
 let currentMap: LoadedMap | null = null;
 let currentInject: { container: OceContainer; plan: InjectionPlan } | null = null;
+const modelGeometryCache = new Map<string, ModelRenderGeometry>();
 const cancelledRequests = new Set<string>();
 
 type Sink = (msg: { type: string; requestId?: string; [key: string]: unknown }) => void;
@@ -312,6 +315,7 @@ export function summarizeOpenMap(map: LoadedMap): OpenMapSummary {
 
 /** Parses `buffer` as the new held map, or throws (the held map is then left as it was). */
 function reparse(filePath: string, buffer: Buffer, modified: boolean, diskStat: LoadedMap['diskStat']): LoadedMap {
+  modelGeometryCache.clear();
   const inspected = inspectCustomEditionMap(buffer);
   if (inspected.status !== 'ok') throw new Error(`The result could not be read back as a Custom Edition map (${inspected.status}).`);
   return { filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified, diskStat };
@@ -323,6 +327,7 @@ export async function runInspect(task: { requestId: string; filePath: string }) 
   const diskStat = diskStatOf(task.filePath);
   progress(task.requestId, 'Parsing header and tag index', 50);
   currentInject = null;
+  modelGeometryCache.clear();
 
   // Demo maps and non-convertible retail maps are reported as unsupported (with Convert offered for demo).
   // Standard PC retail maps (convertible layout at 0x40440000) are opened and editable directly.
@@ -415,16 +420,27 @@ export function runGetDependencies(task: { requestId: string; originalIndices: n
   }
 }
 
-export function runExtractTags(task: { requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }) {
+export function runExtractTags(task: {
+  requestId: string;
+  originalIndices: number[];
+  outputPath: string;
+  sourceMapName: string;
+  resourceMapPaths?: Partial<Record<ResourceMapKind, string>>;
+}) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   const cancelCtl = makeCancelController(task.requestId);
   const tempPath = `${task.outputPath}.tmp-${randomUUID()}`;
   const pendingTemps: string[] = [];
+  const resources = openConversionResources({
+    bitmaps: task.resourceMapPaths?.bitmaps,
+    sounds: task.resourceMapPaths?.sounds,
+  });
   try {
     if (task.originalIndices.length === 1) {
       progress(task.requestId, 'Walking dependencies', 5);
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
         signal: cancelCtl.signal,
+        resourceFiles: resources.files,
         onProgress: (i, total) => progress(task.requestId, `Extracting tag ${i + 1} of ${total}`, 10 + Math.round((i / Math.max(1, total)) * 70)),
       });
       if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
@@ -461,6 +477,7 @@ export function runExtractTags(task: { requestId: string; originalIndices: numbe
       progress(task.requestId, `Extracting ${i + 1} of ${task.originalIndices.length}: ${entry.path}`, Math.round((i / task.originalIndices.length) * 100));
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [origIndex], {
         signal: cancelCtl.signal,
+        resourceFiles: resources.files,
       });
       if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
       const buf = serializeContainer(set, task.sourceMapName);
@@ -495,6 +512,7 @@ export function runExtractTags(task: { requestId: string; originalIndices: numbe
     }
     handleTaskError(task.requestId, err);
   } finally {
+    resources.close();
     cancelCtl.stop();
     cancelledRequests.delete(task.requestId);
   }
@@ -527,6 +545,10 @@ export function runBatchExtract(task: {
   let skippedCount = 0;
   let failedCount = 0;
   let totalBytesWritten = 0;
+  const batchResources = openConversionResources({
+    bitmaps: task.resourceMapPaths?.bitmaps,
+    sounds: task.resourceMapPaths?.sounds,
+  });
 
   try {
     fs.mkdirSync(targetDir, { recursive: true });
@@ -643,6 +665,7 @@ export function runBatchExtract(task: {
       try {
         const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [candidate.index], {
           signal: cancelCtl.signal,
+          resourceFiles: batchResources.files,
         });
 
         if (cancelledRequests.has(task.requestId)) {
@@ -768,6 +791,7 @@ export function runBatchExtract(task: {
     discardStagedFiles(stagingDir);
     handleTaskError(task.requestId, err);
   } finally {
+    batchResources.close();
     cancelCtl.stop();
     cancelledRequests.delete(task.requestId);
   }
@@ -1071,6 +1095,43 @@ export function runUpdateTagField(task: { requestId: string; tagIndex: number; f
   }
 }
 
+/** Tag Editor: appends or clones a child struct chunk in a TagReflexive array. */
+export function runAddReflexiveChunk(task: {
+  requestId: string;
+  tagIndex: number;
+  reflexiveFieldPath: string;
+  cloneFromIndex?: number;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const res = addReflexiveChunk(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.tagIndex,
+      task.reflexiveFieldPath,
+      task.cloneFromIndex ?? -1,
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      tagIndex: task.tagIndex,
+      reflexiveFieldPath: task.reflexiveFieldPath,
+      newElementIndex: res.newElementIndex,
+      newCount: res.newCount,
+      map: summarizeOpenMap(currentMap),
+    } satisfies AddReflexiveChunkResult);
+  } catch (err) {
+    if (err instanceof TagFieldEditorError) {
+      return sendError(task.requestId, 'TAG_FIELD_ERROR', err.message);
+    }
+    handleTaskError(task.requestId, err);
+  }
+}
+
 /** Dependency Swapper: lists every dependency slot of a tag (nested blocks and null slots included). */
 export function runGetDependencySlots(task: { requestId: string; tagIndex: number }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
@@ -1162,8 +1223,6 @@ export function runGetScenarioObjects(task: { requestId: string }) {
     handleTaskError(task.requestId, err);
   }
 }
-
-const modelGeometryCache = new Map<string, ModelRenderGeometry>();
 
 /** Step 8.5: Extracts 3D model geometry for a gbxmodel tag. */
 export function runGetModelGeometry(task: { requestId: string; modelTagId: number; lod?: number }) {
@@ -1362,6 +1421,7 @@ export function runSetUnicodeString(task: { requestId: string; tagIndex: number;
 export function runRenameTag(task: { requestId: string; tagIndex: number; newPath: string }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    modelGeometryCache.clear();
     const res = renameTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.newPath);
     currentMap.buffer = res.buffer;
     const reInspected = inspectCustomEditionMap(currentMap.buffer);
@@ -1382,6 +1442,7 @@ export function runRenameTag(task: { requestId: string; tagIndex: number; newPat
 export function runDuplicateTag(task: { requestId: string; tagIndex: number; newPath: string }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    modelGeometryCache.clear();
     const res = duplicateTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.newPath);
     currentMap.buffer = res.buffer;
     const reInspected = inspectCustomEditionMap(currentMap.buffer);
@@ -1426,26 +1487,37 @@ export async function runPerformBspSwap(task: {
   requestId: string;
   sourceFilePath: string;
   options: BspSwapOptions;
+  resourceMapPaths?: Partial<Record<ResourceKind, string | undefined>>;
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
-    const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
-    const result = performBspSwap(sourceBuffer, currentMap.buffer, task.options);
-    if (!result.ok) {
-      return sendError(task.requestId, 'BSP_SWAP_ERROR', result.error || 'Failed to perform BSP swap.');
+    const resources = openConversionResources(task.resourceMapPaths ?? {});
+    try {
+      const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
+      const optionsWithResources: BspSwapOptions = {
+        ...task.options,
+        resourceFiles: resources.files,
+      };
+      const result = performBspSwap(sourceBuffer, currentMap.buffer, optionsWithResources);
+      if (!result.ok) {
+        return sendError(task.requestId, 'BSP_SWAP_ERROR', result.error || 'Failed to perform BSP swap.');
+      }
+      currentMap.buffer = result.buffer;
+      const reInspected = inspectCustomEditionMap(currentMap.buffer);
+      if (reInspected.status !== 'ok') {
+        return sendError(task.requestId, 'BSP_SWAP_ERROR', 'Failed to inspect map after BSP swap.');
+      }
+      modelGeometryCache.clear();
+      currentMap.header = reInspected.header;
+      currentMap.tagIndex = reInspected.tagIndex;
+      currentMap.modified = true;
+      sendResult(task.requestId, {
+        ...result,
+        map: summarizeOpenMap(currentMap),
+      });
+    } finally {
+      resources.close();
     }
-    currentMap.buffer = result.buffer;
-    const reInspected = inspectCustomEditionMap(currentMap.buffer);
-    if (reInspected.status !== 'ok') {
-      return sendError(task.requestId, 'BSP_SWAP_ERROR', 'Failed to inspect map after BSP swap.');
-    }
-    currentMap.header = reInspected.header;
-    currentMap.tagIndex = reInspected.tagIndex;
-    currentMap.modified = true;
-    sendResult(task.requestId, {
-      ...result,
-      map: summarizeOpenMap(currentMap),
-    });
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -1471,6 +1543,7 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'batchExtract') runBatchExtract(task);
     else if (task.type === 'getTagFields') runGetTagFields(task);
     else if (task.type === 'updateTagField') runUpdateTagField(task);
+    else if (task.type === 'addReflexiveChunk') runAddReflexiveChunk(task);
     else if (task.type === 'getDependencySlots') runGetDependencySlots(task);
     else if (task.type === 'setDependencySlot') runSetDependencySlot(task);
     else if (task.type === 'getBspRenderMesh') runGetBspRenderMesh(task);

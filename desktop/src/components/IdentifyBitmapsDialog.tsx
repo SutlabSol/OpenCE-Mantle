@@ -14,8 +14,8 @@ const VERSION_METADATA: Record<
     title: string;
     badge: string;
     description: string;
-    expectedEntries: string;
-    expectedSize: string;
+    expectedBitmaps: string;
+    expectedSounds: string;
     notes: string;
   }
 > = {
@@ -23,41 +23,41 @@ const VERSION_METADATA: Record<
     title: 'HaloMD (Mac OS X)',
     badge: 'HaloMD Modded Resource',
     description: 'High-resolution community Mac OS X port assets with extended bitmap containers.',
-    expectedEntries: '~1,568 to 2,500+ entries',
-    expectedSize: '~317 MB (or extended packs)',
-    notes: 'Supports high-res textures, DXT1-5, P8 indexed, and expanded multiplayer network assets.',
+    expectedBitmaps: '4,099 entries (~317.2 MB)',
+    expectedSounds: '11,102 entries (~218.5 MB)',
+    notes: 'Shares identical sounds.map (100% byte-for-byte identical) and bitmaps.map (99.98% match) with PC Retail.',
   },
   ce: {
     title: 'Halo Custom Edition (PC CE)',
     badge: 'Official CE Resource',
-    description: 'Standard 2004 PC Custom Edition shared bitmaps resource container.',
-    expectedEntries: '1,568 entries',
-    expectedSize: '34,369,536 bytes (~34.37 MB)',
-    notes: 'Used by all stock and custom CE maps. Required for external bitmap tags without internal textures.',
+    description: 'Standard 2004 PC Custom Edition shared bitmaps and sounds resource containers.',
+    expectedBitmaps: '1,706 entries (~123.5 MB) [or 1,568 legacy ~34.4 MB]',
+    expectedSounds: '752 entries (~41.7 MB)',
+    notes: 'Used by all stock and custom CE maps. Required for external tags without internal raw data.',
   },
   pc: {
     title: 'Halo PC Retail (1.00 - 1.10)',
     badge: 'Retail PC Resource',
-    description: 'Original 2003 PC Retail release shared bitmaps container.',
-    expectedEntries: '1,568 entries',
-    expectedSize: '34,369,536 bytes (~34.37 MB)',
-    notes: 'Compatible with retail PC single-player campaign and multiplayer maps.',
+    description: 'Original 2003 PC Retail release shared bitmaps and sounds containers.',
+    expectedBitmaps: '4,099 entries (~317.2 MB)',
+    expectedSounds: '11,102 entries (~218.5 MB)',
+    notes: 'Compatible with retail PC single-player campaign and multiplayer maps. Shares data with HaloMD.',
   },
   demo: {
     title: 'Halo Mac / PC Demo',
     badge: 'Trimmed Demo Resource',
-    description: 'Compact standalone demo bitmaps container featuring Blood Gulch multiplayer textures.',
-    expectedEntries: '~400 - 550 entries',
-    expectedSize: '~10 - 15 MB',
-    notes: 'Optimized demo package containing only bloodgulch and basic cyborg/vehicle UI assets.',
+    description: 'Standalone demo resource containers featuring Blood Gulch multiplayer textures and audio.',
+    expectedBitmaps: '1,107 entries (~82.3 MB Mac) / ~500 (~15 MB PC)',
+    expectedSounds: '7,192 entries (~79.9 MB Mac)',
+    notes: 'Optimized demo package containing bloodgulch, basic cyborg, vehicles, and weapon audio/UI assets.',
   },
   mcc: {
     title: 'Halo MCC (Master Chief Collection)',
     badge: 'MCC H1 Resource',
     description: 'Master Chief Collection (Steam / Windows Store) Halo 1 shared bitmaps container.',
-    expectedEntries: '~1,818 entries',
-    expectedSize: '~185.6 MB (185,614,690 bytes)',
-    notes: 'Used by MCC CEA campaign and multiplayer maps. Modern remastered release assets.',
+    expectedBitmaps: '1,818 entries (~185.6 MB)',
+    expectedSounds: 'Custom Edition sounds.map (752 entries ~41.7 MB)',
+    notes: 'MCC Halo 1 maps use MCC bitmaps.map for textures, and fall back to Custom Edition sounds.map for audio resources.',
   },
 };
 
@@ -68,8 +68,11 @@ export default function IdentifyBitmapsDialog({
   openMapScenarioName,
 }: IdentifyBitmapsDialogProps) {
   const [selectedVersion, setSelectedVersion] = useState<HaloBitmapVersion>(initialVersion);
-  const [filePath, setFilePath] = useState<string>('');
+  const [selectedKind, setSelectedKind] = useState<'bitmaps' | 'sounds'>('bitmaps');
+  const [bitmapsPath, setBitmapsPath] = useState<string>('');
+  const [soundsPath, setSoundsPath] = useState<string>('');
   const [activeBitmapsPath, setActiveBitmapsPath] = useState<string | null>(null);
+  const [activeSoundsPath, setActiveSoundsPath] = useState<string | null>(null);
   const [defaultPaths, setDefaultPaths] = useState<Record<HaloBitmapVersion, string | null>>({
     halomd: null,
     ce: null,
@@ -89,6 +92,9 @@ export default function IdentifyBitmapsDialog({
     setSelectedVersion(initialVersion);
   }, [initialVersion]);
 
+  // The active file path based on selectedKind
+  const currentPath = selectedKind === 'bitmaps' ? bitmapsPath : soundsPath;
+
   // Load current settings, version settings, and detected default paths on open
   useEffect(() => {
     if (!isOpen) return;
@@ -98,7 +104,16 @@ export default function IdentifyBitmapsDialog({
     window.opence
       .getVersionSettings?.()
       .then((vs) => {
-        if (vs) setVersionSettings(vs);
+        if (vs) {
+          setVersionSettings(vs);
+          const verMaps = vs[selectedVersion];
+          if (verMaps?.bitmaps) setBitmapsPath(verMaps.bitmaps);
+          if (verMaps?.sounds) {
+            setSoundsPath(verMaps.sounds);
+          } else if (selectedVersion === 'mcc' && vs.ce?.sounds) {
+            setSoundsPath(vs.ce.sounds);
+          }
+        }
       })
       .catch(() => {});
 
@@ -107,8 +122,14 @@ export default function IdentifyBitmapsDialog({
       .then((settings) => {
         if (settings?.resourceMaps?.bitmaps) {
           setActiveBitmapsPath(settings.resourceMaps.bitmaps);
-          if (!filePath) {
-            setFilePath(settings.resourceMaps.bitmaps);
+          if (!bitmapsPath) {
+            setBitmapsPath(settings.resourceMaps.bitmaps);
+          }
+        }
+        if (settings?.resourceMaps?.sounds) {
+          setActiveSoundsPath(settings.resourceMaps.sounds);
+          if (!soundsPath) {
+            setSoundsPath(settings.resourceMaps.sounds);
           }
         }
       })
@@ -120,17 +141,24 @@ export default function IdentifyBitmapsDialog({
         if (defaults) {
           setDefaultPaths(defaults);
           // If no file path selected yet, use default for this version
-          if (!filePath && defaults[selectedVersion]) {
-            setFilePath(defaults[selectedVersion]!);
+          if (!bitmapsPath && defaults[selectedVersion]) {
+            setBitmapsPath(defaults[selectedVersion]!);
+          }
+          if (!soundsPath) {
+            if (selectedVersion === 'mcc' && defaults.ce) {
+              setSoundsPath(defaults.ce.replace(/bitmaps\.map$/i, 'sounds.map'));
+            } else if (defaults[selectedVersion]) {
+              setSoundsPath(defaults[selectedVersion]!.replace(/bitmaps\.map$/i, 'sounds.map'));
+            }
           }
         }
       })
       .catch(() => {});
   }, [isOpen, selectedVersion]);
 
-  // Run identification whenever filePath or selectedVersion changes
+  // Run identification whenever currentPath, selectedVersion, or selectedKind changes
   useEffect(() => {
-    if (!isOpen || !filePath.trim()) {
+    if (!isOpen || !currentPath.trim()) {
       setResult(null);
       return;
     }
@@ -138,9 +166,13 @@ export default function IdentifyBitmapsDialog({
     let active = true;
     setIdentifying(true);
 
-    window.opence
-      .identifyResourceMap?.(filePath.trim(), selectedVersion)
-      .then((res) => {
+    const identifyCall =
+      selectedKind === 'sounds'
+        ? window.opence.identifyResourceMap?.(currentPath.trim(), selectedVersion, 'sounds')
+        : window.opence.identifyResourceMap?.(currentPath.trim(), selectedVersion);
+
+    identifyCall
+      ?.then((res) => {
         if (!active) return;
         setResult(res);
         setIdentifying(false);
@@ -150,7 +182,7 @@ export default function IdentifyBitmapsDialog({
         setResult({
           ok: false,
           error: err instanceof Error ? err.message : String(err),
-          filePath,
+          filePath: currentPath,
           fileSizeBytes: 0,
           entryCount: 0,
           tableOffset: 0,
@@ -164,13 +196,17 @@ export default function IdentifyBitmapsDialog({
     return () => {
       active = false;
     };
-  }, [filePath, selectedVersion, isOpen]);
+  }, [currentPath, selectedVersion, selectedKind, isOpen]);
 
   const handlePickFile = async () => {
     try {
-      const picked = await window.opence.pickConvertResource?.('bitmaps');
+      const picked = await window.opence.pickConvertResource?.(selectedKind);
       if (picked && picked.path) {
-        setFilePath(picked.path);
+        if (selectedKind === 'bitmaps') {
+          setBitmapsPath(picked.path);
+        } else {
+          setSoundsPath(picked.path);
+        }
       }
     } catch {
       // Fallback
@@ -178,17 +214,17 @@ export default function IdentifyBitmapsDialog({
   };
 
   const handleSaveForVersion = async () => {
-    if (!filePath || !result?.ok) return;
+    if (!result?.ok) return;
     try {
-      await window.opence.setVersionSettings?.(selectedVersion, { bitmaps: filePath });
+      const toSave = {
+        bitmaps: bitmapsPath.trim() || null,
+        sounds: soundsPath.trim() || null,
+      };
+      await window.opence.setVersionSettings?.(selectedVersion, toSave);
       setSavedForVersion(true);
       setVersionSettings((prev) => ({
         ...prev,
-        [selectedVersion]: {
-          ...prev[selectedVersion],
-          bitmaps: filePath,
-          sounds: prev[selectedVersion]?.sounds ?? null,
-        },
+        [selectedVersion]: toSave,
       }));
     } catch (err) {
       console.error('Failed to save version resource map:', err);
@@ -196,20 +232,26 @@ export default function IdentifyBitmapsDialog({
   };
 
   const handleApplyAsActive = async () => {
-    if (!filePath || !result?.ok) return;
+    if (!result?.ok) return;
     try {
-      await window.opence.setVersionSettings?.(selectedVersion, { bitmaps: filePath });
-      await window.opence.setResourceMapPath?.('bitmaps', filePath);
-      setActiveBitmapsPath(filePath);
+      const toSave = {
+        bitmaps: bitmapsPath.trim() || null,
+        sounds: soundsPath.trim() || null,
+      };
+      await window.opence.setVersionSettings?.(selectedVersion, toSave);
+      if (bitmapsPath.trim()) {
+        await window.opence.setResourceMapPath?.('bitmaps', bitmapsPath.trim());
+        setActiveBitmapsPath(bitmapsPath.trim());
+      }
+      if (soundsPath.trim()) {
+        await window.opence.setResourceMapPath?.('sounds', soundsPath.trim());
+        setActiveSoundsPath(soundsPath.trim());
+      }
       setAppliedActive(true);
       setSavedForVersion(true);
       setVersionSettings((prev) => ({
         ...prev,
-        [selectedVersion]: {
-          ...prev[selectedVersion],
-          bitmaps: filePath,
-          sounds: prev[selectedVersion]?.sounds ?? null,
-        },
+        [selectedVersion]: toSave,
       }));
     } catch (err) {
       console.error('Failed to set active resource map:', err);
@@ -219,7 +261,11 @@ export default function IdentifyBitmapsDialog({
   const handleUseDefault = () => {
     const def = defaultPaths[selectedVersion];
     if (def) {
-      setFilePath(def);
+      if (selectedKind === 'bitmaps') {
+        setBitmapsPath(def);
+      } else {
+        setSoundsPath(def.replace(/bitmaps\.map$/i, 'sounds.map'));
+      }
     }
   };
 
@@ -233,7 +279,9 @@ export default function IdentifyBitmapsDialog({
   if (!isOpen) return null;
 
   const meta = VERSION_METADATA[selectedVersion];
-  const isActiveConfigured = activeBitmapsPath && filePath && activeBitmapsPath.toLowerCase() === filePath.toLowerCase();
+  const isActiveConfigured =
+    (selectedKind === 'bitmaps' && activeBitmapsPath && bitmapsPath && activeBitmapsPath.toLowerCase() === bitmapsPath.toLowerCase()) ||
+    (selectedKind === 'sounds' && activeSoundsPath && soundsPath && activeSoundsPath.toLowerCase() === soundsPath.toLowerCase());
 
   return (
     <div
@@ -252,7 +300,7 @@ export default function IdentifyBitmapsDialog({
       <div
         data-testid="identify-bitmaps-dialog"
         style={{
-          width: 720,
+          width: 760,
           maxWidth: '92vw',
           maxHeight: '90vh',
           background: 'var(--bg-panel)',
@@ -277,7 +325,7 @@ export default function IdentifyBitmapsDialog({
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 16, fontWeight: 700 }}>Identify Bitmaps</span>
+            <span style={{ fontSize: 16, fontWeight: 700 }}>Identify Resource Maps</span>
             <span
               style={{
                 fontSize: 10.5,
@@ -328,7 +376,7 @@ export default function IdentifyBitmapsDialog({
             ] as const
           ).map(([ver, label]) => {
             const isSelected = selectedVersion === ver;
-            const hasConfigured = Boolean(versionSettings[ver]?.bitmaps);
+            const hasConfigured = Boolean(versionSettings[ver]?.bitmaps || versionSettings[ver]?.sounds);
             return (
               <button
                 key={ver}
@@ -336,13 +384,19 @@ export default function IdentifyBitmapsDialog({
                 onClick={() => {
                   setSelectedVersion(ver);
                   setSavedForVersion(false);
-                  const configured = versionSettings[ver]?.bitmaps;
-                  if (configured) {
-                    setFilePath(configured);
+                  const configuredB = versionSettings[ver]?.bitmaps;
+                  const configuredS = versionSettings[ver]?.sounds;
+                  if (configuredB) {
+                    setBitmapsPath(configuredB);
                   } else {
                     const def = defaultPaths[ver];
-                    if (def) setFilePath(def);
-                    else setFilePath('');
+                    setBitmapsPath(def || '');
+                  }
+                  if (configuredS) {
+                    setSoundsPath(configuredS);
+                  } else {
+                    const def = defaultPaths[ver];
+                    setSoundsPath(def ? def.replace(/bitmaps\.map$/i, 'sounds.map') : '');
                   }
                 }}
                 style={{
@@ -379,7 +433,7 @@ export default function IdentifyBitmapsDialog({
         </div>
 
         {/* Dialog Body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
           {/* Version Profile Overview */}
           <div
             style={{
@@ -395,25 +449,101 @@ export default function IdentifyBitmapsDialog({
           >
             <div style={{ fontWeight: 600, color: 'var(--accent-cyan)' }}>{meta.title} Specification</div>
             <div style={{ color: 'var(--text-secondary)' }}>{meta.description}</div>
-            <div style={{ display: 'flex', gap: 20, marginTop: 4, color: 'var(--text-dim)', fontSize: 11 }}>
-              <span>Expected: <strong style={{ color: 'var(--text-primary)' }}>{meta.expectedEntries}</strong></span>
-              <span>Size: <strong style={{ color: 'var(--text-primary)' }}>{meta.expectedSize}</strong></span>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 4, color: 'var(--text-dim)', fontSize: 11 }}>
+              <div>Bitmaps Expected: <strong style={{ color: 'var(--text-primary)' }}>{meta.expectedBitmaps}</strong></div>
+              <div>Sounds Expected: <strong style={{ color: 'var(--text-primary)' }}>{meta.expectedSounds}</strong></div>
             </div>
             <div style={{ color: 'var(--text-dim)', fontSize: 10.5, fontStyle: 'italic', marginTop: 2 }}>{meta.notes}</div>
           </div>
 
-          {/* File Path Picker Row */}
+          {/* Compatibility Note Box */}
+          <div
+            data-testid="identify-compatibility-note"
+            style={{
+              background: 'rgba(56, 189, 248, 0.06)',
+              border: '1px solid rgba(56, 189, 248, 0.25)',
+              borderRadius: 6,
+              padding: '10px 14px',
+              fontSize: 11.5,
+              lineHeight: 1.5,
+              color: 'var(--text-secondary)',
+            }}
+          >
+            <div style={{ fontWeight: 700, color: 'var(--accent-cyan)', marginBottom: 2 }}>
+              ℹ Edition Resource Compatibility & Notes
+            </div>
+            <div style={{ fontSize: 11 }}>
+              • <strong>Halo PC Retail & HaloMD</strong> share <strong>100% identical</strong> <code>sounds.map</code> (218.46 MB, 11,102 entries) and <strong>99.98% identical</strong> <code>bitmaps.map</code> (317.20 MB, 4,099 entries). Both can be used interchangeably for extraction, BSP swaps, and rendering.
+            </div>
+            <div style={{ fontSize: 11, marginTop: 2 }}>
+              • <strong>Halo Custom Edition</strong> uses dedicated maps (123.55 MB bitmaps with 1,706 entries; 41.72 MB sounds with 752 entries).
+            </div>
+            <div style={{ fontSize: 11, marginTop: 2 }}>
+              • <strong>Halo Mac Demo</strong> uses streamlined demo resource files (82.35 MB bitmaps, 1,107 entries; 79.92 MB sounds, 7,192 entries) tailored for Blood Gulch.
+            </div>
+          </div>
+
+          {/* Resource Map Kind Toggle */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
+              Resource Type to Inspect:
+            </span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                type="button"
+                data-testid="identify-kind-bitmaps-btn"
+                onClick={() => setSelectedKind('bitmaps')}
+                style={{
+                  padding: '5px 12px',
+                  borderRadius: 4,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  background: selectedKind === 'bitmaps' ? 'var(--accent-cyan)' : 'var(--bg-main)',
+                  color: selectedKind === 'bitmaps' ? '#000' : 'var(--text-primary)',
+                  border: `1px solid ${selectedKind === 'bitmaps' ? 'var(--accent-cyan)' : 'var(--border)'}`,
+                }}
+              >
+                🖼 Bitmaps (bitmaps.map)
+              </button>
+              <button
+                type="button"
+                data-testid="identify-kind-sounds-btn"
+                onClick={() => setSelectedKind('sounds')}
+                style={{
+                  padding: '5px 12px',
+                  borderRadius: 4,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  background: selectedKind === 'sounds' ? 'var(--accent-cyan)' : 'var(--bg-main)',
+                  color: selectedKind === 'sounds' ? '#000' : 'var(--text-primary)',
+                  border: `1px solid ${selectedKind === 'sounds' ? 'var(--accent-cyan)' : 'var(--border)'}`,
+                }}
+              >
+                🔊 Sounds (sounds.map)
+              </button>
+            </div>
+          </div>
+
+          {/* Active File Path Picker Row */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <label style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-              Resource File Path (bitmaps.map)
+              {selectedKind === 'bitmaps' ? 'Bitmaps Resource Map (bitmaps.map)' : 'Sounds Resource Map (sounds.map)'}
             </label>
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 data-testid="identify-bitmaps-path-input"
                 type="text"
-                value={filePath}
-                onChange={(e) => setFilePath(e.target.value)}
-                placeholder="Path to bitmaps.map..."
+                value={currentPath}
+                onChange={(e) => {
+                  if (selectedKind === 'bitmaps') {
+                    setBitmapsPath(e.target.value);
+                  } else {
+                    setSoundsPath(e.target.value);
+                  }
+                }}
+                placeholder={`Path to ${selectedKind}.map...`}
                 style={{
                   flex: 1,
                   background: 'var(--bg-main)',
@@ -467,7 +597,7 @@ export default function IdentifyBitmapsDialog({
           {/* Analysis & Identification Results Card */}
           {identifying && (
             <div style={{ padding: 20, textAlign: 'center', color: 'var(--accent-cyan)', fontSize: 13 }}>
-              Inspecting resource table and bitmap headers...
+              Inspecting resource table and headers...
             </div>
           )}
 
@@ -496,7 +626,9 @@ export default function IdentifyBitmapsDialog({
                     }}
                   />
                   <span style={{ fontWeight: 700, fontSize: 13, color: result.ok ? '#81c784' : '#e57373' }}>
-                    {result.ok ? 'Valid Halo Bitmaps Resource Map' : 'Invalid or Unreadable File'}
+                    {result.ok
+                      ? `Valid Halo ${result.resourceKind === 'sounds' ? 'Sounds' : 'Bitmaps'} Resource Map`
+                      : 'Invalid or Unreadable File'}
                   </span>
                 </div>
 
@@ -521,12 +653,18 @@ export default function IdentifyBitmapsDialog({
                 )}
               </div>
 
+              {result.versionNote && (
+                <div style={{ fontSize: 11, color: '#38bdf8', fontStyle: 'italic' }}>
+                  ℹ {result.versionNote}
+                </div>
+              )}
+
               {result.ok ? (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, fontSize: 11.5 }}>
                   <div style={{ background: 'var(--bg-main)', padding: '8px 10px', borderRadius: 4 }}>
                     <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase' }}>Entries Count</div>
                     <div style={{ fontWeight: 700, fontSize: 13, fontFamily: 'var(--mono-font)' }}>
-                      {result.entryCount.toLocaleString()} bitmaps
+                      {result.entryCount.toLocaleString()} {result.resourceKind === 'sounds' ? 'sounds' : 'bitmaps'}
                     </div>
                   </div>
                   <div style={{ background: 'var(--bg-main)', padding: '8px 10px', borderRadius: 4 }}>
@@ -560,7 +698,7 @@ export default function IdentifyBitmapsDialog({
                   }}
                 >
                   <span style={{ color: 'var(--accent-cyan)' }}>Map &quot;{openMapScenarioName}&quot;:</span>
-                  <span>Resource table verified ready for tag extraction and 3D viewport rendering.</span>
+                  <span>Resource table verified ready for tag extraction, BSP swaps, and rendering.</span>
                 </div>
               )}
             </div>
@@ -571,7 +709,7 @@ export default function IdentifyBitmapsDialog({
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-                  Contained Bitmaps ({result.entries.length.toLocaleString()})
+                  Contained Resources ({result.entries.length.toLocaleString()})
                 </span>
                 <input
                   data-testid="identify-bitmaps-search-input"
@@ -628,7 +766,7 @@ export default function IdentifyBitmapsDialog({
                             whiteSpace: 'nowrap',
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
-                            maxWidth: 360,
+                            maxWidth: 380,
                           }}
                           title={e.name}
                         >
@@ -662,14 +800,14 @@ export default function IdentifyBitmapsDialog({
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11 }}>
             {isActiveConfigured || appliedActive ? (
-              <span style={{ color: '#81c784', fontWeight: 600 }}>✓ Configured as Active bitmaps.map</span>
+              <span style={{ color: '#81c784', fontWeight: 600 }}>✓ Configured as Active {selectedKind}.map</span>
             ) : (
-              <span style={{ color: 'var(--text-dim)' }}>Configure this file to enable textures for this edition.</span>
+              <span style={{ color: 'var(--text-dim)' }}>Configure this file to enable {selectedKind} for this edition.</span>
             )}
           </div>
 
           <div style={{ display: 'flex', gap: 8 }}>
-            {filePath && result?.ok && (
+            {currentPath && result?.ok && (
               <button
                 data-testid="identify-bitmaps-save-version-btn"
                 onClick={handleSaveForVersion}

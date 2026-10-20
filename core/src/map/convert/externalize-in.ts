@@ -3,7 +3,7 @@ import type { TagIndex } from '../tag-index';
 import { resolveTagDataPointer } from '../tag-index';
 import { decodeStruct, getBitfieldDefinition, getGroupStructName, isRangeInBuffer, resolvePointer, resolveStruct } from '../definitions/engine';
 import type { ResolvedStruct } from '../definitions/engine';
-import { findEmbeddedDataFields, validateBitmapAssetSize } from '../embedded-data-fields';
+import { findEmbeddedDataFields, validateBitmapAssetSize, flagLocation } from '../embedded-data-fields';
 import { appendToRawDataRegion, rawDataRegionLayoutOf } from '../raw-data-region';
 import type { RawDataChunk } from '../raw-data-region';
 import { rangeKey } from './resource-files';
@@ -82,18 +82,6 @@ function structMayHoldAssets(name: string, visiting = new Set<string>()): boolea
   }
   mayHoldAssetsMemo.set(name, result);
   return result;
-}
-
-/** Where the external flag of a matched field is, from the field's own definition. */
-function flagLocation(resolved: ResolvedStruct, fieldName: string): { offset: number; width: 2 | 4; mask: number } | null {
-  const field = resolved.fields.find((f) => f.name === fieldName);
-  if (!field) return null;
-  // TagDataOffset: size(+0) external word(+4) file offset(+8); only bit 0 means external.
-  if (field.def.type === 'TagDataOffset') return { offset: field.offset + 4, width: 4, mask: 0x1 };
-  const bitfield = field.def.type ? getBitfieldDefinition(field.def.type) : undefined;
-  const bit = bitfield?.fields.indexOf('external') ?? -1;
-  if (!bitfield || bit < 0 || (bitfield.width !== 16 && bitfield.width !== 32)) return null;
-  return { offset: field.offset, width: bitfield.width === 16 ? 2 : 4, mask: 1 << bit };
 }
 
 /**

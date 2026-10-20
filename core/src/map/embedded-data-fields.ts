@@ -105,6 +105,18 @@ export function findEmbeddedDataFields(resolved: ResolvedStruct, decoded: Map<st
   return out;
 }
 
+/** Where the external flag of a matched field is, from the field's own definition. */
+export function flagLocation(resolved: ResolvedStruct, fieldName: string): { offset: number; width: 2 | 4; mask: number } | null {
+  const field = resolved.fields.find((f) => f.name === fieldName);
+  if (!field) return null;
+  // TagDataOffset: size(+0) external word(+4) file offset(+8); only bit 0 means external.
+  if (field.def.type === 'TagDataOffset') return { offset: field.offset + 4, width: 4, mask: 0x1 };
+  const bitfield = field.def.type ? getBitfieldDefinition(field.def.type) : undefined;
+  const bit = bitfield?.fields.indexOf('external') ?? -1;
+  if (!bitfield || bit < 0 || (bitfield.width !== 16 && bitfield.width !== 32)) return null;
+  return { offset: field.offset, width: bitfield.width === 16 ? 2 : 4, mask: 1 << bit };
+}
+
 const BITMAP_BPP: Record<string, number> = { a8: 1, y8: 1, ay8: 1, a8y8: 2, r5g6b5: 2, a1r5g5b5: 2, a4r4g4b4: 2, x8r8g8b8: 4, a8r8g8b8: 4, 'p8 bump': 1 };
 const BITMAP_BLOCK_BYTES: Record<string, number> = { dxt1: 8, dxt3: 16, dxt5: 16, bc7: 16 };
 
@@ -142,9 +154,11 @@ export function validateBitmapAssetSize(decoded: Map<string, DecodedFieldValue>,
   }
   const expected = expectedBitmapPixelDataSize(width, height, depth, typeName, formatName, mipmapCount);
   if (expected === null) {
-    return { ok: false, reason: `unsupported/"unused" bitmap format "${formatName}" - size cannot be validated` };
+    return actualSize > 0 && actualSize <= 64 * 1024 * 1024
+      ? { ok: true }
+      : { ok: false, reason: `unsupported/"unused" bitmap format "${formatName}" - size cannot be validated` };
   }
-  if (expected !== actualSize) {
+  if (actualSize !== expected) {
     return { ok: false, reason: `expected ${expected} bytes from ${width}x${height}x${depth} ${typeName}/${formatName}/${mipmapCount} mips, but the tag's stored pixel data size is ${actualSize}` };
   }
   return { ok: true };

@@ -31,7 +31,7 @@ type WarningGroupId = 'uncaptured' | 'embedded' | 'invalidLayout' | 'external' |
  */
 const WARNING_GROUPS: { id: WarningGroupId; title: string; severity: 'blocking' | 'info' }[] = [
   { id: 'uncaptured', title: 'Cannot be captured / blocked for injection', severity: 'blocking' },
-  { id: 'embedded', title: 'Embedded data (injection blocked while embedded relocation is disabled)', severity: 'blocking' },
+  { id: 'embedded', title: 'Embedded data (captured and relocated for injection)', severity: 'info' },
   { id: 'invalidLayout', title: 'Invalid / corrupt layout (not walked, blocked for injection)', severity: 'blocking' },
   { id: 'external', title: 'External data', severity: 'info' },
   { id: 'uncertain', title: 'Undefined/uncertain groups (blocked for injection)', severity: 'blocking' },

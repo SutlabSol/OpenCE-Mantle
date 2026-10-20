@@ -118,8 +118,8 @@ export interface OceContainer {
   /** Fingerprints of the resource maps configured on the extracting machine, if any (v2+). */
   resourceMapIdentities: Partial<Record<'bitmaps' | 'sounds' | 'loc', ResourceMapIdentity>>;
   externalResourceRefs: ExternalResourceRef[];
-  /** Reserved for a future version; always "referenced" today (no asset bytes are embedded in the container - see class doc). */
-  externalData: 'referenced';
+  /** 'embedded' when asset bytes are embedded in the container, 'referenced' when external resource map data is referenced. */
+  externalData: 'referenced' | 'embedded';
 }
 
 export class ContainerFormatError extends Error {
@@ -202,7 +202,7 @@ export function serializeContainer(
     warnings: set.warnings,
     resourceMapIdentities,
     externalResourceRefs,
-    externalData: 'referenced',
+    externalData: set.tags.some((t) => (t.embeddedRawDataAssets?.length ?? 0) > 0) ? 'embedded' : 'referenced',
   };
   return Buffer.from(JSON.stringify(container, null, 2), 'utf-8');
 }
@@ -233,6 +233,6 @@ export function deserializeContainer(buffer: Buffer): OceContainer {
   // v1 containers have none of these fields; default them so callers never need a version check.
   parsed.resourceMapIdentities = parsed.resourceMapIdentities ?? {};
   parsed.externalResourceRefs = parsed.externalResourceRefs ?? [];
-  parsed.externalData = 'referenced';
+  parsed.externalData = parsed.externalData === 'embedded' ? 'embedded' : 'referenced';
   return parsed;
 }

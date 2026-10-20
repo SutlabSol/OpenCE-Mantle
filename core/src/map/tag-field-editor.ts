@@ -530,3 +530,97 @@ export function writeTagFieldValue(
   encodeValueField(buffer, absOffset, { kind: 'basic', type: field.def.type, value: numVal });
   return { fieldName, newValue: numVal, fieldOffset: absOffset };
 }
+
+export interface AddReflexiveChunkResult {
+  buffer: Buffer;
+  header: CacheFileHeader;
+  tagIndex: TagIndex;
+  newElementIndex: number;
+  newElementOffset: number;
+  newCount: number;
+}
+
+/**
+ * Appends a new element chunk to a TagReflexive array in the map buffer.
+ * If `cloneFromIndex` is >= 0 and < oldCount, copies the existing element's fields;
+ * otherwise zero-fills the new chunk. Allocates at the end of tag data and updates
+ * the reflexive's count and pointer.
+ */
+export function addReflexiveChunk(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  tagEntryIndex: number,
+  reflexiveFieldPath: string,
+  cloneFromIndex: number = -1,
+): AddReflexiveChunkResult {
+  const { structDef, rootFileOffset } = resolveTagRootOffset(buffer, header, tagIndex, tagEntryIndex);
+  const { field, absOffset: refFieldAbsOffset } = resolveTargetField(buffer, header, tagIndex, structDef, rootFileOffset, reflexiveFieldPath);
+
+  if (field.def.type !== 'TagReflexive' || !field.def.struct) {
+    throw new TagFieldEditorError(`Field "${reflexiveFieldPath}" is not a TagReflexive with a known child struct.`);
+  }
+
+  const childStruct = resolveStruct(field.def.struct);
+  const elementSize = childStruct.totalSize;
+
+  const oldCount = buffer.readUInt32LE(refFieldAbsOffset);
+  const oldPointerLow = buffer.readUInt32LE(refFieldAbsOffset + 4);
+  const newCount = oldCount + 1;
+
+  const newArrayBytes = newCount * elementSize;
+  const pad = (4 - (newArrayBytes % 4)) % 4;
+  const totalAlloc = newArrayBytes + pad;
+
+  const newArrayOffset = buffer.length;
+  const newVirtualPointer = tagIndex.baseMemoryAddress + (newArrayOffset - header.tagDataOffset);
+
+  const out = Buffer.alloc(buffer.length + totalAlloc);
+  buffer.copy(out, 0, 0, buffer.length);
+
+  // Copy existing elements if any
+  let oldChildBase = 0;
+  if (oldCount > 0 && oldPointerLow > 0) {
+    oldChildBase = resolvePointer(oldPointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    if (isRangeInBuffer(oldChildBase, oldCount * elementSize, buffer.length)) {
+      buffer.copy(out, newArrayOffset, oldChildBase, oldChildBase + oldCount * elementSize);
+    }
+  }
+
+  const newElementOffset = newArrayOffset + oldCount * elementSize;
+  if (cloneFromIndex >= 0 && cloneFromIndex < oldCount && oldChildBase > 0) {
+    buffer.copy(out, newElementOffset, oldChildBase + cloneFromIndex * elementSize, oldChildBase + (cloneFromIndex + 1) * elementSize);
+  } else {
+    out.fill(0, newElementOffset, newElementOffset + elementSize);
+  }
+
+  // Update reflexive header
+  out.writeUInt32LE(newCount, refFieldAbsOffset);
+  out.writeUInt32LE(newVirtualPointer, refFieldAbsOffset + 4);
+  out.writeUInt32LE(0, refFieldAbsOffset + 8);
+
+  // Update header file size & tag data size
+  const newFileSize = out.length;
+  const newTagDataSize = header.tagDataSize + totalAlloc;
+  out.writeUInt32LE(newFileSize, 0x08);
+  out.writeUInt32LE(newTagDataSize, 0x14);
+
+  const newHeader: CacheFileHeader = {
+    ...header,
+    decompressedFileSize: newFileSize,
+    tagDataSize: newTagDataSize,
+  };
+
+  const newTagIndex: TagIndex = {
+    ...tagIndex,
+  };
+
+  return {
+    buffer: out,
+    header: newHeader,
+    tagIndex: newTagIndex,
+    newElementIndex: oldCount,
+    newElementOffset,
+    newCount,
+  };
+}

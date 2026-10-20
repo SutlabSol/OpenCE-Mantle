@@ -90,6 +90,55 @@ function reflexiveDescendantMatches(field: TagFieldDescriptor, query: string): b
   );
 }
 
+/** Field unit & tooltip resolution for engineering precision */
+export function getFieldUnit(name: string, type: string): { unit?: string; tooltip?: string } {
+  const lowerName = name.toLowerCase();
+  const lowerType = type.toLowerCase();
+
+  if (lowerType === 'angle') {
+    return { unit: '°', tooltip: 'Angle in degrees (°)' };
+  }
+  if (lowerType === 'fraction') {
+    return { unit: '0..1', tooltip: 'Fraction ratio [0.0 - 1.0]' };
+  }
+  if (lowerName.includes('ticks')) {
+    return { unit: 'ticks', tooltip: 'Engine simulation ticks (30 ticks = 1 sec)' };
+  }
+  if (
+    lowerName.includes('time') ||
+    lowerName.includes('delay') ||
+    lowerName.includes('duration') ||
+    lowerName.includes('timeout') ||
+    lowerName.includes('period') ||
+    lowerName.includes('cooldown')
+  ) {
+    return { unit: 'sec', tooltip: 'Time duration in seconds' };
+  }
+  if (
+    lowerName.includes('radius') ||
+    lowerName.includes('distance') ||
+    lowerName.includes('range') ||
+    lowerName.includes('depth') ||
+    lowerName.includes('height') ||
+    lowerName.includes('width')
+  ) {
+    return { unit: 'wu', tooltip: 'World units (approx. 10 feet / 3 meters per unit)' };
+  }
+  if (lowerName.includes('speed') || lowerName.includes('velocity')) {
+    return { unit: 'wu/s', tooltip: 'World units per second' };
+  }
+  if (lowerName.includes('acceleration') || lowerName.includes('deceleration')) {
+    return { unit: 'wu/s²', tooltip: 'World units per second squared' };
+  }
+  if (lowerName.includes('damage') || lowerName.includes('health') || lowerName.includes('shield')) {
+    return { unit: 'pts', tooltip: 'Vitality / damage hit points' };
+  }
+  if (lowerName.includes('rate') || lowerName.includes('rpm')) {
+    return { unit: 'shots/s', tooltip: 'Rate of fire / trigger frequency' };
+  }
+  return {};
+}
+
 export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props) {
   const [fieldsResult, setFieldsResult] = useState<TagFieldsResult | null>(null);
   const [isLoadingFields, setIsLoadingFields] = useState(false);
@@ -97,6 +146,7 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
   const [search, setSearch] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [savingField, setSavingField] = useState<string | null>(null);
+  const [addingChunkPath, setAddingChunkPath] = useState<string | null>(null);
 
   // Expanded bitfields set
   const [expandedBitfields, setExpandedBitfields] = useState<Set<string>>(() => new Set());
@@ -152,6 +202,42 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
       });
     } else {
       setStatusMessage(`Failed to update "${fieldPath}": ${res.message}`);
+    }
+  };
+
+  const handleAddChunk = async (fieldPath: string, cloneFromIndex: number = -1) => {
+    if (!focusedTag) return;
+    setAddingChunkPath(fieldPath);
+    setStatusMessage(null);
+    const actionName = cloneFromIndex >= 0 ? `Clone element #${cloneFromIndex}` : 'Add element';
+
+    if (!window.opence.addReflexiveChunk) {
+      setStatusMessage('Reflexive chunk modification is not supported in this environment.');
+      setAddingChunkPath(null);
+      return;
+    }
+
+    try {
+      const res = await window.opence.addReflexiveChunk(focusedTag.index, fieldPath, cloneFromIndex);
+      if (res.ok) {
+        const msg =
+          cloneFromIndex >= 0
+            ? `Cloned element #${cloneFromIndex} to element #${res.newElementIndex} in "${fieldPath}" (in memory, Ctrl+S to save)`
+            : `Added element #${res.newElementIndex} to "${fieldPath}" (in memory, Ctrl+S to save)`;
+        setStatusMessage(msg);
+        setExpandedReflexives((prev) => new Set(prev).add(fieldPath));
+        const refresh = await window.opence.getTagFields(focusedTag.index);
+        if (refresh.ok) {
+          setFieldsResult(refresh.data);
+        }
+      } else {
+        setStatusMessage(`Failed to ${actionName.toLowerCase()} in "${fieldPath}": ${res.message}`);
+      }
+    } catch (err) {
+      const e = err as Error;
+      setStatusMessage(`Failed to ${actionName.toLowerCase()} in "${fieldPath}": ${e.message}`);
+    } finally {
+      setAddingChunkPath(null);
     }
   };
 
@@ -252,6 +338,8 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
                     allTags={allTags}
                     savingField={savingField}
                     onSave={handleUpdateField}
+                    onAddChunk={handleAddChunk}
+                    addingChunkPath={addingChunkPath}
                     expandedBitfields={expandedBitfields}
                     onToggleBitfield={toggleBitfieldExpand}
                     expandedReflexives={expandedReflexives}
@@ -278,6 +366,8 @@ interface FieldCardProps {
   savingField: string | null;
   /** Save a value at the given (possibly nested) field path; passed through to root as-is. */
   onSave: (fieldPath: string, val: unknown) => void;
+  onAddChunk?: (fieldPath: string, cloneFromIndex?: number) => void;
+  addingChunkPath?: string | null;
   expandedBitfields: Set<string>;
   onToggleBitfield: (fieldPath: string) => void;
   expandedReflexives: Set<string>;
@@ -292,6 +382,8 @@ function FieldCard({
   allTags,
   savingField,
   onSave,
+  onAddChunk,
+  addingChunkPath,
   expandedBitfields,
   onToggleBitfield,
   expandedReflexives,
@@ -301,8 +393,13 @@ function FieldCard({
   const isSaving = savingField === fieldPath;
   const isExpanded = expandedBitfields.has(fieldPath);
   const isReflexiveExpanded = expandedReflexives.has(fieldPath);
+  const isAddingChunk = addingChunkPath === fieldPath;
   const searchQ = search?.trim().toLowerCase() ?? '';
   const [localVal, setLocalVal] = useState<unknown>(field.value);
+  const fieldUnitInfo = useMemo(() => getFieldUnit(field.name, field.type), [field.name, field.type]);
+  const canAddChunk = Boolean(
+    onAddChunk && field.reflexiveStruct && (!field.readOnlyReason || field.readOnlyReason.includes('in-place write')),
+  );
 
   useEffect(() => {
     setLocalVal(field.value);
@@ -334,45 +431,98 @@ function FieldCard({
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
         <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)' }}>{field.name}</span>
         <span
+          title={fieldUnitInfo.tooltip ?? field.type}
           style={{
             fontSize: 9.5,
-            padding: '1px 4px',
+            padding: '1px 5px',
             borderRadius: 2,
             background: 'rgba(255, 255, 255, 0.08)',
-            color: 'var(--text-dim)',
+            color: fieldUnitInfo.unit ? 'var(--accent-cyan)' : 'var(--text-dim)',
             fontFamily: 'var(--mono-font)',
+            cursor: fieldUnitInfo.tooltip ? 'help' : 'default',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
           }}
         >
-          {field.type}
+          <span>{field.type}</span>
+          {fieldUnitInfo.unit && (
+            <span
+              style={{
+                color: '#fbbf24',
+                fontWeight: 600,
+                borderLeft: '1px solid rgba(255, 255, 255, 0.15)',
+                paddingLeft: 4,
+              }}
+            >
+              {fieldUnitInfo.unit}
+            </span>
+          )}
         </span>
       </div>
 
       {field.kind === 'reflexive' ? (
         <div>
-          {field.children && field.children.length > 0 ? (
-            <>
-              <div
-                data-testid={`reflexive-toggle-${fieldPath}`}
-                onClick={() => onToggleReflexive(fieldPath)}
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '3px 6px',
+              fontSize: 11,
+              fontFamily: 'var(--mono-font)',
+              background: 'rgba(0, 0, 0, 0.25)',
+              borderRadius: 2,
+              gap: 8,
+            }}
+          >
+            <div
+              data-testid={`reflexive-toggle-${fieldPath}`}
+              onClick={() => onToggleReflexive(fieldPath)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                cursor: 'pointer',
+                flex: 1,
+                overflow: 'hidden',
+              }}
+            >
+              <span style={{ color: 'var(--text-secondary)' }}>
+                {field.children ? field.children.length : (field.reflexiveCount ?? 0)} element(s) — {field.reflexiveStruct ?? 'Block'}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--accent-cyan)' }}>
+                {isReflexiveExpanded ? 'Hide Block ▲' : 'Edit Block ▼'}
+              </span>
+            </div>
+            {canAddChunk && (
+              <button
+                type="button"
+                data-testid={`reflexive-add-${fieldPath}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onAddChunk?.(fieldPath, -1);
+                }}
+                disabled={isAddingChunk}
+                title="Append a new default element chunk to this reflexive array"
                 style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  cursor: 'pointer',
-                  padding: '3px 4px',
-                  fontSize: 11,
-                  fontFamily: 'var(--mono-font)',
-                  background: 'rgba(0, 0, 0, 0.2)',
+                  background: 'rgba(34, 197, 94, 0.15)',
+                  border: '1px solid rgba(34, 197, 94, 0.4)',
                   borderRadius: 2,
+                  color: '#4ade80',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  cursor: isAddingChunk ? 'wait' : 'pointer',
+                  padding: '2px 6px',
                 }}
               >
-                <span style={{ color: 'var(--text-secondary)' }}>
-                  {field.children.length} element(s) — {field.reflexiveStruct ?? 'Block'}
-                </span>
-                <span style={{ fontSize: 10, color: 'var(--accent-cyan)' }}>
-                  {isReflexiveExpanded ? 'Hide Block ▲' : 'Edit Block ▼'}
-                </span>
-              </div>
+                {isAddingChunk ? 'Adding...' : '+ Add Element'}
+              </button>
+            )}
+          </div>
+
+          {field.children && field.children.length > 0 ? (
+            <>
               {(isReflexiveExpanded || (searchQ !== '' && reflexiveDescendantMatches(field, searchQ))) && (
                 <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {field.children.map((el, idx) => {
@@ -390,17 +540,46 @@ function FieldCard({
                       >
                         <div
                           style={{
-                            fontSize: 10.5,
-                            fontWeight: 600,
-                            color: 'var(--accent-cyan)',
-                            fontFamily: 'var(--mono-font)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
                             marginBottom: 4,
                           }}
                         >
-                          {`${field.name}[${idx}]`}
-                          <span style={{ marginLeft: 6, fontWeight: 400, color: 'var(--text-dim)' }}>
-                            {el.structName} @ 0x{el.structBase.toString(16).toUpperCase()}
-                          </span>
+                          <div
+                            style={{
+                              fontSize: 10.5,
+                              fontWeight: 600,
+                              color: 'var(--accent-cyan)',
+                              fontFamily: 'var(--mono-font)',
+                            }}
+                          >
+                            {`${field.name}[${idx}]`}
+                            <span style={{ marginLeft: 6, fontWeight: 400, color: 'var(--text-dim)' }}>
+                              {el.structName} @ 0x{el.structBase.toString(16).toUpperCase()}
+                            </span>
+                          </div>
+                          {canAddChunk && (
+                            <button
+                              type="button"
+                              data-testid={`reflexive-clone-${fieldPath}[${idx}]`}
+                              onClick={() => onAddChunk?.(fieldPath, idx)}
+                              disabled={isAddingChunk}
+                              title={`Duplicate element #${idx} and append to this block`}
+                              style={{
+                                background: 'rgba(56, 189, 248, 0.15)',
+                                border: '1px solid rgba(56, 189, 248, 0.4)',
+                                borderRadius: 2,
+                                color: '#38bdf8',
+                                fontSize: 10,
+                                fontWeight: 500,
+                                cursor: isAddingChunk ? 'wait' : 'pointer',
+                                padding: '1px 6px',
+                              }}
+                            >
+                              Clone
+                            </button>
+                          )}
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                           {editableChildFields.map((cf) => {
@@ -413,6 +592,8 @@ function FieldCard({
                                 allTags={allTags}
                                 savingField={savingField}
                                 onSave={onSave}
+                                onAddChunk={onAddChunk}
+                                addingChunkPath={addingChunkPath}
                                 expandedBitfields={expandedBitfields}
                                 onToggleBitfield={onToggleBitfield}
                                 expandedReflexives={expandedReflexives}
@@ -429,10 +610,10 @@ function FieldCard({
               )}
             </>
           ) : (
-            <div style={{ fontSize: 11, color: 'var(--text-dim)', fontStyle: 'italic' }}>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', fontStyle: 'italic', marginTop: 4 }}>
               {(field.reflexiveCount ?? 0) > 0
                 ? (field.readOnlyReason ?? 'Block is read-only (could not be decoded)')
-                : 'Empty block (0 elements)'}
+                : 'Empty block (0 elements). Click "+ Add Element" to add the first chunk.'}
             </div>
           )}
         </div>

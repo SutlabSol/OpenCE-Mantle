@@ -14,7 +14,13 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
   const [selectedSourceBspIndex, setSelectedSourceBspIndex] = useState(0);
   const [selectedTargetBspIndex, setSelectedTargetBspIndex] = useState(0);
   const [stripDobcAndDecals, setStripDobcAndDecals] = useState(true);
+  const [stripDobc, setStripDobc] = useState(true);
+  const [stripDecals, setStripDecals] = useState(true);
+  const [showDobcInfo, setShowDobcInfo] = useState(false);
+  const [showDecalsInfo, setShowDecalsInfo] = useState(false);
+  const [newScenarioName, setNewScenarioName] = useState('');
   const [relocateGroundObjects, setRelocateGroundObjects] = useState(true);
+  const [harvestShaders, setHarvestShaders] = useState(true);
   const [isSwapping, setIsSwapping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successSummary, setSuccessSummary] = useState<string | null>(null);
@@ -26,6 +32,9 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
       setError(null);
       setSuccessSummary(null);
       setIsSwapping(false);
+      setNewScenarioName('');
+      setShowDobcInfo(false);
+      setShowDecalsInfo(false);
     }
   }, [isOpen]);
 
@@ -84,18 +93,32 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
     setSuccessSummary(null);
 
     try {
-      const res = await window.opence.performBspSwap(sourcePath, {
+      const payload: any = {
         sourceBspIndex: selectedSourceBspIndex,
         targetBspIndex: selectedTargetBspIndex,
-        stripDobcAndDecals,
+        stripDobcAndDecals: stripDobc && stripDecals,
         relocateGroundObjects,
-      });
+        harvestShaders,
+      };
+      if (!stripDobc || !stripDecals) {
+        payload.stripDobc = stripDobc;
+        payload.stripDecals = stripDecals;
+      }
+      if (newScenarioName.trim()) {
+        payload.newScenarioName = newScenarioName.trim();
+      }
+
+      const res = await window.opence.performBspSwap(sourcePath, payload);
 
       setIsSwapping(false);
       if (res.ok) {
         const deltaMb = (res.summary.delta / (1024 * 1024)).toFixed(2);
         const deltaSign = res.summary.delta >= 0 ? '+' : '';
-        const msg = `Successfully swapped BSP! Source: "${res.summary.sourceBspName}". Delta: ${deltaSign}${deltaMb} MB. ${res.summary.strippedDobc ? 'Stripped DOBC & Decals. ' : ''}${res.summary.relocatedSpawns > 0 ? `Relocated ${res.summary.relocatedSpawns} ground objects.` : ''}`;
+        const harvestMsg =
+          (res.summary.harvestedShaders ?? 0) > 0 || (res.summary.harvestedBitmaps ?? 0) > 0
+            ? ` Harvested ${res.summary.harvestedShaders ?? 0} shaders and ${res.summary.harvestedBitmaps ?? 0} bitmaps into map.`
+            : '';
+        const msg = `Successfully swapped BSP! Source: "${res.summary.sourceBspName}". Delta: ${deltaSign}${deltaMb} MB.${harvestMsg} ${res.summary.strippedDobc ? 'Stripped DOBC & Decals. ' : ''}${res.summary.relocatedSpawns > 0 ? `Relocated ${res.summary.relocatedSpawns} ground objects.` : ''}`;
         setSuccessSummary(msg);
         onSuccess();
       } else {
@@ -362,28 +385,101 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                 </div>
               </div>
 
-              {/* Options */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '2px' }}>
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    fontSize: '12px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <input
-                    data-testid="bsp-swapper-strip-dobc-checkbox"
-                    type="checkbox"
-                    checked={stripDobcAndDecals}
-                    onChange={(e) => setStripDobcAndDecals(e.target.checked)}
-                  />
-                  <span>
-                    <strong>Strip Detail Objects (DOBC) & Decals</strong> (Recommended: prevents multiplayer engine crashes)
-                  </span>
+              {/* Scenario Name Rename Option */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
+                  In-Game Scenario Name (Optional Rename)
                 </label>
+                <input
+                  data-testid="bsp-swapper-scenario-name-input"
+                  type="text"
+                  placeholder="e.g. bloodgulch_silent_cartographer (leave blank to keep current name)"
+                  value={newScenarioName}
+                  onChange={(e) => setNewScenarioName(e.target.value)}
+                  maxLength={31}
+                  style={{
+                    background: 'var(--bg-main)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '4px',
+                    padding: '7px 10px',
+                    fontSize: '12px',
+                    fontFamily: 'var(--mono-font)',
+                    color: 'var(--text-primary)',
+                    outline: 'none',
+                  }}
+                />
+                <span style={{ fontSize: '10.5px', color: 'var(--text-dim)' }}>
+                  Updates the internal scenario header name displayed in the Halo multiplayer UI map list.
+                </span>
+              </div>
 
+              {/* Options */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '2px' }}>
+                {/* DOBC Strip */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>
+                      <input
+                        data-testid="bsp-swapper-strip-dobc-checkbox"
+                        type="checkbox"
+                        checked={stripDobc}
+                        onChange={(e) => {
+                          setStripDobc(e.target.checked);
+                          setStripDobcAndDecals(e.target.checked && stripDecals);
+                        }}
+                      />
+                      <span>
+                        <strong>Strip Detail Objects (DOBC)</strong> (Recommended: prevents multiplayer memory crashes)
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowDobcInfo(!showDobcInfo)}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--accent-cyan)', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }}
+                    >
+                      {showDobcInfo ? 'Hide Details' : 'What is DOBC?'}
+                    </button>
+                  </div>
+                  {showDobcInfo && (
+                    <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid var(--border)', borderRadius: '4px', padding: '8px 10px', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+                      Detail objects (<code>dobc</code>) are procedural ground clutter (grass clumps, moss, ferns, pebbles) scattered across campaign terrain via density functions. In multiplayer, DOBC is not synchronized across the network and can exceed client vertex and memory limits, causing fatal crashes or massive FPS drops. Stripping zeroes out the reflexive count and pointer at offset <code>0x24C</code> in the BSP header.
+                    </div>
+                  )}
+                </div>
+
+                {/* Decals Strip */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>
+                      <input
+                        data-testid="bsp-swapper-strip-decals-checkbox"
+                        type="checkbox"
+                        checked={stripDecals}
+                        onChange={(e) => {
+                          setStripDecals(e.target.checked);
+                          setStripDobcAndDecals(stripDobc && e.target.checked);
+                        }}
+                      />
+                      <span>
+                        <strong>Strip Runtime Decals</strong> (Recommended: preserves multiplayer weapon impact buffer)
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowDecalsInfo(!showDecalsInfo)}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--accent-cyan)', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }}
+                    >
+                      {showDecalsInfo ? 'Hide Details' : 'What are Decals?'}
+                    </button>
+                  </div>
+                  {showDecalsInfo && (
+                    <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid var(--border)', borderRadius: '4px', padding: '8px 10px', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+                      Runtime decals are static decals (blood splatters, plasma scorch burns, bullet marks, covenant glyphs) pre-baked into campaign level geometry. Halo multiplayer allocates a strict global static decal buffer shared between the level and combat weapon impacts. Pre-baked campaign decals consume this buffer, causing player bullet holes and plasma impacts to flicker or disappear. Stripping zeroes out the reflexive count and pointer at offset <code>0x258</code> in the BSP header.
+                    </div>
+                  )}
+                </div>
+
+                {/* Spawns Relocation */}
                 <label
                   style={{
                     display: 'flex',
@@ -401,6 +497,27 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   />
                   <span>
                     <strong>Relocate Player Spawns & Equipment to Floor</strong> (Adjusts Z coordinates onto new terrain)
+                  </span>
+                </label>
+
+                {/* Harvest Shaders & Bitmaps */}
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    data-testid="bsp-swapper-harvest-shaders-checkbox"
+                    type="checkbox"
+                    checked={harvestShaders}
+                    onChange={(e) => setHarvestShaders(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Harvest Shaders & Bitmaps</strong> (Recommended: imports missing terrain textures & shaders into target map)
                   </span>
                 </label>
               </div>

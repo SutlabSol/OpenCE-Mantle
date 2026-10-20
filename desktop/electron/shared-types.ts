@@ -281,10 +281,12 @@ export interface BitmapIdentificationResult {
   error?: string;
   filePath: string;
   fileSizeBytes: number;
+  resourceKind?: 'bitmaps' | 'sounds' | 'loc';
   entryCount: number;
   tableOffset: number;
   detectedVersion: HaloBitmapVersion | 'unknown';
   versionMatchConfidence: 'exact' | 'likely' | 'mismatch';
+  versionNote?: string;
   entries: BitmapIdentificationEntry[];
   compatibility?: {
     hasOpenMap: boolean;
@@ -406,7 +408,7 @@ export type WorkerRequest =
   | { type: 'inspect'; requestId: string; filePath: string }
   | { type: 'compress' | 'decompress'; requestId: string; filePath: string; outputPath: string }
   | { type: 'getDependencies'; requestId: string; originalIndices: number[] }
-  | { type: 'extractTags'; requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string }
+  | { type: 'extractTags'; requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string; resourceMapPaths?: Partial<Record<ResourceMapKind, string>> }
   | { type: 'planInject'; requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
   | { type: 'applyInject'; requestId: string }
   | { type: 'saveMap'; requestId: string }
@@ -424,6 +426,7 @@ export type WorkerRequest =
     }
   | { type: 'getTagFields'; requestId: string; tagIndex: number }
   | { type: 'updateTagField'; requestId: string; tagIndex: number; fieldName: string; newValue: unknown }
+  | { type: 'addReflexiveChunk'; requestId: string; tagIndex: number; reflexiveFieldPath: string; cloneFromIndex?: number }
   | { type: 'getDependencySlots'; requestId: string; tagIndex: number }
   | { type: 'setDependencySlot'; requestId: string; tagIndex: number; fieldPath: string; newTagId: number | null }
   | { type: 'getBspRenderMesh'; requestId: string; bspIndex?: number }
@@ -474,7 +477,7 @@ export type WorkerRequest =
   | { type: 'renameTag'; requestId: string; tagIndex: number; newPath: string }
   | { type: 'duplicateTag'; requestId: string; tagIndex: number; newPath: string }
   | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number }
-  | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions }
+  | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions; resourceMapPaths?: Partial<Record<ResourceMapKind, string | undefined>> }
   | { type: 'cancel'; requestId: string };
 
 export type GetReferencingTagsResult =
@@ -549,6 +552,17 @@ export type UpdateTagFieldResult =
   | { ok: true; fieldName: string; newValue: unknown; map: OpenMapSummary }
   | { ok: false; code: string; message: string };
 
+export type AddReflexiveChunkResult =
+  | {
+      ok: true;
+      tagIndex: number;
+      reflexiveFieldPath: string;
+      newElementIndex: number;
+      newCount: number;
+      map: OpenMapSummary;
+    }
+  | { ok: false; code: string; message: string };
+
 export type WorkerResponse =
   | { type: 'ready'; info: string }
   | { type: 'progress'; requestId: string; stage: string; percent: number }
@@ -609,6 +623,8 @@ export interface OpenceApi {
   getTagFields(tagIndex: number): Promise<GetTagFieldsResult>;
   /** M7a: edit a root struct field value in memory in the open map. */
   updateTagField(tagIndex: number, fieldName: string, newValue: unknown): Promise<UpdateTagFieldResult>;
+  /** Tag Editor: Add or clone a child chunk in a TagReflexive array. */
+  addReflexiveChunk?(tagIndex: number, reflexiveFieldPath: string, cloneFromIndex?: number): Promise<AddReflexiveChunkResult>;
   /** Dependency Swapper: every dependency slot of the tag (nested blocks and null slots included). */
   getDependencySlots(tagIndex: number): Promise<GetDependencySlotsResult>;
   /** Dependency Swapper: point one slot at any tag of the open map (null clears it). In memory only. */
@@ -670,8 +686,8 @@ export interface OpenceApi {
   bspSwapPreflight(sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number): Promise<BspSwapPreflightResult>;
   /** Milestone 10: BSP Swapper - perform swap into currently open map. */
   performBspSwap(sourceFilePath: string, options: BspSwapOptions): Promise<BspSwapResult>;
-  /** Tools > Identify Bitmaps: reads and validates a bitmaps.map file for a specific Halo edition. */
-  identifyResourceMap(filePath: string, expectedVersion?: HaloBitmapVersion): Promise<BitmapIdentificationResult>;
+  /** Tools > Identify Resource Maps: reads and validates a bitmaps.map or sounds.map file for a specific Halo edition. */
+  identifyResourceMap(filePath: string, expectedVersion?: HaloBitmapVersion, expectedKind?: 'bitmaps' | 'sounds'): Promise<BitmapIdentificationResult>;
   setResourceMapPath(kind: ResourceMapKind, filePath: string): Promise<{ ok: boolean }>;
   detectDefaultResourceMapPaths(): Promise<Record<HaloBitmapVersion, string | null>>;
   getVersionSettings?(): Promise<Partial<Record<HaloBitmapVersion, VersionResourceMaps>>>;

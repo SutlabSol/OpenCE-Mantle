@@ -183,6 +183,26 @@ describe.skipIf(!hasSampleMaps(['bloodgulch.map']))('Scenario Object Placements 
     expect(addRes.newPlacement.position[0]).toBeCloseTo(10.0, 2);
     expect(addRes.newPlacement.modelTagId).not.toBe(0xffffffff);
   });
+
+  it('extracts advanced scenario entities (netgame flags, decals, triggers) and allows moving them (Milestone 9)', () => {
+    const summary = extractScenarioPlacements(buffer, header, tagIndex);
+    expect((summary.counts.netgameFlags || 0) + (summary.counts.decals || 0) + (summary.counts.triggerVolumes || 0)).toBeGreaterThan(0);
+
+    const netgameFlag = summary.objects.find((o) => o.kind === 'netgame_flag');
+    if (netgameFlag) {
+      expect(netgameFlag.flagType).toBeDefined();
+      expect(netgameFlag.position.every(Number.isFinite)).toBe(true);
+
+      const testBuf = Buffer.from(buffer);
+      const updated = updateScenarioPlacement(testBuf, header, tagIndex, netgameFlag.id, {
+        position: [12.34, 56.78, 90.12],
+        rotation: [1.57, 0, 0],
+      });
+      const moved = updated.objects.find((o) => o.id === netgameFlag.id);
+      expect(moved).toBeDefined();
+      expect(moved!.position[0]).toBeCloseTo(12.34, 2);
+    }
+  });
 });
 
 describe.skipIf(!hasSampleMaps(['coldsnap.map']))('Scenario Object Placements Extractor (Step 8.5) – coldsnap', () => {

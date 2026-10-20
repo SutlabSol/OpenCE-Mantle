@@ -172,6 +172,7 @@ describe('BspSwapperDialog', () => {
         targetBspIndex: 0,
         stripDobcAndDecals: true,
         relocateGroundObjects: true,
+        harvestShaders: true,
       });
       expect(mockOnSuccess).toHaveBeenCalledTimes(1);
       expect(screen.getByTestId('bsp-swapper-success')).toBeInTheDocument();

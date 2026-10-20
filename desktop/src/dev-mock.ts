@@ -19,6 +19,7 @@ import type {
   ConvertMapResult,
   GetTagFieldsResult,
   UpdateTagFieldResult,
+  AddReflexiveChunkResult,
   GetDependencySlotsResult,
   SetDependencySlotResult,
   GetBspRenderMeshResult,
@@ -426,6 +427,12 @@ export function installDevMock() {
       updatedListeners.forEach((cb) => cb(currentMock!));
       return { ok: true, fieldName, newValue, map: currentMock };
     },
+    addReflexiveChunk: async (tagIndex: number, reflexiveFieldPath: string, _cloneFromIndex?: number): Promise<AddReflexiveChunkResult> => {
+      if (!currentMock) return { ok: false, code: 'NO_MAP', message: 'No map open' };
+      currentMock = { ...currentMock, modified: true };
+      updatedListeners.forEach((cb) => cb(currentMock!));
+      return { ok: true, tagIndex, reflexiveFieldPath, newElementIndex: 1, newCount: 2, map: currentMock };
+    },
     getDependencySlots: async (): Promise<GetDependencySlotsResult> => ({
       ok: true,
       slots: [
@@ -624,7 +631,7 @@ export function installDevMock() {
           objects: mockScenarioSummary.objects.filter((o) => o.id !== placementId),
           counts: {
             ...mockScenarioSummary.counts,
-            [kindKey]: Math.max(0, mockScenarioSummary.counts[kindKey] - 1),
+            [kindKey]: Math.max(0, (mockScenarioSummary.counts[kindKey] ?? 0) - 1),
           },
         };
       }

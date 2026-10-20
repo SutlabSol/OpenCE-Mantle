@@ -5,11 +5,19 @@ import type { DecodedFieldValue, ResolvedField } from './definitions/engine';
 import type { DecodedTagDataOffset } from './definitions/codec';
 import { walkDependencies } from './dependency-walker';
 import type { WalkerWarning, WalkOptions } from './dependency-walker';
-import { findEmbeddedDataFields, validateBitmapAssetSize } from './embedded-data-fields';
+import { findEmbeddedDataFields, validateBitmapAssetSize, flagLocation } from './embedded-data-fields';
 import { scanGbxmodelGeometryBoundaries, captureGbxmodelGeometry, type CapturedGbxmodelPart } from './gbxmodel-geometry';
 import { OperationCancelledError } from './errors';
 import type { CacheFileHeader } from './header';
 import type { TagIndex } from './tag-index';
+import type { RandomAccessFile } from './convert/resource-files';
+
+export interface ExtractOptions extends WalkOptions {
+  resourceFiles?: {
+    bitmaps?: RandomAccessFile;
+    sounds?: RandomAccessFile;
+  };
+}
 
 const NULL_TAG_ID = 0xffffffff;
 
@@ -172,17 +180,58 @@ function captureEmbeddedFields(
   buffer: Buffer,
   resolved: ReturnType<typeof resolveStruct>,
   decoded: ReturnType<typeof decodeStruct>,
+  myBytes: Buffer,
   myAbsoluteOffset: number,
   fieldPath: string,
   capture: EmbeddedCaptureState,
+  resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile },
+  capturedAssetKeys?: Set<string>,
 ): void {
   for (const match of findEmbeddedDataFields(resolved, decoded)) {
     const context = `${fieldPath}.${match.fieldName}`;
-    if (match.external) continue; // lives in bitmaps.map/sounds.map - out of scope here (see externalResourceRefs)
     if (match.kind === 'unknown') {
       capture.blockedReasons.push(`${context}: unrecognized embedded-data layout, not captured.`);
       continue;
     }
+    if (match.external) {
+      const resFile = match.kind === 'bitmap' ? resourceFiles?.bitmaps : match.kind === 'sound' ? resourceFiles?.sounds : undefined;
+      if (!resFile) {
+        continue; // lives in bitmaps.map/sounds.map - not provided for this extraction
+      }
+      if (match.fileOffset < 0 || match.size <= 0 || match.fileOffset + match.size > resFile.size) {
+        capture.blockedReasons.push(`${context}: external file offset ${match.fileOffset} + size ${match.size} is out of bounds of ${resFile.label}.`);
+        continue;
+      }
+      if (match.kind === 'bitmap') {
+        const validation = validateBitmapAssetSize(decoded, match.size);
+        if (!validation.ok) {
+          capture.blockedReasons.push(`${context}: ${validation.reason}.`);
+          continue;
+        }
+      }
+      const rawData = resFile.read(match.fileOffset, match.size);
+      const dedupeKey = `${match.resourceMap}:${match.fileOffset}:${match.size}`;
+      let assetIndex = capture.dedupeKeyToAssetIndex.get(dedupeKey);
+      if (assetIndex === undefined) {
+        assetIndex = capture.assets.length;
+        capture.assets.push({ kind: match.kind, data: Buffer.from(rawData) });
+        capture.dedupeKeyToAssetIndex.set(dedupeKey, assetIndex);
+      }
+      capture.patches.push({ assetIndex, patchOffset: myAbsoluteOffset + match.patchOffset, patchWidth: match.patchWidth });
+      capturedAssetKeys?.add(`${match.resourceMap}:${match.fileOffset}:${match.size}`);
+
+      // Clear the external flag in myBytes so the struct becomes an internal/embedded asset
+      const flag = flagLocation(resolved, match.fieldName);
+      if (flag) {
+        if (flag.width === 2) {
+          myBytes.writeUInt16LE(myBytes.readUInt16LE(flag.offset) & ~flag.mask, flag.offset);
+        } else if (flag.width === 4) {
+          myBytes.writeUInt32LE(myBytes.readUInt32LE(flag.offset) & ~flag.mask, flag.offset);
+        }
+      }
+      continue;
+    }
+
     if (match.fileOffset < 0 || match.size <= 0 || match.fileOffset + match.size > buffer.length) {
       capture.blockedReasons.push(`${context}: file offset ${match.fileOffset} + size ${match.size} is out of bounds of the source map.`);
       continue;
@@ -237,10 +286,12 @@ function flattenStruct(
   tagIndex: TagIndex,
   localIndexByOriginal: Map<number, number>,
   notExtractedByOriginal: Map<number, NotExtractedTag>,
+  resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile },
+  capturedAssetKeys?: Set<string>,
 ): void {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(buffer, fileOffset, structName);
-  captureEmbeddedFields(buffer, resolved, decoded, myAbsoluteOffset, fieldPath, embeddedCapture);
+  captureEmbeddedFields(buffer, resolved, decoded, myBytes, myAbsoluteOffset, fieldPath, embeddedCapture, resourceFiles, capturedAssetKeys);
 
   interface ReflexiveWork {
     fieldName: string;
@@ -334,6 +385,8 @@ function flattenStruct(
         tagIndex,
         localIndexByOriginal,
         notExtractedByOriginal,
+        resourceFiles,
+        capturedAssetKeys,
       );
     }
   }
@@ -351,9 +404,10 @@ export function extractTagSet(
   header: CacheFileHeader,
   tagIndex: TagIndex,
   rootIndices: number[],
-  options: WalkOptions = {},
+  options: ExtractOptions = {},
 ): ExtractedTagSet {
   const walk = walkDependencies(buffer, header, tagIndex, rootIndices, options);
+  const capturedAssetKeys = new Set<string>();
 
   const extractableWalked: typeof walk.tags = [];
   const notExtracted: NotExtractedTag[] = [];
@@ -432,6 +486,8 @@ export function extractTagSet(
         tagIndex,
         localIndexByOriginal,
         notExtractedByOriginal,
+        options.resourceFiles,
+        capturedAssetKeys,
       );
 
       if (embeddedCapture.blockedReasons.length > 0) {
@@ -479,8 +535,16 @@ export function extractTagSet(
     }
   });
 
+  const filteredWarnings = walk.warnings.filter((w) => {
+    if (w.kind === 'externalData' && w.resourceMap && w.fileOffset !== undefined && w.size !== undefined) {
+      const key = `${w.resourceMap}:${w.fileOffset}:${w.size}`;
+      if (capturedAssetKeys.has(key)) return false;
+    }
+    return true;
+  });
+
   options.onProgress?.(extractableWalked.length, extractableWalked.length);
-  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...walk.warnings, ...extraWarnings] };
+  return { rootOriginalIndices: rootIndices, tags, notExtracted, warnings: [...filteredWarnings, ...extraWarnings] };
 }
 
 /**

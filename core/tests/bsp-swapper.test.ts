@@ -62,6 +62,7 @@ describe('BSP Swapper Core Module', () => {
       targetBspIndex: 0,
       stripDobcAndDecals: true,
       relocateGroundObjects: true,
+      harvestShaders: false,
     });
 
     expect(swapResult.ok).toBe(true);
@@ -76,6 +77,36 @@ describe('BSP Swapper Core Module', () => {
       expect(inspected.tagIndex.entries.length).toBe(2455);
 
       // Verify that the new BSP renders cleanly
+      const mesh = extractBspRenderMesh(swapResult.buffer, inspected.header, inspected.tagIndex, 0);
+      expect(mesh.totalVertices).toBe(50936);
+      expect(mesh.totalTriangles).toBe(35105);
+      expect(mesh.submeshes.length).toBe(117);
+    }
+  });
+
+  it('performs BSP swap with automatic shader and bitmap harvesting', () => {
+    if (!hasBg || !hasB30) return;
+
+    const bgBuf = fs.readFileSync(bgPath);
+    const b30Buf = fs.readFileSync(b30Path);
+
+    const swapResult = performBspSwap(b30Buf, bgBuf, {
+      sourceBspIndex: 0,
+      targetBspIndex: 0,
+      stripDobcAndDecals: true,
+      relocateGroundObjects: true,
+      harvestShaders: true,
+    });
+
+    expect(swapResult.ok).toBe(true);
+    expect((swapResult.summary.harvestedShaders ?? 0)).toBeGreaterThan(0);
+    expect(swapResult.buffer.length).toBeGreaterThan(bgBuf.length + swapResult.summary.delta);
+
+    const inspected = inspectCustomEditionMap(swapResult.buffer);
+    expect(inspected.status).toBe('ok');
+    if (inspected.status === 'ok') {
+      expect(inspected.tagIndex.entries.length).toBeGreaterThan(2455);
+
       const mesh = extractBspRenderMesh(swapResult.buffer, inspected.header, inspected.tagIndex, 0);
       expect(mesh.totalVertices).toBe(50936);
       expect(mesh.totalTriangles).toBe(35105);
