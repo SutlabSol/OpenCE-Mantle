@@ -578,14 +578,6 @@ describe('ScenarioViewport', () => {
     fireEvent.click(btnIso);
   });
 
-  it('renders Snap Spawns to Ground button in the toolbar', async () => {
-    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
-
-    await waitFor(() => {
-      expect(screen.getByTestId('viewport-snap-spawns-btn')).toBeInTheDocument();
-    });
-  });
-
   it('displays Teleporter Pair controls with ID input and Switch buttons when teleporter is selected', async () => {
     render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
 
@@ -608,7 +600,7 @@ describe('ScenarioViewport', () => {
     fireEvent.click(screen.getByTestId('inspector-teleport-switch-origin'));
   });
 
-  it('displays KOTH Zone controls with KOTH ID, Add Point, Remove Point, and Remove KOTH Zone buttons', async () => {
+  it('displays KOTH Zone controls with KOTH ID, Add Point, Remove Point, and Select Full Zone buttons', async () => {
     render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
 
     await waitFor(() => {
@@ -624,11 +616,32 @@ describe('ScenarioViewport', () => {
       expect(screen.getByTestId('inspector-koth-id-input')).toBeInTheDocument();
       expect(screen.getByTestId('inspector-koth-add-point')).toBeInTheDocument();
       expect(screen.getByTestId('inspector-koth-remove-point')).toBeInTheDocument();
-      expect(screen.getByTestId('inspector-koth-remove-zone')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-koth-select-zone')).toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByTestId('inspector-koth-select-zone'));
   });
 
-  it('includes teleporters, KOTH zone, race, and oddball in Add Object modal categories', async () => {
+  it('displays Player Spawn management info with team count and Select All Team Spawns button', async () => {
+    render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-tab-outliner')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('inspector-tab-outliner'));
+    const item = screen.getByTestId('outliner-item-spawn-0');
+    fireEvent.click(item);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('inspector-spawn-team-controls')).toBeInTheDocument();
+      expect(screen.getByTestId('inspector-select-all-team-spawns')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('inspector-select-all-team-spawns'));
+  });
+
+  it('includes 1-way and 2-way teleporters, KOTH zone, race, and oddball in Add Object modal categories', async () => {
     render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
 
     await waitFor(() => {
@@ -644,6 +657,7 @@ describe('ScenarioViewport', () => {
     const kindSelect = screen.getByTestId('add-modal-kind-select') as HTMLSelectElement;
     const optionValues = Array.from(kindSelect.options).map((o) => o.value);
     expect(optionValues).toContain('teleport');
+    expect(optionValues).toContain('teleport_2way');
     expect(optionValues).toContain('koth');
     expect(optionValues).toContain('race');
     expect(optionValues).toContain('oddball');

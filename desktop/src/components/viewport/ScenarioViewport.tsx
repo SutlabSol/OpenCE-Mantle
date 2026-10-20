@@ -136,7 +136,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   const [outlinerFilter, setOutlinerFilter] = useState<'all' | ScenarioObjectKind>('all');
   const [outlinerSearch, setOutlinerSearch] = useState<string>('');
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
-  const [addKind, setAddKind] = useState<ScenarioObjectKind | 'teleport' | 'koth' | 'race' | 'oddball'>('vehicle');
+  const [addKind, setAddKind] = useState<ScenarioObjectKind | 'teleport' | 'teleport_2way' | 'koth' | 'race' | 'oddball'>('vehicle');
   const [addPaletteIndex, setAddPaletteIndex] = useState<number>(0);
   const [addTeam, setAddTeam] = useState<number>(0);
 
@@ -169,6 +169,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   // Gizmo & selection refs
   const transformControlsRef = useRef<TransformControls | null>(null);
   const selectionBoxHelperRef = useRef<THREE.BoxHelper | null>(null);
+  const gizmoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const partnerBoxHelperRef = useRef<THREE.BoxHelper | null>(null);
   const kothZoneHelpersRef = useRef<THREE.BoxHelper[]>([]);
   const multiSelectionHelpersRef = useRef<THREE.BoxHelper[]>([]);
@@ -186,7 +187,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
   const hasInitialFramedRef = useRef<boolean>(false);
   const isMiddleDraggingRef = useRef<boolean>(false);
-  const isCtrlDraggingRef = useRef<boolean>(false);
+  const isShiftDraggingRef = useRef<boolean>(false);
   const isAltLeftDraggingRef = useRef<boolean>(false);
   const isAltRightDraggingRef = useRef<boolean>(false);
   const dragHasMovedRef = useRef<boolean>(false);
@@ -297,7 +298,13 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     camPosRef.current.set(eyeX, eyeY, eyeZ);
     camEulerRef.current.yaw = yaw;
     camEulerRef.current.pitch = pitch;
-    cameraRef.current.position.set(eyeX, eyeY, eyeZ);
+    if (cameraRef.current) {
+      cameraRef.current.position.set(eyeX, eyeY, eyeZ);
+      const lookTarget = new THREE.Vector3().copy(camPosRef.current).add(
+        new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch)),
+      );
+      cameraRef.current.lookAt(lookTarget);
+    }
   }, [combinedBounds]);
 
   // Focus camera on an object
@@ -334,7 +341,26 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       },
     ) => {
       try {
-        const res = await window.opence.updateScenarioPlacement(placementId, updates);
+        const currentObj = scenarioData?.objects.find((o) => o.id === placementId);
+        // If this is a teleporter with a co-located partner (Two-Way Teleporter Node), keep them stuck together
+        let colocatedId: string | null = null;
+        if (currentObj && currentObj.kind === 'netgame_flag' && (currentObj.paletteIndex === 6 || currentObj.paletteIndex === 7)) {
+          const colocated = (scenarioData?.objects || []).find(
+            (o) =>
+              o.id !== placementId &&
+              o.kind === 'netgame_flag' &&
+              (o.paletteIndex === 6 || o.paletteIndex === 7) &&
+              Math.hypot(o.position[0] - currentObj.position[0], o.position[1] - currentObj.position[1], o.position[2] - currentObj.position[2]) < 0.25,
+          );
+          if (colocated) colocatedId = colocated.id;
+        }
+
+        let res = await window.opence.updateScenarioPlacement(placementId, updates);
+        if (colocatedId && updates.position) {
+          const partnerUpdates = { ...updates };
+          res = await window.opence.updateScenarioPlacement(colocatedId, partnerUpdates);
+        }
+
         if (res && res.ok) {
           setScenarioData(res.summary);
         }
@@ -342,7 +368,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         console.error('Failed to update scenario placement:', err);
       }
     },
-    [],
+    [scenarioData],
   );
 
   const handleDuplicatePlacement = useCallback(
@@ -363,33 +389,54 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   const handleDeletePlacement = useCallback(
     async (placementId: string) => {
       try {
-        const obj = scenarioData?.objects.find((o) => o.id === placementId);
-        let partnerId: string | null = null;
-        if (obj && obj.kind === 'netgame_flag' && (obj.paletteIndex === 6 || obj.paletteIndex === 7)) {
-          const partnerType = obj.paletteIndex === 6 ? 7 : 6;
-          const partner = scenarioData?.objects.find(
-            (o) => o.kind === 'netgame_flag' && o.paletteIndex === partnerType && o.teamIndex === obj.teamIndex && o.id !== placementId,
-          );
-          if (partner) {
-            partnerId = partner.id;
+        const idsToDelete =
+          selectedObjectIdsRef.current.includes(placementId) && selectedObjectIdsRef.current.length > 1
+            ? [...selectedObjectIdsRef.current]
+            : [placementId];
+
+        // Also include any co-located teleporter nodes (2-way teleporter nodes) or paired flags
+        const expandedIds = new Set<string>(idsToDelete);
+        for (const id of idsToDelete) {
+          const obj = scenarioData?.objects.find((o) => o.id === id);
+          if (obj && obj.kind === 'netgame_flag' && (obj.paletteIndex === 6 || obj.paletteIndex === 7)) {
+            // Co-located node partner
+            const colocated = scenarioData?.objects.find(
+              (o) =>
+                o.id !== id &&
+                o.kind === 'netgame_flag' &&
+                (o.paletteIndex === 6 || o.paletteIndex === 7) &&
+                Math.hypot(o.position[0] - obj.position[0], o.position[1] - obj.position[1], o.position[2] - obj.position[2]) < 0.25,
+            );
+            if (colocated) expandedIds.add(colocated.id);
+
+            // Paired destination/origin
+            const partnerType = obj.paletteIndex === 6 ? 7 : 6;
+            const partner = scenarioData?.objects.find(
+              (o) => o.kind === 'netgame_flag' && o.paletteIndex === partnerType && o.teamIndex === obj.teamIndex,
+            );
+            if (partner) expandedIds.add(partner.id);
           }
         }
 
-        const res = await window.opence.deleteScenarioPlacement(placementId);
-        if (res && res.ok) {
-          let finalSummary = res.summary;
-          if (partnerId) {
-            const partnerIndex = parseInt(partnerId.split('-')[1], 10);
-            const myIndex = parseInt(placementId.split('-')[1], 10);
-            const adjustedPartnerId = partnerIndex > myIndex ? `netgame_flag-${partnerIndex - 1}` : partnerId;
-            const res2 = await window.opence.deleteScenarioPlacement(adjustedPartnerId);
-            if (res2 && res2.ok) {
-              finalSummary = res2.summary;
-            }
+        // Sort descending by index so deleting from the array doesn't disrupt earlier element indices
+        const sortedIds = Array.from(expandedIds).sort((a, b) => {
+          const ai = parseInt(a.split('-')[1], 10);
+          const bi = parseInt(b.split('-')[1], 10);
+          return bi - ai;
+        });
+
+        let finalSummary = scenarioData;
+        for (const id of sortedIds) {
+          const res = await window.opence.deleteScenarioPlacement(id);
+          if (res && res.ok) {
+            finalSummary = res.summary;
           }
-          setScenarioData(finalSummary);
-          setSelectedObjectIds((prev) => prev.filter((id) => id !== placementId && id !== partnerId));
         }
+
+        if (finalSummary) {
+          setScenarioData(finalSummary);
+        }
+        setSelectedObjectIds([]);
       } catch (err) {
         console.error('Failed to delete scenario placement:', err);
       }
@@ -406,6 +453,34 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       teamIndex?: number,
     ) => {
       try {
+        if (kind === 'teleport_2way') {
+          // Two-Way Teleporter: 2 Bi-directional nodes (Node 1 and Node 2), each with an Origin and Destination
+          const existing = (scenarioData?.objects || []).filter(
+            (o) => o.kind === 'netgame_flag' && (o.paletteIndex === 6 || o.paletteIndex === 7),
+          );
+          const maxId = existing.length > 0 ? Math.max(...existing.map((o) => o.teamIndex ?? 0)) : -1;
+          const idA = maxId + 1;
+          const idB = maxId + 2;
+
+          const p1 = position;
+          const p2: [number, number, number] = [position[0] + 6, position[1], position[2]];
+
+          // Node 1: Origin ID A, Destination ID B
+          const n1A = await window.opence.addScenarioPlacement('netgame_flag', 6, p1, rotation, idA);
+          const n1B = await window.opence.addScenarioPlacement('netgame_flag', 7, p1, rotation, idB);
+
+          // Node 2: Origin ID B, Destination ID A
+          const n2B = await window.opence.addScenarioPlacement('netgame_flag', 6, p2, rotation, idB);
+          const n2A = await window.opence.addScenarioPlacement('netgame_flag', 7, p2, rotation, idA);
+
+          if (n2A && n2A.ok) {
+            setScenarioData(n2A.summary);
+            if (n1A && n1A.ok) setSelectedObjectId(n1A.newPlacement.id);
+            setShowAddModal(false);
+          }
+          return;
+        }
+
         if (kind === 'teleport') {
           // Find next available Teleport ID
           const existing = (scenarioData?.objects || []).filter(
@@ -876,6 +951,15 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           const isRace = obj.paletteIndex === 3 || obj.paletteIndex === 4 || (obj.objectPath || '').toLowerCase().includes('race');
           const isOddball = obj.paletteIndex === 2 || (obj.objectPath || '').toLowerCase().includes('oddball');
 
+          // Check if this teleporter flag is part of a Two-Way Teleporter node (co-located with another teleporter flag)
+          const isTwoWayNode = (isTeleOrigin || isTeleDest) && (scenarioData?.objects || []).some(
+            (other) =>
+              other.id !== obj.id &&
+              other.kind === 'netgame_flag' &&
+              (other.paletteIndex === 6 || other.paletteIndex === 7) &&
+              Math.hypot(other.position[0] - obj.position[0], other.position[1] - obj.position[1], other.position[2] - obj.position[2]) < 0.25,
+          );
+
           if (isKoth) {
             // KOTH marker: Orange box cube (size of AR ~0.7m)
             const cubeGeom = new THREE.BoxGeometry(0.7, 0.7, 0.7);
@@ -915,6 +999,28 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             const cubeMesh = new THREE.Mesh(cubeGeom, cubeMat);
             cubeMesh.userData = { id: obj.id };
             flagMarker.add(cubeMesh);
+          } else if (isTwoWayNode) {
+            // Two-Way Teleporter Node: Glowing Purple portal ring & beam
+            const torusGeom = new THREE.TorusGeometry(0.85, 0.09, 8, 24);
+            torusGeom.translate(0, 0, 0.09);
+            const torusMat = new THREE.MeshStandardMaterial({
+              color: 0xab47bc,
+              emissive: 0x8e24aa,
+              emissiveIntensity: 0.6,
+              roughness: 0.2,
+            });
+            const torusMesh = new THREE.Mesh(torusGeom, torusMat);
+            torusMesh.userData = { id: obj.id };
+            flagMarker.add(torusMesh);
+
+            // Purple energy beam
+            const beamGeom = new THREE.CylinderGeometry(0.14, 0.14, 2.0, 8);
+            beamGeom.rotateX(Math.PI / 2);
+            beamGeom.translate(0, 0, 1.0);
+            const beamMat = new THREE.MeshBasicMaterial({ color: 0xba68c8, transparent: true, opacity: 0.45 });
+            const beamMesh = new THREE.Mesh(beamGeom, beamMat);
+            beamMesh.userData = { id: obj.id };
+            flagMarker.add(beamMesh);
           } else if (isTeleOrigin) {
             // Teleport Origin: Cyan glowing portal ring
             const torusGeom = new THREE.TorusGeometry(0.75, 0.08, 8, 24);
@@ -1588,10 +1694,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           canvas.focus();
         }
       } else if (e.button === 0) {
-        if (e.ctrlKey && targetGroup) {
-          // Left Ctrl + left click drag: vertical up/down move
-          isCtrlDraggingRef.current = true;
+        if (e.shiftKey && targetGroup) {
+          // Left Shift + left click drag: vertical up/down move
+          isShiftDraggingRef.current = true;
           dragHasMovedRef.current = false;
+          pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
         } else if (e.altKey && targetGroup) {
           // Left Alt + left click drag: yaw rotate
           isAltLeftDraggingRef.current = true;
@@ -1615,13 +1722,13 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       const targetGroup = getSelectedGroup();
       const wasCustomDrag =
         isMiddleDraggingRef.current ||
-        isCtrlDraggingRef.current ||
-        isAltLeftDraggingRef.current ||
-        isAltRightDraggingRef.current;
+        (isShiftDraggingRef.current && dragHasMovedRef.current) ||
+        (isAltLeftDraggingRef.current && dragHasMovedRef.current) ||
+        (isAltRightDraggingRef.current && dragHasMovedRef.current);
 
       if (wasCustomDrag) {
         isMiddleDraggingRef.current = false;
-        isCtrlDraggingRef.current = false;
+        isShiftDraggingRef.current = false;
         isAltLeftDraggingRef.current = false;
         isAltRightDraggingRef.current = false;
         if (dragHasMovedRef.current && targetGroup && selectedObjectIdRef.current) {
@@ -1720,7 +1827,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         return;
       }
 
-      if (isCtrlDraggingRef.current && targetGroup) {
+      if (isShiftDraggingRef.current && targetGroup) {
         dragHasMovedRef.current = true;
         const moveZ = -e.movementY * 0.05;
         targetGroup.position.z += moveZ;
@@ -1865,6 +1972,80 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       }
 
       renderer.render(scene, camera);
+
+      // Render real-time Blender-like 3D Orientation Gizmo
+      if (gizmoCanvasRef.current) {
+        const gCtx = gizmoCanvasRef.current.getContext('2d');
+        if (gCtx) {
+          gCtx.clearRect(0, 0, 90, 90);
+
+          // Background disk
+          gCtx.beginPath();
+          gCtx.arc(45, 45, 38, 0, Math.PI * 2);
+          gCtx.fillStyle = 'rgba(21, 25, 33, 0.85)';
+          gCtx.fill();
+          gCtx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+          gCtx.lineWidth = 1.5;
+          gCtx.stroke();
+
+          // Camera rotation matrix
+          const rotMat = new THREE.Matrix4().extractRotation(camera.matrixWorldInverse);
+
+          // Three.js world axes corresponding to Halo coordinates:
+          // Halo +X (Red): Three.js (1, 0, 0)
+          // Halo +Y (Green): Three.js (0, 0, -1)
+          // Halo +Z (Blue): Three.js (0, 1, 0)
+          const axes = [
+            { id: 'x' as const, label: 'X', dir: new THREE.Vector3(1, 0, 0), color: '#ef5350', isNegative: false },
+            { id: '-x' as const, label: '-X', dir: new THREE.Vector3(-1, 0, 0), color: '#ef5350', isNegative: true },
+            { id: 'y' as const, label: 'Y', dir: new THREE.Vector3(0, 0, -1), color: '#66bb6a', isNegative: false },
+            { id: '-y' as const, label: '-Y', dir: new THREE.Vector3(0, 0, 1), color: '#66bb6a', isNegative: true },
+            { id: 'z' as const, label: 'Z', dir: new THREE.Vector3(0, 1, 0), color: '#42a5f5', isNegative: false },
+            { id: '-z' as const, label: '-Z', dir: new THREE.Vector3(0, -1, 0), color: '#42a5f5', isNegative: true },
+          ];
+
+          const projected = axes.map((a) => {
+            const v = a.dir.clone().applyMatrix4(rotMat);
+            return {
+              ...a,
+              sx: 45 + v.x * 26,
+              sy: 45 - v.y * 26,
+              sz: v.z, // depth: positive means pointing away, negative means pointing towards camera
+            };
+          });
+
+          // Sort from furthest to closest (back to front)
+          projected.sort((a, b) => b.sz - a.sz);
+
+          for (const a of projected) {
+            // Draw axis line from center
+            gCtx.beginPath();
+            gCtx.moveTo(45, 45);
+            gCtx.lineTo(a.sx, a.sy);
+            gCtx.strokeStyle = a.isNegative ? 'rgba(255, 255, 255, 0.2)' : a.color;
+            gCtx.lineWidth = a.isNegative ? 1.5 : 2.5;
+            gCtx.stroke();
+
+            // Draw axis circle / dot
+            gCtx.beginPath();
+            const r = a.isNegative ? 4 : 8;
+            gCtx.arc(a.sx, a.sy, r, 0, Math.PI * 2);
+            gCtx.fillStyle = a.isNegative ? 'rgba(150, 150, 150, 0.7)' : a.color;
+            gCtx.fill();
+            gCtx.strokeStyle = '#fff';
+            gCtx.lineWidth = 1;
+            gCtx.stroke();
+
+            if (!a.isNegative) {
+              gCtx.fillStyle = '#fff';
+              gCtx.font = 'bold 9px sans-serif';
+              gCtx.textAlign = 'center';
+              gCtx.textBaseline = 'middle';
+              gCtx.fillText(a.label, a.sx, a.sy);
+            }
+          }
+        }
+      }
 
       displayThrottle += dt;
       if (displayThrottle > 0.1) {
@@ -2259,24 +2440,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             [R] Frame Scene
           </button>
 
-          {/* Snap Spawns to Ground */}
-          <button
-            data-testid="viewport-snap-spawns-btn"
-            onClick={snapAllSpawnsToGround}
-            style={{
-              background: 'var(--bg-panel)',
-              color: 'var(--accent-cyan)',
-              border: '1px solid var(--border)',
-              borderRadius: 4,
-              padding: '4px 10px',
-              fontSize: 11,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-            title="Move and snap all player spawns and items down onto the BSP ground surface"
-          >
-            Snap Spawns to Ground
-          </button>
+
 
           {/* Inspector Panel Toggle Button */}
           <button
@@ -2338,13 +2502,48 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           <div style={{ fontSize: 9.5, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
             View Orientation
           </div>
+
+          {/* Dynamic 3D Rotating Blender-Style Coordinate Gizmo */}
+          <canvas
+            ref={gizmoCanvasRef}
+            width={90}
+            height={90}
+            data-testid="orientation-gizmo-canvas"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const mx = e.clientX - rect.left;
+              const my = e.clientY - rect.top;
+              if (!cameraRef.current) return;
+              const rotMat = new THREE.Matrix4().extractRotation(cameraRef.current.matrixWorldInverse);
+              const axes = [
+                { id: 'x' as const, dir: new THREE.Vector3(1, 0, 0) },
+                { id: '-x' as const, dir: new THREE.Vector3(-1, 0, 0) },
+                { id: 'y' as const, dir: new THREE.Vector3(0, 0, -1) },
+                { id: '-y' as const, dir: new THREE.Vector3(0, 0, 1) },
+                { id: 'z' as const, dir: new THREE.Vector3(0, 1, 0) },
+                { id: '-z' as const, dir: new THREE.Vector3(0, -1, 0) },
+              ];
+              for (const a of axes) {
+                const v = a.dir.clone().applyMatrix4(rotMat);
+                const sx = 45 + v.x * 26;
+                const sy = 45 - v.y * 26;
+                if (Math.hypot(mx - sx, my - sy) < 14) {
+                  alignCameraView(a.id);
+                  return;
+                }
+              }
+            }}
+            style={{ cursor: 'pointer', display: 'block' }}
+            title="Click an axis to align view"
+          />
+
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 26px)', gap: 3, justifyContent: 'center' }}>
             {/* Top row */}
             <div />
             <button
               data-testid="orientation-btn-top"
               title="Top View (+Z)"
-              onClick={() => { alignCameraView('z'); frameScene(); }}
+              onClick={() => { alignCameraView('z'); }}
               style={{
                 width: 26,
                 height: 24,
@@ -2366,7 +2565,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             <button
               data-testid="orientation-btn-iso"
               title="Isometric View"
-              onClick={() => { alignCameraView('iso'); frameScene(); }}
+              onClick={() => { alignCameraView('iso'); }}
               style={{
                 width: 26,
                 height: 24,
@@ -2390,7 +2589,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             <button
               data-testid="orientation-btn-left"
               title="Left View (+Y)"
-              onClick={() => { alignCameraView('y'); frameScene(); }}
+              onClick={() => { alignCameraView('y'); }}
               style={{
                 width: 26,
                 height: 24,
@@ -2412,7 +2611,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             <button
               data-testid="orientation-btn-front"
               title="Front View (+X)"
-              onClick={() => { alignCameraView('x'); frameScene(); }}
+              onClick={() => { alignCameraView('x'); }}
               style={{
                 width: 26,
                 height: 24,
@@ -2434,7 +2633,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             <button
               data-testid="orientation-btn-right"
               title="Right View (-Y)"
-              onClick={() => { alignCameraView('-y'); frameScene(); }}
+              onClick={() => { alignCameraView('-y'); }}
               style={{
                 width: 26,
                 height: 24,
@@ -2459,7 +2658,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             <button
               data-testid="orientation-btn-back"
               title="Back View (-X)"
-              onClick={() => { alignCameraView('-x'); frameScene(); }}
+              onClick={() => { alignCameraView('-x'); }}
               style={{
                 width: 26,
                 height: 24,
@@ -2481,7 +2680,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             <button
               data-testid="orientation-btn-bottom"
               title="Bottom View (-Z)"
-              onClick={() => { alignCameraView('-z'); frameScene(); }}
+              onClick={() => { alignCameraView('-z'); }}
               style={{
                 width: 26,
                 height: 24,
@@ -3015,40 +3214,28 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                             </button>
                           </div>
                           <button
-                            data-testid="inspector-koth-remove-zone"
-                            onClick={async () => {
+                            data-testid="inspector-koth-select-zone"
+                            onClick={() => {
                               const oldId = selectedPlacement.teamIndex;
                               const zone = (scenarioData?.objects || []).filter(
                                 (o) => o.kind === 'netgame_flag' && o.paletteIndex === 8 && o.teamIndex === oldId,
                               );
-                              // Delete in reverse order
-                              const sorted = [...zone].sort((a, b) => {
-                                const ai = parseInt(a.id.split('-')[1], 10);
-                                const bi = parseInt(b.id.split('-')[1], 10);
-                                return bi - ai;
-                              });
-                              for (const pt of sorted) {
-                                await window.opence.deleteScenarioPlacement(pt.id);
-                              }
-                              const res = await window.opence.getScenarioPlacements();
-                              if (res && res.ok) {
-                                setScenarioData(res.summary);
-                              }
-                              setSelectedObjectIds([]);
+                              setSelectedObjectIds(zone.map((pt) => pt.id));
                             }}
                             style={{
                               width: '100%',
-                              padding: '4px 6px',
-                              fontSize: 10.5,
+                              padding: '5px 6px',
+                              fontSize: 11,
                               fontWeight: 600,
-                              background: 'rgba(255, 80, 80, 0.15)',
-                              color: '#ff6b6b',
-                              border: '1px solid rgba(255, 80, 80, 0.4)',
+                              background: 'rgba(255, 152, 0, 0.15)',
+                              color: '#ffa726',
+                              border: '1px solid rgba(255, 152, 0, 0.45)',
                               borderRadius: 3,
                               cursor: 'pointer',
                             }}
+                            title="Select all points in this KOTH zone to move or delete them all together"
                           >
-                            Remove KOTH Zone
+                            Select Full Zone (Move All)
                           </button>
                         </div>
                       </div>
@@ -3145,6 +3332,61 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                             }}
                           />
                         </div>
+                      </div>
+                    )}
+
+                    {/* Team Spawns Count & Multi-Select */}
+                    {selectedPlacement.kind === 'spawn' && (
+                      <div
+                        data-testid="inspector-spawn-team-controls"
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          padding: 8,
+                          background: 'rgba(66, 165, 245, 0.08)',
+                          border: '1px solid rgba(66, 165, 245, 0.3)',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: 10.5, fontWeight: 700, color: '#42a5f5', textTransform: 'uppercase' }}>
+                            Player Spawn Info
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                          <strong>{selectedPlacement.teamIndex === 0 ? 'Red Team' : selectedPlacement.teamIndex === 1 ? 'Blue Team' : 'FFA / Other'} Spawns:</strong>{' '}
+                          <span style={{ color: 'var(--text-primary)', fontWeight: 700 }}>
+                            {(scenarioData?.objects || []).filter((o) => o.kind === 'spawn' && (o.teamIndex ?? 0) === (selectedPlacement.teamIndex ?? 0)).length}
+                          </span>{' '}
+                          <span style={{ color: 'var(--text-dim)', fontSize: 10 }}>
+                            (Total Map Spawns: {(scenarioData?.objects || []).filter((o) => o.kind === 'spawn').length})
+                          </span>
+                        </div>
+                        <button
+                          data-testid="inspector-select-all-team-spawns"
+                          onClick={() => {
+                            const team = selectedPlacement.teamIndex ?? 0;
+                            const teamSpawns = (scenarioData?.objects || []).filter(
+                              (o) => o.kind === 'spawn' && (o.teamIndex ?? 0) === team,
+                            );
+                            setSelectedObjectIds(teamSpawns.map((s) => s.id));
+                          }}
+                          style={{
+                            width: '100%',
+                            padding: '5px 8px',
+                            fontSize: 11,
+                            fontWeight: 600,
+                            background: 'var(--bg-main)',
+                            color: '#42a5f5',
+                            border: '1px solid rgba(66, 165, 245, 0.4)',
+                            borderRadius: 3,
+                            cursor: 'pointer',
+                            marginTop: 2,
+                          }}
+                        >
+                          Select All {selectedPlacement.teamIndex === 0 ? 'Red' : selectedPlacement.teamIndex === 1 ? 'Blue' : 'Team'} Spawns
+                        </button>
                       </div>
                     )}
 
@@ -3652,7 +3894,8 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                 <option value="weapon">Weapon</option>
                 <option value="equipment">Equipment</option>
                 <option value="biped">Biped</option>
-                <option value="teleport">Teleporters (Origin & Destination Pair)</option>
+                <option value="teleport">One-Way Teleporter (Origin & Destination Pair)</option>
+                <option value="teleport_2way">Two-Way Teleporter (Bi-Directional Pair - Purple)</option>
                 <option value="koth">King of the Hill (KOTH 8-Point Zone)</option>
                 <option value="race">Race Track Checkpoint</option>
                 <option value="oddball">Oddball Skull Spawn</option>
