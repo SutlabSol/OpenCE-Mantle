@@ -5,7 +5,7 @@ import VerifyEmbeddedDataDialog from '../VerifyEmbeddedDataDialog';
 import type { OpenceApi, VerifyEmbeddedDataResult, GetReferencingTagsResult } from '../../../electron/shared-types';
 
 function installMockOpence(verifyEmbeddedData: () => Promise<VerifyEmbeddedDataResult>) {
-  const api: OpenceApi = {
+  const api: any = {
     openMapDialog: vi.fn(),
     loadMap: vi.fn(),
     decompressMap: vi.fn(),

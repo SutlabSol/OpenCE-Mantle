@@ -29,7 +29,7 @@ describe('BatchExtractDialog', () => {
 
   beforeEach(() => {
     progressListeners = new Set();
-    window.opence = {
+    (window as any).opence = {
       openMapDialog: vi.fn(),
       loadMap: vi.fn(),
       decompressMap: vi.fn(),
@@ -83,7 +83,7 @@ describe('BatchExtractDialog', () => {
       showAbout: vi.fn(),
       getAppVersion: vi.fn(async () => '0.1.0'),
       getRecentMaps: vi.fn(async () => []),
-      onProgress: (cb) => {
+      onProgress: (cb: any) => {
         progressListeners.add(cb);
         return () => progressListeners.delete(cb);
       },

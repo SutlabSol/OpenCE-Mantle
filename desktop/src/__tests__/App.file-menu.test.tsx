@@ -27,7 +27,7 @@ function installMockOpence(openResult: LoadMapResult = OK_MAP) {
   const discardChanges = vi.fn(async () => ({ ok: true as const, map: OK_MAP as LoadMapResult }));
   const notImplemented = vi.fn();
   const updated = new Set<(m: OpenMapSummary) => void>();
-  const api: OpenceApi = {
+  const api: any = {
     openMapDialog: vi.fn(async () => openResult),
     loadMap: vi.fn(async () => null),
     decompressMap: vi.fn(),
@@ -85,7 +85,7 @@ function installMockOpence(openResult: LoadMapResult = OK_MAP) {
     onLog: () => () => {},
     onMenuAction: () => () => {},
     onMapLoaded: () => () => {},
-    onMapUpdated: (cb) => {
+    onMapUpdated: (cb: any) => {
       updated.add(cb);
       return () => updated.delete(cb);
     },

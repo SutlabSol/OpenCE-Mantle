@@ -20,6 +20,7 @@ interface Props {
   onRenameTag?: (tag: TagEntrySummary) => void;
   /** Right-click "Duplicate Tag..." */
   onDuplicateTag?: (tag: TagEntrySummary) => void;
+  onOpenBitmapEditor?: (tag: TagEntrySummary) => void;
 }
 
 type GroupMode = 'class' | 'folder';
@@ -64,6 +65,7 @@ export default function TagBrowser({
   onFindReferences,
   onRenameTag,
   onDuplicateTag,
+  onOpenBitmapEditor,
 }: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
@@ -350,6 +352,22 @@ export default function TagBrowser({
           >
             Tag Editor...
           </button>
+          {contextMenuTag?.primaryClassName === 'bitmap' && (
+            <button
+              data-testid="tag-row-context-bitmap-editor"
+              onClick={() => {
+                const t = contextMenuTag;
+                setContextMenu(null);
+                if (t) {
+                  focusRow(t);
+                  onOpenBitmapEditor?.(t);
+                }
+              }}
+              style={{ ...menuItemStyle(false), color: 'var(--accent-cyan)' }}
+            >
+              Bitmap Editor & Injector...
+            </button>
+          )}
           <button
             data-testid="tag-row-context-references"
             onClick={() => {

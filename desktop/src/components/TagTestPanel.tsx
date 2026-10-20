@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { TagTestStatus, TagTestLogEntry } from '../electron/shared-types';
+import type { TagTestStatus, TagTestLogEntry } from '../../electron/shared-types';
 
 interface Props {
   onOpenTagEditor?: (tagIndexOrPath: number | string) => void;

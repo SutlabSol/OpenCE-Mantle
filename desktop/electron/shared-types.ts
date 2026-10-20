@@ -15,6 +15,7 @@ import type { ModelRenderGeometry } from '../../core/src/render/model-geometry';
 import type { ReferencingTagSummary } from '../../core/src/map/tag-reverse-dependencies';
 import type { UnicodeStringItem, UnicodeStringListResult } from '../../core/src/map/unicode-string-editor';
 import type { BspInfo, BspSwapPreflightResult, BspSwapOptions, BspSwapResult } from '../../core/src/map/bsp-swapper';
+import type { BitmapTagSummary, BitmapImageInfo, BitmapSequenceInfo } from '../../core/src/render/bitmap-codec';
 
 export type {
   TagFieldDescriptor,
@@ -36,6 +37,9 @@ export type {
   BspSwapPreflightResult,
   BspSwapOptions,
   BspSwapResult,
+  BitmapTagSummary,
+  BitmapImageInfo,
+  BitmapSequenceInfo,
 };
 
 export interface MapHeaderSummary {
@@ -406,6 +410,36 @@ export type ConvertMapResult =
 
 /* --------------------------- main <-> worker thread protocol (internal) --------------------------- */
 
+export interface GetBitmapInfoResult {
+  ok: boolean;
+  summary?: BitmapTagSummary;
+  code?: string;
+  message?: string;
+}
+
+export interface GetBitmapRgbaResult {
+  ok: boolean;
+  width?: number;
+  height?: number;
+  dataUrl?: string;
+  code?: string;
+  message?: string;
+}
+
+export interface ExportBitmapResult {
+  ok: boolean;
+  filePath?: string;
+  code?: string;
+  message?: string;
+}
+
+export interface ReplaceBitmapResult {
+  ok: boolean;
+  map?: OpenMapSummary;
+  code?: string;
+  message?: string;
+}
+
 export type WorkerRequest =
   | { type: 'inspect'; requestId: string; filePath: string }
   | { type: 'compress' | 'decompress'; requestId: string; filePath: string; outputPath: string }
@@ -482,6 +516,10 @@ export type WorkerRequest =
   | { type: 'getSourceBspMesh'; requestId: string; sourceFilePath: string; bspIndex?: number }
   | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions; resourceMapPaths?: Partial<Record<ResourceMapKind, string | undefined>> }
   | { type: 'stageTagTestMap'; requestId: string; targetPath: string }
+  | { type: 'getBitmapInfo'; requestId: string; tagIndex: number; bitmapsPath?: string }
+  | { type: 'getBitmapRgba'; requestId: string; tagIndex: number; imageIndex: number; bitmapsPath?: string }
+  | { type: 'exportBitmap'; requestId: string; tagIndex: number; imageIndex: number; format: 'png' | 'dds'; outputPath: string; bitmapsPath?: string }
+  | { type: 'replaceBitmap'; requestId: string; tagIndex: number; imageIndex: number; inputPath: string; targetFormat?: number; bitmapsPath?: string }
   | { type: 'cancel'; requestId: string };
 
 export type GetReferencingTagsResult =
@@ -740,6 +778,13 @@ export interface OpenceApi {
   pickOpenCeDirectory(): Promise<{ path: string | null }>;
   getOpenCeConfig(): Promise<{ directory: string | null; executable: string | null; exists: boolean }>;
   setOpenCeDirectory(dir: string | null): Promise<{ ok: boolean }>;
+  /** M13.1: Bitmap / Texture Editor & Injector */
+  getBitmapInfo(tagIndex: number): Promise<GetBitmapInfoResult>;
+  getBitmapRgba(tagIndex: number, imageIndex: number): Promise<GetBitmapRgbaResult>;
+  pickExportBitmapPath(defaultName: string, format: 'png' | 'dds'): Promise<{ path: string | null }>;
+  exportBitmapImage(tagIndex: number, imageIndex: number, format: 'png' | 'dds', outputPath: string): Promise<ExportBitmapResult>;
+  pickImportBitmapPath(): Promise<{ path: string | null }>;
+  replaceBitmapImage(tagIndex: number, imageIndex: number, inputPath: string, targetFormat?: number): Promise<ReplaceBitmapResult>;
   getPathForFile(file: File): string;
 }
 

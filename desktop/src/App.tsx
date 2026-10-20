@@ -17,6 +17,7 @@ import ConfirmDialog from './components/ConfirmDialog';
 import InjectDialog from './components/InjectDialog';
 import SettingsDialog from './components/SettingsDialog';
 import TagEditorDialog from './components/TagEditorDialog';
+import BitmapEditorDialog from './components/BitmapEditorDialog';
 import TagActionDialog, { type TagActionType } from './components/TagActionDialog';
 import VerifyEmbeddedDataDialog from './components/VerifyEmbeddedDataDialog';
 import ConvertDialog from './components/ConvertDialog';
@@ -45,6 +46,7 @@ export default function App() {
   const [identifyBitmapsVersion, setIdentifyBitmapsVersion] = useState<HaloBitmapVersion | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
   const [editingTag, setEditingTag] = useState<TagEntrySummary | null>(null);
+  const [bitmapEditorTag, setBitmapEditorTag] = useState<TagEntrySummary | null>(null);
   /** Properties palette active tab */
   const [propertiesPaletteTab, setPropertiesPaletteTab] = useState<PropertiesPaletteTab>('overview');
   /** Milestone 9: Tag action modal (rename or duplicate) */
@@ -347,6 +349,7 @@ export default function App() {
               }}
               onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
               onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
+              onOpenBitmapEditor={setBitmapEditorTag}
             />
             <CenterWorkspace
               header={mapState.header}
@@ -420,7 +423,16 @@ export default function App() {
       )}
 
       {editingTag && mapState?.status === 'ok' && (
-        <TagEditorDialog tag={editingTag} allTags={mapState.tags} onClose={() => setEditingTag(null)} />
+        <TagEditorDialog
+          tag={editingTag}
+          allTags={mapState.tags}
+          onClose={() => setEditingTag(null)}
+          onOpenBitmapEditor={setBitmapEditorTag}
+        />
+      )}
+
+      {bitmapEditorTag && mapState?.status === 'ok' && (
+        <BitmapEditorDialog tag={bitmapEditorTag} onClose={() => setBitmapEditorTag(null)} />
       )}
 
       {tagAction && mapState?.status === 'ok' && (

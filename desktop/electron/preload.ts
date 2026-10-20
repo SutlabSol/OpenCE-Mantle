@@ -82,6 +82,15 @@ const api: OpenceApi = {
     newPaletteIndex: number,
   ) => ipcRenderer.invoke('render:swapScenarioPlacement', placementId, newKind, newPaletteIndex),
   deleteScenarioPlacement: (placementId: string) => ipcRenderer.invoke('render:deleteScenarioPlacement', placementId),
+  getBitmapInfo: (tagIndex: number) => ipcRenderer.invoke('bitmap:getInfo', tagIndex),
+  getBitmapRgba: (tagIndex: number, imageIndex: number) => ipcRenderer.invoke('bitmap:getRgba', tagIndex, imageIndex),
+  pickExportBitmapPath: (defaultName: string, format: 'png' | 'dds') =>
+    ipcRenderer.invoke('dialog:pickExportBitmapPath', defaultName, format),
+  exportBitmapImage: (tagIndex: number, imageIndex: number, format: 'png' | 'dds', outputPath: string) =>
+    ipcRenderer.invoke('bitmap:export', tagIndex, imageIndex, format, outputPath),
+  pickImportBitmapPath: () => ipcRenderer.invoke('dialog:pickImportBitmapPath'),
+  replaceBitmapImage: (tagIndex: number, imageIndex: number, inputPath: string, targetFormat?: number) =>
+    ipcRenderer.invoke('bitmap:replace', tagIndex, imageIndex, inputPath, targetFormat),
   convertPreflight: (source: 'open' | 'pick', resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convertPreflight', source, resourcePaths),
   convertMap: (acknowledgeScripts: boolean, repairs: ConvertRepairChoice, resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convert', acknowledgeScripts, repairs, resourcePaths),
   pickConvertResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickConvertResource', kind),

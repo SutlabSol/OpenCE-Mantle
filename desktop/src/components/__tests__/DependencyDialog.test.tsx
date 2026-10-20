@@ -12,7 +12,7 @@ function okDeps(scenario: MockScenario): () => Promise<GetDependenciesResult> {
 
 function installMockOpence(overrides: Partial<OpenceApi> = {}): { progressListeners: Set<(e: ProgressEvent) => void> } {
   const progressListeners = new Set<(e: ProgressEvent) => void>();
-  const api: OpenceApi = {
+  const api: any = {
     openMapDialog: vi.fn(),
     loadMap: vi.fn(),
     decompressMap: vi.fn(),
@@ -68,7 +68,7 @@ function installMockOpence(overrides: Partial<OpenceApi> = {}): { progressListen
     showAbout: vi.fn(async () => {}),
     getAppVersion: vi.fn(async () => '0.1.0-test'),
     getRecentMaps: vi.fn(async () => []),
-    onProgress: (cb) => {
+    onProgress: (cb: any) => {
       progressListeners.add(cb);
       return () => progressListeners.delete(cb);
     },

@@ -446,7 +446,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
   const handleAddPlacement = useCallback(
     async (
-      kind: ScenarioObjectKind | 'teleport' | 'koth' | 'race' | 'oddball',
+      kind: ScenarioObjectKind | 'teleport' | 'teleport_2way' | 'koth' | 'race' | 'oddball',
       paletteIndex: number,
       position: [number, number, number],
       rotation: [number, number, number] = [0, 0, 0],
@@ -3178,7 +3178,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                                   selectedPlacement.rotation,
                                   selectedPlacement.teamIndex ?? 0,
                                 );
-                                const res = await window.opence.getScenarioPlacements();
+                                const res = await window.opence.getScenarioObjects();
                                 if (res && res.ok) setScenarioData(res.summary);
                               }}
                               style={{

@@ -63,6 +63,14 @@ import {
   bspSwapPreflight,
   performBspSwap,
   type BspSwapOptions,
+  inspectBitmapTag,
+  replaceBitmapImageData,
+  encodeRgbaToPng,
+  decodePngToRgba,
+  encodeToDds,
+  encodeRgbaToDxt1,
+  encodeRgbaToDxt5,
+  BitmapFormat,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -1238,6 +1246,174 @@ export function runGetBitmapTexture(task: { requestId: string; bitmapTagId: numb
   }
 }
 
+/** M13.1: Inspects a bitmap tag's sequences, formats, and image plates. */
+export function runGetBitmapInfo(task: { requestId: string; tagIndex: number; bitmapsPath?: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+    const summary = inspectBitmapTag(currentMap.buffer, currentMap.header, currentMap.tagIndex, entry.tagId, externalBitmaps);
+    sendResult(task.requestId, { ok: true, summary });
+  } catch (err) {
+    sendError(task.requestId, 'BITMAP_INFO_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** M13.1: Decodes an image plate to base64 PNG data URL for UI preview. */
+export function runGetBitmapRgba(task: { requestId: string; tagIndex: number; imageIndex: number; bitmapsPath?: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+    const texture = decodeBitmapTagImage(currentMap.buffer, currentMap.header, currentMap.tagIndex, entry.tagId, task.imageIndex, externalBitmaps);
+    const pngBuffer = encodeRgbaToPng(texture.rgbaData, texture.width, texture.height);
+    const dataUrl = `data:image/png;base64,${pngBuffer.toString('base64')}`;
+    sendResult(task.requestId, {
+      ok: true,
+      width: texture.width,
+      height: texture.height,
+      dataUrl,
+    });
+  } catch (err) {
+    sendError(task.requestId, 'BITMAP_RGBA_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** M13.1: Exports a bitmap image plate as PNG or DDS. */
+export function runExportBitmap(task: {
+  requestId: string;
+  tagIndex: number;
+  imageIndex: number;
+  format: 'png' | 'dds';
+  outputPath: string;
+  bitmapsPath?: string;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+    if (task.format === 'dds') {
+      const summary = inspectBitmapTag(currentMap.buffer, currentMap.header, currentMap.tagIndex, entry.tagId, externalBitmaps);
+      const img = summary.images[task.imageIndex];
+      if (!img) return sendError(task.requestId, 'IMAGE_NOT_FOUND', `Image plate ${task.imageIndex} not found.`);
+      const srcBuf = img.isExternal ? externalBitmaps : currentMap.buffer;
+      if (!srcBuf) return sendError(task.requestId, 'EXTERNAL_BITMAPS_REQUIRED', 'External bitmaps.map required.');
+      const rawBytes = srcBuf.subarray(img.pixelDataOffset, img.pixelDataOffset + img.pixelDataSize);
+      const ddsBuffer = encodeToDds(rawBytes, img.width, img.height, img.format, img.mipmapCount);
+      fs.writeFileSync(task.outputPath, ddsBuffer);
+    } else {
+      const texture = decodeBitmapTagImage(currentMap.buffer, currentMap.header, currentMap.tagIndex, entry.tagId, task.imageIndex, externalBitmaps);
+      const pngBuffer = encodeRgbaToPng(texture.rgbaData, texture.width, texture.height);
+      fs.writeFileSync(task.outputPath, pngBuffer);
+    }
+    sendResult(task.requestId, { ok: true, filePath: task.outputPath });
+  } catch (err) {
+    sendError(task.requestId, 'BITMAP_EXPORT_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** M13.1: Imports and replaces a bitmap image plate in-place or appended/internalized. */
+export function runReplaceBitmapImage(task: {
+  requestId: string;
+  tagIndex: number;
+  imageIndex: number;
+  inputPath: string;
+  targetFormat?: number;
+  bitmapsPath?: string;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    if (!fs.existsSync(task.inputPath)) return sendError(task.requestId, 'FILE_NOT_FOUND', `Input file "${task.inputPath}" does not exist.`);
+
+    const fileBuf = fs.readFileSync(task.inputPath);
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+
+    let pixels: Uint8Array;
+    let width: number;
+    let height: number;
+    let chosenFormat = task.targetFormat;
+
+    // Check if DDS
+    if (fileBuf.length > 128 && fileBuf.readUInt32LE(0) === 0x20534444) {
+      height = fileBuf.readUInt32LE(12);
+      width = fileBuf.readUInt32LE(16);
+      const fourCC = fileBuf.toString('ascii', 84, 88);
+      if (chosenFormat === undefined) {
+        if (fourCC === 'DXT1') chosenFormat = BitmapFormat.DXT1;
+        else if (fourCC === 'DXT3') chosenFormat = BitmapFormat.DXT3;
+        else if (fourCC === 'DXT5') chosenFormat = BitmapFormat.DXT5;
+        else chosenFormat = BitmapFormat.A8R8G8B8;
+      }
+      pixels = fileBuf.subarray(128);
+    } else {
+      // Decode PNG
+      const decoded = decodePngToRgba(fileBuf);
+      width = decoded.width;
+      height = decoded.height;
+
+      if (chosenFormat === undefined) {
+        let hasAlpha = false;
+        for (let i = 3; i < decoded.rgba.length; i += 4) {
+          if (decoded.rgba[i] < 250) {
+            hasAlpha = true;
+            break;
+          }
+        }
+        chosenFormat = hasAlpha ? BitmapFormat.DXT5 : BitmapFormat.DXT1;
+      }
+
+      if (chosenFormat === BitmapFormat.DXT1) {
+        pixels = encodeRgbaToDxt1(decoded.rgba, width, height);
+      } else if (chosenFormat === BitmapFormat.DXT5) {
+        pixels = encodeRgbaToDxt5(decoded.rgba, width, height);
+      } else {
+        pixels = new Uint8Array(width * height * 4);
+        for (let i = 0; i < decoded.rgba.length; i += 4) {
+          pixels[i + 0] = decoded.rgba[i + 2]; // B
+          pixels[i + 1] = decoded.rgba[i + 1]; // G
+          pixels[i + 2] = decoded.rgba[i + 0]; // R
+          pixels[i + 3] = decoded.rgba[i + 3]; // A
+        }
+        chosenFormat = BitmapFormat.A8R8G8B8;
+      }
+    }
+
+    const updatedBuffer = replaceBitmapImageData(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      task.imageIndex,
+      pixels,
+      width,
+      height,
+      chosenFormat,
+      externalBitmaps,
+    );
+
+    currentMap.buffer = updatedBuffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== 'ok') {
+      return sendError(task.requestId, 'REINSPECT_FAILED', 'Failed to inspect map after replacing bitmap.');
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+
+    sendResult(task.requestId, {
+      ok: true,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendError(task.requestId, 'BITMAP_REPLACE_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
 /** Step 8.5: Extracts placed scenario objects (vehicles, scenery, bipeds, weapons, spawns). */
 export function runGetScenarioObjects(task: { requestId: string }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
@@ -1610,6 +1786,10 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'bspSwapPreflight') await runBspSwapPreflight(task);
     else if (task.type === 'performBspSwap') await runPerformBspSwap(task);
     else if (task.type === 'stageTagTestMap') runStageTagTestMap(task);
+    else if (task.type === 'getBitmapInfo') runGetBitmapInfo(task);
+    else if (task.type === 'getBitmapRgba') runGetBitmapRgba(task);
+    else if (task.type === 'exportBitmap') runExportBitmap(task);
+    else if (task.type === 'replaceBitmap') runReplaceBitmapImage(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

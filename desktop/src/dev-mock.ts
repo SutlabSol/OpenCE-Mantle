@@ -895,6 +895,25 @@ export function installDevMock() {
       updatedListeners.add(cb);
       return () => updatedListeners.delete(cb);
     },
+    // M12: OpenCE Tag Test
+    tagTestLaunch: async () => ({ ok: true }),
+    tagTestStop: async () => ({ ok: true }),
+    tagTestSendCommand: async (cmd: string) => ({ ok: true, response: `(mock response to "${cmd}")` }),
+    tagTestHotReload: async () => ({ ok: true }),
+    tagTestGetStatus: async () => ({ state: 'stopped', telnetConnected: false }),
+    onTagTestLog: () => () => {},
+    onTagTestStatusChange: () => () => {},
+    pickOpenCeDirectory: async () => ({ path: 'C:\\Games\\Halo Custom Edition' }),
+    getOpenCeConfig: async () => ({ directory: 'C:\\Games\\Halo Custom Edition', executable: 'C:\\Games\\Halo Custom Edition\\haloce.exe', exists: true }),
+    setOpenCeDirectory: async () => ({ ok: true }),
+
+    // M13.1: Bitmap Editor
+    getBitmapInfo: async () => ({ ok: true }),
+    getBitmapRgba: async () => ({ ok: true }),
+    pickExportBitmapPath: async () => ({ path: 'C:\\exports\\bitmap.png' }),
+    exportBitmapImage: async () => ({ ok: true }),
+    pickImportBitmapPath: async () => ({ path: 'C:\\imports\\bitmap.png' }),
+    replaceBitmapImage: async () => ({ ok: true }),
     getPathForFile: (file) => (file as unknown as { path?: string }).path ?? file.name,
   };
 

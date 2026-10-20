@@ -33956,6 +33956,49 @@ var TAG_DATA_REPAIR_IDS = ["alignTagData", "scriptSyntaxData", "tagRootOutside",
 var DEMO_BASE_MEMORY_ADDRESS = 1274085376;
 var DEMO_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - DEMO_BASE_MEMORY_ADDRESS;
 
+// ../core/src/render/bitmap-textures.ts
+var BitmapFormat = {
+  A8: 0,
+  Y8: 1,
+  AY8: 2,
+  A8Y8: 3,
+  R5G6B5: 6,
+  A1R5G5B5: 8,
+  A4R4G4B4: 9,
+  X8R8G8B8: 10,
+  A8R8G8B8: 11,
+  DXT1: 14,
+  DXT3: 15,
+  DXT5: 16,
+  P8: 17
+};
+
+// ../core/src/render/bitmap-codec.ts
+var BITMAP_FORMAT_NAMES = {
+  [BitmapFormat.A8]: "A8 (8-bit Alpha)",
+  [BitmapFormat.Y8]: "Y8 (8-bit Greyscale)",
+  [BitmapFormat.AY8]: "AY8 (8-bit Alpha-Greyscale)",
+  [BitmapFormat.A8Y8]: "A8Y8 (16-bit Alpha-Greyscale)",
+  [BitmapFormat.R5G6B5]: "R5G6B5 (16-bit RGB 565)",
+  [BitmapFormat.A1R5G5B5]: "A1R5G5B5 (16-bit ARGB 1555)",
+  [BitmapFormat.A4R4G4B4]: "A4R4G4B4 (16-bit ARGB 4444)",
+  [BitmapFormat.X8R8G8B8]: "X8R8G8B8 (32-bit RGB 888)",
+  [BitmapFormat.A8R8G8B8]: "A8R8G8B8 (32-bit ARGB 8888)",
+  [BitmapFormat.DXT1]: "DXT1 (BC1 Compressed RGB)",
+  [BitmapFormat.DXT3]: "DXT3 (BC2 Compressed Explicit Alpha)",
+  [BitmapFormat.DXT5]: "DXT5 (BC3 Compressed Interpolated Alpha)",
+  [BitmapFormat.P8]: "P8 (8-bit Paletted / Bump)"
+};
+var PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+var CRC_TABLE2 = new Uint32Array(256);
+for (let n = 0; n < 256; n++) {
+  let c = n;
+  for (let k = 0; k < 8; k++) {
+    c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+  }
+  CRC_TABLE2[n] = c >>> 0;
+}
+
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
@@ -35867,6 +35910,77 @@ async function getModelGeometryFlow(modelTagId, lod) {
   );
   return promise;
 }
+async function pickExportBitmapPathFlow(defaultName, format) {
+  if (!mainWindow) return { path: null };
+  const ext = format === "dds" ? "dds" : "png";
+  const res = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    title: `Export Bitmap as ${format.toUpperCase()}`,
+    defaultPath: `${defaultName}.${ext}`,
+    filters: [{ name: format.toUpperCase(), extensions: [ext] }]
+  });
+  return { path: res.canceled ? null : res.filePath ?? null };
+}
+async function pickImportBitmapPathFlow() {
+  if (!mainWindow) return { path: null };
+  const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    title: "Import Bitmap Image",
+    filters: [{ name: "Bitmap Images (PNG, DDS)", extensions: ["png", "dds"] }],
+    properties: ["openFile"]
+  });
+  return { path: res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0] };
+}
+async function getBitmapInfoFlow(tagIndex) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "getBitmapInfo", tagIndex, bitmapsPath },
+    sendLog
+  );
+  return promise;
+}
+async function getBitmapRgbaFlow(tagIndex, imageIndex) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "getBitmapRgba", tagIndex, imageIndex, bitmapsPath },
+    sendLog
+  );
+  return promise;
+}
+async function exportBitmapFlow(tagIndex, imageIndex, format, outputPath) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "exportBitmap", tagIndex, imageIndex, format, outputPath, bitmapsPath },
+    sendLog
+  );
+  return promise;
+}
+async function replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat) {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const { promise } = sendWorkerRequest(
+    { type: "replaceBitmap", tagIndex, imageIndex, inputPath, targetFormat, bitmapsPath },
+    sendLog
+  );
+  const result = await promise;
+  if (result.ok && result.map) {
+    setOpenMapState(result.map);
+  }
+  return result;
+}
 async function updateScenarioPlacementFlow(placementId, updates) {
   if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
@@ -36564,6 +36678,18 @@ import_electron3.app.whenReady().then(() => {
     (_e, placementId, newKind, newPaletteIndex) => swapScenarioPlacementFlow(placementId, newKind, newPaletteIndex)
   );
   import_electron3.ipcMain.handle("render:deleteScenarioPlacement", (_e, placementId) => deleteScenarioPlacementFlow(placementId));
+  import_electron3.ipcMain.handle("bitmap:getInfo", (_e, tagIndex) => getBitmapInfoFlow(tagIndex));
+  import_electron3.ipcMain.handle("bitmap:getRgba", (_e, tagIndex, imageIndex) => getBitmapRgbaFlow(tagIndex, imageIndex));
+  import_electron3.ipcMain.handle("dialog:pickExportBitmapPath", (_e, defaultName, format) => pickExportBitmapPathFlow(defaultName, format));
+  import_electron3.ipcMain.handle(
+    "bitmap:export",
+    (_e, tagIndex, imageIndex, format, outputPath) => exportBitmapFlow(tagIndex, imageIndex, format, outputPath)
+  );
+  import_electron3.ipcMain.handle("dialog:pickImportBitmapPath", () => pickImportBitmapPathFlow());
+  import_electron3.ipcMain.handle(
+    "bitmap:replace",
+    (_e, tagIndex, imageIndex, inputPath, targetFormat) => replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat)
+  );
   import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
   import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());

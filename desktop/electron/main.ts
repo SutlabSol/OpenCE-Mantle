@@ -82,6 +82,10 @@ import type {
   BspSwapPreflightResult,
   BspSwapOptions,
   BspSwapResult,
+  GetBitmapInfoResult,
+  GetBitmapRgbaResult,
+  ExportBitmapResult,
+  ReplaceBitmapResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -1217,6 +1221,84 @@ async function getModelGeometryFlow(modelTagId: number, lod?: number): Promise<G
   return promise;
 }
 
+/** M13.1: Bitmap / Texture Editor flows */
+async function pickExportBitmapPathFlow(defaultName: string, format: 'png' | 'dds'): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const ext = format === 'dds' ? 'dds' : 'png';
+  const res = await dialog.showSaveDialog(mainWindow, {
+    title: `Export Bitmap as ${format.toUpperCase()}`,
+    defaultPath: `${defaultName}.${ext}`,
+    filters: [{ name: format.toUpperCase(), extensions: [ext] }],
+  });
+  return { path: res.canceled ? null : (res.filePath ?? null) };
+}
+
+async function pickImportBitmapPathFlow(): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Bitmap Image',
+    filters: [{ name: 'Bitmap Images (PNG, DDS)', extensions: ['png', 'dds'] }],
+    properties: ['openFile'],
+  });
+  return { path: res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0] };
+}
+
+async function getBitmapInfoFlow(tagIndex: number): Promise<GetBitmapInfoResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const { promise } = sendWorkerRequest<GetBitmapInfoResult>(
+    { type: 'getBitmapInfo', tagIndex, bitmapsPath },
+    sendLog,
+  );
+  return promise;
+}
+
+async function getBitmapRgbaFlow(tagIndex: number, imageIndex: number): Promise<GetBitmapRgbaResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const { promise } = sendWorkerRequest<GetBitmapRgbaResult>(
+    { type: 'getBitmapRgba', tagIndex, imageIndex, bitmapsPath },
+    sendLog,
+  );
+  return promise;
+}
+
+async function exportBitmapFlow(tagIndex: number, imageIndex: number, format: 'png' | 'dds', outputPath: string): Promise<ExportBitmapResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const { promise } = sendWorkerRequest<ExportBitmapResult>(
+    { type: 'exportBitmap', tagIndex, imageIndex, format, outputPath, bitmapsPath },
+    sendLog,
+  );
+  return promise;
+}
+
+async function replaceBitmapFlow(tagIndex: number, imageIndex: number, inputPath: string, targetFormat?: number): Promise<ReplaceBitmapResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const { promise } = sendWorkerRequest<ReplaceBitmapResult>(
+    { type: 'replaceBitmap', tagIndex, imageIndex, inputPath, targetFormat, bitmapsPath },
+    sendLog,
+  );
+  const result = await promise;
+  if (result.ok && result.map) {
+    setOpenMapState(result.map);
+  }
+  return result;
+}
+
 /** Step 9: Updates a placed scenario object in memory. */
 async function updateScenarioPlacementFlow(
   placementId: string,
@@ -2020,6 +2102,16 @@ app.whenReady().then(() => {
     swapScenarioPlacementFlow(placementId, newKind, newPaletteIndex),
   );
   ipcMain.handle('render:deleteScenarioPlacement', (_e, placementId: string) => deleteScenarioPlacementFlow(placementId));
+  ipcMain.handle('bitmap:getInfo', (_e, tagIndex: number) => getBitmapInfoFlow(tagIndex));
+  ipcMain.handle('bitmap:getRgba', (_e, tagIndex: number, imageIndex: number) => getBitmapRgbaFlow(tagIndex, imageIndex));
+  ipcMain.handle('dialog:pickExportBitmapPath', (_e, defaultName: string, format: 'png' | 'dds') => pickExportBitmapPathFlow(defaultName, format));
+  ipcMain.handle('bitmap:export', (_e, tagIndex: number, imageIndex: number, format: 'png' | 'dds', outputPath: string) =>
+    exportBitmapFlow(tagIndex, imageIndex, format, outputPath),
+  );
+  ipcMain.handle('dialog:pickImportBitmapPath', () => pickImportBitmapPathFlow());
+  ipcMain.handle('bitmap:replace', (_e, tagIndex: number, imageIndex: number, inputPath: string, targetFormat?: number) =>
+    replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat),
+  );
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());

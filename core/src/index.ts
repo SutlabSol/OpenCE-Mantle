@@ -42,3 +42,4 @@ export * from './map/unicode-string-editor';
 export * from './map/tag-index-editor';
 export * from './map/bsp-swapper';
 export * from './map/bsp-merger';
+export * from './render/bitmap-codec';
