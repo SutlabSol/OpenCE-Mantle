@@ -191,4 +191,43 @@ describe('BspSwapperDialog', () => {
     fireEvent.click(screen.getByTestId('bsp-swapper-close-btn'));
     expect(mockOnClose).toHaveBeenCalledTimes(1);
   });
+
+  it('supports multi-BSP selection and performs combined BSP swap', async () => {
+    render(
+      <BspSwapperDialog
+        isOpen={true}
+        onClose={mockOnClose}
+        onSuccess={mockOnSuccess}
+      />
+    );
+
+    fireEvent.click(screen.getByTestId('bsp-swapper-browse-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/levels\\b30\\b30a/i)).toBeInTheDocument();
+      expect(screen.getByText(/levels\\b30\\b30b/i)).toBeInTheDocument();
+    });
+
+    const selectAllBtn = screen.getByText('Select All');
+    fireEvent.click(selectAllBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Multi-BSP Combine Mode/i)).toBeInTheDocument();
+      expect(screen.getByText(/Merge & Swap \(2 BSPs\)/i)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('bsp-swapper-perform-btn'));
+
+    await waitFor(() => {
+      expect(window.opence.performBspSwap).toHaveBeenCalledWith(
+        'C:\\HaloPC\\maps\\b30.map',
+        expect.objectContaining({
+          sourceBspIndex: 0,
+          sourceBspIndices: [0, 1],
+          targetBspIndex: 0,
+        })
+      );
+      expect(mockOnSuccess).toHaveBeenCalledTimes(1);
+    });
+  });
 });

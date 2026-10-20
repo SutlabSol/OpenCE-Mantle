@@ -1466,16 +1466,37 @@ export function runDuplicateTag(task: { requestId: string; tagIndex: number; new
 }
 
 /** Milestone 10: Preflight BSP Swap. */
+/** Milestone 10.2: Extract 3D Structure BSP render mesh from an external source map. */
+export async function runGetSourceBspMesh(task: {
+  requestId: string;
+  sourceFilePath: string;
+  bspIndex?: number;
+}) {
+  try {
+    const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
+    const inspected = inspectCustomEditionMap(sourceBuffer);
+    if (inspected.status !== 'ok') {
+      return sendError(task.requestId, 'INVALID_MAP', 'Failed to inspect source map.');
+    }
+    const mesh = extractBspRenderMesh(sourceBuffer, inspected.header, inspected.tagIndex, task.bspIndex ?? 0);
+    sendResult(task.requestId, { ok: true, mesh } satisfies GetBspRenderMeshResult);
+  } catch (err: any) {
+    sendError(task.requestId, 'BSP_MESH_ERROR', err?.message || 'Failed to extract source BSP mesh.');
+  }
+}
+
+/** Milestone 10: Preflight BSP Swap. */
 export async function runBspSwapPreflight(task: {
   requestId: string;
   sourceFilePath: string;
   sourceBspIndex?: number;
   targetBspIndex?: number;
+  sourceBspIndices?: number[];
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
     const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
-    const result = bspSwapPreflight(sourceBuffer, currentMap.buffer, task.sourceBspIndex, task.targetBspIndex);
+    const result = bspSwapPreflight(sourceBuffer, currentMap.buffer, task.sourceBspIndex, task.targetBspIndex, task.sourceBspIndices);
     sendResult(task.requestId, result);
   } catch (err) {
     handleTaskError(task.requestId, err);
@@ -1560,6 +1581,7 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'setUnicodeString') runSetUnicodeString(task);
     else if (task.type === 'renameTag') runRenameTag(task);
     else if (task.type === 'duplicateTag') runDuplicateTag(task);
+    else if (task.type === 'getSourceBspMesh') await runGetSourceBspMesh(task);
     else if (task.type === 'bspSwapPreflight') await runBspSwapPreflight(task);
     else if (task.type === 'performBspSwap') await runPerformBspSwap(task);
   } catch (err) {

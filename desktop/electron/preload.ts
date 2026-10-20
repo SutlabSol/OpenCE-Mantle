@@ -41,8 +41,10 @@ const api: OpenceApi = {
   duplicateTag: (tagIndex: number, newPath: string) => ipcRenderer.invoke('tags:duplicateTag', tagIndex, newPath),
   pickBspSourceMap: () => ipcRenderer.invoke('dialog:pickBspSourceMap'),
   pickBspResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickBspResource', kind),
-  bspSwapPreflight: (sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number) =>
-    ipcRenderer.invoke('bsp:swapPreflight', sourceFilePath, sourceBspIndex, targetBspIndex),
+  bspSwapPreflight: (sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number, sourceBspIndices?: number[]) =>
+    ipcRenderer.invoke('bsp:swapPreflight', sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices),
+  getSourceBspMesh: (sourceFilePath: string, bspIndex?: number) =>
+    ipcRenderer.invoke('bsp:getSourceMesh', sourceFilePath, bspIndex),
   performBspSwap: (sourceFilePath: string, options: any) =>
     ipcRenderer.invoke('bsp:performSwap', sourceFilePath, options),
   getBspRenderMesh: (bspIndex?: number) => ipcRenderer.invoke('render:getBspMesh', bspIndex),

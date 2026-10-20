@@ -476,7 +476,8 @@ export type WorkerRequest =
   | { type: 'setUnicodeString'; requestId: string; tagIndex: number; stringIndex: number; newText: string }
   | { type: 'renameTag'; requestId: string; tagIndex: number; newPath: string }
   | { type: 'duplicateTag'; requestId: string; tagIndex: number; newPath: string }
-  | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number }
+  | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number; sourceBspIndices?: number[] }
+  | { type: 'getSourceBspMesh'; requestId: string; sourceFilePath: string; bspIndex?: number }
   | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions; resourceMapPaths?: Partial<Record<ResourceMapKind, string | undefined>> }
   | { type: 'cancel'; requestId: string };
 
@@ -684,7 +685,9 @@ export interface OpenceApi {
   pickBspSourceMap(): Promise<{ path: string | null }>;
   pickBspResource?(kind: 'bitmaps' | 'sounds'): Promise<{ path: string | null }>;
   /** Milestone 10: BSP Swapper - preflight swap between source and target map. */
-  bspSwapPreflight(sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number): Promise<BspSwapPreflightResult>;
+  bspSwapPreflight(sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number, sourceBspIndices?: number[]): Promise<BspSwapPreflightResult>;
+  /** Milestone 10.2: Extract 3D BSP render geometry from any map file. */
+  getSourceBspMesh?(sourceFilePath: string, bspIndex?: number): Promise<GetBspRenderMeshResult>;
   /** Milestone 10: BSP Swapper - perform swap into currently open map. */
   performBspSwap(sourceFilePath: string, options: BspSwapOptions): Promise<BspSwapResult>;
   /** Tools > Identify Resource Maps: reads and validates a bitmaps.map or sounds.map file for a specific Halo edition. */

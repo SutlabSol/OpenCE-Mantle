@@ -8,6 +8,7 @@ import { extractTagSet } from './tag-extractor';
 import type { RandomAccessFile } from './convert/resource-files';
 import { serializeContainer, deserializeContainer } from './container';
 import { planAddInjection, applyAddInjection, type InjectionPlan } from './tag-injector';
+import { mergeStructureBsps, rebaseStructureBspPointers } from './bsp-merger';
 
 export interface BspInfo {
   index: number;
@@ -29,6 +30,7 @@ export interface BspSwapPreflightResult {
   sourceBsps: BspInfo[];
   targetBsps: BspInfo[];
   selectedSourceBsp: BspInfo | null;
+  selectedSourceBsps?: BspInfo[];
   selectedTargetBsp: BspInfo | null;
   sizeDelta: number;
   estimatedNewSize: number;
@@ -41,7 +43,8 @@ export interface BspSwapPreflightResult {
 }
 
 export interface BspSwapOptions {
-  sourceBspIndex: number;
+  sourceBspIndex?: number;
+  sourceBspIndices?: number[];
   targetBspIndex?: number;
   stripDobcAndDecals?: boolean;
   stripDobc?: boolean;
@@ -168,6 +171,7 @@ export function bspSwapPreflight(
   targetBuffer: Buffer,
   sourceBspIndex = 0,
   targetBspIndex = 0,
+  sourceBspIndices?: number[],
 ): BspSwapPreflightResult {
   const sourceBsps = getMapBsps(sourceBuffer);
   const targetBsps = getMapBsps(targetBuffer);
@@ -200,18 +204,46 @@ export function bspSwapPreflight(
     };
   }
 
-  const selectedSourceBsp = sourceBsps[sourceBspIndex] ?? sourceBsps[0];
   const selectedTargetBsp = targetBsps[targetBspIndex] ?? targetBsps[0];
 
-  const sizeDelta = selectedSourceBsp.bspSize - selectedTargetBsp.bspSize;
+  let selectedSourceBsps: BspInfo[] | undefined;
+  let selectedSourceBsp: BspInfo;
+  let totalSourceSize = 0;
+
+  if (sourceBspIndices && sourceBspIndices.length > 0) {
+    selectedSourceBsps = sourceBspIndices.map((idx) => sourceBsps[idx]).filter(Boolean);
+    if (selectedSourceBsps.length === 0) {
+      selectedSourceBsp = sourceBsps[sourceBspIndex] ?? sourceBsps[0];
+      selectedSourceBsps = [selectedSourceBsp];
+    } else {
+      selectedSourceBsp = selectedSourceBsps[0];
+    }
+  } else {
+    selectedSourceBsp = sourceBsps[sourceBspIndex] ?? sourceBsps[0];
+    selectedSourceBsps = [selectedSourceBsp];
+  }
+
+  if (selectedSourceBsps.length > 1) {
+    totalSourceSize = selectedSourceBsps.reduce((acc, b) => acc + b.bspSize, 0);
+  } else {
+    totalSourceSize = selectedSourceBsp.bspSize;
+  }
+
+  const sizeDelta = totalSourceSize - selectedTargetBsp.bspSize;
   const estimatedNewSize = targetBuffer.length + sizeDelta;
   const warnings: string[] = [];
 
-  if (selectedSourceBsp.hasDobc) {
+  const anyDobc = selectedSourceBsps.some((b) => b.hasDobc);
+  const anyDecals = selectedSourceBsps.some((b) => b.hasDecals);
+
+  if (anyDobc) {
     warnings.push('Source BSP contains Detail Objects (DOBC). Stripping recommended for multiplayer.');
   }
-  if (selectedSourceBsp.hasDecals) {
+  if (anyDecals) {
     warnings.push('Source BSP contains Runtime Decals. Stripping recommended for multiplayer stability.');
+  }
+  if (selectedSourceBsps.length > 1) {
+    warnings.push(`Multi-BSP Merge Mode active: ${selectedSourceBsps.length} donor BSPs will be fused into a single multiplayer BSP.`);
   }
   if (estimatedNewSize > 250 * 1024 * 1024) {
     warnings.push('Target map size will exceed 250 MB; verify engine memory constraints.');
@@ -222,6 +254,7 @@ export function bspSwapPreflight(
     sourceBsps,
     targetBsps,
     selectedSourceBsp,
+    selectedSourceBsps,
     selectedTargetBsp,
     sizeDelta,
     estimatedNewSize,
@@ -287,6 +320,67 @@ function scanBspDependencies(
                   bspSize,
                   bspAddress,
                   out,
+                  visitedOffsets,
+                );
+              }
+            } catch {
+              // ignore unknown child struct
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+function rewriteBspDependencies(
+  buffer: Buffer,
+  structName: string,
+  fileOffset: number,
+  bspStart: number,
+  bspSize: number,
+  bspAddress: number,
+  tagIdMap: Map<number, number>,
+  visitedOffsets: Set<number>,
+): void {
+  if (fileOffset < bspStart || fileOffset >= bspStart + bspSize || visitedOffsets.has(fileOffset)) return;
+  visitedOffsets.add(fileOffset);
+  let resolved;
+  try {
+    resolved = resolveStruct(structName);
+  } catch {
+    return;
+  }
+  if (fileOffset + resolved.totalSize > buffer.length) return;
+
+  for (const field of resolved.fields) {
+    const fieldOffset = fileOffset + field.offset;
+    if (field.def.type === 'TagDependency') {
+      if (fieldOffset + 16 <= buffer.length) {
+        const oldTagId = buffer.readUInt32LE(fieldOffset + 12);
+        const mapped = tagIdMap.get(oldTagId) ?? tagIdMap.get(oldTagId & 0xffff);
+        if (mapped !== undefined) {
+          buffer.writeUInt32LE(mapped, fieldOffset + 12);
+        }
+      }
+    } else if (field.def.type === 'TagReflexive') {
+      if (fieldOffset + 12 <= buffer.length && field.def.struct) {
+        const count = buffer.readUInt32LE(fieldOffset + 0);
+        const pointerLow = buffer.readUInt32LE(fieldOffset + 4);
+        if (count > 0 && count < 20000 && pointerLow >= bspAddress) {
+          const childArrayOffset = bspStart + (pointerLow - bspAddress);
+          if (childArrayOffset >= bspStart && childArrayOffset < bspStart + bspSize) {
+            try {
+              const childSize = resolveStruct(field.def.struct).totalSize;
+              for (let i = 0; i < count; i++) {
+                rewriteBspDependencies(
+                  buffer,
+                  field.def.struct,
+                  childArrayOffset + i * childSize,
+                  bspStart,
+                  bspSize,
+                  bspAddress,
+                  tagIdMap,
                   visitedOffsets,
                 );
               }
@@ -402,7 +496,11 @@ export function performBspSwap(
   const srcIdx = options.sourceBspIndex ?? 0;
   const dstIdx = options.targetBspIndex ?? 0;
 
-  const srcBsp = sourceBsps[srcIdx];
+  const srcIndices = options.sourceBspIndices && options.sourceBspIndices.length > 0
+    ? options.sourceBspIndices
+    : [srcIdx];
+
+  const srcBsp = sourceBsps[srcIndices[0]];
   let dstBsp = targetBsps[dstIdx];
 
   if (!srcBsp) {
@@ -423,19 +521,47 @@ export function performBspSwap(
     };
   }
 
+  // Determine whether this is a single BSP swap or a multi-BSP merger
+  let srcBspData: Buffer;
+  let srcBspSize: number;
+  let srcBspAddress: number;
+  let srcBspName: string;
+  let srcWorldBounds: [number, number, number, number, number, number];
+
+  if (srcIndices.length > 1) {
+    const merged = mergeStructureBsps(sourceBuffer, srcIndices);
+    srcBspData = merged.bspBuffer;
+    srcBspSize = merged.bspSize;
+    srcBspAddress = merged.bspAddress;
+    srcBspName = merged.mergedBspNames.join(' + ');
+    srcWorldBounds = merged.worldBounds;
+  } else {
+    srcBspData = Buffer.from(sourceBuffer.subarray(srcBsp.bspStart, srcBsp.bspStart + srcBsp.bspSize));
+    srcBspSize = srcBsp.bspSize;
+    srcBspAddress = srcBsp.bspAddress;
+    const CE_BSP_CACHE_CEILING = 0x41b40000;
+    if (srcBspAddress + srcBspSize > CE_BSP_CACHE_CEILING) {
+      const rebasedAddr = (CE_BSP_CACHE_CEILING - srcBspSize) & ~511;
+      rebaseStructureBspPointers(srcBspData, srcBspAddress, rebasedAddr);
+      srcBspAddress = rebasedAddr;
+    }
+    srcBspName = srcBsp.path;
+    srcWorldBounds = srcBsp.worldBounds;
+  }
+
   // 1. Perform geometry swap FIRST so modelDataFileOffset and tagDataOffset are at their final positions.
-  const delta = srcBsp.bspSize - dstBsp.bspSize;
+  const delta = srcBspSize - dstBsp.bspSize;
   const newLength = targetBuffer.length + delta;
   let out: Buffer = Buffer.alloc(newLength);
 
   // Copy everything before target BSP
   targetBuffer.copy(out, 0, 0, dstBsp.bspStart);
 
-  // Copy source BSP data
-  sourceBuffer.copy(out, dstBsp.bspStart, srcBsp.bspStart, srcBsp.bspStart + srcBsp.bspSize);
+  // Copy source BSP data (single or merged)
+  srcBspData.copy(out, dstBsp.bspStart, 0, srcBspSize);
 
   // Copy everything after target BSP shifted by delta
-  targetBuffer.copy(out, dstBsp.bspStart + srcBsp.bspSize, dstBsp.bspStart + dstBsp.bspSize);
+  targetBuffer.copy(out, dstBsp.bspStart + srcBspSize, dstBsp.bspStart + dstBsp.bspSize);
 
   // Update Header decompressedFileSize & tagDataOffset
   const oldFileSize = targetBuffer.readUInt32LE(0x8);
@@ -470,8 +596,8 @@ export function performBspSwap(
 
   // Write new bsp_start, bsp_size, bsp_address
   out.writeUInt32LE(dstBsp.bspStart, targetEntryOffset + 0);
-  out.writeUInt32LE(srcBsp.bspSize, targetEntryOffset + 4);
-  out.writeUInt32LE(srcBsp.bspAddress, targetEntryOffset + 8);
+  out.writeUInt32LE(srcBspSize, targetEntryOffset + 4);
+  out.writeUInt32LE(srcBspAddress, targetEntryOffset + 8);
 
   // Shift existing embedded raw data offsets if any pre-existed in target map
   shiftExistingRawDataOffsets(out, newTagDataOffset, tagIndex, dstBsp.bspStart + dstBsp.bspSize, delta);
@@ -493,19 +619,23 @@ export function performBspSwap(
   const bspDeps: BspDependencyOccurrence[] = [];
 
   if (sourceInspected.status === 'ok') {
-    const metaPointer = sourceBuffer.readUInt32LE(srcBsp.bspStart + 0);
-    const bspRootOffset = srcBsp.bspStart + (metaPointer - srcBsp.bspAddress);
-    if (bspRootOffset >= srcBsp.bspStart && bspRootOffset < srcBsp.bspStart + srcBsp.bspSize) {
-      scanBspDependencies(
-        sourceBuffer,
-        'ScenarioStructureBSP',
-        bspRootOffset,
-        srcBsp.bspStart,
-        srcBsp.bspSize,
-        srcBsp.bspAddress,
-        bspDeps,
-        new Set<number>(),
-      );
+    for (const bIdx of srcIndices) {
+      const curBsp = sourceBsps[bIdx];
+      if (!curBsp) continue;
+      const metaPointer = sourceBuffer.readUInt32LE(curBsp.bspStart + 0);
+      const bspRootOffset = curBsp.bspStart + (metaPointer - curBsp.bspAddress);
+      if (bspRootOffset >= curBsp.bspStart && bspRootOffset < curBsp.bspStart + curBsp.bspSize) {
+        scanBspDependencies(
+          sourceBuffer,
+          'ScenarioStructureBSP',
+          bspRootOffset,
+          curBsp.bspStart,
+          curBsp.bspSize,
+          curBsp.bspAddress,
+          bspDeps,
+          new Set<number>(),
+        );
+      }
     }
 
     if (options.harvestShaders !== false && bspDeps.length > 0) {
@@ -584,16 +714,21 @@ export function performBspSwap(
     nameBuf.copy(out, 0x20);
   }
 
-  // 4. Rewrite TagDependency tagId fields in the swapped BSP
-  if (tagIdMap.size > 0 && bspDeps.length > 0) {
-    for (const dep of bspDeps) {
-      const mapped = tagIdMap.get(dep.tagId) ?? tagIdMap.get(dep.tagId & 0xffff);
-      if (mapped !== undefined) {
-        const targetOffset = dstBsp.bspStart + dep.bspRelativeOffset;
-        if (targetOffset + 16 <= out.length) {
-          out.writeUInt32LE(mapped, targetOffset + 12);
-        }
-      }
+  // 4. Rewrite TagDependency tagId fields directly in the swapped/merged BSP
+  if (tagIdMap.size > 0) {
+    const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
+    const bspRootOffset = dstBsp.bspStart + (metaPointer - srcBspAddress);
+    if (bspRootOffset >= dstBsp.bspStart && bspRootOffset < dstBsp.bspStart + srcBspSize) {
+      rewriteBspDependencies(
+        out,
+        'ScenarioStructureBSP',
+        bspRootOffset,
+        dstBsp.bspStart,
+        srcBspSize,
+        srcBspAddress,
+        tagIdMap,
+        new Set<number>(),
+      );
     }
   }
 
@@ -604,8 +739,8 @@ export function performBspSwap(
   const shouldStripDecals = options.stripDecals !== undefined ? options.stripDecals : (options.stripDobcAndDecals ?? true);
 
   const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
-  const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBsp.bspAddress);
-  if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 0x260 <= dstBsp.bspStart + srcBsp.bspSize) {
+  const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBspAddress);
+  if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 0x260 <= dstBsp.bspStart + srcBspSize) {
     if (shouldStripDobc) {
       // detail objects reflexive at 0x24c: count = 0, pointerLow = 0
       out.writeUInt32LE(0, bspRootFileOffset + 0x24c);
@@ -624,8 +759,8 @@ export function performBspSwap(
   // 6. Relocate player spawns and netgame equipment if requested
   let relocatedSpawns = 0;
   if (options.relocateGroundObjects ?? true) {
-    const minZ = srcBsp.worldBounds[2];
-    const maxZ = srcBsp.worldBounds[5];
+    const minZ = srcWorldBounds[2];
+    const maxZ = srcWorldBounds[5];
     const defaultGroundZ = minZ + 0.5;
 
     // Player starting locations at 0x354
@@ -663,7 +798,7 @@ export function performBspSwap(
     ok: true,
     buffer: out,
     summary: {
-      sourceBspName: srcBsp.path,
+      sourceBspName: srcBspName,
       targetBspName: dstBsp.path,
       oldSize: targetBuffer.length,
       newSize: out.length,

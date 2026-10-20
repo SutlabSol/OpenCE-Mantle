@@ -35751,10 +35751,17 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
   if (soundsPath) resourceMapPaths.sounds = soundsPath;
   return { edition, editionName, bitmapsPath, soundsPath, resourceMapPaths };
 }
-async function bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex) {
+async function getSourceBspMeshFlow(sourceFilePath, bspIndex) {
+  const { promise } = sendWorkerRequest(
+    { type: "getSourceBspMesh", sourceFilePath, bspIndex },
+    sendLog
+  );
+  return promise;
+}
+async function bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices) {
   const resolved = resolveResourceMapsForSource(sourceFilePath);
   const { promise } = sendWorkerRequest(
-    { type: "bspSwapPreflight", sourceFilePath, sourceBspIndex, targetBspIndex },
+    { type: "bspSwapPreflight", sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices },
     sendLog
   );
   const res = await promise;
@@ -36138,7 +36145,11 @@ import_electron3.app.whenReady().then(() => {
   });
   import_electron3.ipcMain.handle(
     "bsp:swapPreflight",
-    (_e, sourceFilePath, sourceBspIndex, targetBspIndex) => bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex)
+    (_e, sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices) => bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices)
+  );
+  import_electron3.ipcMain.handle(
+    "bsp:getSourceMesh",
+    (_e, sourceFilePath, bspIndex) => getSourceBspMeshFlow(sourceFilePath, bspIndex)
   );
   import_electron3.ipcMain.handle(
     "bsp:performSwap",

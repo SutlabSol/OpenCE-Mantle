@@ -1565,14 +1565,24 @@ function resolveResourceMapsForSource(sourceFilePath: string, options?: BspSwapO
   return { edition, editionName, bitmapsPath, soundsPath, resourceMapPaths };
 }
 
+/** Milestone 10.2: Extracts 3D Structure BSP render mesh from an external source map. */
+async function getSourceBspMeshFlow(sourceFilePath: string, bspIndex?: number): Promise<GetBspRenderMeshResult> {
+  const { promise } = sendWorkerRequest<GetBspRenderMeshResult>(
+    { type: 'getSourceBspMesh', sourceFilePath, bspIndex },
+    sendLog,
+  );
+  return promise;
+}
+
 async function bspSwapPreflightFlow(
   sourceFilePath: string,
   sourceBspIndex?: number,
   targetBspIndex?: number,
+  sourceBspIndices?: number[],
 ): Promise<BspSwapPreflightResult> {
   const resolved = resolveResourceMapsForSource(sourceFilePath);
   const { promise } = sendWorkerRequest<BspSwapPreflightResult>(
-    { type: 'bspSwapPreflight', sourceFilePath, sourceBspIndex, targetBspIndex },
+    { type: 'bspSwapPreflight', sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices },
     sendLog,
   );
   const res = await promise;
@@ -1987,8 +1997,11 @@ app.whenReady().then(() => {
     if (canceled || filePaths.length === 0) return { path: null };
     return { path: filePaths[0] };
   });
-  ipcMain.handle('bsp:swapPreflight', (_e, sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number) =>
-    bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex),
+  ipcMain.handle('bsp:swapPreflight', (_e, sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number, sourceBspIndices?: number[]) =>
+    bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices),
+  );
+  ipcMain.handle('bsp:getSourceMesh', (_e, sourceFilePath: string, bspIndex?: number) =>
+    getSourceBspMeshFlow(sourceFilePath, bspIndex),
   );
   ipcMain.handle('bsp:performSwap', (_e, sourceFilePath: string, options: BspSwapOptions) =>
     performBspSwapFlow(sourceFilePath, options),

@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import type { BspInfo, BspSwapPreflightResult } from '../../electron/shared-types';
+import BspPreviewViewport from './viewport/BspPreviewViewport';
 
 interface Props {
   isOpen: boolean;
@@ -12,6 +13,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
   const [isPreflighting, setIsPreflighting] = useState(false);
   const [preflight, setPreflight] = useState<BspSwapPreflightResult | null>(null);
   const [selectedSourceBspIndex, setSelectedSourceBspIndex] = useState(0);
+  const [selectedSourceBspIndices, setSelectedSourceBspIndices] = useState<number[]>([0]);
   const [selectedTargetBspIndex, setSelectedTargetBspIndex] = useState(0);
   const [stripDobcAndDecals, setStripDobcAndDecals] = useState(true);
   const [stripDobc, setStripDobc] = useState(true);
@@ -39,6 +41,8 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
       setShowDecalsInfo(false);
       setCustomBitmapsPath(null);
       setCustomSoundsPath(null);
+      setSelectedSourceBspIndex(0);
+      setSelectedSourceBspIndices([0]);
     }
   }, [isOpen]);
 
@@ -49,6 +53,8 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
       const res = await window.opence.pickBspSourceMap();
       if (res && res.path) {
         setSourcePath(res.path);
+        setSelectedSourceBspIndex(0);
+        setSelectedSourceBspIndices([0]);
         runPreflight(res.path, 0, 0);
       }
     } catch (err) {
@@ -56,17 +62,21 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
     }
   };
 
-  const runPreflight = async (srcPath: string, srcIdx: number, dstIdx: number) => {
+  const runPreflight = async (srcPath: string, srcIdx: number, dstIdx: number, indices?: number[]) => {
     setIsPreflighting(true);
     setError(null);
     try {
-      const result = await window.opence.bspSwapPreflight(srcPath, srcIdx, dstIdx);
+      const effectiveIndices = indices && indices.length > 0 ? indices : [srcIdx];
+      const result = effectiveIndices.length > 1
+        ? await window.opence.bspSwapPreflight(srcPath, srcIdx, dstIdx, effectiveIndices)
+        : await window.opence.bspSwapPreflight(srcPath, srcIdx, dstIdx);
       setIsPreflighting(false);
       setPreflight(result);
       if (!result.ok) {
         setError(result.error || 'Failed to analyze source map BSPs.');
       } else {
         setSelectedSourceBspIndex(srcIdx);
+        setSelectedSourceBspIndices(effectiveIndices);
         setSelectedTargetBspIndex(dstIdx);
       }
     } catch (err) {
@@ -75,17 +85,43 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
     }
   };
 
-  const handleSourceBspChange = (idx: number) => {
-    setSelectedSourceBspIndex(idx);
+  const handleSourceBspToggle = (idx: number) => {
+    let next: number[];
+    if (selectedSourceBspIndices.includes(idx)) {
+      if (selectedSourceBspIndices.length <= 1) return; // Prevent deselecting all
+      next = selectedSourceBspIndices.filter((i) => i !== idx);
+    } else {
+      next = [...selectedSourceBspIndices, idx].sort((a, b) => a - b);
+    }
+    setSelectedSourceBspIndices(next);
+    setSelectedSourceBspIndex(next[0] ?? 0);
     if (sourcePath) {
-      runPreflight(sourcePath, idx, selectedTargetBspIndex);
+      runPreflight(sourcePath, next[0] ?? 0, selectedTargetBspIndex, next);
+    }
+  };
+
+  const handleSelectAllBsps = () => {
+    if (!preflight) return;
+    const all = preflight.sourceBsps.map((b) => b.index);
+    setSelectedSourceBspIndices(all);
+    setSelectedSourceBspIndex(all[0] ?? 0);
+    if (sourcePath) {
+      runPreflight(sourcePath, all[0] ?? 0, selectedTargetBspIndex, all);
+    }
+  };
+
+  const handleSelectFirstBspOnly = () => {
+    setSelectedSourceBspIndices([0]);
+    setSelectedSourceBspIndex(0);
+    if (sourcePath) {
+      runPreflight(sourcePath, 0, selectedTargetBspIndex, [0]);
     }
   };
 
   const handleTargetBspChange = (idx: number) => {
     setSelectedTargetBspIndex(idx);
     if (sourcePath) {
-      runPreflight(sourcePath, selectedSourceBspIndex, idx);
+      runPreflight(sourcePath, selectedSourceBspIndex, idx, selectedSourceBspIndices);
     }
   };
 
@@ -116,18 +152,27 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
 
     try {
       const payload: any = {
-        sourceBspIndex: selectedSourceBspIndex,
+        sourceBspIndex: selectedSourceBspIndices[0] ?? 0,
         targetBspIndex: selectedTargetBspIndex,
         stripDobcAndDecals: stripDobc && stripDecals,
         relocateGroundObjects,
         harvestShaders,
       };
+      if (selectedSourceBspIndices.length > 1) {
+        payload.sourceBspIndices = selectedSourceBspIndices;
+      }
       if (!stripDobc || !stripDecals) {
         payload.stripDobc = stripDobc;
         payload.stripDecals = stripDecals;
       }
       if (newScenarioName.trim()) {
         payload.newScenarioName = newScenarioName.trim();
+      }
+      if (customBitmapsPath) {
+        payload.customBitmapsPath = customBitmapsPath;
+      }
+      if (customSoundsPath) {
+        payload.customSoundsPath = customSoundsPath;
       }
 
       const res = await window.opence.performBspSwap(sourcePath, payload);
@@ -138,10 +183,14 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         const deltaSign = res.summary.delta >= 0 ? '+' : '';
         const harvestMsg =
           (res.summary.harvestedShaders ?? 0) > 0 || (res.summary.harvestedBitmaps ?? 0) > 0
-            ? ` Harvested ${res.summary.harvestedShaders ?? 0} shaders and ${res.summary.harvestedBitmaps ?? 0} bitmaps into map.`
+            ? ` Harvested ${res.summary.harvestedShaders ?? 0} shader(s) and ${res.summary.harvestedBitmaps ?? 0} bitmap(s).`
             : '';
-        const msg = `Successfully swapped BSP! Source: "${res.summary.sourceBspName}". Delta: ${deltaSign}${deltaMb} MB.${harvestMsg} ${res.summary.strippedDobc ? 'Stripped DOBC & Decals. ' : ''}${res.summary.relocatedSpawns > 0 ? `Relocated ${res.summary.relocatedSpawns} ground objects.` : ''}`;
-        setSuccessSummary(msg);
+        const multiMsg = selectedSourceBspIndices.length > 1
+          ? ` Fused ${selectedSourceBspIndices.length} Structure BSPs into structure_bsps[${selectedTargetBspIndex}].`
+          : '';
+        setSuccessSummary(
+          `Swapped BSP successfully!${multiMsg} New map size: ${(res.summary.newSize / (1024 * 1024)).toFixed(2)} MB (${deltaSign}${deltaMb} MB). Relocated ${res.summary.relocatedSpawns} spawn/item placement(s).${harvestMsg}`,
+        );
         onSuccess();
       } else {
         setError(res.error || 'BSP swap failed.');
@@ -152,11 +201,24 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
     }
   };
 
-  const formatBytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  const formatBytes = (bytes: number): string => {
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${bytes} B`;
+  };
+
+  const bspNamesMap = useMemo(() => {
+    const map: Record<number, string> = {};
+    preflight?.sourceBsps.forEach((b) => {
+      map[b.index] = b.path;
+    });
+    return map;
+  }, [preflight]);
+
+  const isMultiBsp = selectedSourceBspIndices.length > 1;
 
   return (
     <div
-      data-testid="bsp-swapper-dialog-overlay"
       style={{
         position: 'fixed',
         inset: 0,
@@ -165,7 +227,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         alignItems: 'center',
         justifyContent: 'center',
         zIndex: 1000,
-        fontFamily: 'var(--ui-font)',
       }}
       onClick={(e) => {
         if (e.target === e.currentTarget && !isSwapping) onClose();
@@ -174,8 +235,9 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
       <div
         data-testid="bsp-swapper-dialog"
         style={{
-          width: '640px',
-          maxWidth: '92vw',
+          width: '1140px',
+          maxWidth: '95vw',
+          height: '90vh',
           maxHeight: '90vh',
           background: 'var(--bg-panel)',
           border: '1px solid var(--border)',
@@ -212,7 +274,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                 border: '1px solid rgba(56, 189, 248, 0.3)',
               }}
             >
-              Milestone 10
+              Milestone 10.2
             </span>
           </div>
           <button
@@ -232,7 +294,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         </div>
 
         {/* Content */}
-        <div style={{ padding: '18px 20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <div style={{ padding: '16px 20px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: '12px', overflow: 'hidden' }}>
           {/* Instructions banner */}
           <div
             style={{
@@ -246,17 +308,17 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
             }}
           >
             Directly transplant single-player campaign BSPs (e.g. Silent Cartographer, Halo, Truth & Reconciliation)
-            into your multiplayer map. Geometry, submeshes, and vertices are relocated in-memory.
+            into your multiplayer map. Select multiple BSPs to fuse exterior and interior zones into a single playable multiplayer structure.
           </div>
 
-          {/* Source Map Picker */}
+          {/* Source Map File Picker */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
             <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
               Source Map File (.map)
             </label>
             <div style={{ display: 'flex', gap: '8px' }}>
               <input
-                data-testid="bsp-swapper-source-input"
+                data-testid="bsp-swapper-source-path"
                 type="text"
                 readOnly
                 placeholder="Select a campaign or multiplayer map..."
@@ -300,32 +362,124 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
           )}
 
           {preflight && preflight.ok && (
-            <>
-              {/* Source BSP Selector */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-                  Select Source BSP to Import
-                </label>
-                <select
-                  data-testid="bsp-swapper-source-select"
-                  value={selectedSourceBspIndex}
-                  onChange={(e) => handleSourceBspChange(Number(e.target.value))}
-                  style={{
-                    background: 'var(--bg-main)',
-                    border: '1px solid var(--border)',
-                    borderRadius: '4px',
-                    padding: '8px 10px',
-                    fontSize: '12px',
-                    color: 'var(--text-primary)',
-                    outline: 'none',
-                  }}
-                >
-                  {preflight.sourceBsps.map((bsp: BspInfo) => (
-                    <option key={bsp.index} value={bsp.index}>
-                      BSP {bsp.index}: {bsp.path} ({bsp.vertexCount.toLocaleString()} verts, {bsp.triangleCount.toLocaleString()} tris, {formatBytes(bsp.bspSize)})
-                    </option>
-                  ))}
-                </select>
+            <div style={{ display: 'flex', gap: '16px', flex: 1, minHeight: 0 }}>
+              {/* Left Column: Form & Configuration */}
+              <div
+                style={{
+                  flex: '1 1 540px',
+                  maxWidth: '560px',
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px',
+                  paddingRight: '6px',
+                }}
+              >
+              {/* Source BSP Selector Card with Multi-BSP Support */}
+              <div
+                style={{
+                  background: 'rgba(255, 255, 255, 0.02)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '5px',
+                  padding: '12px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
+                      Select Source BSP(s) to Import
+                    </label>
+                    {isMultiBsp && (
+                      <span
+                        style={{
+                          fontSize: '10px',
+                          fontWeight: 700,
+                          padding: '1px 6px',
+                          borderRadius: '3px',
+                          background: 'rgba(56, 189, 248, 0.15)',
+                          color: 'var(--accent-cyan, #38bdf8)',
+                          border: '1px solid rgba(56, 189, 248, 0.3)',
+                        }}
+                      >
+                        Multi-BSP Combine Mode ({selectedSourceBspIndices.length} Selected)
+                      </span>
+                    )}
+                  </div>
+                  {preflight.sourceBsps.length > 1 && (
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        type="button"
+                        onClick={handleSelectAllBsps}
+                        style={{
+                          fontSize: '11px',
+                          padding: '2px 8px',
+                          borderRadius: '3px',
+                          background: 'rgba(255, 255, 255, 0.05)',
+                          border: '1px solid var(--border)',
+                          color: 'var(--text-secondary)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSelectFirstBspOnly}
+                        style={{
+                          fontSize: '11px',
+                          padding: '2px 8px',
+                          borderRadius: '3px',
+                          background: 'rgba(255, 255, 255, 0.05)',
+                          border: '1px solid var(--border)',
+                          color: 'var(--text-secondary)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        BSP 0 Only
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* BSP Checkbox List */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {preflight.sourceBsps.map((bsp: BspInfo) => {
+                    const isChecked = selectedSourceBspIndices.includes(bsp.index);
+                    return (
+                      <label
+                        key={bsp.index}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '6px 10px',
+                          borderRadius: '4px',
+                          background: isChecked ? 'rgba(56, 189, 248, 0.06)' : 'rgba(255, 255, 255, 0.01)',
+                          border: `1px solid ${isChecked ? 'rgba(56, 189, 248, 0.25)' : 'var(--border)'}`,
+                          cursor: 'pointer',
+                          fontSize: '12px',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => handleSourceBspToggle(bsp.index)}
+                        />
+                        <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontWeight: isChecked ? 600 : 400 }}>
+                            BSP {bsp.index}: {bsp.path}
+                          </span>
+                          <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+                            {bsp.vertexCount.toLocaleString()} verts, {bsp.triangleCount.toLocaleString()} tris, {formatBytes(bsp.bspSize)}
+                          </span>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
 
               {/* Target BSP Selector */}
@@ -364,7 +518,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   borderRadius: '5px',
                   padding: '12px 14px',
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(3, 1fr)',
+                  gridTemplateColumns: 'repeat(4, 1fr)',
                   gap: '12px',
                   fontSize: '11.5px',
                 }}
@@ -372,10 +526,26 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                 <div>
                   <div style={{ color: 'var(--text-dim)', fontSize: '10.5px' }}>Source Geometry</div>
                   <div style={{ fontWeight: 600, marginTop: '2px' }}>
-                    {preflight.selectedSourceBsp?.vertexCount.toLocaleString()} vertices
+                    {isMultiBsp
+                      ? `${selectedSourceBspIndices.length} BSPs Combined`
+                      : `${preflight.selectedSourceBsp?.vertexCount.toLocaleString()} vertices`}
                   </div>
                   <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>
-                    {preflight.selectedSourceBsp?.triangleCount.toLocaleString()} triangles
+                    {isMultiBsp
+                      ? `${preflight.selectedSourceBsps?.reduce((s, b) => s + b.triangleCount, 0).toLocaleString()} total triangles`
+                      : `${preflight.selectedSourceBsp?.triangleCount.toLocaleString()} triangles`}
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ color: 'var(--text-dim)', fontSize: '10.5px' }}>Submeshes</div>
+                  <div style={{ fontWeight: 600, marginTop: '2px' }}>
+                    {isMultiBsp
+                      ? `${preflight.selectedSourceBsps?.reduce((s, b) => s + b.submeshCount, 0)} submeshes`
+                      : `${preflight.selectedSourceBsp?.submeshCount ?? 0} submeshes`}
+                  </div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>
+                    {preflight.selectedSourceBsp?.hasDobc ? 'DOBC present' : 'Clean DOBC'}
                   </div>
                 </div>
 
@@ -385,118 +555,217 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                     style={{
                       fontWeight: 600,
                       marginTop: '2px',
-                      color: preflight.sizeDelta >= 0 ? '#38bdf8' : '#34d399',
+                      color: preflight.sizeDelta > 0 ? 'var(--accent-cyan)' : 'var(--text-primary)',
                     }}
                   >
                     {preflight.sizeDelta >= 0 ? '+' : ''}
                     {formatBytes(preflight.sizeDelta)}
                   </div>
                   <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>
-                    Est: {formatBytes(preflight.estimatedNewSize)}
+                    vs current target BSP ({formatBytes(preflight.selectedTargetBsp?.bspSize ?? 0)})
                   </div>
                 </div>
 
                 <div>
-                  <div style={{ color: 'var(--text-dim)', fontSize: '10.5px' }}>Submeshes</div>
+                  <div style={{ color: 'var(--text-dim)', fontSize: '10.5px' }}>Estimated Target Size</div>
                   <div style={{ fontWeight: 600, marginTop: '2px' }}>
-                    {preflight.selectedSourceBsp?.submeshCount ?? 0} submeshes
+                    {formatBytes(preflight.estimatedNewSize)}
                   </div>
-                  <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>
-                    {preflight.selectedSourceBsp?.hasDobc ? 'DOBC present' : 'Clean DOBC'}
-                  </div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>Safe limit: ~250 MB</div>
                 </div>
               </div>
 
-              {/* Scenario Name Rename Option */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-                  In-Game Scenario Name (Optional Rename)
-                </label>
-                <input
-                  data-testid="bsp-swapper-scenario-name-input"
-                  type="text"
-                  placeholder="e.g. bloodgulch_silent_cartographer (leave blank to keep current name)"
-                  value={newScenarioName}
-                  onChange={(e) => setNewScenarioName(e.target.value)}
-                  maxLength={31}
+              {/* Donor Format & Resource Routing Card */}
+              {preflight.sourceEdition && (
+                <div
                   style={{
-                    background: 'var(--bg-main)',
+                    background: 'rgba(255, 255, 255, 0.02)',
                     border: '1px solid var(--border)',
-                    borderRadius: '4px',
-                    padding: '7px 10px',
-                    fontSize: '12px',
-                    fontFamily: 'var(--mono-font)',
-                    color: 'var(--text-primary)',
-                    outline: 'none',
+                    borderRadius: '5px',
+                    padding: '12px 14px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    fontSize: '11.5px',
                   }}
-                />
-                <span style={{ fontSize: '10.5px', color: 'var(--text-dim)' }}>
-                  Updates the internal scenario header name displayed in the Halo multiplayer UI map list.
-                </span>
-              </div>
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ color: 'var(--text-dim)' }}>Donor Format:</span>
+                      <strong style={{ color: 'var(--accent-cyan, #38bdf8)' }}>
+                        {preflight.sourceEditionName || preflight.sourceEdition}
+                      </strong>
+                    </div>
+                  </div>
 
-              {/* Options */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '2px' }}>
-                {/* DOBC Strip */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>
-                      <input
-                        data-testid="bsp-swapper-strip-dobc-checkbox"
-                        type="checkbox"
-                        checked={stripDobc}
-                        onChange={(e) => {
-                          setStripDobc(e.target.checked);
-                          setStripDobcAndDecals(e.target.checked && stripDecals);
+                  {preflight.sourceBitmapsPath && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <span style={{ color: 'var(--text-dim)' }}>Bitmaps: </span>
+                        <code style={{ fontSize: '10.5px', color: 'var(--text-secondary)' }}>
+                          {customBitmapsPath || preflight.sourceBitmapsPath}
+                        </code>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handlePickBitmaps}
+                        style={{
+                          background: 'rgba(255, 255, 255, 0.05)',
+                          border: '1px solid var(--border)',
+                          borderRadius: '3px',
+                          padding: '2px 8px',
+                          fontSize: '11px',
+                          cursor: 'pointer',
+                          color: 'var(--text-secondary)',
+                          whiteSpace: 'nowrap',
                         }}
-                      />
-                      <span>
-                        <strong>Strip Detail Objects (DOBC)</strong> (Recommended: prevents multiplayer memory crashes)
-                      </span>
+                      >
+                        Change...
+                      </button>
+                    </div>
+                  )}
+
+                  {preflight.sourceSoundsPath && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <span style={{ color: 'var(--text-dim)' }}>Sounds: </span>
+                        <code style={{ fontSize: '10.5px', color: 'var(--text-secondary)' }}>
+                          {customSoundsPath || preflight.sourceSoundsPath}
+                        </code>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handlePickSounds}
+                        style={{
+                          background: 'rgba(255, 255, 255, 0.05)',
+                          border: '1px solid var(--border)',
+                          borderRadius: '3px',
+                          padding: '2px 8px',
+                          fontSize: '11px',
+                          cursor: 'pointer',
+                          color: 'var(--text-secondary)',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        Change...
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Options Section */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
+                  Options & Customization
+                </label>
+
+                {/* Scenario Name */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    Map / Scenario Display Name:
+                  </label>
+                  <input
+                    data-testid="bsp-swapper-scenario-name-input"
+                    type="text"
+                    maxLength={31}
+                    placeholder="Leave blank to preserve current scenario name"
+                    value={newScenarioName}
+                    onChange={(e) => setNewScenarioName(e.target.value)}
+                    style={{
+                      background: 'var(--bg-main)',
+                      border: '1px solid var(--border)',
+                      borderRadius: '4px',
+                      padding: '6px 10px',
+                      fontSize: '12px',
+                      color: 'var(--text-primary)',
+                      outline: 'none',
+                    }}
+                  />
+                </div>
+
+                {/* Detail Objects (DOBC) Stripping */}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <input
+                      data-testid="bsp-swapper-strip-dobc-checkbox"
+                      type="checkbox"
+                      checked={stripDobc}
+                      onChange={(e) => setStripDobc(e.target.checked)}
+                    />
+                    <label style={{ fontSize: '12px', cursor: 'pointer' }} onClick={() => setStripDobc(!stripDobc)}>
+                      <strong>Strip Detail Objects (DOBC)</strong> (Grass, pebbles - recommended for multiplayer performance)
                     </label>
                     <button
                       type="button"
                       onClick={() => setShowDobcInfo(!showDobcInfo)}
-                      style={{ background: 'transparent', border: 'none', color: 'var(--accent-cyan)', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--accent-cyan, #38bdf8)',
+                        cursor: 'pointer',
+                        fontSize: '11px',
+                        padding: '0 4px',
+                      }}
                     >
-                      {showDobcInfo ? 'Hide Details' : 'What is DOBC?'}
+                      {showDobcInfo ? '▲ Hide Info' : '▼ What is this?'}
                     </button>
                   </div>
                   {showDobcInfo && (
-                    <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid var(--border)', borderRadius: '4px', padding: '8px 10px', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
-                      Detail objects (<code>dobc</code>) are procedural ground clutter (grass clumps, moss, ferns, pebbles) scattered across campaign terrain via density functions. In multiplayer, DOBC is not synchronized across the network and can exceed client vertex and memory limits, causing fatal crashes or massive FPS drops. Stripping zeroes out the reflexive count and pointer at offset <code>0x24C</code> in the BSP header.
+                    <div
+                      style={{
+                        marginTop: '4px',
+                        marginLeft: '24px',
+                        fontSize: '11px',
+                        color: 'var(--text-dim)',
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      Detail Objects (DOBC) represent instanced grass clumps, pebbles, and moss generated by shaders.
+                      In Custom Edition multiplayer, DOBC from campaign maps can exceed the engine render limits or cause visual pop-in.
                     </div>
                   )}
                 </div>
 
-                {/* Decals Strip */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>
-                      <input
-                        data-testid="bsp-swapper-strip-decals-checkbox"
-                        type="checkbox"
-                        checked={stripDecals}
-                        onChange={(e) => {
-                          setStripDecals(e.target.checked);
-                          setStripDobcAndDecals(stripDobc && e.target.checked);
-                        }}
-                      />
-                      <span>
-                        <strong>Strip Runtime Decals</strong> (Recommended: preserves multiplayer weapon impact buffer)
-                      </span>
+                {/* Runtime Decals Stripping */}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <input
+                      data-testid="bsp-swapper-strip-decals-checkbox"
+                      type="checkbox"
+                      checked={stripDecals}
+                      onChange={(e) => setStripDecals(e.target.checked)}
+                    />
+                    <label style={{ fontSize: '12px', cursor: 'pointer' }} onClick={() => setStripDecals(!stripDecals)}>
+                      <strong>Strip Runtime Decals</strong> (Pre-baked stains, bullet marks, blood - eliminates decal limits)
                     </label>
                     <button
                       type="button"
                       onClick={() => setShowDecalsInfo(!showDecalsInfo)}
-                      style={{ background: 'transparent', border: 'none', color: 'var(--accent-cyan)', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--accent-cyan, #38bdf8)',
+                        cursor: 'pointer',
+                        fontSize: '11px',
+                        padding: '0 4px',
+                      }}
                     >
-                      {showDecalsInfo ? 'Hide Details' : 'What are Decals?'}
+                      {showDecalsInfo ? '▲ Hide Info' : '▼ What is this?'}
                     </button>
                   </div>
                   {showDecalsInfo && (
-                    <div style={{ background: 'rgba(0, 0, 0, 0.25)', border: '1px solid var(--border)', borderRadius: '4px', padding: '8px 10px', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
-                      Runtime decals are static decals (blood splatters, plasma scorch burns, bullet marks, covenant glyphs) pre-baked into campaign level geometry. Halo multiplayer allocates a strict global static decal buffer shared between the level and combat weapon impacts. Pre-baked campaign decals consume this buffer, causing player bullet holes and plasma impacts to flicker or disappear. Stripping zeroes out the reflexive count and pointer at offset <code>0x258</code> in the BSP header.
+                    <div
+                      style={{
+                        marginTop: '4px',
+                        marginLeft: '24px',
+                        fontSize: '11px',
+                        color: 'var(--text-dim)',
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      Runtime decals are static pre-baked decals embedded into the campaign BSP.
+                      Stripping them frees up decal buffer slots for multiplayer projectile and explosion decals.
                     </div>
                   )}
                 </div>
@@ -564,11 +833,83 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   ))}
                 </div>
               )}
-            </>
+
+              {/* Error display inside left column */}
+              {error && (
+                <div
+                  data-testid="bsp-swapper-error"
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: '4px',
+                    background: 'rgba(239, 68, 68, 0.12)',
+                    border: '1px solid rgba(239, 68, 68, 0.35)',
+                    color: '#f87171',
+                    fontSize: '12px',
+                  }}
+                >
+                  {error}
+                </div>
+              )}
+
+              {/* Success summary display inside left column */}
+              {successSummary && (
+                <div
+                  data-testid="bsp-swapper-success"
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: '4px',
+                    background: 'rgba(34, 197, 94, 0.12)',
+                    border: '1px solid rgba(34, 197, 94, 0.35)',
+                    color: '#4ade80',
+                    fontSize: '12px',
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {successSummary}
+                </div>
+              )}
+              </div>
+
+              {/* Right Column: 3D Interactive Viewport Preview */}
+              <div
+                style={{
+                  flex: '1 1 540px',
+                  minWidth: '440px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  minHeight: 0,
+                }}
+              >
+                {sourcePath && selectedSourceBspIndices.length > 0 ? (
+                  <BspPreviewViewport
+                    sourceFilePath={sourcePath}
+                    selectedBspIndices={selectedSourceBspIndices}
+                    bspNames={bspNamesMap}
+                    height="100%"
+                  />
+                ) : (
+                  <div
+                    style={{
+                      flex: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      background: 'rgba(0, 0, 0, 0.25)',
+                      border: '1px dashed var(--border)',
+                      borderRadius: '6px',
+                      color: 'var(--text-dim)',
+                      fontSize: '12px',
+                    }}
+                  >
+                    <span>No BSPs selected for preview</span>
+                  </div>
+                )}
+              </div>
+            </div>
           )}
 
-          {/* Error display */}
-          {error && (
+          {/* Error display when no preflight */}
+          {!preflight && error && (
             <div
               data-testid="bsp-swapper-error"
               style={{
@@ -581,24 +922,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
               }}
             >
               {error}
-            </div>
-          )}
-
-          {/* Success summary display */}
-          {successSummary && (
-            <div
-              data-testid="bsp-swapper-success"
-              style={{
-                padding: '10px 12px',
-                borderRadius: '4px',
-                background: 'rgba(34, 197, 94, 0.12)',
-                border: '1px solid rgba(34, 197, 94, 0.35)',
-                color: '#4ade80',
-                fontSize: '12px',
-                lineHeight: 1.4,
-              }}
-            >
-              {successSummary}
             </div>
           )}
         </div>
@@ -649,7 +972,13 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                 cursor: isSwapping || !preflight?.ok ? 'not-allowed' : 'pointer',
               }}
             >
-              {isSwapping ? 'Swapping BSP...' : 'Perform BSP Swap'}
+              {isSwapping
+                ? isMultiBsp
+                  ? 'Merging & Swapping BSPs...'
+                  : 'Swapping BSP...'
+                : isMultiBsp
+                ? `Merge & Swap (${selectedSourceBspIndices.length} BSPs)`
+                : 'Perform BSP Swap'}
             </button>
           </div>
         </div>

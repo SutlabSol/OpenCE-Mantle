@@ -744,9 +744,41 @@ export function installDevMock() {
       }
       return { ok: true, newTagIndex, newTagId, path: newPath, map: currentMock! };
     },
+    getSourceBspMesh: async (_sourceFilePath?: string, bspIndex = 0): Promise<GetBspRenderMeshResult> => ({
+      ok: true,
+      mesh: {
+        bspIndex,
+        bspCount: 2,
+        bspNames: ['levels\\b30\\b30a', 'levels\\b30\\b30b'],
+        bspTagId: 0xef7b0e05,
+        lightmapsBitmapTagId: 0xef7c0e06,
+        worldBounds: [-200, -200, -20, 200, 200, 50],
+        totalVertices: bspIndex === 0 ? 50936 : 44105,
+        totalTriangles: bspIndex === 0 ? 35105 : 25208,
+        submeshes: [
+          {
+            submeshIndex: 0,
+            lightmapIndex: 0,
+            lightmapBitmapIndex: 0,
+            shaderTagId: 0,
+            shaderPermutation: 0,
+            vertexCount: 4,
+            vertices: new Float32Array([
+              -50, -50, 0, 0, 0, 1, 0, 0,
+              50, -50, 0, 0, 0, 1, 1, 0,
+              50, 50, 0, 0, 0, 1, 1, 1,
+              -50, 50, 0, 0, 0, 1, 0, 1,
+            ]),
+            lightmapUvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+            indices: new Uint16Array([0, 1, 2, 0, 2, 3]),
+            boundingBox: [-50, -50, 0, 50, 50, 0],
+          },
+        ],
+      },
+    }),
     pickBspSourceMap: async () => ({ path: 'C:\\HaloPC\\maps\\b30.map' }),
     pickBspResource: async () => ({ path: 'C:\\HaloPC\\maps\\bitmaps.map' }),
-    bspSwapPreflight: async (_sourceFilePath, _srcIdx, _dstIdx) => ({
+    bspSwapPreflight: async (_sourceFilePath, _srcIdx, _dstIdx, _sourceBspIndices) => ({
       ok: true,
       sourceBsps: [
         {
@@ -760,6 +792,20 @@ export function installDevMock() {
           triangleCount: 35105,
           submeshCount: 117,
           worldBounds: [-200, -200, -20, 200, 200, 50],
+          hasDobc: true,
+          hasDecals: true,
+        },
+        {
+          index: 1,
+          path: 'levels\\b30\\b30b',
+          tagId: 0xefe10e6b,
+          bspStart: 8415232,
+          bspSize: 5566464,
+          bspAddress: 0x415f1000,
+          vertexCount: 44105,
+          triangleCount: 25208,
+          submeshCount: 177,
+          worldBounds: [-42, -37, -108, 29, -7, 18],
           hasDobc: true,
           hasDecals: true,
         },

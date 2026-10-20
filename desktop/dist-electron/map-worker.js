@@ -55,6 +55,7 @@ __export(map_worker_exports, {
   runGetModelGeometry: () => runGetModelGeometry,
   runGetReferencingTags: () => runGetReferencingTags,
   runGetScenarioObjects: () => runGetScenarioObjects,
+  runGetSourceBspMesh: () => runGetSourceBspMesh,
   runGetTagFields: () => runGetTagFields,
   runGetUnicodeStrings: () => runGetUnicodeStrings,
   runInspect: () => runInspect,
@@ -41807,6 +41808,369 @@ ${reasons}`);
   };
 }
 
+// ../core/src/map/bsp-merger.ts
+function getReflexive(decoded, key) {
+  const f = decoded.get(key);
+  if (f && f.kind === "reflexive" && f.value) {
+    return f.value;
+  }
+  return { count: 0, pointerLow: 0 };
+}
+function getBounds(decoded, key) {
+  const f = decoded.get(key);
+  if (f && f.kind === "bounds" && Array.isArray(f.value)) {
+    return f.value;
+  }
+  return [0, 0];
+}
+function rebaseStructureBspPointers(bspBuffer, oldBaseAddress, newBaseAddress) {
+  const delta = newBaseAddress - oldBaseAddress;
+  if (delta === 0) return 0;
+  const bspSize = bspBuffer.length;
+  const inBsp = (p, len) => {
+    const at = p - oldBaseAddress;
+    return at >= 0 && at + len <= bspSize;
+  };
+  const sites = [];
+  const rootPtr = bspBuffer.readUInt32LE(0);
+  sites.push({ at: 0, value: rootPtr });
+  const visited = /* @__PURE__ */ new Set();
+  function walk2(structName, pointer, where) {
+    const structDef = resolveStruct(structName);
+    const size = structDef.totalSize;
+    if (!inBsp(pointer, size)) return;
+    const at = pointer - oldBaseAddress;
+    const key = `${structName}@${at}`;
+    if (visited.has(key)) return;
+    visited.add(key);
+    const decoded = decodeStruct(bspBuffer, at, structName);
+    for (const field of structDef.fields) {
+      const value = decoded.get(field.name);
+      if (!value || field.def.nonCached) continue;
+      if (value.kind === "reflexive" && field.def.type === "TagReflexive") {
+        const p = value.value.pointerLow >>> 0;
+        if (p !== 0 && (value.value.count > 0 || inBsp(p, 1))) {
+          sites.push({ at: at + field.offset + 4, value: p });
+        }
+        if (value.value.count > 0 && field.def.struct) {
+          const childStruct = field.def.struct;
+          const childSize = resolveStruct(childStruct).totalSize;
+          if (inBsp(p, value.value.count * childSize)) {
+            for (let i = 0; i < value.value.count; i++) {
+              walk2(childStruct, p + i * childSize >>> 0, `${where}.${field.name}[${i}]`);
+            }
+          }
+        }
+      } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset) {
+        const p = value.value.pointerLow >>> 0;
+        if (p !== 0 && inBsp(p, 1)) {
+          sites.push({ at: at + field.offset + 12, value: p });
+        }
+      }
+    }
+  }
+  walk2("ScenarioStructureBSP", rootPtr, "ScenarioStructureBSP");
+  for (const s of sites) {
+    bspBuffer.writeUInt32LE(s.value + delta >>> 0, s.at);
+  }
+  return sites.length;
+}
+function mergeStructureBsps(sourceBuffer, bspIndices) {
+  if (bspIndices.length === 0) {
+    throw new Error("mergeStructureBsps requires at least one BSP index.");
+  }
+  const inspected = inspectCustomEditionMap(sourceBuffer);
+  if (inspected.status !== "ok") {
+    throw new Error("Failed to inspect map buffer header or tag index.");
+  }
+  const { header, tagIndex } = inspected;
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (ID: 0x${tagIndex.scenarioTagId.toString(16)}) not found in tag index.`);
+  }
+  const scenarioFileOffset = header.tagDataOffset + (scenarioEntry.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+  const decodedScenario = decodeStruct(sourceBuffer, scenarioFileOffset, "Scenario");
+  const bspsField = decodedScenario.get("structure bsps");
+  if (!bspsField || bspsField.kind !== "reflexive" || bspsField.value.count === 0) {
+    throw new Error("Scenario has no structure bsps.");
+  }
+  const bspCount = bspsField.value.count;
+  const scenarioBspSize = resolveStruct("ScenarioBSP").totalSize;
+  const bspsArrayOffset = header.tagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+  const contexts = [];
+  for (const idx of bspIndices) {
+    if (idx < 0 || idx >= bspCount) {
+      throw new Error(`BSP index ${idx} is out of bounds (scenario has ${bspCount} BSPs).`);
+    }
+    const bspEntryOffset = bspsArrayOffset + idx * scenarioBspSize;
+    const decodedBspEntry = decodeStruct(sourceBuffer, bspEntryOffset, "ScenarioBSP");
+    const bspDep = decodedBspEntry.get("structure bsp");
+    const bspTagId = bspDep && bspDep.kind === "dependency" ? bspDep.value.tagId : 4294967295;
+    const bspStart = decodedBspEntry.get("bsp start").value;
+    const bspSize = decodedBspEntry.get("bsp size").value;
+    const bspAddress = decodedBspEntry.get("bsp address").value;
+    const loc = locateStructureBsp(
+      sourceBuffer,
+      tagIndex,
+      scenarioFileOffset,
+      header.tagDataOffset,
+      tagIndex.baseMemoryAddress,
+      bspTagId
+    );
+    if (!loc) {
+      throw new Error(`Failed to locate structure BSP for index ${idx}.`);
+    }
+    const decoded = decodeStruct(sourceBuffer, loc.fileOffset, "ScenarioStructureBSP");
+    const tagEntry = tagIndex.entries[bspTagId & 65535];
+    const bspName = tagEntry?.path || `BSP ${idx}`;
+    const dobc = decoded.get("detail objects");
+    const hasDobc = !!dobc && dobc.kind === "reflexive" && dobc.value.count > 0;
+    const decals = decoded.get("runtime decals");
+    const hasDecals = !!decals && decals.kind === "reflexive" && decals.value.count > 0;
+    contexts.push({
+      bspIndex: idx,
+      bspTagId,
+      bspName,
+      bspStart,
+      bspSize,
+      bspAddress,
+      loc,
+      decoded,
+      hasDobc,
+      hasDecals
+    });
+  }
+  const baseCtx = contexts[0];
+  const baseAddress = baseCtx.bspAddress;
+  if (contexts.length === 1) {
+    const bspBuf = Buffer.alloc(baseCtx.bspSize);
+    sourceBuffer.copy(bspBuf, 0, baseCtx.bspStart, baseCtx.bspStart + baseCtx.bspSize);
+    const CE_BSP_CACHE_CEILING2 = 1102315520;
+    let finalBspAddress2 = baseAddress;
+    if (baseAddress + baseCtx.bspSize > CE_BSP_CACHE_CEILING2) {
+      finalBspAddress2 = CE_BSP_CACHE_CEILING2 - baseCtx.bspSize & ~511;
+      rebaseStructureBspPointers(bspBuf, baseAddress, finalBspAddress2);
+    }
+    const b0x2 = getBounds(baseCtx.decoded, "world bounds x");
+    const b0y2 = getBounds(baseCtx.decoded, "world bounds y");
+    const b0z2 = getBounds(baseCtx.decoded, "world bounds z");
+    const surfacesRefl = getReflexive(baseCtx.decoded, "surfaces");
+    return {
+      bspBuffer: bspBuf,
+      bspSize: baseCtx.bspSize,
+      bspAddress: finalBspAddress2,
+      vertexCount: 0,
+      triangleCount: surfacesRefl.count,
+      submeshCount: 0,
+      worldBounds: [b0x2[0], b0y2[0], b0z2[0], b0x2[1], b0y2[1], b0z2[1]],
+      hasDobc: baseCtx.hasDobc,
+      hasDecals: baseCtx.hasDecals,
+      mergedBspNames: [baseCtx.bspName]
+    };
+  }
+  let totalEstimatedBytes = 0;
+  for (const c of contexts) totalEstimatedBytes += c.bspSize;
+  totalEstimatedBytes += 16 * 1024 * 1024;
+  const merged = Buffer.alloc(totalEstimatedBytes);
+  sourceBuffer.copy(merged, 0, baseCtx.bspStart, baseCtx.bspStart + baseCtx.bspSize);
+  let appendOffset = baseCtx.bspSize + 511 & ~511;
+  const lmStructSize = resolveStruct("ScenarioStructureBSPLightmap").totalSize;
+  const matStructSize = resolveStruct("ScenarioStructureBSPMaterial").totalSize;
+  let cumulativeSurfaceCount = getReflexive(baseCtx.decoded, "surfaces").count;
+  const cumulativeClusterCount = getReflexive(baseCtx.decoded, "clusters").count;
+  const b0x = getBounds(baseCtx.decoded, "world bounds x");
+  const b0y = getBounds(baseCtx.decoded, "world bounds y");
+  const b0z = getBounds(baseCtx.decoded, "world bounds z");
+  const unionBounds = [
+    b0x[0],
+    b0y[0],
+    b0z[0],
+    b0x[1],
+    b0y[1],
+    b0z[1]
+  ];
+  let vehicleFloor = baseCtx.decoded.get("vehicle floor")?.value ?? 0;
+  let vehicleCeiling = baseCtx.decoded.get("vehicle ceiling")?.value ?? 0;
+  const allLightmaps = [];
+  const lmRefl0 = getReflexive(baseCtx.decoded, "lightmaps");
+  const lmOff0 = baseCtx.loc.fileOffsetAnchor + (lmRefl0.pointerLow - baseCtx.loc.baseMemoryAddress);
+  for (let i = 0; i < lmRefl0.count; i++) {
+    const lm = decodeStruct(sourceBuffer, lmOff0 + i * lmStructSize, "ScenarioStructureBSPLightmap");
+    const bitmap = lm.get("bitmap")?.value ?? -1;
+    const mats = getReflexive(lm, "materials");
+    allLightmaps.push({
+      bitmap,
+      materialsCount: mats.count,
+      materialsPointer: mats.pointerLow
+    });
+  }
+  const allSurfacesBuffers = [];
+  const baseSurfacesRefl = getReflexive(baseCtx.decoded, "surfaces");
+  const baseSurfacesOff = baseCtx.loc.fileOffsetAnchor + (baseSurfacesRefl.pointerLow - baseCtx.loc.baseMemoryAddress);
+  allSurfacesBuffers.push(sourceBuffer.subarray(baseSurfacesOff, baseSurfacesOff + baseSurfacesRefl.count * 6));
+  let totalTriangles = baseSurfacesRefl.count;
+  let totalVertices = 0;
+  let totalSubmeshes = 0;
+  for (let k = 1; k < contexts.length; k++) {
+    const ctx = contexts[k];
+    const cx = getBounds(ctx.decoded, "world bounds x");
+    const cy = getBounds(ctx.decoded, "world bounds y");
+    const cz = getBounds(ctx.decoded, "world bounds z");
+    unionBounds[0] = Math.min(unionBounds[0], cx[0]);
+    unionBounds[1] = Math.min(unionBounds[1], cy[0]);
+    unionBounds[2] = Math.min(unionBounds[2], cz[0]);
+    unionBounds[3] = Math.max(unionBounds[3], cx[1]);
+    unionBounds[4] = Math.max(unionBounds[4], cy[1]);
+    unionBounds[5] = Math.max(unionBounds[5], cz[1]);
+    const vFloor = ctx.decoded.get("vehicle floor")?.value ?? 0;
+    const vCeil = ctx.decoded.get("vehicle ceiling")?.value ?? 0;
+    vehicleFloor = Math.min(vehicleFloor, vFloor);
+    vehicleCeiling = Math.max(vehicleCeiling, vCeil);
+    const lmRefl = getReflexive(ctx.decoded, "lightmaps");
+    const lmOff = ctx.loc.fileOffsetAnchor + (lmRefl.pointerLow - ctx.loc.baseMemoryAddress);
+    let minVertPtr = Infinity;
+    let maxVertPtr = -Infinity;
+    for (let i = 0; i < lmRefl.count; i++) {
+      const lm = decodeStruct(sourceBuffer, lmOff + i * lmStructSize, "ScenarioStructureBSPLightmap");
+      const mats = getReflexive(lm, "materials");
+      if (mats.count === 0) continue;
+      const matsOff = ctx.loc.fileOffsetAnchor + (mats.pointerLow - ctx.loc.baseMemoryAddress);
+      for (let j = 0; j < mats.count; j++) {
+        const mat = decodeStruct(sourceBuffer, matsOff + j * matStructSize, "ScenarioStructureBSPMaterial");
+        const uncomp = mat.get("uncompressed vertices");
+        if (uncomp && uncomp.kind === "tagDataOffset" && uncomp.value.pointerLow) {
+          const p = uncomp.value.pointerLow;
+          const sz = uncomp.value.size;
+          if (p < minVertPtr) minVertPtr = p;
+          if (p + sz > maxVertPtr) maxVertPtr = p + sz;
+        }
+      }
+    }
+    let vertRebaseDelta = 0;
+    if (minVertPtr !== Infinity && maxVertPtr > minVertPtr) {
+      const vertSpanSize = maxVertPtr - minVertPtr;
+      const vertSourceOffset = ctx.loc.fileOffsetAnchor + (minVertPtr - ctx.loc.baseMemoryAddress);
+      const vertDestOffset = appendOffset;
+      sourceBuffer.copy(merged, vertDestOffset, vertSourceOffset, vertSourceOffset + vertSpanSize);
+      appendOffset += vertSpanSize + 15 & ~15;
+      vertRebaseDelta = baseAddress + vertDestOffset - minVertPtr;
+    }
+    for (let i = 0; i < lmRefl.count; i++) {
+      const lm = decodeStruct(sourceBuffer, lmOff + i * lmStructSize, "ScenarioStructureBSPLightmap");
+      const bitmap = lm.get("bitmap")?.value ?? -1;
+      const mats = getReflexive(lm, "materials");
+      if (mats.count === 0) {
+        allLightmaps.push({ bitmap, materialsCount: 0, materialsPointer: 0 });
+        continue;
+      }
+      const matsSourceOff = ctx.loc.fileOffsetAnchor + (mats.pointerLow - ctx.loc.baseMemoryAddress);
+      const matsDestOff = appendOffset;
+      const matsByteSize = mats.count * matStructSize;
+      sourceBuffer.copy(merged, matsDestOff, matsSourceOff, matsSourceOff + matsByteSize);
+      for (let j = 0; j < mats.count; j++) {
+        const mOff = matsDestOff + j * matStructSize;
+        const oldSurf = merged.readInt32LE(mOff + 20);
+        merged.writeInt32LE(oldSurf + cumulativeSurfaceCount, mOff + 20);
+        const oldVertPtr = merged.readUInt32LE(mOff + 228);
+        if (oldVertPtr !== 0 && vertRebaseDelta !== 0) {
+          merged.writeUInt32LE(oldVertPtr + vertRebaseDelta, mOff + 228);
+        }
+        const vCount = merged.readUInt32LE(mOff + 180);
+        totalVertices += vCount;
+        totalSubmeshes++;
+      }
+      allLightmaps.push({
+        bitmap,
+        materialsCount: mats.count,
+        materialsPointer: baseAddress + matsDestOff
+      });
+      appendOffset += matsByteSize + 15 & ~15;
+    }
+    const surfacesRefl = getReflexive(ctx.decoded, "surfaces");
+    const surfacesOff = ctx.loc.fileOffsetAnchor + (surfacesRefl.pointerLow - ctx.loc.baseMemoryAddress);
+    allSurfacesBuffers.push(sourceBuffer.subarray(surfacesOff, surfacesOff + surfacesRefl.count * 6));
+    cumulativeSurfaceCount += surfacesRefl.count;
+    totalTriangles += surfacesRefl.count;
+  }
+  for (let i = 0; i < lmRefl0.count; i++) {
+    const lm = decodeStruct(sourceBuffer, lmOff0 + i * lmStructSize, "ScenarioStructureBSPLightmap");
+    const mats = getReflexive(lm, "materials");
+    if (mats.count === 0) continue;
+    const matsOff = baseCtx.loc.fileOffsetAnchor + (mats.pointerLow - baseCtx.loc.baseMemoryAddress);
+    for (let j = 0; j < mats.count; j++) {
+      const vCount = sourceBuffer.readUInt32LE(matsOff + j * matStructSize + 180);
+      totalVertices += vCount;
+      totalSubmeshes++;
+    }
+  }
+  const combinedLmDestOff = appendOffset;
+  const combinedLmByteSize = allLightmaps.length * lmStructSize;
+  for (let i = 0; i < allLightmaps.length; i++) {
+    const off = combinedLmDestOff + i * lmStructSize;
+    merged.writeUInt16LE(allLightmaps[i].bitmap & 65535, off + 0);
+    merged.writeUInt16LE(0, off + 2);
+    merged.writeUInt32LE(0, off + 4);
+    merged.writeUInt32LE(0, off + 8);
+    merged.writeUInt32LE(0, off + 12);
+    merged.writeUInt32LE(0, off + 16);
+    merged.writeUInt32LE(allLightmaps[i].materialsCount, off + 20);
+    merged.writeUInt32LE(allLightmaps[i].materialsPointer, off + 24);
+  }
+  appendOffset += combinedLmByteSize + 15 & ~15;
+  const combinedSurfacesDestOff = appendOffset;
+  let currSurfOff = combinedSurfacesDestOff;
+  for (const sBuf of allSurfacesBuffers) {
+    sBuf.copy(merged, currSurfOff);
+    currSurfOff += sBuf.length;
+  }
+  appendOffset += currSurfOff - combinedSurfacesDestOff + 15 & ~15;
+  const totalClusters = cumulativeClusterCount;
+  const pvsBytesPerCluster = Math.ceil(totalClusters / 8);
+  const pvsTotalSize = totalClusters * pvsBytesPerCluster;
+  const pvsDestOff = appendOffset;
+  merged.fill(255, pvsDestOff, pvsDestOff + pvsTotalSize);
+  appendOffset += pvsTotalSize + 15 & ~15;
+  const rootOffset = 24;
+  merged.writeFloatLE(unionBounds[0], rootOffset + 200);
+  merged.writeFloatLE(unionBounds[3], rootOffset + 204);
+  merged.writeFloatLE(unionBounds[1], rootOffset + 208);
+  merged.writeFloatLE(unionBounds[4], rootOffset + 212);
+  merged.writeFloatLE(unionBounds[2], rootOffset + 216);
+  merged.writeFloatLE(unionBounds[5], rootOffset + 220);
+  merged.writeFloatLE(vehicleFloor, rootOffset + 4);
+  merged.writeFloatLE(vehicleCeiling, rootOffset + 8);
+  merged.writeUInt32LE(totalTriangles, rootOffset + 248);
+  merged.writeUInt32LE(baseAddress + combinedSurfacesDestOff, rootOffset + 252);
+  merged.writeUInt32LE(allLightmaps.length, rootOffset + 260);
+  merged.writeUInt32LE(baseAddress + combinedLmDestOff, rootOffset + 264);
+  merged.writeUInt32LE(pvsTotalSize, rootOffset + 320);
+  merged.writeUInt32LE(baseAddress + pvsDestOff, rootOffset + 332);
+  const finalMergedSize = appendOffset + 511 & ~511;
+  const finalMergedBuffer = Buffer.alloc(finalMergedSize);
+  merged.copy(finalMergedBuffer, 0, 0, finalMergedSize);
+  const CE_BSP_CACHE_CEILING = 1102315520;
+  let finalBspAddress = baseAddress;
+  if (baseAddress + finalMergedSize > CE_BSP_CACHE_CEILING) {
+    finalBspAddress = CE_BSP_CACHE_CEILING - finalMergedSize & ~511;
+    rebaseStructureBspPointers(finalMergedBuffer, baseAddress, finalBspAddress);
+  }
+  const anyDobc = contexts.some((c) => c.hasDobc);
+  const anyDecals = contexts.some((c) => c.hasDecals);
+  const mergedNames = contexts.map((c) => c.bspName);
+  return {
+    bspBuffer: finalMergedBuffer,
+    bspSize: finalMergedSize,
+    bspAddress: finalBspAddress,
+    vertexCount: totalVertices,
+    triangleCount: totalTriangles,
+    submeshCount: totalSubmeshes,
+    worldBounds: unionBounds,
+    hasDobc: anyDobc,
+    hasDecals: anyDecals,
+    mergedBspNames: mergedNames
+  };
+}
+
 // ../core/src/map/bsp-swapper.ts
 function getMapBsps(buffer) {
   const inspected = inspectCustomEditionMap(buffer);
@@ -41881,7 +42245,7 @@ function getMapBsps(buffer) {
   }
   return results;
 }
-function bspSwapPreflight(sourceBuffer, targetBuffer, sourceBspIndex = 0, targetBspIndex = 0) {
+function bspSwapPreflight(sourceBuffer, targetBuffer, sourceBspIndex = 0, targetBspIndex = 0, sourceBspIndices) {
   const sourceBsps = getMapBsps(sourceBuffer);
   const targetBsps = getMapBsps(targetBuffer);
   if (sourceBsps.length === 0) {
@@ -41910,16 +42274,40 @@ function bspSwapPreflight(sourceBuffer, targetBuffer, sourceBspIndex = 0, target
       error: "No valid Structure BSPs found in target map."
     };
   }
-  const selectedSourceBsp = sourceBsps[sourceBspIndex] ?? sourceBsps[0];
   const selectedTargetBsp = targetBsps[targetBspIndex] ?? targetBsps[0];
-  const sizeDelta = selectedSourceBsp.bspSize - selectedTargetBsp.bspSize;
+  let selectedSourceBsps;
+  let selectedSourceBsp;
+  let totalSourceSize = 0;
+  if (sourceBspIndices && sourceBspIndices.length > 0) {
+    selectedSourceBsps = sourceBspIndices.map((idx) => sourceBsps[idx]).filter(Boolean);
+    if (selectedSourceBsps.length === 0) {
+      selectedSourceBsp = sourceBsps[sourceBspIndex] ?? sourceBsps[0];
+      selectedSourceBsps = [selectedSourceBsp];
+    } else {
+      selectedSourceBsp = selectedSourceBsps[0];
+    }
+  } else {
+    selectedSourceBsp = sourceBsps[sourceBspIndex] ?? sourceBsps[0];
+    selectedSourceBsps = [selectedSourceBsp];
+  }
+  if (selectedSourceBsps.length > 1) {
+    totalSourceSize = selectedSourceBsps.reduce((acc, b) => acc + b.bspSize, 0);
+  } else {
+    totalSourceSize = selectedSourceBsp.bspSize;
+  }
+  const sizeDelta = totalSourceSize - selectedTargetBsp.bspSize;
   const estimatedNewSize = targetBuffer.length + sizeDelta;
   const warnings = [];
-  if (selectedSourceBsp.hasDobc) {
+  const anyDobc = selectedSourceBsps.some((b) => b.hasDobc);
+  const anyDecals = selectedSourceBsps.some((b) => b.hasDecals);
+  if (anyDobc) {
     warnings.push("Source BSP contains Detail Objects (DOBC). Stripping recommended for multiplayer.");
   }
-  if (selectedSourceBsp.hasDecals) {
+  if (anyDecals) {
     warnings.push("Source BSP contains Runtime Decals. Stripping recommended for multiplayer stability.");
+  }
+  if (selectedSourceBsps.length > 1) {
+    warnings.push(`Multi-BSP Merge Mode active: ${selectedSourceBsps.length} donor BSPs will be fused into a single multiplayer BSP.`);
   }
   if (estimatedNewSize > 250 * 1024 * 1024) {
     warnings.push("Target map size will exceed 250 MB; verify engine memory constraints.");
@@ -41929,6 +42317,7 @@ function bspSwapPreflight(sourceBuffer, targetBuffer, sourceBspIndex = 0, target
     sourceBsps,
     targetBsps,
     selectedSourceBsp,
+    selectedSourceBsps,
     selectedTargetBsp,
     sizeDelta,
     estimatedNewSize,
@@ -41977,6 +42366,55 @@ function scanBspDependencies(buffer, structName, fileOffset, bspStart, bspSize, 
                   bspSize,
                   bspAddress,
                   out,
+                  visitedOffsets
+                );
+              }
+            } catch {
+            }
+          }
+        }
+      }
+    }
+  }
+}
+function rewriteBspDependencies(buffer, structName, fileOffset, bspStart, bspSize, bspAddress, tagIdMap, visitedOffsets) {
+  if (fileOffset < bspStart || fileOffset >= bspStart + bspSize || visitedOffsets.has(fileOffset)) return;
+  visitedOffsets.add(fileOffset);
+  let resolved;
+  try {
+    resolved = resolveStruct(structName);
+  } catch {
+    return;
+  }
+  if (fileOffset + resolved.totalSize > buffer.length) return;
+  for (const field of resolved.fields) {
+    const fieldOffset = fileOffset + field.offset;
+    if (field.def.type === "TagDependency") {
+      if (fieldOffset + 16 <= buffer.length) {
+        const oldTagId = buffer.readUInt32LE(fieldOffset + 12);
+        const mapped = tagIdMap.get(oldTagId) ?? tagIdMap.get(oldTagId & 65535);
+        if (mapped !== void 0) {
+          buffer.writeUInt32LE(mapped, fieldOffset + 12);
+        }
+      }
+    } else if (field.def.type === "TagReflexive") {
+      if (fieldOffset + 12 <= buffer.length && field.def.struct) {
+        const count2 = buffer.readUInt32LE(fieldOffset + 0);
+        const pointerLow = buffer.readUInt32LE(fieldOffset + 4);
+        if (count2 > 0 && count2 < 2e4 && pointerLow >= bspAddress) {
+          const childArrayOffset = bspStart + (pointerLow - bspAddress);
+          if (childArrayOffset >= bspStart && childArrayOffset < bspStart + bspSize) {
+            try {
+              const childSize = resolveStruct(field.def.struct).totalSize;
+              for (let i = 0; i < count2; i++) {
+                rewriteBspDependencies(
+                  buffer,
+                  field.def.struct,
+                  childArrayOffset + i * childSize,
+                  bspStart,
+                  bspSize,
+                  bspAddress,
+                  tagIdMap,
                   visitedOffsets
                 );
               }
@@ -42073,7 +42511,8 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   let targetBsps = getMapBsps(targetBuffer);
   const srcIdx = options.sourceBspIndex ?? 0;
   const dstIdx = options.targetBspIndex ?? 0;
-  const srcBsp = sourceBsps[srcIdx];
+  const srcIndices = options.sourceBspIndices && options.sourceBspIndices.length > 0 ? options.sourceBspIndices : [srcIdx];
+  const srcBsp = sourceBsps[srcIndices[0]];
   let dstBsp = targetBsps[dstIdx];
   if (!srcBsp) {
     return {
@@ -42091,12 +42530,37 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       error: `Invalid target BSP index ${dstIdx}.`
     };
   }
-  const delta = srcBsp.bspSize - dstBsp.bspSize;
+  let srcBspData;
+  let srcBspSize;
+  let srcBspAddress;
+  let srcBspName;
+  let srcWorldBounds;
+  if (srcIndices.length > 1) {
+    const merged = mergeStructureBsps(sourceBuffer, srcIndices);
+    srcBspData = merged.bspBuffer;
+    srcBspSize = merged.bspSize;
+    srcBspAddress = merged.bspAddress;
+    srcBspName = merged.mergedBspNames.join(" + ");
+    srcWorldBounds = merged.worldBounds;
+  } else {
+    srcBspData = Buffer.from(sourceBuffer.subarray(srcBsp.bspStart, srcBsp.bspStart + srcBsp.bspSize));
+    srcBspSize = srcBsp.bspSize;
+    srcBspAddress = srcBsp.bspAddress;
+    const CE_BSP_CACHE_CEILING = 1102315520;
+    if (srcBspAddress + srcBspSize > CE_BSP_CACHE_CEILING) {
+      const rebasedAddr = CE_BSP_CACHE_CEILING - srcBspSize & ~511;
+      rebaseStructureBspPointers(srcBspData, srcBspAddress, rebasedAddr);
+      srcBspAddress = rebasedAddr;
+    }
+    srcBspName = srcBsp.path;
+    srcWorldBounds = srcBsp.worldBounds;
+  }
+  const delta = srcBspSize - dstBsp.bspSize;
   const newLength = targetBuffer.length + delta;
   let out = Buffer.alloc(newLength);
   targetBuffer.copy(out, 0, 0, dstBsp.bspStart);
-  sourceBuffer.copy(out, dstBsp.bspStart, srcBsp.bspStart, srcBsp.bspStart + srcBsp.bspSize);
-  targetBuffer.copy(out, dstBsp.bspStart + srcBsp.bspSize, dstBsp.bspStart + dstBsp.bspSize);
+  srcBspData.copy(out, dstBsp.bspStart, 0, srcBspSize);
+  targetBuffer.copy(out, dstBsp.bspStart + srcBspSize, dstBsp.bspStart + dstBsp.bspSize);
   const oldFileSize = targetBuffer.readUInt32LE(8);
   out.writeUInt32LE(oldFileSize + delta, 8);
   const oldTagDataOffset = targetBuffer.readUInt32LE(16);
@@ -42121,8 +42585,8 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   const bspArrayOffset = newTagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
   const targetEntryOffset = bspArrayOffset + dstIdx * scenarioBspSize;
   out.writeUInt32LE(dstBsp.bspStart, targetEntryOffset + 0);
-  out.writeUInt32LE(srcBsp.bspSize, targetEntryOffset + 4);
-  out.writeUInt32LE(srcBsp.bspAddress, targetEntryOffset + 8);
+  out.writeUInt32LE(srcBspSize, targetEntryOffset + 4);
+  out.writeUInt32LE(srcBspAddress, targetEntryOffset + 8);
   shiftExistingRawDataOffsets(out, newTagDataOffset, tagIndex, dstBsp.bspStart + dstBsp.bspSize, delta);
   let reinspected = inspectCustomEditionMap(out);
   if (reinspected.status !== "ok") {
@@ -42138,19 +42602,23 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   const tagIdMap = /* @__PURE__ */ new Map();
   const bspDeps = [];
   if (sourceInspected.status === "ok") {
-    const metaPointer2 = sourceBuffer.readUInt32LE(srcBsp.bspStart + 0);
-    const bspRootOffset = srcBsp.bspStart + (metaPointer2 - srcBsp.bspAddress);
-    if (bspRootOffset >= srcBsp.bspStart && bspRootOffset < srcBsp.bspStart + srcBsp.bspSize) {
-      scanBspDependencies(
-        sourceBuffer,
-        "ScenarioStructureBSP",
-        bspRootOffset,
-        srcBsp.bspStart,
-        srcBsp.bspSize,
-        srcBsp.bspAddress,
-        bspDeps,
-        /* @__PURE__ */ new Set()
-      );
+    for (const bIdx of srcIndices) {
+      const curBsp = sourceBsps[bIdx];
+      if (!curBsp) continue;
+      const metaPointer2 = sourceBuffer.readUInt32LE(curBsp.bspStart + 0);
+      const bspRootOffset = curBsp.bspStart + (metaPointer2 - curBsp.bspAddress);
+      if (bspRootOffset >= curBsp.bspStart && bspRootOffset < curBsp.bspStart + curBsp.bspSize) {
+        scanBspDependencies(
+          sourceBuffer,
+          "ScenarioStructureBSP",
+          bspRootOffset,
+          curBsp.bspStart,
+          curBsp.bspSize,
+          curBsp.bspAddress,
+          bspDeps,
+          /* @__PURE__ */ new Set()
+        );
+      }
     }
     if (options.harvestShaders !== false && bspDeps.length > 0) {
       const srcTagIndex = sourceInspected.tagIndex;
@@ -42213,15 +42681,20 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
     nameBuf.write(nameStr, "ascii");
     nameBuf.copy(out, 32);
   }
-  if (tagIdMap.size > 0 && bspDeps.length > 0) {
-    for (const dep of bspDeps) {
-      const mapped = tagIdMap.get(dep.tagId) ?? tagIdMap.get(dep.tagId & 65535);
-      if (mapped !== void 0) {
-        const targetOffset = dstBsp.bspStart + dep.bspRelativeOffset;
-        if (targetOffset + 16 <= out.length) {
-          out.writeUInt32LE(mapped, targetOffset + 12);
-        }
-      }
+  if (tagIdMap.size > 0) {
+    const metaPointer2 = out.readUInt32LE(dstBsp.bspStart + 0);
+    const bspRootOffset = dstBsp.bspStart + (metaPointer2 - srcBspAddress);
+    if (bspRootOffset >= dstBsp.bspStart && bspRootOffset < dstBsp.bspStart + srcBspSize) {
+      rewriteBspDependencies(
+        out,
+        "ScenarioStructureBSP",
+        bspRootOffset,
+        dstBsp.bspStart,
+        srcBspSize,
+        srcBspAddress,
+        tagIdMap,
+        /* @__PURE__ */ new Set()
+      );
     }
   }
   let strippedDobc = false;
@@ -42229,8 +42702,8 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   const shouldStripDobc = options.stripDobc !== void 0 ? options.stripDobc : options.stripDobcAndDecals ?? true;
   const shouldStripDecals = options.stripDecals !== void 0 ? options.stripDecals : options.stripDobcAndDecals ?? true;
   const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
-  const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBsp.bspAddress);
-  if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 608 <= dstBsp.bspStart + srcBsp.bspSize) {
+  const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBspAddress);
+  if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 608 <= dstBsp.bspStart + srcBspSize) {
     if (shouldStripDobc) {
       out.writeUInt32LE(0, bspRootFileOffset + 588);
       out.writeUInt32LE(0, bspRootFileOffset + 592);
@@ -42244,8 +42717,8 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   }
   let relocatedSpawns = 0;
   if (options.relocateGroundObjects ?? true) {
-    const minZ = srcBsp.worldBounds[2];
-    const maxZ = srcBsp.worldBounds[5];
+    const minZ = srcWorldBounds[2];
+    const maxZ = srcWorldBounds[5];
     const defaultGroundZ = minZ + 0.5;
     const spawnsReflexive = decodedScnr.get("player starting locations");
     if (spawnsReflexive && spawnsReflexive.kind === "reflexive" && spawnsReflexive.value.count > 0) {
@@ -42278,7 +42751,7 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
     ok: true,
     buffer: out,
     summary: {
-      sourceBspName: srcBsp.path,
+      sourceBspName: srcBspName,
       targetBspName: dstBsp.path,
       oldSize: targetBuffer.length,
       newSize: out.length,
@@ -43573,11 +44046,24 @@ function runDuplicateTag(task) {
     handleTaskError(task.requestId, err);
   }
 }
+async function runGetSourceBspMesh(task) {
+  try {
+    const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
+    const inspected = inspectCustomEditionMap(sourceBuffer);
+    if (inspected.status !== "ok") {
+      return sendError(task.requestId, "INVALID_MAP", "Failed to inspect source map.");
+    }
+    const mesh = extractBspRenderMesh(sourceBuffer, inspected.header, inspected.tagIndex, task.bspIndex ?? 0);
+    sendResult(task.requestId, { ok: true, mesh });
+  } catch (err) {
+    sendError(task.requestId, "BSP_MESH_ERROR", err?.message || "Failed to extract source BSP mesh.");
+  }
+}
 async function runBspSwapPreflight(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
     const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
-    const result = bspSwapPreflight(sourceBuffer, currentMap.buffer, task.sourceBspIndex, task.targetBspIndex);
+    const result = bspSwapPreflight(sourceBuffer, currentMap.buffer, task.sourceBspIndex, task.targetBspIndex, task.sourceBspIndices);
     sendResult(task.requestId, result);
   } catch (err) {
     handleTaskError(task.requestId, err);
@@ -43654,6 +44140,7 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "setUnicodeString") runSetUnicodeString(task);
     else if (task.type === "renameTag") runRenameTag(task);
     else if (task.type === "duplicateTag") runDuplicateTag(task);
+    else if (task.type === "getSourceBspMesh") await runGetSourceBspMesh(task);
     else if (task.type === "bspSwapPreflight") await runBspSwapPreflight(task);
     else if (task.type === "performBspSwap") await runPerformBspSwap(task);
   } catch (err) {
@@ -43693,6 +44180,7 @@ try {
   runGetModelGeometry,
   runGetReferencingTags,
   runGetScenarioObjects,
+  runGetSourceBspMesh,
   runGetTagFields,
   runGetUnicodeStrings,
   runInspect,
