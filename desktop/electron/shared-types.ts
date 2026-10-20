@@ -16,6 +16,7 @@ import type { ReferencingTagSummary } from '../../core/src/map/tag-reverse-depen
 import type { UnicodeStringItem, UnicodeStringListResult } from '../../core/src/map/unicode-string-editor';
 import type { BspInfo, BspSwapPreflightResult, BspSwapOptions, BspSwapResult } from '../../core/src/map/bsp-swapper';
 import type { BitmapTagSummary, BitmapImageInfo, BitmapSequenceInfo } from '../../core/src/render/bitmap-codec';
+import type { SoundTagSummary, SoundPitchRangeInfo, SoundPermutationInfo } from '../../core/src/render/sound-codec';
 
 export type {
   TagFieldDescriptor,
@@ -40,6 +41,9 @@ export type {
   BitmapTagSummary,
   BitmapImageInfo,
   BitmapSequenceInfo,
+  SoundTagSummary,
+  SoundPitchRangeInfo,
+  SoundPermutationInfo,
 };
 
 export interface MapHeaderSummary {
@@ -440,6 +444,37 @@ export interface ReplaceBitmapResult {
   message?: string;
 }
 
+export interface GetSoundInfoResult {
+  ok: boolean;
+  summary?: SoundTagSummary;
+  code?: string;
+  message?: string;
+}
+
+export interface GetSoundWavResult {
+  ok: boolean;
+  dataUrl?: string;
+  sampleRate?: number;
+  channels?: number;
+  durationSeconds?: number;
+  code?: string;
+  message?: string;
+}
+
+export interface ExportSoundResult {
+  ok: boolean;
+  filePath?: string;
+  code?: string;
+  message?: string;
+}
+
+export interface ReplaceSoundResult {
+  ok: boolean;
+  map?: OpenMapSummary;
+  code?: string;
+  message?: string;
+}
+
 export type WorkerRequest =
   | { type: 'inspect'; requestId: string; filePath: string }
   | { type: 'compress' | 'decompress'; requestId: string; filePath: string; outputPath: string }
@@ -520,6 +555,10 @@ export type WorkerRequest =
   | { type: 'getBitmapRgba'; requestId: string; tagIndex: number; imageIndex: number; bitmapsPath?: string }
   | { type: 'exportBitmap'; requestId: string; tagIndex: number; imageIndex: number; format: 'png' | 'dds'; outputPath: string; bitmapsPath?: string }
   | { type: 'replaceBitmap'; requestId: string; tagIndex: number; imageIndex: number; inputPath: string; targetFormat?: number; bitmapsPath?: string }
+  | { type: 'getSoundInfo'; requestId: string; tagIndex: number; soundsPath?: string }
+  | { type: 'getSoundWav'; requestId: string; tagIndex: number; pitchRangeIndex: number; permutationIndex: number; soundsPath?: string }
+  | { type: 'exportSound'; requestId: string; tagIndex: number; pitchRangeIndex: number; permutationIndex: number; outputPath: string; soundsPath?: string }
+  | { type: 'replaceSound'; requestId: string; tagIndex: number; pitchRangeIndex: number; permutationIndex: number; inputPath: string; targetFormat?: number; soundsPath?: string }
   | { type: 'cancel'; requestId: string };
 
 export type GetReferencingTagsResult =
@@ -785,6 +824,13 @@ export interface OpenceApi {
   exportBitmapImage(tagIndex: number, imageIndex: number, format: 'png' | 'dds', outputPath: string): Promise<ExportBitmapResult>;
   pickImportBitmapPath(): Promise<{ path: string | null }>;
   replaceBitmapImage(tagIndex: number, imageIndex: number, inputPath: string, targetFormat?: number): Promise<ReplaceBitmapResult>;
+  /** M13.2: Sound Audition Player & Injector */
+  getSoundInfo(tagIndex: number): Promise<GetSoundInfoResult>;
+  getSoundWav(tagIndex: number, pitchRangeIndex: number, permutationIndex: number): Promise<GetSoundWavResult>;
+  pickExportSoundPath(defaultName: string): Promise<{ path: string | null }>;
+  exportSoundWav(tagIndex: number, pitchRangeIndex: number, permutationIndex: number, outputPath: string): Promise<ExportSoundResult>;
+  pickImportSoundPath(): Promise<{ path: string | null }>;
+  replaceSoundWav(tagIndex: number, pitchRangeIndex: number, permutationIndex: number, inputPath: string, targetFormat?: number): Promise<ReplaceSoundResult>;
   getPathForFile(file: File): string;
 }
 

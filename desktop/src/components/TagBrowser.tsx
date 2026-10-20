@@ -21,6 +21,7 @@ interface Props {
   /** Right-click "Duplicate Tag..." */
   onDuplicateTag?: (tag: TagEntrySummary) => void;
   onOpenBitmapEditor?: (tag: TagEntrySummary) => void;
+  onOpenSoundAuditor?: (tag: TagEntrySummary) => void;
 }
 
 type GroupMode = 'class' | 'folder';
@@ -66,6 +67,7 @@ export default function TagBrowser({
   onRenameTag,
   onDuplicateTag,
   onOpenBitmapEditor,
+  onOpenSoundAuditor,
 }: Props) {
   const [search, setSearch] = useState('');
   const [groupMode, setGroupMode] = useState<GroupMode>('class');
@@ -366,6 +368,22 @@ export default function TagBrowser({
               style={{ ...menuItemStyle(false), color: 'var(--accent-cyan)' }}
             >
               Bitmap Editor & Injector...
+            </button>
+          )}
+          {contextMenuTag?.primaryClassName === 'sound' && (
+            <button
+              data-testid="tag-row-context-sound-auditor"
+              onClick={() => {
+                const t = contextMenuTag;
+                setContextMenu(null);
+                if (t) {
+                  focusRow(t);
+                  onOpenSoundAuditor?.(t);
+                }
+              }}
+              style={{ ...menuItemStyle(false), color: '#38bdf8' }}
+            >
+              Sound Audition & Injector...
             </button>
           )}
           <button

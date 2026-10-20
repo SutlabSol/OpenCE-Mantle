@@ -8,6 +8,7 @@ interface Props {
   tag: TagEntrySummary;
   allTags: TagEntrySummary[];
   onOpenBitmapEditor?: (tag: TagEntrySummary) => void;
+  onOpenSoundAuditor?: (tag: TagEntrySummary) => void;
   onClose: () => void;
 }
 
@@ -16,7 +17,7 @@ interface Props {
  * or `UnicodeStringEditorPanel` for ustr tags in a modal overlay (zIndex 150, above the dependency dialog's 100).
  * Escape or the header Close button dismisses.
  */
-export default function TagEditorDialog({ tag, allTags, onClose, onOpenBitmapEditor }: Props) {
+export default function TagEditorDialog({ tag, allTags, onClose, onOpenBitmapEditor, onOpenSoundAuditor }: Props) {
   const shellRef = useRef<HTMLDivElement>(null);
   const isUnicodeStrings = tag.primaryClassName === 'unicode_string_list';
   const [tab, setTab] = useState<'strings' | 'fields'>(isUnicodeStrings ? 'strings' : 'fields');
@@ -122,6 +123,28 @@ export default function TagEditorDialog({ tag, allTags, onClose, onOpenBitmapEdi
               }}
             >
               Open in Bitmap Editor
+            </button>
+          )}
+          {tag.primaryClassName === 'sound' && onOpenSoundAuditor && (
+            <button
+              data-testid="tag-editor-open-sound"
+              onClick={() => {
+                onClose();
+                onOpenSoundAuditor(tag);
+              }}
+              style={{
+                padding: '3px 8px',
+                fontSize: 11,
+                background: 'rgba(56,189,248,0.15)',
+                border: '1px solid rgba(56,189,248,0.4)',
+                color: '#38bdf8',
+                borderRadius: 3,
+                cursor: 'pointer',
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              Open in Sound Auditor
             </button>
           )}
 

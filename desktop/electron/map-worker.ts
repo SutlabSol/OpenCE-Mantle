@@ -71,6 +71,13 @@ import {
   encodeRgbaToDxt1,
   encodeRgbaToDxt5,
   BitmapFormat,
+  inspectSoundTag,
+  decodeSoundPermutationPcm,
+  replaceSoundPermutationData,
+  encodePcmToWav,
+  decodeWavToPcm,
+  encodeXboxAdpcmMono,
+  SoundFormat,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -1213,6 +1220,29 @@ function getBitmapsBuffer(bitmapsPath?: string): Buffer | undefined {
   }
 }
 
+let cachedSoundsMap: { filePath: string; mtimeMs: number; buffer: Buffer } | null = null;
+function getSoundsBuffer(soundsPath?: string): Buffer | undefined {
+  let resolved = soundsPath;
+  if (!resolved && currentMap?.filePath) {
+    const candidate = path.join(path.dirname(currentMap.filePath), 'sounds.map');
+    if (fs.existsSync(candidate)) {
+      resolved = candidate;
+    }
+  }
+  if (!resolved || !fs.existsSync(resolved)) return undefined;
+  try {
+    const stat = fs.statSync(resolved);
+    if (cachedSoundsMap && cachedSoundsMap.filePath === resolved && cachedSoundsMap.mtimeMs === stat.mtimeMs) {
+      return cachedSoundsMap.buffer;
+    }
+    const buffer = fs.readFileSync(resolved);
+    cachedSoundsMap = { filePath: resolved, mtimeMs: stat.mtimeMs, buffer };
+    return buffer;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Step 8.4: Extracts 3D Structure BSP render mesh for the open map. */
 export function runGetBspRenderMesh(task: { requestId: string; bspIndex?: number }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
@@ -1411,6 +1441,147 @@ export function runReplaceBitmapImage(task: {
     });
   } catch (err) {
     sendError(task.requestId, 'BITMAP_REPLACE_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** M13.2: Inspects a sound tag's pitch ranges and permutations. */
+export function runGetSoundInfo(task: { requestId: string; tagIndex: number; soundsPath?: string }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    const externalSounds = getSoundsBuffer(task.soundsPath);
+    const summary = inspectSoundTag(currentMap.buffer, currentMap.header, currentMap.tagIndex, entry.tagId, externalSounds);
+    sendResult(task.requestId, { ok: true, summary });
+  } catch (err) {
+    sendError(task.requestId, 'SOUND_INFO_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** M13.2: Decodes a sound permutation into base64 WAV data URL for audition playback. */
+export function runGetSoundWav(task: {
+  requestId: string;
+  tagIndex: number;
+  pitchRangeIndex: number;
+  permutationIndex: number;
+  soundsPath?: string;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    const externalSounds = getSoundsBuffer(task.soundsPath);
+    const audio = decodeSoundPermutationPcm(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      task.pitchRangeIndex,
+      task.permutationIndex,
+      externalSounds,
+    );
+    const wavBuffer = encodePcmToWav(audio.pcmSamples, audio.sampleRate, audio.channels);
+    const dataUrl = `data:audio/wav;base64,${wavBuffer.toString('base64')}`;
+    sendResult(task.requestId, {
+      ok: true,
+      dataUrl,
+      sampleRate: audio.sampleRate,
+      channels: audio.channels,
+      durationSeconds: audio.durationSeconds,
+    });
+  } catch (err) {
+    sendError(task.requestId, 'SOUND_WAV_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** M13.2: Exports a sound permutation as WAV on disk. */
+export function runExportSound(task: {
+  requestId: string;
+  tagIndex: number;
+  pitchRangeIndex: number;
+  permutationIndex: number;
+  outputPath: string;
+  soundsPath?: string;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    const externalSounds = getSoundsBuffer(task.soundsPath);
+    const audio = decodeSoundPermutationPcm(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      task.pitchRangeIndex,
+      task.permutationIndex,
+      externalSounds,
+    );
+    const wavBuffer = encodePcmToWav(audio.pcmSamples, audio.sampleRate, audio.channels);
+    fs.writeFileSync(task.outputPath, wavBuffer);
+    sendResult(task.requestId, { ok: true, filePath: task.outputPath });
+  } catch (err) {
+    sendError(task.requestId, 'SOUND_EXPORT_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** M13.2: Imports a WAV file, encodes to Xbox ADPCM/PCM, and internalizes/replaces the sound permutation. */
+export function runReplaceSound(task: {
+  requestId: string;
+  tagIndex: number;
+  pitchRangeIndex: number;
+  permutationIndex: number;
+  inputPath: string;
+  targetFormat?: number;
+  soundsPath?: string;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    if (!fs.existsSync(task.inputPath)) return sendError(task.requestId, 'FILE_NOT_FOUND', `Input file "${task.inputPath}" does not exist.`);
+
+    const wavFileBuf = fs.readFileSync(task.inputPath);
+    const decodedWav = decodeWavToPcm(wavFileBuf);
+    const externalSounds = getSoundsBuffer(task.soundsPath);
+
+    let chosenFormat = task.targetFormat ?? SoundFormat.XboxADPCM;
+    let newSamples: Uint8Array;
+
+    if (chosenFormat === SoundFormat.XboxADPCM) {
+      newSamples = encodeXboxAdpcmMono(decodedWav.pcmSamples);
+    } else {
+      chosenFormat = SoundFormat.PCM16;
+      newSamples = new Uint8Array(decodedWav.pcmSamples.buffer, decodedWav.pcmSamples.byteOffset, decodedWav.pcmSamples.byteLength);
+    }
+
+    const updatedBuffer = replaceSoundPermutationData(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      task.pitchRangeIndex,
+      task.permutationIndex,
+      newSamples,
+      chosenFormat,
+      externalSounds,
+    );
+
+    currentMap.buffer = updatedBuffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== 'ok') {
+      return sendError(task.requestId, 'REINSPECT_FAILED', 'Failed to inspect map after replacing sound.');
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+
+    sendResult(task.requestId, {
+      ok: true,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendError(task.requestId, 'SOUND_REPLACE_ERROR', err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -1790,6 +1961,10 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'getBitmapRgba') runGetBitmapRgba(task);
     else if (task.type === 'exportBitmap') runExportBitmap(task);
     else if (task.type === 'replaceBitmap') runReplaceBitmapImage(task);
+    else if (task.type === 'getSoundInfo') runGetSoundInfo(task);
+    else if (task.type === 'getSoundWav') runGetSoundWav(task);
+    else if (task.type === 'exportSound') runExportSound(task);
+    else if (task.type === 'replaceSound') runReplaceSound(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

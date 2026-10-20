@@ -86,6 +86,10 @@ import type {
   GetBitmapRgbaResult,
   ExportBitmapResult,
   ReplaceBitmapResult,
+  GetSoundInfoResult,
+  GetSoundWavResult,
+  ExportSoundResult,
+  ReplaceSoundResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -1299,6 +1303,94 @@ async function replaceBitmapFlow(tagIndex: number, imageIndex: number, inputPath
   return result;
 }
 
+/** M13.2: Sound Audition Player & Injector flows */
+async function pickExportSoundPathFlow(defaultName: string): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const res = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Sound as WAV',
+    defaultPath: `${defaultName}.wav`,
+    filters: [{ name: 'WAV Audio (*.wav)', extensions: ['wav'] }],
+  });
+  return { path: res.canceled ? null : (res.filePath ?? null) };
+}
+
+async function pickImportSoundPathFlow(): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import WAV Audio',
+    filters: [{ name: 'WAV Audio (*.wav)', extensions: ['wav'] }],
+    properties: ['openFile'],
+  });
+  return { path: res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0] };
+}
+
+async function getSoundInfoFlow(tagIndex: number): Promise<GetSoundInfoResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const soundsPath = settings.resourceMaps.sounds ?? undefined;
+  const { promise } = sendWorkerRequest<GetSoundInfoResult>(
+    { type: 'getSoundInfo', tagIndex, soundsPath },
+    sendLog,
+  );
+  return promise;
+}
+
+async function getSoundWavFlow(tagIndex: number, pitchRangeIndex: number, permutationIndex: number): Promise<GetSoundWavResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const soundsPath = settings.resourceMaps.sounds ?? undefined;
+  const { promise } = sendWorkerRequest<GetSoundWavResult>(
+    { type: 'getSoundWav', tagIndex, pitchRangeIndex, permutationIndex, soundsPath },
+    sendLog,
+  );
+  return promise;
+}
+
+async function exportSoundFlow(
+  tagIndex: number,
+  pitchRangeIndex: number,
+  permutationIndex: number,
+  outputPath: string,
+): Promise<ExportSoundResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const soundsPath = settings.resourceMaps.sounds ?? undefined;
+  const { promise } = sendWorkerRequest<ExportSoundResult>(
+    { type: 'exportSound', tagIndex, pitchRangeIndex, permutationIndex, outputPath, soundsPath },
+    sendLog,
+  );
+  return promise;
+}
+
+async function replaceSoundFlow(
+  tagIndex: number,
+  pitchRangeIndex: number,
+  permutationIndex: number,
+  inputPath: string,
+  targetFormat?: number,
+): Promise<ReplaceSoundResult> {
+  if (!currentMapPath || currentMapCompressed) {
+    return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  }
+  const settings = getSettings();
+  const soundsPath = settings.resourceMaps.sounds ?? undefined;
+  const { promise } = sendWorkerRequest<ReplaceSoundResult>(
+    { type: 'replaceSound', tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat, soundsPath },
+    sendLog,
+  );
+  const result = await promise;
+  if (result.ok && result.map) {
+    setOpenMapState(result.map);
+  }
+  return result;
+}
+
 /** Step 9: Updates a placed scenario object in memory. */
 async function updateScenarioPlacementFlow(
   placementId: string,
@@ -2111,6 +2203,18 @@ app.whenReady().then(() => {
   ipcMain.handle('dialog:pickImportBitmapPath', () => pickImportBitmapPathFlow());
   ipcMain.handle('bitmap:replace', (_e, tagIndex: number, imageIndex: number, inputPath: string, targetFormat?: number) =>
     replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat),
+  );
+  ipcMain.handle('sound:getInfo', (_e, tagIndex: number) => getSoundInfoFlow(tagIndex));
+  ipcMain.handle('sound:getWav', (_e, tagIndex: number, pitchRangeIndex: number, permutationIndex: number) =>
+    getSoundWavFlow(tagIndex, pitchRangeIndex, permutationIndex),
+  );
+  ipcMain.handle('dialog:pickExportSoundPath', (_e, defaultName: string) => pickExportSoundPathFlow(defaultName));
+  ipcMain.handle('sound:export', (_e, tagIndex: number, pitchRangeIndex: number, permutationIndex: number, outputPath: string) =>
+    exportSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, outputPath),
+  );
+  ipcMain.handle('dialog:pickImportSoundPath', () => pickImportSoundPathFlow());
+  ipcMain.handle('sound:replace', (_e, tagIndex: number, pitchRangeIndex: number, permutationIndex: number, inputPath: string, targetFormat?: number) =>
+    replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat),
   );
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);

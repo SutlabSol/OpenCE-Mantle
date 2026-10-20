@@ -914,6 +914,57 @@ export function installDevMock() {
     exportBitmapImage: async () => ({ ok: true }),
     pickImportBitmapPath: async () => ({ path: 'C:\\imports\\bitmap.png' }),
     replaceBitmapImage: async () => ({ ok: true }),
+
+    // M13.2: Sound Auditor
+    getSoundInfo: async (tagIndex: number) => ({
+      ok: true,
+      summary: {
+        tagIndex,
+        tagPath: 'sound\\sfx\\impulse\\coolant\\enter_water',
+        sampleRate: 22050,
+        encoding: 1,
+        encodingName: 'Xbox ADPCM',
+        compression: 0,
+        compressionName: 'None',
+        pitchRangeCount: 1,
+        permutationCount: 1,
+        pitchRanges: [
+          {
+            name: 'default',
+            naturalPitch: 22050,
+            bendLower: 1.0,
+            bendUpper: 1.0,
+            maxGain: 0,
+            minGain: 0,
+            permutations: [
+              {
+                name: 'enter_water_0',
+                skipFraction: 0,
+                gain: 0,
+                permutationInfoIndex: 0,
+                sampleRate: 22050,
+                channels: 1,
+                sampleSize: 44100,
+                durationSeconds: 1.0,
+                isExternal: true,
+                externalOffset: 0,
+              },
+            ],
+          },
+        ],
+      },
+    }),
+    getSoundWav: async () => ({
+      ok: true,
+      dataUrl: 'data:audio/wav;base64,UklGRgAAAABXQVZFZm10IBAAAAABAAEAESsAACErAAABAAgAZGF0YQAAAAA=',
+      sampleRate: 22050,
+      channels: 1,
+      durationSeconds: 1.0,
+    }),
+    pickExportSoundPath: async () => ({ path: 'C:\\exports\\sound.wav' }),
+    exportSoundWav: async () => ({ ok: true, filePath: 'C:\\exports\\sound.wav' }),
+    pickImportSoundPath: async () => ({ path: 'C:\\imports\\sound.wav' }),
+    replaceSoundWav: async () => ({ ok: true, map: currentMock! }),
     getPathForFile: (file) => (file as unknown as { path?: string }).path ?? file.name,
   };
 

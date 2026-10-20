@@ -90,6 +90,13 @@ function installMockOpence(openResult: LoadMapResult = OK_MAP) {
       return () => updated.delete(cb);
     },
     getPathForFile: () => '',
+    tagTestGetStatus: vi.fn(async () => ({ state: 'stopped', telnetConnected: false })),
+    onTagTestStatusChange: () => () => {},
+    onTagTestLog: () => () => {},
+    getBitmapInfo: vi.fn(async () => ({ ok: false })),
+    getBitmapRgba: vi.fn(async () => ({ ok: false })),
+    getSoundInfo: vi.fn(async () => ({ ok: false })),
+    getSoundWav: vi.fn(async () => ({ ok: false })),
   };
   (window as unknown as { opence: OpenceApi }).opence = api;
   /** What main sends after Inject (modified) or Save (not modified). */

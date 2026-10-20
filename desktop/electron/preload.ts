@@ -91,6 +91,15 @@ const api: OpenceApi = {
   pickImportBitmapPath: () => ipcRenderer.invoke('dialog:pickImportBitmapPath'),
   replaceBitmapImage: (tagIndex: number, imageIndex: number, inputPath: string, targetFormat?: number) =>
     ipcRenderer.invoke('bitmap:replace', tagIndex, imageIndex, inputPath, targetFormat),
+  getSoundInfo: (tagIndex: number) => ipcRenderer.invoke('sound:getInfo', tagIndex),
+  getSoundWav: (tagIndex: number, pitchRangeIndex: number, permutationIndex: number) =>
+    ipcRenderer.invoke('sound:getWav', tagIndex, pitchRangeIndex, permutationIndex),
+  pickExportSoundPath: (defaultName: string) => ipcRenderer.invoke('dialog:pickExportSoundPath', defaultName),
+  exportSoundWav: (tagIndex: number, pitchRangeIndex: number, permutationIndex: number, outputPath: string) =>
+    ipcRenderer.invoke('sound:export', tagIndex, pitchRangeIndex, permutationIndex, outputPath),
+  pickImportSoundPath: () => ipcRenderer.invoke('dialog:pickImportSoundPath'),
+  replaceSoundWav: (tagIndex: number, pitchRangeIndex: number, permutationIndex: number, inputPath: string) =>
+    ipcRenderer.invoke('sound:replace', tagIndex, pitchRangeIndex, permutationIndex, inputPath),
   convertPreflight: (source: 'open' | 'pick', resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convertPreflight', source, resourcePaths),
   convertMap: (acknowledgeScripts: boolean, repairs: ConvertRepairChoice, resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convert', acknowledgeScripts, repairs, resourcePaths),
   pickConvertResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickConvertResource', kind),
