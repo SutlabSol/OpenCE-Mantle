@@ -25,8 +25,8 @@
 
 ### 1.1 Architectural Overview (`core/` + `desktop/`)
 `OpenCE-Modding-Tool` is cleanly split into two workspaces:
-- **[`core/`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/index.ts)**: A pure TypeScript library with zero DOM, React, or Electron dependencies, tested by 50 Vitest suites (518 passing tests).
-- **[`desktop/`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/electron/main.ts)**: An Electron + React + Vite + Three.js GUI application, tested by 25 Vitest suites (193 passing tests), where [`map-worker.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/electron/map-worker.ts) runs in a dedicated Node.js `worker_threads` worker holding the active `.map` buffer in memory. Combined test coverage: **711 passing automated tests**.
+- **[`core/`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/index.ts)**: A pure TypeScript library with zero DOM, React, or Electron dependencies, tested by 51 Vitest suites (522 passing tests).
+- **[`desktop/`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/electron/main.ts)**: An Electron + React + Vite + Three.js GUI application, tested by 25 Vitest suites (194 passing tests), where [`map-worker.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/electron/map-worker.ts) runs in a dedicated Node.js `worker_threads` worker holding the active `.map` buffer in memory. Combined test coverage: **716 passing automated tests**.
 
 ### 1.2 Capabilities Already Built & Verified in `OpenCE-Modding-Tool`
 
@@ -41,6 +41,7 @@
 | **Halo Demo (v6) & Retail/HaloMD (v7) $\rightarrow$ CE (v609) Converter** | [`retail-to-ce.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/map/convert/retail-to-ce.ts), [`demo-to-ce.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/map/convert/demo-to-ce.ts), [`align-tag-data.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/map/convert/align-tag-data.ts), [`ConvertDialog.tsx`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/src/components/ConvertDialog.tsx) | Converts retail PC (`v7`), HaloMD, and Mac Demo (`v6`) maps to CE `v609`, internalizing external `bitmaps.map`/`sounds.map` ranges, 4-byte aligning tag blocks for OpenCE, repairing unaligned script syntax arrays, and running preflight OpenCE checks. | ✅ Built & Verified |
 | **Recursive Tag Field Editor & Dependency Swapper (M7a/M7b)** | [`tag-field-editor.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/map/tag-field-editor.ts), [`tag-dependency-swapper.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/map/tag-dependency-swapper.ts), [`TagEditorDialog.tsx`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/src/components/TagEditorDialog.tsx), [`TagFieldEditorPanel.tsx`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/src/components/TagFieldEditorPanel.tsx) | Right-click Tag Editor modal decoding root fields + nested `TagReflexive` blocks up to depth 8 with dotted-path in-place mutation, plus HHT-style dependency swapping, `ustr` Unicode String List editing, reverse dependency lookup, and tag rename/duplication. | ✅ Built & Verified |
 | **Automated BSP Swapper with Shader Harvesting & Stripping (M10.1)** | [`bsp-swapper.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/map/bsp-swapper.ts), [`BspSwapperDialog.tsx`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/src/components/BspSwapperDialog.tsx) | 1-Click SP-to-MP BSP swapping that automatically harvests shaders, lightmaps, and bitmaps from donor maps to eliminate grey textures. Includes interactive toggles and lists for stripping Detail Objects (`DOBC`) and Runtime Decals, plus in-place scenario name renaming. | ✅ Built & Verified |
+| **Multi-BSP Combining, 3D Viewport & Scenery/Door Importing (M10.2)** | [`bsp-merger.ts`](file:///C:/Users/LeviB/Projects/OpenCE-Modding-Tool/core/src/map/bsp-merger.ts), [`bsp-swapper.ts`](file:///C:/Users/LeviB/Projects/OpenCE-Modding-Tool/core/src/map/bsp-swapper.ts), [`BspPreviewViewport.tsx`](file:///C:/Users/LeviB/Projects/OpenCE-Modding-Tool/desktop/src/components/viewport/BspPreviewViewport.tsx), [`BspSwapperDialog.tsx`](file:///C:/Users/LeviB/Projects/OpenCE-Modding-Tool/desktop/src/components/BspSwapperDialog.tsx) | Fuses multiple SP campaign BSPs into a single unified multiplayer BSP (`mergeStructureBsps`) with CE 23 MiB cache ceiling virtual address rebasing (`rebaseStructureBspPointers`), 32-bit aligned PVS bitmatrix sizing, in-place tag dependency rewriting (`rewriteBspDependencies`), interactive 3D multi-BSP viewport with 2-column layout and scrollable BSP selection, and automatic `.scenery` & `.device_machine` (doors, bridges) importing with auto-opening multiplayer flags. | ✅ Built & Verified |
 | **Interactive 3D Scenario Editor with Sapien/SparkEdit Parity (M9)** | [`ScenarioViewport.tsx`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/desktop/src/components/viewport/ScenarioViewport.tsx), [`scenario-objects.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/render/scenario-objects.ts), [`bsp-geometry.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/render/bsp-geometry.ts), [`model-geometry.ts`](file:///C:/Users/levib/Desktop/OPEN%20CE/OpenCE-Modding-Tool/core/src/render/model-geometry.ts) | Complete 3D scenario editor with Three.js `TransformControls` (translation/rotation gizmos), ground terrain raycast snapping (<kbd>G</kbd>), AI encounters & squads (resolved to `gbxmodel` 3D meshes), A–Z firing positions, 3D trigger volume OBBs, cutscene cameras with FOV frustums, netgame flags, 10-layer toolbar, and category outliner. | ✅ Built & Verified |
 
 ---
@@ -446,7 +447,7 @@ Because we have the full source of **[OpenCommunityEdition/OpenCE](https://githu
 | **Phase 1** | **M1–M8** | Core Engine, Schema Codec, `.ocetags` Container, In-Memory ADD/SWAP, Multi-Version Converter, Recursive Tag Editor & 3D Viewport | **✅ Completed** | 100% verified across 711 passing tests. Full tag walking, injection, conversion for PC/Mac/Demo/HaloMD/MCC maps, in-place tag field mutations, and basic 3D BSP/mesh rendering. |
 | **Phase 2A** | **M9** | **Interactive 3D Scenario Editor** (Sapien / SparkEdit Parity) | **✅ Completed** | Full Three.js `TransformControls` (translate/rotate gizmos), ground raycast snapping (<kbd>G</kbd>), AI encounters & squads (resolved to `gbxmodel` 3D meshes), A–Z firing positions, 3D trigger volume OBBs, cutscene cameras with FOV frustums, netgame flags, 10-layer toolbar, and outliner search chips. |
 | **Phase 2B** | **M10.1** | **Automated BSP Swapper, Shader Harvesting & Stripping** | **✅ Completed** | Automated SP-to-MP BSP Swapper with automatic shader, lightmap, and bitmap harvesting from donor maps (preventing grey textures), interactive toggles and lists for stripping Detail Objects (`DOBC`) and Runtime Decals, and in-place scenario name renaming. |
-| **Phase 2C** | **M10.2** | **Multi-BSP Combining / Merging into Single Multiplayer BSP** | **🚀 Up Next** | Merging multiple single-player campaign BSPs (e.g. `b30`'s exterior island + underground cartographer interior) into a single cohesive multiplayer map BSP without requiring custom engine scripts. Includes 3D multi-BSP render preview in swapper dialog. Reference: `Tool CE` (`structure_bsp_build.c`, `bsp3d.c`, `import_structure.c`). |
+| **Phase 2C** | **M10.2** | **Multi-BSP Combining, 3D Viewport & Scenery/Door Importing** | **✅ Completed** | Merging multiple single-player campaign BSPs (e.g. `a30` or `b30`) into a single cohesive multiplayer map BSP (`bsp-merger.ts`, `mergeStructureBsps`). Features interactive 3D multi-BSP preview in swapper dialog (`BspPreviewViewport.tsx`), CE 23 MiB cache ceiling rebasing (`rebaseStructureBspPointers`), 32-bit aligned PVS bitmatrix sizing, robust in-place dependency rewriting (`rewriteBspDependencies`), and automatic importing of scenery props & functional doors/bridges with automatic multiplayer opening flags. |
 | **Phase 2D** | **M12** | **"Launch Map In OpenCE Tag Test" (Tier 1 & Live Control Deck)** | **Planned** | 1. `desktop/electron/tag-test-runner.ts` (stages in-memory `.map` to `custom_maps\_opence_tag_test.map`, writes `init.txt`, spawns `halo.exe` with `HALO_TELNET_CONSOLE=1`).<br/>2. `desktop/src/components/TagTestPanel.tsx` (live TCP `127.0.0.1:2323` cheat/debug toggles, game speed slider, 1-click hot-reload in <1s, interactive HS console, and live `debug.txt` parser with clickable tag links). |
 | **Phase 2E** | **M13** | **Built-In Asset Editors (Bitmaps, Sounds, 3D Models, Curves & HUD)** | **Planned** | 1. **Bitmap Editor**: PNG/DDS/TIF export & import, DXT1/3/5 & RGBA encoder, cubemap/3D slice viewer, `plate` sprite sheet packer, and internal `.map` embedding.<br/>2. **Sound Editor**: Web Audio player, WAV/OGG export & import, Xbox ADPCM 36-byte block encoder (`custom_edition_sounds.c`), and internal `.map` embedding.<br/>3. **3D Model & BSP Editor**: GLTF/OBJ/JMS export & import, `.wrl` geometry error overlay, and `gbxmodel` injection (`Reclaimer`).<br/>4. **Guerilla Curve Graph & WYSIWYG HUD Previewer** inside `TagEditorDialog.tsx`. |
 | **Phase 2F** | **M14** | **Halo Script (`hsc`) Decompiler, IDE & Bytecode Compiler** | **Planned** | 1. `core/src/map/hs-decompiler.ts`: Reconstructs full `.hsc` source code from any `.map`'s `scnr.script_syntax_data` and `script_string_data`.<br/>2. `core/src/map/hs-compiler.ts` & `ScriptEditorPanel.tsx`: Autocomplete for all 543 HS functions, OpenCE compatibility linter (`begin_random` & allowlist check), and in-map bytecode compilation. |
@@ -455,19 +456,43 @@ Because we have the full source of **[OpenCommunityEdition/OpenCE](https://githu
 
 ---
 
-### 5.2 Upcoming Focus: Game Plan for Multi-BSP Combining (M10.2)
+### 5.2 Completed Milestone: Multi-BSP Combining, 3D Preview & Scenery/Door Importing (M10.2)
 
-Combining multiple campaign BSPs (e.g. `b30` / The Silent Cartographer's exterior island and underground interior) into a single unified multiplayer map BSP without scripting:
+Multi-BSP merging and asset extraction has been fully delivered and verified:
 
 1. **Simultaneous Multi-BSP 3D Preview in Swapper Dialog**:
-   - The BSP Swapper dialog renders an interactive 3D Three.js viewport showing all BSPs selected with toggles, allowing users to visually see their spatial relationship, seam alignment, and bounds before merging.
-2. **Unified Geometry & Collision Synthesis (`Tool CE` blueprint)**:
-   - Combine submesh clusters, vertices, indices, and lightmaps into a single merged `sbsp` tag.
-   - Offset and concatenate collision BSP nodes, surfaces, 3D planes, and leaves into a single unified collision tree.
-3. **Automated Shader & Bitmap Union**:
-   - Merge shader references and lightmaps across both source BSPs into the target map's palette with zero duplicate textures.
-4. **All-in-One Conversion & Merging**:
-   - Perform the multi-BSP merge and SP $\rightarrow$ MP conversion (DOBC/decal stripping, spawn setup, and scenario renaming) in a single unified workflow.
+   - Integrated an interactive 3D Three.js viewport (`BspPreviewViewport.tsx`) inside a dedicated 2-column side-by-side dialog layout (`BspSwapperDialog.tsx`).
+   - Features individual checkbox toggles with scrollable BSP list so maps with many BSPs (e.g. `a10`) never hide the 3D viewport.
+2. **Unified Geometry & Lightmap Synthesis (`bsp-merger.ts`)**:
+   - Implemented `mergeStructureBsps` which concatenates vertex buffers, surfaces, submeshes, and lightmaps from multiple source BSPs into a single unified `sbsp` tag with world bounds unioning.
+   - Rebased BSP memory pointers (`rebaseStructureBspPointers`) so merged structures strictly comply with OpenCE's 23 MiB cache ceiling rule (`bspAddress + bspSize <= 0x41B40000`).
+   - Sized the cluster PVS (Potentially Visible Set) bitmatrix to 32-bit (4-byte) aligned rows (`Math.ceil(totalClusters / 32) * 4`), satisfying `halo.exe`'s strict cluster data size verification and eliminating the `structure bsp #0 has more than the game can hold` error.
+3. **In-Place Dependency Rewriting (`bsp-swapper.ts`)**:
+   - Implemented `rewriteBspDependencies` to rewrite external shader/bitmap tag IDs directly on parsed struct instances in output memory, preventing vertex normal buffer corruption (Error 24).
+4. **Automated Scenery Props & Automatic Doors/Bridges Importing**:
+   - Added automated extraction of donor `.scenery` (`scen`) and `.device_machine` (`mach`) tag closures (models, textures, collision, animations, physics).
+   - Batch-appends placed instances into the target scenario (`appendReflexiveElements`) with remapped palette indices.
+   - Added automatic door conversion in multiplayer by clearing the "does not operate automatically" and "initially off" flags so doors open dynamically on player proximity without requiring campaign scripts.
+
+---
+
+### 5.3 Upcoming Focus: Game Plan for "Launch Map In OpenCE Tag Test" (M12)
+
+The next priority milestone connects OpenCE-Modding-Tool directly to the live OpenCE engine:
+
+1. **Test Runner Process Launcher (`desktop/electron/tag-test-runner.ts`)**:
+   - Atomically stages the in-memory edited `.map` buffer into `<OpenCE_dir>\custom_maps\_opence_tag_test.map`.
+   - Writes `<OpenCE_dir>\init.txt` with startup console commands (`map_name custom_maps\_opence_tag_test`) to launch straight into gameplay, skipping menus.
+   - Spawns `halo.exe` with environment variables `HALO_TELNET_CONSOLE=1` and `HALO_TELNET_CONSOLE_PORT=2323`.
+2. **Live TCP Telnet Control Deck Panel (`desktop/src/components/TagTestPanel.tsx`)**:
+   - Connects to `127.0.0.1:2323` via TCP socket.
+   - 1-Click developer cheats & toggles: Invulnerability (`cheat_deathless_player 1`), Infinite Ammo (`cheat_infinite_ammo 1`), Bump Possession (`cheat_bump_possession 1`), Wireframe (`rasterizer_wireframe 1`), Debug Portals (`debug_portals 1`), Flycam (`camera_control 1`).
+   - Game speed slider (`game_speed 0.1` to `5.0`).
+   - Interactive HaloScript (HS) command line with command history and evaluation return values.
+   - Sub-second hot-reload button: pushes in-memory map changes and issues `map_name custom_maps\_opence_tag_test` in under 1 second.
+3. **Live Diagnostic Log Streamer & Clickable Tag Links**:
+   - Tails `<OpenCE_dir>\debug.txt` and `halo.log` in real-time.
+   - Detects tag validation warnings, unmapped shaders, or script errors with clickable links that jump straight to that tag inside the Tag Field Editor.
 
 ---
 
