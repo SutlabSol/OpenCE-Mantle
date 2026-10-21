@@ -365,7 +365,7 @@ export function inspectSoundTag(
   const soundClass = srcBuf.readUInt16LE(tagStart + 0x04);
   const sampleRateCode = srcBuf.readUInt16LE(tagStart + 0x06);
   const sampleRate = sampleRateCode === 1 ? 44100 : 22050;
-  const channelCount = srcBuf.readUInt16LE(tagStart + 0x68) === 1 ? 2 : 1;
+  const channelCount = srcBuf.readUInt16LE(tagStart + 0x6c) === 1 ? 2 : 1;
 
   // Pitch Ranges Reflexive (offset 0x98)
   const pitchCount = srcBuf.readUInt32LE(tagStart + 0x98);
@@ -649,6 +649,7 @@ export function replaceSoundPermutationData(
 
   // Already internal in mapBuffer
   const tagStart = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  const pitchCount = mapBuffer.readUInt32LE(tagStart + 0x98);
   const pitchPtr = mapBuffer.readUInt32LE(tagStart + 0x9c);
   const pitchBase = header.tagDataOffset + (pitchPtr - tagIndex.baseMemoryAddress);
   const pOffset = pitchBase + pitchRangeIndex * 72;
@@ -673,12 +674,6 @@ export function replaceSoundPermutationData(
     Buffer.from(newSamples).copy(newBuf, alignedAppendOffset);
     outputBuffer = newBuf;
     targetOffset = alignedAppendOffset;
-
-    const newTagDataSize = outputBuffer.length - header.tagDataOffset;
-    outputBuffer.writeUInt32LE(outputBuffer.length, 0x08);
-    outputBuffer.writeUInt32LE(newTagDataSize, 0x14);
-    header.tagDataSize = newTagDataSize;
-    header.decompressedFileSize = outputBuffer.length;
   }
 
   outputBuffer.writeUInt16LE(newFormat, mOffset + 0x28);
@@ -687,6 +682,59 @@ export function replaceSoundPermutationData(
   outputBuffer.writeUInt32LE(targetOffset, mOffset + 0x48);
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 0x34); // Set tag id 0
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 0x3c); // Set tag id 1
+
+  // Also internalize any remaining external sibling permutations on this sound tag
+  if (externalSoundsBuffer && pitchCount > 0 && pitchCount < 32) {
+    const extraPayloads: { mOff: number; data: Buffer }[] = [];
+    for (let p = 0; p < pitchCount; p++) {
+      const curPOff = pitchBase + p * 72;
+      if (curPOff + 72 > outputBuffer.length) continue;
+      const curPermCount = outputBuffer.readUInt32LE(curPOff + 0x3c);
+      const curPermPtr = outputBuffer.readUInt32LE(curPOff + 0x40);
+      if (curPermCount <= 0 || curPermCount >= 256 || curPermPtr < tagIndex.baseMemoryAddress) continue;
+      const curPermBase = header.tagDataOffset + (curPermPtr - tagIndex.baseMemoryAddress);
+      for (let m = 0; m < curPermCount; m++) {
+        if (p === pitchRangeIndex && m === permutationIndex) continue;
+        const sibOff = curPermBase + m * 124;
+        if (sibOff + 124 > outputBuffer.length) continue;
+        const sibExt = outputBuffer.readUInt32LE(sibOff + 0x44);
+        if ((sibExt & 1) !== 0) {
+          const sibSampleSize = outputBuffer.readUInt32LE(sibOff + 0x40);
+          const sibSampleOffset = outputBuffer.readUInt32LE(sibOff + 0x48);
+          if (sibSampleSize > 0 && sibSampleOffset + sibSampleSize <= externalSoundsBuffer.length) {
+            extraPayloads.push({
+              mOff: sibOff,
+              data: Buffer.from(externalSoundsBuffer.subarray(sibSampleOffset, sibSampleOffset + sibSampleSize)),
+            });
+          }
+        }
+      }
+    }
+    if (extraPayloads.length > 0) {
+      let cursor = (outputBuffer.length + 3) & ~3;
+      const placements: { mOff: number; offset: number; data: Buffer }[] = [];
+      for (const ep of extraPayloads) {
+        placements.push({ mOff: ep.mOff, offset: cursor, data: ep.data });
+        cursor = (cursor + ep.data.length + 3) & ~3;
+      }
+      const expanded = Buffer.alloc(cursor);
+      outputBuffer.copy(expanded, 0);
+      for (const pl of placements) {
+        pl.data.copy(expanded, pl.offset);
+        expanded.writeUInt32LE(0, pl.mOff + 0x44);
+        expanded.writeUInt32LE(pl.offset, pl.mOff + 0x48);
+        expanded.writeUInt32LE(soundTagId, pl.mOff + 0x34);
+        expanded.writeUInt32LE(soundTagId, pl.mOff + 0x3c);
+      }
+      outputBuffer = expanded;
+    }
+  }
+
+  const newTagDataSize = outputBuffer.length - header.tagDataOffset;
+  outputBuffer.writeUInt32LE(outputBuffer.length, 0x08);
+  outputBuffer.writeUInt32LE(newTagDataSize, 0x14);
+  header.tagDataSize = newTagDataSize;
+  header.decompressedFileSize = outputBuffer.length;
 
   return outputBuffer;
 }

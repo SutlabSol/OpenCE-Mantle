@@ -1097,7 +1097,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
                   const isImgExternal = (flags & 0x100) !== 0;
                   if (!isImgExternal) {
                     const pixelOff = out.readUInt32LE(rowOffset + 0x18);
-                    if (pixelOff >= oldStructDataOffset && pixelOff < oldFileLength) {
+                    if (pixelOff >= insertPos && pixelOff < oldFileLength) {
                       const newPixelOff = outOffsetOf(pixelOff);
                       out.writeUInt32LE(newPixelOff, rowOffset + 0x18);
                     }
@@ -1107,8 +1107,8 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
             }
           }
         }
-      } else if (groupFourCC === 0x736e6420 && !isExternal) {
-        // 'snd ' = 0x736e6420: shift internal sound permutation sample offsets
+      } else if (groupFourCC === 0x736e6421 && !isExternal) {
+        // 'snd!' = 0x736e6421: shift internal sound permutation sample offsets
         const tagDataPtr = out.readUInt32LE(entryOffset + 0x14);
         if (tagDataPtr >= baseMemoryAddress) {
           const tagStructOffset = newTagDataOffset + (tagDataPtr - baseMemoryAddress);
@@ -1132,7 +1132,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
                         const sampleExt = out.readUInt32LE(mOffset + 0x44);
                         if ((sampleExt & 1) === 0) {
                           const sampleOffset = out.readUInt32LE(mOffset + 0x48);
-                          if (sampleOffset >= oldStructDataOffset && sampleOffset < oldFileLength) {
+                          if (sampleOffset >= insertPos && sampleOffset < oldFileLength) {
                             out.writeUInt32LE(outOffsetOf(sampleOffset), mOffset + 0x48);
                           }
                         }

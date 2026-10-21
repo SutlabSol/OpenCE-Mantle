@@ -358,6 +358,7 @@ function rewriteBspDependencies(
   bspAddress: number,
   tagIdMap: Map<number, number>,
   visitedOffsets: Set<number>,
+  tagDataOffset?: number,
 ): void {
   if (fileOffset < bspStart || fileOffset >= bspStart + bspSize || visitedOffsets.has(fileOffset)) return;
   visitedOffsets.add(fileOffset);
@@ -374,13 +375,32 @@ function rewriteBspDependencies(
     if (field.def.type === 'TagDependency') {
       if (fieldOffset + 16 <= buffer.length) {
         const oldTagId = buffer.readUInt32LE(fieldOffset + 12);
-        const mapped = tagIdMap.get(oldTagId) ?? tagIdMap.get(oldTagId & 0xffff);
-        if (mapped !== undefined) {
-          buffer.writeUInt32LE(mapped, fieldOffset + 12);
+        if (oldTagId !== 0xffffffff) {
+          const mapped = tagIdMap.get(oldTagId) ?? tagIdMap.get(oldTagId & 0xffff);
+          if (mapped !== undefined) {
+            buffer.writeUInt32LE(mapped >>> 0, fieldOffset + 12);
+            if (tagDataOffset !== undefined) {
+              const entryOff = tagDataOffset + 0x28 + (mapped & 0xffff) * 32;
+              if (entryOff + 0x14 <= buffer.length) {
+                const pathPtr = buffer.readUInt32LE(entryOff + 0x10);
+                buffer.writeUInt32LE(pathPtr >>> 0, fieldOffset + 4);
+                buffer.writeUInt32LE(0, fieldOffset + 8);
+              }
+            }
+          } else {
+            buffer.writeUInt32LE(0, fieldOffset + 4);
+            buffer.writeUInt32LE(0, fieldOffset + 8);
+            buffer.writeUInt32LE(0xffffffff, fieldOffset + 12);
+          }
         }
       }
     } else if (field.def.type === 'TagReflexive') {
       if (fieldOffset + 12 <= buffer.length && field.def.struct) {
+        if (field.def.struct === 'PredictedResource') {
+          buffer.writeUInt32LE(0, fieldOffset + 0);
+          buffer.writeUInt32LE(0, fieldOffset + 4);
+          continue;
+        }
         const count = buffer.readUInt32LE(fieldOffset + 0);
         const pointerLow = buffer.readUInt32LE(fieldOffset + 4);
         if (count > 0 && count < 20000 && pointerLow >= bspAddress) {
@@ -398,6 +418,7 @@ function rewriteBspDependencies(
                   bspAddress,
                   tagIdMap,
                   visitedOffsets,
+                  tagDataOffset,
                 );
               }
             } catch {
@@ -517,12 +538,19 @@ function cloneEncounterWithChildReflexives(
   currentTagIndex: TagIndex,
   donorToTargetActorPal: Map<number, number>,
   dstBspIdx: number,
+  bspClusterCount = 65535,
 ): { buffer: Buffer; header: CacheFileHeader; encounterBytes: Buffer } {
   let curOut = currentOut;
   let curHdr = currentHdr;
 
   const encCopy = Buffer.alloc(176);
   encSourceBytes.copy(encCopy);
+
+  // Clear 'not initially created' (0x01), 'initially blind' (0x04), 'initially deaf' (0x08),
+  // 'initially braindead' (0x10), and enable 'respawn enabled' (0x02) + 'manual bsp index specified' (0x40)
+  // so imported campaign encounters spawn and fight automatically without campaign mission scripts.
+  const origEncFlags = encCopy.readUInt32LE(0x20);
+  encCopy.writeUInt32LE(((origEncFlags & ~0x1d) | 0x42) >>> 0, 0x20);
 
   encCopy.writeInt16LE(dstBspIdx, 0x2a); // manual bsp index
   encCopy.writeInt16LE(dstBspIdx, 0x7e); // precomputed bsp index
@@ -542,15 +570,25 @@ function cloneEncounterWithChildReflexives(
       const donorActorType = sqBytes.readInt16LE(0x20);
       if (donorActorType >= 0 && donorToTargetActorPal.has(donorActorType)) {
         sqBytes.writeInt16LE(donorToTargetActorPal.get(donorActorType)!, 0x20);
+      } else {
+        sqBytes.writeInt16LE(-1, 0x20);
       }
 
-      // Move positions
+      // Move positions (ScenarioMovePosition = 80 bytes)
       const moveCount = sourceBuffer.readUInt32LE(sqSrcOff + 0xc4);
       const movePtr = sourceBuffer.readUInt32LE(sqSrcOff + 0xc8);
       if (moveCount > 0 && movePtr !== 0) {
         const moveSrcOff = resolvePointer(movePtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-        const moveData = Buffer.alloc(moveCount * 64);
+        const moveData = Buffer.alloc(moveCount * 80);
         sourceBuffer.copy(moveData, 0, moveSrcOff, moveSrcOff + moveData.length);
+        for (let m = 0; m < moveCount; m++) {
+          const mBase = m * 80;
+          moveData.writeInt16LE(-1, mBase + 0x1c); // animation index -> -1 (no ai animation references copied)
+          const mCluster = moveData.readInt16LE(mBase + 0x28);
+          if (mCluster < 0 || mCluster >= bspClusterCount) {
+            moveData.writeInt16LE(0, mBase + 0x28);
+          }
+        }
         const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, moveData);
         curOut = appRes.buffer;
         curHdr = appRes.header;
@@ -561,7 +599,7 @@ function cloneEncounterWithChildReflexives(
         sqBytes.writeUInt32LE(0, 0xc8);
       }
 
-      // Starting locations
+      // Starting locations (ScenarioActorStartingLocation = 28 bytes)
       const locCount = sourceBuffer.readUInt32LE(sqSrcOff + 0xd0);
       const locPtr = sourceBuffer.readUInt32LE(sqSrcOff + 0xd4);
       if (locCount > 0 && locPtr !== 0) {
@@ -569,16 +607,34 @@ function cloneEncounterWithChildReflexives(
         const locData = Buffer.alloc(locCount * 28);
         sourceBuffer.copy(locData, 0, locSrcOff, locSrcOff + locData.length);
         for (let l = 0; l < locCount; l++) {
-          const lActorType = locData.readInt16LE(l * 28 + 24);
-          if (lActorType >= 0 && donorToTargetActorPal.has(lActorType)) {
-            locData.writeInt16LE(donorToTargetActorPal.get(lActorType)!, l * 28 + 24);
+          const lBase = l * 28;
+          const lCluster = locData.readInt16LE(lBase + 0x10);
+          if (lCluster < 0 || lCluster >= bspClusterCount) {
+            locData.writeInt16LE(0, lBase + 0x10);
           }
+          const lActorType = locData.readInt16LE(lBase + 0x18);
+          if (lActorType >= 0 && donorToTargetActorPal.has(lActorType)) {
+            locData.writeInt16LE(donorToTargetActorPal.get(lActorType)!, lBase + 0x18);
+          } else {
+            locData.writeInt16LE(-1, lBase + 0x18);
+          }
+          locData.writeInt16LE(-1, lBase + 0x1a); // command list -> -1 (no command lists copied)
         }
         const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, locData);
         curOut = appRes.buffer;
         curHdr = appRes.header;
         sqBytes.writeUInt32LE(locCount, 0xd0);
         sqBytes.writeUInt32LE(appRes.virtualAddress, 0xd4);
+
+        // Ensure normal & insane diff counts are > 0 so actors spawn in multiplayer
+        const normalCount = sqBytes.readInt16LE(0x7c);
+        const insaneCount = sqBytes.readInt16LE(0x7e);
+        if (normalCount <= 0) {
+          sqBytes.writeInt16LE(Math.max(1, insaneCount > 0 ? insaneCount : locCount), 0x7c);
+        }
+        if (insaneCount <= 0) {
+          sqBytes.writeInt16LE(Math.max(1, normalCount > 0 ? normalCount : locCount), 0x7e);
+        }
       } else {
         sqBytes.writeUInt32LE(0, 0xd0);
         sqBytes.writeUInt32LE(0, 0xd4);
@@ -615,13 +671,19 @@ function cloneEncounterWithChildReflexives(
     encCopy.writeUInt32LE(0, 0x90);
   }
 
-  // 3. Firing Positions
+  // 3. Firing Positions (ScenarioFiringPosition = 24 bytes)
   const fpCount = encSourceBytes.readUInt32LE(0x98);
   const fpPtr = encSourceBytes.readUInt32LE(0x9c);
   if (fpCount > 0 && fpPtr !== 0) {
     const fpSrcBase = resolvePointer(fpPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
     const fpData = Buffer.alloc(fpCount * 24);
     sourceBuffer.copy(fpData, 0, fpSrcBase, fpSrcBase + fpData.length);
+    for (let f = 0; f < fpCount; f++) {
+      const fCluster = fpData.readInt16LE(f * 24 + 0x0e);
+      if (fCluster < 0 || fCluster >= bspClusterCount) {
+        fpData.writeInt16LE(0, f * 24 + 0x0e);
+      }
+    }
     const fpAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, fpData);
     curOut = fpAppRes.buffer;
     curHdr = fpAppRes.header;
@@ -632,22 +694,9 @@ function cloneEncounterWithChildReflexives(
     encCopy.writeUInt32LE(0, 0x9c);
   }
 
-  // 4. Player Starting Locations
-  const pslCount = encSourceBytes.readUInt32LE(0xa4);
-  const pslPtr = encSourceBytes.readUInt32LE(0xa8);
-  if (pslCount > 0 && pslPtr !== 0) {
-    const pslSrcBase = resolvePointer(pslPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-    const pslData = Buffer.alloc(pslCount * 52);
-    sourceBuffer.copy(pslData, 0, pslSrcBase, pslSrcBase + pslData.length);
-    const pslAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, pslData);
-    curOut = pslAppRes.buffer;
-    curHdr = pslAppRes.header;
-    encCopy.writeUInt32LE(pslCount, 0xa4);
-    encCopy.writeUInt32LE(pslAppRes.virtualAddress, 0xa8);
-  } else {
-    encCopy.writeUInt32LE(0, 0xa4);
-    encCopy.writeUInt32LE(0, 0xa8);
-  }
+  // 4. Player Starting Locations on encounter -> clear to 0 in multiplayer scenario
+  encCopy.writeUInt32LE(0, 0xa4);
+  encCopy.writeUInt32LE(0, 0xa8);
 
   return { buffer: curOut, header: curHdr, encounterBytes: encCopy };
 }
@@ -1473,15 +1522,25 @@ export function performBspSwap(
                       const encBase = sourceInspected.header.tagDataOffset + (encRefl.pointerLow - srcTagIndex.baseMemoryAddress);
                       const clonedEncBuffers: Buffer[] = [];
 
+                      // Determine cluster count of the swapped BSP for cluster index validation
+                      let bspClusterCount = 65535;
+                      const bspMetaPtr = out.readUInt32LE(dstBsp.bspStart + 0);
+                      const bspRootOff = dstBsp.bspStart + (bspMetaPtr - srcBspAddress);
+                      if (bspRootOff >= dstBsp.bspStart && bspRootOff + 0x140 <= dstBsp.bspStart + srcBspSize) {
+                        const cCount = out.readUInt32LE(bspRootOff + 0x134);
+                        if (cCount > 0 && cCount < 65535) bspClusterCount = cCount;
+                      }
+
                       for (let i = 0; i < encRefl.count; i++) {
                         const encOff = encBase + i * 176;
+                        const encFlags = sourceBuffer.readUInt32LE(encOff + 0x20);
+                        const hasManualBsp = (encFlags & 0x40) !== 0;
                         const precompBsp = sourceBuffer.readInt16LE(encOff + 0x7e);
                         const manualBsp = sourceBuffer.readInt16LE(encOff + 0x2a);
+                        const effectiveBsp = precompBsp >= 0 ? precompBsp : (hasManualBsp ? manualBsp : -1);
 
-                        if (options.filterObjectsToBspBounds && srcIndices.length === 1) {
-                          if (precompBsp !== -1 && precompBsp !== srcIdx && manualBsp !== srcIdx) {
-                            continue;
-                          }
+                        if (srcIndices.length === 1 && effectiveBsp !== -1 && effectiveBsp !== srcIdx) {
+                          continue;
                         }
 
                         const encBytes = sourceBuffer.subarray(encOff, encOff + 176);
@@ -1495,6 +1554,7 @@ export function performBspSwap(
                           reinspected.tagIndex,
                           donorToTargetActorPal,
                           dstIdx,
+                          bspClusterCount,
                         );
                         out = cloneRes.buffer;
                         reinspected.header = cloneRes.header;
@@ -1517,86 +1577,10 @@ export function performBspSwap(
                       }
                     }
 
-                    // C. Scripting (syntax data 0x474, string data 0x488, scripts 0x49c, globals 0x4a8, references 0x4b4)
-                    const syntaxDataSize = sourceBuffer.readUInt32LE(srcScnrOffset + 0x474);
-                    const syntaxDataPtr = sourceBuffer.readUInt32LE(srcScnrOffset + 0x474 + 12);
-                    const stringDataSize = sourceBuffer.readUInt32LE(srcScnrOffset + 0x488);
-                    const stringDataPtr = sourceBuffer.readUInt32LE(srcScnrOffset + 0x488 + 12);
-                    const scriptsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x49c);
-                    const globalsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x4a8);
-                    const refsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x4b4);
-
-                    if (scriptsRefl.count > 0 && syntaxDataSize > 0) {
-                      // 1. Script syntax data
-                      const synSrcOff = resolvePointer(syntaxDataPtr, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                      const synData = Buffer.alloc(syntaxDataSize);
-                      sourceBuffer.copy(synData, 0, synSrcOff, synSrcOff + syntaxDataSize);
-                      const synRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, synData);
-                      out = synRes.buffer;
-                      reinspected.header = synRes.header;
-                      out.writeUInt32LE(syntaxDataSize, curScnrOff + 0x474);
-                      out.writeUInt32LE(0, curScnrOff + 0x474 + 4);
-                      out.writeUInt32LE(0, curScnrOff + 0x474 + 8);
-                      out.writeUInt32LE(synRes.virtualAddress, curScnrOff + 0x474 + 12);
-
-                      // 2. Script string data
-                      const strSrcOff = resolvePointer(stringDataPtr, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                      const strData = Buffer.alloc(stringDataSize);
-                      sourceBuffer.copy(strData, 0, strSrcOff, strSrcOff + stringDataSize);
-                      const strRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, strData);
-                      out = strRes.buffer;
-                      reinspected.header = strRes.header;
-                      out.writeUInt32LE(stringDataSize, curScnrOff + 0x488);
-                      out.writeUInt32LE(0, curScnrOff + 0x488 + 4);
-                      out.writeUInt32LE(0, curScnrOff + 0x488 + 8);
-                      out.writeUInt32LE(strRes.virtualAddress, curScnrOff + 0x488 + 12);
-
-                      // 3. Scripts
-                      const scSrcOff = resolvePointer(scriptsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                      const scData = Buffer.alloc(scriptsRefl.count * 92);
-                      sourceBuffer.copy(scData, 0, scSrcOff, scSrcOff + scData.length);
-                      for (let s = 0; s < scriptsRefl.count; s++) {
-                        scData.writeUInt32LE(0, s * 92 + 80);
-                        scData.writeUInt32LE(0, s * 92 + 84);
-                      }
-                      const scRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, scData);
-                      out = scRes.buffer;
-                      reinspected.header = scRes.header;
-                      out.writeUInt32LE(scriptsRefl.count, curScnrOff + 0x49c);
-                      out.writeUInt32LE(scRes.virtualAddress, curScnrOff + 0x49c + 4);
-                      importedScripts = scriptsRefl.count;
-
-                      // 4. Globals
-                      if (globalsRefl.count > 0) {
-                        const glSrcOff = resolvePointer(globalsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                        const glData = Buffer.alloc(globalsRefl.count * 92);
-                        sourceBuffer.copy(glData, 0, glSrcOff, glSrcOff + glData.length);
-                        const glRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, glData);
-                        out = glRes.buffer;
-                        reinspected.header = glRes.header;
-                        out.writeUInt32LE(globalsRefl.count, curScnrOff + 0x4a8);
-                        out.writeUInt32LE(glRes.virtualAddress, curScnrOff + 0x4a8 + 4);
-                      }
-
-                      // 5. References
-                      if (refsRefl.count > 0) {
-                        const refSrcOff = resolvePointer(refsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                        const refData = Buffer.alloc(refsRefl.count * 40);
-                        sourceBuffer.copy(refData, 0, refSrcOff, refSrcOff + refData.length);
-                        for (let r = 0; r < refsRefl.count; r++) {
-                          const donorTagId = refData.readUInt32LE(r * 40 + 36);
-                          const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
-                          if (targetTagId !== undefined) {
-                            refData.writeUInt32LE(targetTagId, r * 40 + 36);
-                          }
-                        }
-                        const refRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, refData);
-                        out = refRes.buffer;
-                        reinspected.header = refRes.header;
-                        out.writeUInt32LE(refsRefl.count, curScnrOff + 0x4b4);
-                        out.writeUInt32LE(refRes.virtualAddress, curScnrOff + 0x4b4 + 4);
-                      }
-                    }
+                    // C. Scripting: Campaign mission scripts (0x474..0x4b4) are tightly bound to
+                    // multi-BSP campaign cutscenes, switch_bsp calls, and named singleplayer objects
+                    // (e.g. bsp0_door) that crash multiplayer maps. Instead, imported encounters have
+                    // their 'not initially created' flag cleared above so AI squads spawn natively.
 
                     // D. If player spawns were cleared and donor map has starting locations on this BSP, import donor starting locations
                     if (options.clearPlayerSpawns) {
@@ -1621,6 +1605,10 @@ export function performBspSwap(
                           ) {
                             const spBytes = Buffer.alloc(spSize);
                             sourceBuffer.copy(spBytes, 0, spOff, spOff + spSize);
+                            spBytes.writeInt16LE(dstIdx, 18); // bsp_index
+                            if (spBytes.readInt16LE(20) === 0) {
+                              spBytes.writeInt16LE(12, 20); // type 0 = 12 (all games) so campaign spawns work in MP
+                            }
                             validSpawns.push(spBytes);
                           }
                         }
@@ -1665,21 +1653,20 @@ export function performBspSwap(
   }
 
   // 4. Rewrite TagDependency tagId fields directly in the swapped/merged BSP
-  if (tagIdMap.size > 0) {
-    const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
-    const bspRootOffset = dstBsp.bspStart + (metaPointer - srcBspAddress);
-    if (bspRootOffset >= dstBsp.bspStart && bspRootOffset < dstBsp.bspStart + srcBspSize) {
-      rewriteBspDependencies(
-        out,
-        'ScenarioStructureBSP',
-        bspRootOffset,
-        dstBsp.bspStart,
-        srcBspSize,
-        srcBspAddress,
-        tagIdMap,
-        new Set<number>(),
-      );
-    }
+  const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
+  const bspRootOffset = dstBsp.bspStart + (metaPointer - srcBspAddress);
+  if (bspRootOffset >= dstBsp.bspStart && bspRootOffset < dstBsp.bspStart + srcBspSize) {
+    rewriteBspDependencies(
+      out,
+      'ScenarioStructureBSP',
+      bspRootOffset,
+      dstBsp.bspStart,
+      srcBspSize,
+      srcBspAddress,
+      tagIdMap,
+      new Set<number>(),
+      reinspected.header.tagDataOffset,
+    );
   }
 
   // 5. Strip DOBC & Decals if requested
@@ -1688,7 +1675,6 @@ export function performBspSwap(
   const shouldStripDobc = options.stripDobc !== undefined ? options.stripDobc : (options.stripDobcAndDecals ?? true);
   const shouldStripDecals = options.stripDecals !== undefined ? options.stripDecals : (options.stripDobcAndDecals ?? true);
 
-  const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
   const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBspAddress);
   if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 0x260 <= dstBsp.bspStart + srcBspSize) {
     if (shouldStripDobc) {
@@ -1717,11 +1703,17 @@ export function performBspSwap(
     const maxZ = srcWorldBounds[5];
     const defaultGroundZ = minZ + 0.5;
 
+    const latestTagDataOffset = reinspected.header.tagDataOffset;
+    const latestBaseAddr = reinspected.tagIndex.baseMemoryAddress;
+    const latestScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+    const latestScnrOffset = latestTagDataOffset + (latestScnrEntry.tagDataPointerOrResourceIndex - latestBaseAddr);
+    const latestDecodedScnr = decodeStruct(out, latestScnrOffset, 'Scenario');
+
     // Player starting locations at 0x354
-    const spawnsReflexive = decodedScnr.get('player starting locations');
+    const spawnsReflexive = latestDecodedScnr.get('player starting locations');
     if (spawnsReflexive && spawnsReflexive.kind === 'reflexive' && spawnsReflexive.value.count > 0) {
       const spawnSize = 52;
-      const spawnsOffset = newTagDataOffset + (spawnsReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
+      const spawnsOffset = latestTagDataOffset + (spawnsReflexive.value.pointerLow - latestBaseAddr);
       for (let s = 0; s < spawnsReflexive.value.count; s++) {
         const sOff = spawnsOffset + s * spawnSize;
         let curX = out.readFloatLE(sOff + 0);
@@ -1748,10 +1740,10 @@ export function performBspSwap(
     }
 
     // Netgame equipment at 0x384
-    const equipReflexive = decodedScnr.get('netgame equipment');
+    const equipReflexive = latestDecodedScnr.get('netgame equipment');
     if (equipReflexive && equipReflexive.kind === 'reflexive' && equipReflexive.value.count > 0) {
       const equipSize = 144; // ScenarioNetgameEquipment struct
-      const equipOffset = newTagDataOffset + (equipReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
+      const equipOffset = latestTagDataOffset + (equipReflexive.value.pointerLow - latestBaseAddr);
       for (let e = 0; e < equipReflexive.value.count; e++) {
         const eOff = equipOffset + e * equipSize;
         let curX = out.readFloatLE(eOff + 64);

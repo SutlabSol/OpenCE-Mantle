@@ -36452,7 +36452,7 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
                   const isImgExternal = (flags & 256) !== 0;
                   if (!isImgExternal) {
                     const pixelOff = out.readUInt32LE(rowOffset + 24);
-                    if (pixelOff >= oldStructDataOffset && pixelOff < oldFileLength) {
+                    if (pixelOff >= insertPos && pixelOff < oldFileLength) {
                       const newPixelOff = outOffsetOf(pixelOff);
                       out.writeUInt32LE(newPixelOff, rowOffset + 24);
                     }
@@ -36462,7 +36462,7 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
             }
           }
         }
-      } else if (groupFourCC === 1936614432 && !isExternal) {
+      } else if (groupFourCC === 1936614433 && !isExternal) {
         const tagDataPtr = out.readUInt32LE(entryOffset + 20);
         if (tagDataPtr >= baseMemoryAddress) {
           const tagStructOffset = newTagDataOffset + (tagDataPtr - baseMemoryAddress);
@@ -36486,7 +36486,7 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
                         const sampleExt = out.readUInt32LE(mOffset + 68);
                         if ((sampleExt & 1) === 0) {
                           const sampleOffset = out.readUInt32LE(mOffset + 72);
-                          if (sampleOffset >= oldStructDataOffset && sampleOffset < oldFileLength) {
+                          if (sampleOffset >= insertPos && sampleOffset < oldFileLength) {
                             out.writeUInt32LE(outOffsetOf(sampleOffset), mOffset + 72);
                           }
                         }
@@ -40599,11 +40599,13 @@ function ensurePaletteEntry(buffer, header, tagIndex, paletteFieldName, paletteS
       }
     }
   }
+  const tagEntryOff = header.tagDataOffset + 40 + (tagId & 65535) * 32;
+  const pathPointer = tagEntryOff + 20 <= buffer.length ? buffer.readUInt32LE(tagEntryOff + 16) : 0;
   const entryBytes = Buffer.alloc(structSize, 0);
   entryBytes.writeUInt32LE(classFourCC, 0);
-  entryBytes.writeUInt32LE(0, 4);
+  entryBytes.writeUInt32LE(pathPointer >>> 0, 4);
   entryBytes.writeUInt32LE(0, 8);
-  entryBytes.writeUInt32LE(tagId, 12);
+  entryBytes.writeUInt32LE(tagId >>> 0, 12);
   const res = appendReflexiveElement(buffer, header, tagIndex, reflOffset, entryBytes);
   return { buffer: res.buffer, header: res.header, paletteIndex: res.newIndex };
 }
@@ -42636,7 +42638,7 @@ function scanBspDependencies(buffer, structName, fileOffset, bspStart, bspSize, 
     }
   }
 }
-function rewriteBspDependencies(buffer, structName, fileOffset, bspStart, bspSize, bspAddress, tagIdMap, visitedOffsets) {
+function rewriteBspDependencies(buffer, structName, fileOffset, bspStart, bspSize, bspAddress, tagIdMap, visitedOffsets, tagDataOffset) {
   if (fileOffset < bspStart || fileOffset >= bspStart + bspSize || visitedOffsets.has(fileOffset)) return;
   visitedOffsets.add(fileOffset);
   let resolved;
@@ -42651,13 +42653,32 @@ function rewriteBspDependencies(buffer, structName, fileOffset, bspStart, bspSiz
     if (field.def.type === "TagDependency") {
       if (fieldOffset + 16 <= buffer.length) {
         const oldTagId = buffer.readUInt32LE(fieldOffset + 12);
-        const mapped = tagIdMap.get(oldTagId) ?? tagIdMap.get(oldTagId & 65535);
-        if (mapped !== void 0) {
-          buffer.writeUInt32LE(mapped, fieldOffset + 12);
+        if (oldTagId !== 4294967295) {
+          const mapped = tagIdMap.get(oldTagId) ?? tagIdMap.get(oldTagId & 65535);
+          if (mapped !== void 0) {
+            buffer.writeUInt32LE(mapped >>> 0, fieldOffset + 12);
+            if (tagDataOffset !== void 0) {
+              const entryOff = tagDataOffset + 40 + (mapped & 65535) * 32;
+              if (entryOff + 20 <= buffer.length) {
+                const pathPtr = buffer.readUInt32LE(entryOff + 16);
+                buffer.writeUInt32LE(pathPtr >>> 0, fieldOffset + 4);
+                buffer.writeUInt32LE(0, fieldOffset + 8);
+              }
+            }
+          } else {
+            buffer.writeUInt32LE(0, fieldOffset + 4);
+            buffer.writeUInt32LE(0, fieldOffset + 8);
+            buffer.writeUInt32LE(4294967295, fieldOffset + 12);
+          }
         }
       }
     } else if (field.def.type === "TagReflexive") {
       if (fieldOffset + 12 <= buffer.length && field.def.struct) {
+        if (field.def.struct === "PredictedResource") {
+          buffer.writeUInt32LE(0, fieldOffset + 0);
+          buffer.writeUInt32LE(0, fieldOffset + 4);
+          continue;
+        }
         const count2 = buffer.readUInt32LE(fieldOffset + 0);
         const pointerLow = buffer.readUInt32LE(fieldOffset + 4);
         if (count2 > 0 && count2 < 2e4 && pointerLow >= bspAddress) {
@@ -42674,7 +42695,8 @@ function rewriteBspDependencies(buffer, structName, fileOffset, bspStart, bspSiz
                   bspSize,
                   bspAddress,
                   tagIdMap,
-                  visitedOffsets
+                  visitedOffsets,
+                  tagDataOffset
                 );
               }
             } catch {
@@ -42767,11 +42789,13 @@ function appendDataBlock(buffer, header, tagIndex, data) {
   newBuffer.writeUInt32LE(newHeader.tagDataSize, 20);
   return { buffer: newBuffer, header: newHeader, virtualAddress, fileOffset };
 }
-function cloneEncounterWithChildReflexives(encSourceBytes, sourceBuffer, srcHdr, srcTagIndex, currentOut, currentHdr, currentTagIndex, donorToTargetActorPal, dstBspIdx) {
+function cloneEncounterWithChildReflexives(encSourceBytes, sourceBuffer, srcHdr, srcTagIndex, currentOut, currentHdr, currentTagIndex, donorToTargetActorPal, dstBspIdx, bspClusterCount = 65535) {
   let curOut = currentOut;
   let curHdr = currentHdr;
   const encCopy = Buffer.alloc(176);
   encSourceBytes.copy(encCopy);
+  const origEncFlags = encCopy.readUInt32LE(32);
+  encCopy.writeUInt32LE((origEncFlags & ~29 | 66) >>> 0, 32);
   encCopy.writeInt16LE(dstBspIdx, 42);
   encCopy.writeInt16LE(dstBspIdx, 126);
   const sqCount = encSourceBytes.readUInt32LE(128);
@@ -42786,13 +42810,23 @@ function cloneEncounterWithChildReflexives(encSourceBytes, sourceBuffer, srcHdr,
       const donorActorType = sqBytes.readInt16LE(32);
       if (donorActorType >= 0 && donorToTargetActorPal.has(donorActorType)) {
         sqBytes.writeInt16LE(donorToTargetActorPal.get(donorActorType), 32);
+      } else {
+        sqBytes.writeInt16LE(-1, 32);
       }
       const moveCount = sourceBuffer.readUInt32LE(sqSrcOff + 196);
       const movePtr = sourceBuffer.readUInt32LE(sqSrcOff + 200);
       if (moveCount > 0 && movePtr !== 0) {
         const moveSrcOff = resolvePointer3(movePtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-        const moveData = Buffer.alloc(moveCount * 64);
+        const moveData = Buffer.alloc(moveCount * 80);
         sourceBuffer.copy(moveData, 0, moveSrcOff, moveSrcOff + moveData.length);
+        for (let m = 0; m < moveCount; m++) {
+          const mBase = m * 80;
+          moveData.writeInt16LE(-1, mBase + 28);
+          const mCluster = moveData.readInt16LE(mBase + 40);
+          if (mCluster < 0 || mCluster >= bspClusterCount) {
+            moveData.writeInt16LE(0, mBase + 40);
+          }
+        }
         const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, moveData);
         curOut = appRes.buffer;
         curHdr = appRes.header;
@@ -42809,16 +42843,32 @@ function cloneEncounterWithChildReflexives(encSourceBytes, sourceBuffer, srcHdr,
         const locData = Buffer.alloc(locCount * 28);
         sourceBuffer.copy(locData, 0, locSrcOff, locSrcOff + locData.length);
         for (let l = 0; l < locCount; l++) {
-          const lActorType = locData.readInt16LE(l * 28 + 24);
-          if (lActorType >= 0 && donorToTargetActorPal.has(lActorType)) {
-            locData.writeInt16LE(donorToTargetActorPal.get(lActorType), l * 28 + 24);
+          const lBase = l * 28;
+          const lCluster = locData.readInt16LE(lBase + 16);
+          if (lCluster < 0 || lCluster >= bspClusterCount) {
+            locData.writeInt16LE(0, lBase + 16);
           }
+          const lActorType = locData.readInt16LE(lBase + 24);
+          if (lActorType >= 0 && donorToTargetActorPal.has(lActorType)) {
+            locData.writeInt16LE(donorToTargetActorPal.get(lActorType), lBase + 24);
+          } else {
+            locData.writeInt16LE(-1, lBase + 24);
+          }
+          locData.writeInt16LE(-1, lBase + 26);
         }
         const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, locData);
         curOut = appRes.buffer;
         curHdr = appRes.header;
         sqBytes.writeUInt32LE(locCount, 208);
         sqBytes.writeUInt32LE(appRes.virtualAddress, 212);
+        const normalCount = sqBytes.readInt16LE(124);
+        const insaneCount = sqBytes.readInt16LE(126);
+        if (normalCount <= 0) {
+          sqBytes.writeInt16LE(Math.max(1, insaneCount > 0 ? insaneCount : locCount), 124);
+        }
+        if (insaneCount <= 0) {
+          sqBytes.writeInt16LE(Math.max(1, normalCount > 0 ? normalCount : locCount), 126);
+        }
       } else {
         sqBytes.writeUInt32LE(0, 208);
         sqBytes.writeUInt32LE(0, 212);
@@ -42856,6 +42906,12 @@ function cloneEncounterWithChildReflexives(encSourceBytes, sourceBuffer, srcHdr,
     const fpSrcBase = resolvePointer3(fpPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
     const fpData = Buffer.alloc(fpCount * 24);
     sourceBuffer.copy(fpData, 0, fpSrcBase, fpSrcBase + fpData.length);
+    for (let f = 0; f < fpCount; f++) {
+      const fCluster = fpData.readInt16LE(f * 24 + 14);
+      if (fCluster < 0 || fCluster >= bspClusterCount) {
+        fpData.writeInt16LE(0, f * 24 + 14);
+      }
+    }
     const fpAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, fpData);
     curOut = fpAppRes.buffer;
     curHdr = fpAppRes.header;
@@ -42865,21 +42921,8 @@ function cloneEncounterWithChildReflexives(encSourceBytes, sourceBuffer, srcHdr,
     encCopy.writeUInt32LE(0, 152);
     encCopy.writeUInt32LE(0, 156);
   }
-  const pslCount = encSourceBytes.readUInt32LE(164);
-  const pslPtr = encSourceBytes.readUInt32LE(168);
-  if (pslCount > 0 && pslPtr !== 0) {
-    const pslSrcBase = resolvePointer3(pslPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-    const pslData = Buffer.alloc(pslCount * 52);
-    sourceBuffer.copy(pslData, 0, pslSrcBase, pslSrcBase + pslData.length);
-    const pslAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, pslData);
-    curOut = pslAppRes.buffer;
-    curHdr = pslAppRes.header;
-    encCopy.writeUInt32LE(pslCount, 164);
-    encCopy.writeUInt32LE(pslAppRes.virtualAddress, 168);
-  } else {
-    encCopy.writeUInt32LE(0, 164);
-    encCopy.writeUInt32LE(0, 168);
-  }
+  encCopy.writeUInt32LE(0, 164);
+  encCopy.writeUInt32LE(0, 168);
   return { buffer: curOut, header: curHdr, encounterBytes: encCopy };
 }
 function performBspSwap(sourceBuffer, targetBuffer, options) {
@@ -43007,12 +43050,12 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       const curBsp = sourceBsps[bIdx];
       if (!curBsp) continue;
       const metaPointer2 = sourceBuffer.readUInt32LE(curBsp.bspStart + 0);
-      const bspRootOffset = curBsp.bspStart + (metaPointer2 - curBsp.bspAddress);
-      if (bspRootOffset >= curBsp.bspStart && bspRootOffset < curBsp.bspStart + curBsp.bspSize) {
+      const bspRootOffset2 = curBsp.bspStart + (metaPointer2 - curBsp.bspAddress);
+      if (bspRootOffset2 >= curBsp.bspStart && bspRootOffset2 < curBsp.bspStart + curBsp.bspSize) {
         scanBspDependencies(
           sourceBuffer,
           "ScenarioStructureBSP",
-          bspRootOffset,
+          bspRootOffset2,
           curBsp.bspStart,
           curBsp.bspSize,
           curBsp.bspAddress,
@@ -43577,14 +43620,22 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                     if (encRefl.count > 0) {
                       const encBase = sourceInspected.header.tagDataOffset + (encRefl.pointerLow - srcTagIndex.baseMemoryAddress);
                       const clonedEncBuffers = [];
+                      let bspClusterCount = 65535;
+                      const bspMetaPtr = out.readUInt32LE(dstBsp.bspStart + 0);
+                      const bspRootOff = dstBsp.bspStart + (bspMetaPtr - srcBspAddress);
+                      if (bspRootOff >= dstBsp.bspStart && bspRootOff + 320 <= dstBsp.bspStart + srcBspSize) {
+                        const cCount = out.readUInt32LE(bspRootOff + 308);
+                        if (cCount > 0 && cCount < 65535) bspClusterCount = cCount;
+                      }
                       for (let i = 0; i < encRefl.count; i++) {
                         const encOff = encBase + i * 176;
+                        const encFlags = sourceBuffer.readUInt32LE(encOff + 32);
+                        const hasManualBsp = (encFlags & 64) !== 0;
                         const precompBsp = sourceBuffer.readInt16LE(encOff + 126);
                         const manualBsp = sourceBuffer.readInt16LE(encOff + 42);
-                        if (options.filterObjectsToBspBounds && srcIndices.length === 1) {
-                          if (precompBsp !== -1 && precompBsp !== srcIdx && manualBsp !== srcIdx) {
-                            continue;
-                          }
+                        const effectiveBsp = precompBsp >= 0 ? precompBsp : hasManualBsp ? manualBsp : -1;
+                        if (srcIndices.length === 1 && effectiveBsp !== -1 && effectiveBsp !== srcIdx) {
+                          continue;
                         }
                         const encBytes = sourceBuffer.subarray(encOff, encOff + 176);
                         const cloneRes = cloneEncounterWithChildReflexives(
@@ -43596,7 +43647,8 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                           reinspected.header,
                           reinspected.tagIndex,
                           donorToTargetActorPal,
-                          dstIdx
+                          dstIdx,
+                          bspClusterCount
                         );
                         out = cloneRes.buffer;
                         reinspected.header = cloneRes.header;
@@ -43617,75 +43669,6 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                         importedEncounters = clonedEncBuffers.length;
                       }
                     }
-                    const syntaxDataSize = sourceBuffer.readUInt32LE(srcScnrOffset + 1140);
-                    const syntaxDataPtr = sourceBuffer.readUInt32LE(srcScnrOffset + 1140 + 12);
-                    const stringDataSize = sourceBuffer.readUInt32LE(srcScnrOffset + 1160);
-                    const stringDataPtr = sourceBuffer.readUInt32LE(srcScnrOffset + 1160 + 12);
-                    const scriptsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1180);
-                    const globalsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1192);
-                    const refsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1204);
-                    if (scriptsRefl.count > 0 && syntaxDataSize > 0) {
-                      const synSrcOff = resolvePointer3(syntaxDataPtr, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                      const synData = Buffer.alloc(syntaxDataSize);
-                      sourceBuffer.copy(synData, 0, synSrcOff, synSrcOff + syntaxDataSize);
-                      const synRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, synData);
-                      out = synRes.buffer;
-                      reinspected.header = synRes.header;
-                      out.writeUInt32LE(syntaxDataSize, curScnrOff + 1140);
-                      out.writeUInt32LE(0, curScnrOff + 1140 + 4);
-                      out.writeUInt32LE(0, curScnrOff + 1140 + 8);
-                      out.writeUInt32LE(synRes.virtualAddress, curScnrOff + 1140 + 12);
-                      const strSrcOff = resolvePointer3(stringDataPtr, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                      const strData = Buffer.alloc(stringDataSize);
-                      sourceBuffer.copy(strData, 0, strSrcOff, strSrcOff + stringDataSize);
-                      const strRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, strData);
-                      out = strRes.buffer;
-                      reinspected.header = strRes.header;
-                      out.writeUInt32LE(stringDataSize, curScnrOff + 1160);
-                      out.writeUInt32LE(0, curScnrOff + 1160 + 4);
-                      out.writeUInt32LE(0, curScnrOff + 1160 + 8);
-                      out.writeUInt32LE(strRes.virtualAddress, curScnrOff + 1160 + 12);
-                      const scSrcOff = resolvePointer3(scriptsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                      const scData = Buffer.alloc(scriptsRefl.count * 92);
-                      sourceBuffer.copy(scData, 0, scSrcOff, scSrcOff + scData.length);
-                      for (let s = 0; s < scriptsRefl.count; s++) {
-                        scData.writeUInt32LE(0, s * 92 + 80);
-                        scData.writeUInt32LE(0, s * 92 + 84);
-                      }
-                      const scRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, scData);
-                      out = scRes.buffer;
-                      reinspected.header = scRes.header;
-                      out.writeUInt32LE(scriptsRefl.count, curScnrOff + 1180);
-                      out.writeUInt32LE(scRes.virtualAddress, curScnrOff + 1180 + 4);
-                      importedScripts = scriptsRefl.count;
-                      if (globalsRefl.count > 0) {
-                        const glSrcOff = resolvePointer3(globalsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                        const glData = Buffer.alloc(globalsRefl.count * 92);
-                        sourceBuffer.copy(glData, 0, glSrcOff, glSrcOff + glData.length);
-                        const glRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, glData);
-                        out = glRes.buffer;
-                        reinspected.header = glRes.header;
-                        out.writeUInt32LE(globalsRefl.count, curScnrOff + 1192);
-                        out.writeUInt32LE(glRes.virtualAddress, curScnrOff + 1192 + 4);
-                      }
-                      if (refsRefl.count > 0) {
-                        const refSrcOff = resolvePointer3(refsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                        const refData = Buffer.alloc(refsRefl.count * 40);
-                        sourceBuffer.copy(refData, 0, refSrcOff, refSrcOff + refData.length);
-                        for (let r = 0; r < refsRefl.count; r++) {
-                          const donorTagId = refData.readUInt32LE(r * 40 + 36);
-                          const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
-                          if (targetTagId !== void 0) {
-                            refData.writeUInt32LE(targetTagId, r * 40 + 36);
-                          }
-                        }
-                        const refRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, refData);
-                        out = refRes.buffer;
-                        reinspected.header = refRes.header;
-                        out.writeUInt32LE(refsRefl.count, curScnrOff + 1204);
-                        out.writeUInt32LE(refRes.virtualAddress, curScnrOff + 1204 + 4);
-                      }
-                    }
                     if (options.clearPlayerSpawns) {
                       const srcSpawnsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 852);
                       if (srcSpawnsRefl.count > 0) {
@@ -43702,6 +43685,10 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                           if (!options.filterObjectsToBspBounds || posX >= minX2 - margin && posX <= maxX2 + margin && posY >= minY2 - margin && posY <= maxY2 + margin && posZ >= minZ2 - margin && posZ <= maxZ2 + margin) {
                             const spBytes = Buffer.alloc(spSize);
                             sourceBuffer.copy(spBytes, 0, spOff, spOff + spSize);
+                            spBytes.writeInt16LE(dstIdx, 18);
+                            if (spBytes.readInt16LE(20) === 0) {
+                              spBytes.writeInt16LE(12, 20);
+                            }
                             validSpawns.push(spBytes);
                           }
                         }
@@ -43739,27 +43726,25 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
     nameBuf.write(nameStr, "ascii");
     nameBuf.copy(out, 32);
   }
-  if (tagIdMap.size > 0) {
-    const metaPointer2 = out.readUInt32LE(dstBsp.bspStart + 0);
-    const bspRootOffset = dstBsp.bspStart + (metaPointer2 - srcBspAddress);
-    if (bspRootOffset >= dstBsp.bspStart && bspRootOffset < dstBsp.bspStart + srcBspSize) {
-      rewriteBspDependencies(
-        out,
-        "ScenarioStructureBSP",
-        bspRootOffset,
-        dstBsp.bspStart,
-        srcBspSize,
-        srcBspAddress,
-        tagIdMap,
-        /* @__PURE__ */ new Set()
-      );
-    }
+  const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
+  const bspRootOffset = dstBsp.bspStart + (metaPointer - srcBspAddress);
+  if (bspRootOffset >= dstBsp.bspStart && bspRootOffset < dstBsp.bspStart + srcBspSize) {
+    rewriteBspDependencies(
+      out,
+      "ScenarioStructureBSP",
+      bspRootOffset,
+      dstBsp.bspStart,
+      srcBspSize,
+      srcBspAddress,
+      tagIdMap,
+      /* @__PURE__ */ new Set(),
+      reinspected.header.tagDataOffset
+    );
   }
   let strippedDobc = false;
   let strippedDecals = false;
   const shouldStripDobc = options.stripDobc !== void 0 ? options.stripDobc : options.stripDobcAndDecals ?? true;
   const shouldStripDecals = options.stripDecals !== void 0 ? options.stripDecals : options.stripDobcAndDecals ?? true;
-  const metaPointer = out.readUInt32LE(dstBsp.bspStart + 0);
   const bspRootFileOffset = dstBsp.bspStart + (metaPointer - srcBspAddress);
   if (bspRootFileOffset >= dstBsp.bspStart && bspRootFileOffset + 608 <= dstBsp.bspStart + srcBspSize) {
     if (shouldStripDobc) {
@@ -43782,10 +43767,15 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
     const maxY = srcWorldBounds[4];
     const maxZ = srcWorldBounds[5];
     const defaultGroundZ = minZ + 0.5;
-    const spawnsReflexive = decodedScnr.get("player starting locations");
+    const latestTagDataOffset = reinspected.header.tagDataOffset;
+    const latestBaseAddr = reinspected.tagIndex.baseMemoryAddress;
+    const latestScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+    const latestScnrOffset = latestTagDataOffset + (latestScnrEntry.tagDataPointerOrResourceIndex - latestBaseAddr);
+    const latestDecodedScnr = decodeStruct(out, latestScnrOffset, "Scenario");
+    const spawnsReflexive = latestDecodedScnr.get("player starting locations");
     if (spawnsReflexive && spawnsReflexive.kind === "reflexive" && spawnsReflexive.value.count > 0) {
       const spawnSize = 52;
-      const spawnsOffset = newTagDataOffset + (spawnsReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
+      const spawnsOffset = latestTagDataOffset + (spawnsReflexive.value.pointerLow - latestBaseAddr);
       for (let s = 0; s < spawnsReflexive.value.count; s++) {
         const sOff = spawnsOffset + s * spawnSize;
         let curX = out.readFloatLE(sOff + 0);
@@ -43810,10 +43800,10 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
         if (changed) relocatedSpawns++;
       }
     }
-    const equipReflexive = decodedScnr.get("netgame equipment");
+    const equipReflexive = latestDecodedScnr.get("netgame equipment");
     if (equipReflexive && equipReflexive.kind === "reflexive" && equipReflexive.value.count > 0) {
       const equipSize = 144;
-      const equipOffset = newTagDataOffset + (equipReflexive.value.pointerLow - tagIndex.baseMemoryAddress);
+      const equipOffset = latestTagDataOffset + (equipReflexive.value.pointerLow - latestBaseAddr);
       for (let e = 0; e < equipReflexive.value.count; e++) {
         const eOff = equipOffset + e * equipSize;
         let curX = out.readFloatLE(eOff + 64);
@@ -44880,7 +44870,7 @@ function inspectSoundTag(mapBuffer, header, tagIndex, soundTagId, externalSounds
   const soundClass = srcBuf.readUInt16LE(tagStart + 4);
   const sampleRateCode = srcBuf.readUInt16LE(tagStart + 6);
   const sampleRate = sampleRateCode === 1 ? 44100 : 22050;
-  const channelCount = srcBuf.readUInt16LE(tagStart + 104) === 1 ? 2 : 1;
+  const channelCount = srcBuf.readUInt16LE(tagStart + 108) === 1 ? 2 : 1;
   const pitchCount = srcBuf.readUInt32LE(tagStart + 152);
   const pitchPtr = srcBuf.readUInt32LE(tagStart + 156);
   const pitchRanges = [];
@@ -45032,13 +45022,13 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
     const tagCopy = Buffer.from(externalSoundsBuffer.subarray(matchedOffset, matchedOffset + matchedSize));
     const tagStartInMap = mapBuffer.length + 3 & ~3;
     const tagVirtualAddress = tagIndex.baseMemoryAddress + (tagStartInMap - header.tagDataOffset);
-    const pitchCount = tagCopy.readUInt32LE(152);
+    const pitchCount2 = tagCopy.readUInt32LE(152);
     const pitchOffsetRel = 164;
     tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel, 156);
     let audioCursor = tagStartInMap + tagCopy.length + 3 & ~3;
     const audioPayloads = [];
     const pitchStructSize = 72;
-    for (let p = 0; p < pitchCount; p++) {
+    for (let p = 0; p < pitchCount2; p++) {
       const pOffset2 = pitchOffsetRel + p * pitchStructSize;
       const permCount = tagCopy.readUInt32LE(pOffset2 + 60);
       const permRelOffset = tagCopy.readUInt32LE(pOffset2 + 64);
@@ -45082,14 +45072,15 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
     outBuffer.writeUInt32LE(0, entryOffset + 24);
     entry.tagDataPointerOrResourceIndex = tagVirtualAddress;
     entry.isExternal = false;
-    const newTagDataSize = totalNewLength - header.tagDataOffset;
+    const newTagDataSize2 = totalNewLength - header.tagDataOffset;
     outBuffer.writeUInt32LE(totalNewLength, 8);
-    outBuffer.writeUInt32LE(newTagDataSize, 20);
-    header.tagDataSize = newTagDataSize;
+    outBuffer.writeUInt32LE(newTagDataSize2, 20);
+    header.tagDataSize = newTagDataSize2;
     header.decompressedFileSize = totalNewLength;
     return outBuffer;
   }
   const tagStart = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  const pitchCount = mapBuffer.readUInt32LE(tagStart + 152);
   const pitchPtr = mapBuffer.readUInt32LE(tagStart + 156);
   const pitchBase = header.tagDataOffset + (pitchPtr - tagIndex.baseMemoryAddress);
   const pOffset = pitchBase + pitchRangeIndex * 72;
@@ -45110,11 +45101,6 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
     Buffer.from(newSamples).copy(newBuf, alignedAppendOffset);
     outputBuffer = newBuf;
     targetOffset = alignedAppendOffset;
-    const newTagDataSize = outputBuffer.length - header.tagDataOffset;
-    outputBuffer.writeUInt32LE(outputBuffer.length, 8);
-    outputBuffer.writeUInt32LE(newTagDataSize, 20);
-    header.tagDataSize = newTagDataSize;
-    header.decompressedFileSize = outputBuffer.length;
   }
   outputBuffer.writeUInt16LE(newFormat, mOffset + 40);
   outputBuffer.writeUInt32LE(newSamples.length, mOffset + 64);
@@ -45122,6 +45108,56 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
   outputBuffer.writeUInt32LE(targetOffset, mOffset + 72);
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 52);
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 60);
+  if (externalSoundsBuffer && pitchCount > 0 && pitchCount < 32) {
+    const extraPayloads = [];
+    for (let p = 0; p < pitchCount; p++) {
+      const curPOff = pitchBase + p * 72;
+      if (curPOff + 72 > outputBuffer.length) continue;
+      const curPermCount = outputBuffer.readUInt32LE(curPOff + 60);
+      const curPermPtr = outputBuffer.readUInt32LE(curPOff + 64);
+      if (curPermCount <= 0 || curPermCount >= 256 || curPermPtr < tagIndex.baseMemoryAddress) continue;
+      const curPermBase = header.tagDataOffset + (curPermPtr - tagIndex.baseMemoryAddress);
+      for (let m = 0; m < curPermCount; m++) {
+        if (p === pitchRangeIndex && m === permutationIndex) continue;
+        const sibOff = curPermBase + m * 124;
+        if (sibOff + 124 > outputBuffer.length) continue;
+        const sibExt = outputBuffer.readUInt32LE(sibOff + 68);
+        if ((sibExt & 1) !== 0) {
+          const sibSampleSize = outputBuffer.readUInt32LE(sibOff + 64);
+          const sibSampleOffset = outputBuffer.readUInt32LE(sibOff + 72);
+          if (sibSampleSize > 0 && sibSampleOffset + sibSampleSize <= externalSoundsBuffer.length) {
+            extraPayloads.push({
+              mOff: sibOff,
+              data: Buffer.from(externalSoundsBuffer.subarray(sibSampleOffset, sibSampleOffset + sibSampleSize))
+            });
+          }
+        }
+      }
+    }
+    if (extraPayloads.length > 0) {
+      let cursor = outputBuffer.length + 3 & ~3;
+      const placements = [];
+      for (const ep of extraPayloads) {
+        placements.push({ mOff: ep.mOff, offset: cursor, data: ep.data });
+        cursor = cursor + ep.data.length + 3 & ~3;
+      }
+      const expanded = Buffer.alloc(cursor);
+      outputBuffer.copy(expanded, 0);
+      for (const pl of placements) {
+        pl.data.copy(expanded, pl.offset);
+        expanded.writeUInt32LE(0, pl.mOff + 68);
+        expanded.writeUInt32LE(pl.offset, pl.mOff + 72);
+        expanded.writeUInt32LE(soundTagId, pl.mOff + 52);
+        expanded.writeUInt32LE(soundTagId, pl.mOff + 60);
+      }
+      outputBuffer = expanded;
+    }
+  }
+  const newTagDataSize = outputBuffer.length - header.tagDataOffset;
+  outputBuffer.writeUInt32LE(outputBuffer.length, 8);
+  outputBuffer.writeUInt32LE(newTagDataSize, 20);
+  header.tagDataSize = newTagDataSize;
+  header.decompressedFileSize = outputBuffer.length;
   return outputBuffer;
 }
 

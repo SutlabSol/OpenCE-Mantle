@@ -423,11 +423,13 @@ export function ensurePaletteEntry(
   }
 
   // Not in palette yet -> append new palette entry
+  const tagEntryOff = header.tagDataOffset + 0x28 + (tagId & 0xffff) * 32;
+  const pathPointer = tagEntryOff + 0x14 <= buffer.length ? buffer.readUInt32LE(tagEntryOff + 0x10) : 0;
   const entryBytes = Buffer.alloc(structSize, 0);
   entryBytes.writeUInt32LE(classFourCC, 0);
-  entryBytes.writeUInt32LE(0, 4);
+  entryBytes.writeUInt32LE(pathPointer >>> 0, 4);
   entryBytes.writeUInt32LE(0, 8);
-  entryBytes.writeUInt32LE(tagId, 12);
+  entryBytes.writeUInt32LE(tagId >>> 0, 12);
 
   const res = appendReflexiveElement(buffer, header, tagIndex, reflOffset, entryBytes);
   return { buffer: res.buffer, header: res.header, paletteIndex: res.newIndex };
