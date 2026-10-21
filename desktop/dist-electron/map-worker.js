@@ -36396,6 +36396,42 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
             }
           }
         }
+      } else if (groupFourCC === 1936614432 && !isExternal) {
+        const tagDataPtr = out.readUInt32LE(entryOffset + 20);
+        if (tagDataPtr >= baseMemoryAddress) {
+          const tagStructOffset = newTagDataOffset + (tagDataPtr - baseMemoryAddress);
+          if (tagStructOffset + 160 <= out.length) {
+            const pitchCount = out.readUInt32LE(tagStructOffset + 152);
+            const pitchPtr = out.readUInt32LE(tagStructOffset + 156);
+            if (pitchCount > 0 && pitchCount < 32 && pitchPtr >= baseMemoryAddress) {
+              const pitchArrayOffset = newTagDataOffset + (pitchPtr - baseMemoryAddress);
+              const pitchStructSize = 72;
+              for (let p = 0; p < pitchCount; p++) {
+                const pOffset = pitchArrayOffset + p * pitchStructSize;
+                if (pOffset + pitchStructSize <= out.length) {
+                  const permCount = out.readUInt32LE(pOffset + 60);
+                  const permPtr = out.readUInt32LE(pOffset + 64);
+                  if (permCount > 0 && permCount < 256 && permPtr >= baseMemoryAddress) {
+                    const permArrayOffset = newTagDataOffset + (permPtr - baseMemoryAddress);
+                    const permStructSize = 124;
+                    for (let m = 0; m < permCount; m++) {
+                      const mOffset = permArrayOffset + m * permStructSize;
+                      if (mOffset + permStructSize <= out.length) {
+                        const sampleExt = out.readUInt32LE(mOffset + 68);
+                        if ((sampleExt & 1) === 0) {
+                          const sampleOffset = out.readUInt32LE(mOffset + 72);
+                          if (sampleOffset >= oldStructDataOffset && sampleOffset < oldFileLength) {
+                            out.writeUInt32LE(outOffsetOf(sampleOffset), mOffset + 72);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -37588,17 +37624,21 @@ function planTagDataRepairs(view, header, tagIndex, extents) {
       const maximum = headerReadable ? view.readInt16LE(at + DATA_ARRAY_MAXIMUM_COUNT) : -1;
       const elementSize = headerReadable ? view.readInt16LE(at + DATA_ARRAY_ELEMENT_SIZE) : -1;
       const count2 = headerReadable ? view.readInt16LE(at + DATA_ARRAY_COUNT) : -1;
-      const consistent = headerReadable && elementSize === SCRIPT_NODE_SIZE && maximum > 0 && count2 >= 0 && count2 <= maximum && size === DATA_ARRAY_HEADER_SIZE + maximum * elementSize;
+      const fullDeclaredSize = DATA_ARRAY_HEADER_SIZE + maximum * SCRIPT_NODE_SIZE;
+      const validHeader = headerReadable && elementSize === SCRIPT_NODE_SIZE && maximum > 0 && count2 >= 0 && count2 <= maximum;
+      const isTruncated = validHeader && size < fullDeclaredSize;
+      const consistent = validHeader && (size === fullDeclaredSize || isTruncated);
+      const targetBlockSize = validHeader ? fullDeclaredSize : size;
       const used = consistent ? DATA_ARRAY_HEADER_SIZE + count2 * SCRIPT_NODE_SIZE : -1;
       const where = `${scenario.path}.scenario script syntax data`;
-      const plan = (required, details) => repairs.push({
+      const plan = (required, details, bSize = targetBlockSize) => repairs.push({
         id: "scriptSyntaxData",
         required,
         tagIndex: scenario.index,
         tagPath: scenario.path,
         pointerAddress: scenarioPointer + field.offset + DATA_FIELD_POINTER,
         oldPointer: address,
-        blockSize: size,
+        blockSize: bSize,
         copyBytes: used,
         details
       });
@@ -37614,13 +37654,20 @@ function planTagDataRepairs(view, header, tagIndex, extents) {
           plan(true, [
             violation.text,
             `Only the first ${fmt(free)} of its ${fmt(size)} bytes are its own; the rest belongs to other tags. ${count2} of ${maximum} node slots are used (${fmt(used)} bytes with the header), so everything in use fits.`,
-            `New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes copied, the rest zero (a zeroed slot is a free slot).`
+            `New block: ${fmt(targetBlockSize)} bytes at the end of the tag data (4-aligned): the header and used nodes copied, the rest zero (a zeroed slot is a free slot).`
           ]);
         }
-      } else if (!aligned && consistent) {
+      } else if ((!aligned || isTruncated) && consistent) {
+        const reasons = [];
+        if (!aligned) {
+          reasons.push(`${where} starts at ${hex2(address)}, which is not 4-aligned from the tag data start.`);
+        }
+        if (isTruncated) {
+          reasons.push(`${where} is truncated to ${fmt(size)} bytes, smaller than the required ${fmt(fullDeclaredSize)} bytes for ${maximum} node slots. OpenCE stops loading at "the script syntax of '${scenario.path}' is not laid out as this build's" (a blue screen).`);
+        }
         plan(true, [
-          `${where} starts at ${hex2(address)}, which is not 4-aligned from the tag data start. OpenCE stops loading at "the scenario's script data is missing or damaged; its scripts won't run" (a blue screen).`,
-          `${count2} of ${maximum} node slots are used. New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes (${fmt(used)} bytes) copied, the rest zero (a zeroed slot is a free slot).`
+          ...reasons,
+          `${count2} of ${maximum} node slots are used. New block: ${fmt(targetBlockSize)} bytes at the end of the tag data (4-aligned): the header and used nodes (${fmt(used)} bytes) copied, the rest zero (a zeroed slot is a free slot).`
         ]);
       } else if (!aligned) {
         unrepairable.push(
@@ -37757,6 +37804,9 @@ function applyTagDataRepairs(map, plan, repairs) {
     }
     const newPointer = base + at >>> 0;
     out.writeUInt32LE(newPointer, pointerAt);
+    if (r.id === "scriptSyntaxData") {
+      out.writeUInt32LE(r.blockSize, pointerAt - DATA_FIELD_POINTER);
+    }
     applied.push({ id: r.id, tagIndex: r.tagIndex, tagPath: r.tagPath, oldPointer: r.oldPointer >>> 0, newPointer, padding, blockSize: r.blockSize, copied: r.copyBytes, bytesAppended: padding + r.blockSize });
   }
   out.writeUInt32LE(out.length, TAG_DATA_FILE_SIZE_OFFSET);
@@ -40477,7 +40527,7 @@ function ensurePaletteEntry(buffer, header, tagIndex, paletteFieldName, paletteS
     const baseOffset = resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
     for (let i = 0; i < refl.count; i++) {
       const decoded = decodeStruct(buffer, baseOffset + i * structSize, paletteStructName);
-      const nameDep = decoded.get("name");
+      const nameDep = decoded.get("name") ?? decoded.get("reference");
       if (nameDep && nameDep.kind === "dependency" && nameDep.value.tagId === tagId) {
         return { buffer, header, paletteIndex: i };
       }
@@ -42630,6 +42680,142 @@ function shiftExistingRawDataOffsets(buffer, tagDataOffset, tagIndex, cutoffOffs
     }
   }
 }
+function resolvePointer3(pointer, tagDataOffset, baseMemoryAddress) {
+  return tagDataOffset + (pointer - baseMemoryAddress);
+}
+function appendDataBlock(buffer, header, tagIndex, data) {
+  if (data.length === 0) {
+    return { buffer, header, virtualAddress: 0, fileOffset: 0 };
+  }
+  const alignedPad = (4 - buffer.length % 4) % 4;
+  const padBuffer = alignedPad > 0 ? Buffer.alloc(alignedPad, 0) : Buffer.alloc(0);
+  const fileOffset = buffer.length + padBuffer.length;
+  const virtualAddress = tagIndex.baseMemoryAddress + (fileOffset - header.tagDataOffset);
+  const newBuffer = Buffer.concat([buffer, padBuffer, data]);
+  const newHeader = {
+    ...header,
+    tagDataSize: newBuffer.length - header.tagDataOffset,
+    decompressedFileSize: newBuffer.length
+  };
+  newBuffer.writeUInt32LE(newBuffer.length, 8);
+  newBuffer.writeUInt32LE(newHeader.tagDataSize, 20);
+  return { buffer: newBuffer, header: newHeader, virtualAddress, fileOffset };
+}
+function cloneEncounterWithChildReflexives(encSourceBytes, sourceBuffer, srcHdr, srcTagIndex, currentOut, currentHdr, currentTagIndex, donorToTargetActorPal, dstBspIdx) {
+  let curOut = currentOut;
+  let curHdr = currentHdr;
+  const encCopy = Buffer.alloc(176);
+  encSourceBytes.copy(encCopy);
+  encCopy.writeInt16LE(dstBspIdx, 42);
+  encCopy.writeInt16LE(dstBspIdx, 126);
+  const sqCount = encSourceBytes.readUInt32LE(128);
+  const sqPtr = encSourceBytes.readUInt32LE(132);
+  if (sqCount > 0 && sqPtr !== 0) {
+    const sqSrcBase = resolvePointer3(sqPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
+    const clonedSquads = [];
+    for (let s = 0; s < sqCount; s++) {
+      const sqSrcOff = sqSrcBase + s * 232;
+      const sqBytes = Buffer.alloc(232);
+      sourceBuffer.copy(sqBytes, 0, sqSrcOff, sqSrcOff + 232);
+      const donorActorType = sqBytes.readInt16LE(32);
+      if (donorActorType >= 0 && donorToTargetActorPal.has(donorActorType)) {
+        sqBytes.writeInt16LE(donorToTargetActorPal.get(donorActorType), 32);
+      }
+      const moveCount = sourceBuffer.readUInt32LE(sqSrcOff + 196);
+      const movePtr = sourceBuffer.readUInt32LE(sqSrcOff + 200);
+      if (moveCount > 0 && movePtr !== 0) {
+        const moveSrcOff = resolvePointer3(movePtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
+        const moveData = Buffer.alloc(moveCount * 64);
+        sourceBuffer.copy(moveData, 0, moveSrcOff, moveSrcOff + moveData.length);
+        const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, moveData);
+        curOut = appRes.buffer;
+        curHdr = appRes.header;
+        sqBytes.writeUInt32LE(moveCount, 196);
+        sqBytes.writeUInt32LE(appRes.virtualAddress, 200);
+      } else {
+        sqBytes.writeUInt32LE(0, 196);
+        sqBytes.writeUInt32LE(0, 200);
+      }
+      const locCount = sourceBuffer.readUInt32LE(sqSrcOff + 208);
+      const locPtr = sourceBuffer.readUInt32LE(sqSrcOff + 212);
+      if (locCount > 0 && locPtr !== 0) {
+        const locSrcOff = resolvePointer3(locPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
+        const locData = Buffer.alloc(locCount * 28);
+        sourceBuffer.copy(locData, 0, locSrcOff, locSrcOff + locData.length);
+        for (let l = 0; l < locCount; l++) {
+          const lActorType = locData.readInt16LE(l * 28 + 24);
+          if (lActorType >= 0 && donorToTargetActorPal.has(lActorType)) {
+            locData.writeInt16LE(donorToTargetActorPal.get(lActorType), l * 28 + 24);
+          }
+        }
+        const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, locData);
+        curOut = appRes.buffer;
+        curHdr = appRes.header;
+        sqBytes.writeUInt32LE(locCount, 208);
+        sqBytes.writeUInt32LE(appRes.virtualAddress, 212);
+      } else {
+        sqBytes.writeUInt32LE(0, 208);
+        sqBytes.writeUInt32LE(0, 212);
+      }
+      clonedSquads.push(sqBytes);
+    }
+    const allSquadsData = Buffer.concat(clonedSquads);
+    const sqAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, allSquadsData);
+    curOut = sqAppRes.buffer;
+    curHdr = sqAppRes.header;
+    encCopy.writeUInt32LE(sqCount, 128);
+    encCopy.writeUInt32LE(sqAppRes.virtualAddress, 132);
+  } else {
+    encCopy.writeUInt32LE(0, 128);
+    encCopy.writeUInt32LE(0, 132);
+  }
+  const plCount = encSourceBytes.readUInt32LE(140);
+  const plPtr = encSourceBytes.readUInt32LE(144);
+  if (plCount > 0 && plPtr !== 0) {
+    const plSrcBase = resolvePointer3(plPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
+    const plData = Buffer.alloc(plCount * 172);
+    sourceBuffer.copy(plData, 0, plSrcBase, plSrcBase + plData.length);
+    const plAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, plData);
+    curOut = plAppRes.buffer;
+    curHdr = plAppRes.header;
+    encCopy.writeUInt32LE(plCount, 140);
+    encCopy.writeUInt32LE(plAppRes.virtualAddress, 144);
+  } else {
+    encCopy.writeUInt32LE(0, 140);
+    encCopy.writeUInt32LE(0, 144);
+  }
+  const fpCount = encSourceBytes.readUInt32LE(152);
+  const fpPtr = encSourceBytes.readUInt32LE(156);
+  if (fpCount > 0 && fpPtr !== 0) {
+    const fpSrcBase = resolvePointer3(fpPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
+    const fpData = Buffer.alloc(fpCount * 24);
+    sourceBuffer.copy(fpData, 0, fpSrcBase, fpSrcBase + fpData.length);
+    const fpAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, fpData);
+    curOut = fpAppRes.buffer;
+    curHdr = fpAppRes.header;
+    encCopy.writeUInt32LE(fpCount, 152);
+    encCopy.writeUInt32LE(fpAppRes.virtualAddress, 156);
+  } else {
+    encCopy.writeUInt32LE(0, 152);
+    encCopy.writeUInt32LE(0, 156);
+  }
+  const pslCount = encSourceBytes.readUInt32LE(164);
+  const pslPtr = encSourceBytes.readUInt32LE(168);
+  if (pslCount > 0 && pslPtr !== 0) {
+    const pslSrcBase = resolvePointer3(pslPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
+    const pslData = Buffer.alloc(pslCount * 52);
+    sourceBuffer.copy(pslData, 0, pslSrcBase, pslSrcBase + pslData.length);
+    const pslAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, pslData);
+    curOut = pslAppRes.buffer;
+    curHdr = pslAppRes.header;
+    encCopy.writeUInt32LE(pslCount, 164);
+    encCopy.writeUInt32LE(pslAppRes.virtualAddress, 168);
+  } else {
+    encCopy.writeUInt32LE(0, 164);
+    encCopy.writeUInt32LE(0, 168);
+  }
+  return { buffer: curOut, header: curHdr, encounterBytes: encCopy };
+}
 function performBspSwap(sourceBuffer, targetBuffer, options) {
   const sourceInspected = inspectCustomEditionMap(sourceBuffer);
   let targetInspected = inspectCustomEditionMap(targetBuffer);
@@ -42743,7 +42929,11 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   let harvestedShaders = 0;
   let harvestedBitmaps = 0;
   let importedScenery = 0;
+  let importedVehicles = 0;
   let importedMachines = 0;
+  let importedEncounters = 0;
+  let importedTriggers = 0;
+  let importedScripts = 0;
   const tagIdMap = /* @__PURE__ */ new Map();
   const bspDeps = [];
   if (sourceInspected.status === "ok") {
@@ -42767,7 +42957,9 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
     }
     const shouldHarvestShaders = options.harvestShaders !== false;
     const shouldImportObjects = Boolean(options.importSceneryAndMachines);
-    if (shouldHarvestShaders && bspDeps.length > 0 || shouldImportObjects) {
+    const shouldImportVehicles = Boolean(options.importVehicles);
+    const shouldImportAiAndScripts = Boolean(options.importAiAndScripts);
+    if (shouldHarvestShaders && bspDeps.length > 0 || shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
       const srcTagIndex = sourceInspected.tagIndex;
       const rootIndicesSet = /* @__PURE__ */ new Set();
       if (shouldHarvestShaders) {
@@ -42782,49 +42974,104 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       let srcSceneryPalOffset = 0;
       let srcPlacedSceneryCount = 0;
       let srcPlacedSceneryOffset = 0;
+      let srcVehiclePalCount = 0;
+      let srcVehiclePalOffset = 0;
+      let srcPlacedVehiclesCount = 0;
+      let srcPlacedVehiclesOffset = 0;
       let srcMachinePalCount = 0;
       let srcMachinePalOffset = 0;
       let srcPlacedMachinesCount = 0;
       let srcPlacedMachinesOffset = 0;
-      if (shouldImportObjects) {
+      let srcActorPalCount = 0;
+      let srcActorPalOffset = 0;
+      let srcRefCount = 0;
+      let srcRefOffset = 0;
+      let srcScnrOffset = 0;
+      if (shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
         const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 65535];
         if (srcScnrEntry) {
-          const srcScnrOffset = resolveTagDataPointer(
+          srcScnrOffset = resolveTagDataPointer(
             srcScnrEntry.tagDataPointerOrResourceIndex,
             sourceInspected.header,
             srcTagIndex.baseMemoryAddress
           );
-          const scenPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 540);
-          srcSceneryPalCount = scenPalRefl.count;
-          if (scenPalRefl.count > 0) {
-            srcSceneryPalOffset = sourceInspected.header.tagDataOffset + (scenPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-            for (let i = 0; i < scenPalRefl.count; i++) {
-              const tagId = sourceBuffer.readUInt32LE(srcSceneryPalOffset + i * 48 + 12);
-              if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
-                rootIndicesSet.add(tagId & 65535);
+          if (shouldImportObjects) {
+            const scenPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 540);
+            srcSceneryPalCount = scenPalRefl.count;
+            if (scenPalRefl.count > 0) {
+              srcSceneryPalOffset = sourceInspected.header.tagDataOffset + (scenPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+              for (let i = 0; i < scenPalRefl.count; i++) {
+                const tagId = sourceBuffer.readUInt32LE(srcSceneryPalOffset + i * 48 + 12);
+                if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
+                  rootIndicesSet.add(tagId & 65535);
+                }
               }
             }
-          }
-          const scenRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 528);
-          srcPlacedSceneryCount = scenRefl.count;
-          if (scenRefl.count > 0) {
-            srcPlacedSceneryOffset = sourceInspected.header.tagDataOffset + (scenRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-          }
-          const machPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 672);
-          srcMachinePalCount = machPalRefl.count;
-          if (machPalRefl.count > 0) {
-            srcMachinePalOffset = sourceInspected.header.tagDataOffset + (machPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-            for (let i = 0; i < machPalRefl.count; i++) {
-              const tagId = sourceBuffer.readUInt32LE(srcMachinePalOffset + i * 48 + 12);
-              if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
-                rootIndicesSet.add(tagId & 65535);
-              }
+            const scenRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 528);
+            srcPlacedSceneryCount = scenRefl.count;
+            if (scenRefl.count > 0) {
+              srcPlacedSceneryOffset = sourceInspected.header.tagDataOffset + (scenRefl.pointerLow - srcTagIndex.baseMemoryAddress);
             }
           }
-          const machRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 660);
-          srcPlacedMachinesCount = machRefl.count;
-          if (machRefl.count > 0) {
-            srcPlacedMachinesOffset = sourceInspected.header.tagDataOffset + (machRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+          if (shouldImportVehicles) {
+            const vehPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 588);
+            srcVehiclePalCount = vehPalRefl.count;
+            if (vehPalRefl.count > 0) {
+              srcVehiclePalOffset = sourceInspected.header.tagDataOffset + (vehPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+              for (let i = 0; i < vehPalRefl.count; i++) {
+                const tagId = sourceBuffer.readUInt32LE(srcVehiclePalOffset + i * 48 + 12);
+                if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
+                  rootIndicesSet.add(tagId & 65535);
+                }
+              }
+            }
+            const vehRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 576);
+            srcPlacedVehiclesCount = vehRefl.count;
+            if (vehRefl.count > 0) {
+              srcPlacedVehiclesOffset = sourceInspected.header.tagDataOffset + (vehRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+            }
+          }
+          if (shouldImportObjects) {
+            const machPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 672);
+            srcMachinePalCount = machPalRefl.count;
+            if (machPalRefl.count > 0) {
+              srcMachinePalOffset = sourceInspected.header.tagDataOffset + (machPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+              for (let i = 0; i < machPalRefl.count; i++) {
+                const tagId = sourceBuffer.readUInt32LE(srcMachinePalOffset + i * 48 + 12);
+                if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
+                  rootIndicesSet.add(tagId & 65535);
+                }
+              }
+            }
+            const machRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 660);
+            srcPlacedMachinesCount = machRefl.count;
+            if (machRefl.count > 0) {
+              srcPlacedMachinesOffset = sourceInspected.header.tagDataOffset + (machRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+            }
+          }
+          if (shouldImportAiAndScripts) {
+            const actorPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1056);
+            srcActorPalCount = actorPalRefl.count;
+            if (actorPalRefl.count > 0) {
+              srcActorPalOffset = sourceInspected.header.tagDataOffset + (actorPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+              for (let i = 0; i < actorPalRefl.count; i++) {
+                const tagId = sourceBuffer.readUInt32LE(srcActorPalOffset + i * 16 + 12);
+                if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
+                  rootIndicesSet.add(tagId & 65535);
+                }
+              }
+            }
+            const refRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1204);
+            srcRefCount = refRefl.count;
+            if (refRefl.count > 0) {
+              srcRefOffset = sourceInspected.header.tagDataOffset + (refRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+              for (let i = 0; i < refRefl.count; i++) {
+                const tagId = sourceBuffer.readUInt32LE(srcRefOffset + i * 40 + 36);
+                if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
+                  rootIndicesSet.add(tagId & 65535);
+                }
+              }
+            }
           }
         }
       }
@@ -42868,10 +43115,44 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                   tagIdMap.set(cTag.originalIndex, targetTagId);
                 }
               }
-              if (shouldImportObjects) {
+              if (options.clearExistingPlacements) {
                 const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
                 if (targetScnrEntry) {
-                  if (srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
+                  const curScnrOff = resolveTagDataPointer(
+                    targetScnrEntry.tagDataPointerOrResourceIndex,
+                    reinspected.header,
+                    reinspected.tagIndex.baseMemoryAddress
+                  );
+                  const clearOffsets = [528, 552, 576, 600, 624, 660, 684, 708, 732, 888, 900, 936];
+                  if (!shouldImportAiAndScripts) {
+                    clearOffsets.push(864, 1068);
+                  }
+                  for (const off of clearOffsets) {
+                    out.writeUInt32LE(0, curScnrOff + off);
+                    out.writeUInt32LE(0, curScnrOff + off + 4);
+                  }
+                }
+              }
+              if (options.clearPlayerSpawns) {
+                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+                if (targetScnrEntry) {
+                  const curScnrOff = resolveTagDataPointer(
+                    targetScnrEntry.tagDataPointerOrResourceIndex,
+                    reinspected.header,
+                    reinspected.tagIndex.baseMemoryAddress
+                  );
+                  const spawnClearOffsets = [840, 852, 912];
+                  for (const off of spawnClearOffsets) {
+                    out.writeUInt32LE(0, curScnrOff + off);
+                    out.writeUInt32LE(0, curScnrOff + off + 4);
+                  }
+                }
+              }
+              if (shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
+                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+                if (targetScnrEntry) {
+                  const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+                  if (shouldImportObjects && srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
                     const donorToTargetScenPal = /* @__PURE__ */ new Map();
                     for (let i = 0; i < srcSceneryPalCount; i++) {
                       const entryOff = srcSceneryPalOffset + i * 48;
@@ -42900,11 +43181,11 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                       const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
                       if (targetPalIdx !== void 0) {
                         if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(sOff + 4);
-                          const posY = sourceBuffer.readFloatLE(sOff + 8);
-                          const posZ = sourceBuffer.readFloatLE(sOff + 12);
-                          const margin = 8;
-                          if (posX < srcWorldBounds[0] - margin || posX > srcWorldBounds[1] + margin || posY < srcWorldBounds[2] - margin || posY > srcWorldBounds[3] + margin || posZ < srcWorldBounds[4] - margin || posZ > srcWorldBounds[5] + margin) {
+                          const posX = sourceBuffer.readFloatLE(sOff + 8);
+                          const posY = sourceBuffer.readFloatLE(sOff + 12);
+                          const posZ = sourceBuffer.readFloatLE(sOff + 16);
+                          const margin = 20;
+                          if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
                             continue;
                           }
                         }
@@ -42934,7 +43215,72 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                       importedScenery = validPlaced.length;
                     }
                   }
-                  if (srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
+                  if (shouldImportVehicles && srcVehiclePalCount > 0 && srcPlacedVehiclesCount > 0) {
+                    const donorToTargetVehPal = /* @__PURE__ */ new Map();
+                    for (let i = 0; i < srcVehiclePalCount; i++) {
+                      const entryOff = srcVehiclePalOffset + i * 48;
+                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
+                      if (targetTagId !== void 0 && targetTagId !== 4294967295) {
+                        const palRes = ensurePaletteEntry(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          "vehicle palette",
+                          "ScenarioVehiclePalette",
+                          targetTagId,
+                          1986357353
+                          // 'vehi'
+                        );
+                        out = palRes.buffer;
+                        reinspected.header = palRes.header;
+                        donorToTargetVehPal.set(i, palRes.paletteIndex);
+                      }
+                    }
+                    const validVehPlaced = [];
+                    for (let i = 0; i < srcPlacedVehiclesCount; i++) {
+                      const vOff = srcPlacedVehiclesOffset + i * 120;
+                      const donorPalIdx = sourceBuffer.readInt16LE(vOff + 0);
+                      const targetPalIdx = donorToTargetVehPal.get(donorPalIdx);
+                      if (targetPalIdx !== void 0) {
+                        if (options.filterObjectsToBspBounds) {
+                          const posX = sourceBuffer.readFloatLE(vOff + 8);
+                          const posY = sourceBuffer.readFloatLE(vOff + 12);
+                          const posZ = sourceBuffer.readFloatLE(vOff + 16);
+                          const margin = 20;
+                          if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
+                            continue;
+                          }
+                        }
+                        const vBytes = Buffer.alloc(120);
+                        sourceBuffer.copy(vBytes, 0, vOff, vOff + 120);
+                        vBytes.writeInt16LE(targetPalIdx, 0);
+                        vBytes.writeInt16LE(-1, 2);
+                        vBytes.writeUInt16LE(0, 4);
+                        vBytes.writeUInt16LE(3855, 90);
+                        validVehPlaced.push(vBytes);
+                      }
+                    }
+                    if (validVehPlaced.length > 0) {
+                      const curScnrOff = resolveTagDataPointer(
+                        targetScnrEntry.tagDataPointerOrResourceIndex,
+                        reinspected.header,
+                        reinspected.tagIndex.baseMemoryAddress
+                      );
+                      const appendRes = appendReflexiveElements(
+                        out,
+                        reinspected.header,
+                        reinspected.tagIndex,
+                        curScnrOff + 576,
+                        Buffer.concat(validVehPlaced),
+                        validVehPlaced.length
+                      );
+                      out = appendRes.buffer;
+                      reinspected.header = appendRes.header;
+                      importedVehicles = validVehPlaced.length;
+                    }
+                  }
+                  if (shouldImportObjects && srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
                     const donorToTargetMachPal = /* @__PURE__ */ new Map();
                     for (let i = 0; i < srcMachinePalCount; i++) {
                       const entryOff = srcMachinePalOffset + i * 48;
@@ -42963,6 +43309,15 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                       const donorPalIdx = sourceBuffer.readInt16LE(mOff + 0);
                       const targetPalIdx = donorToTargetMachPal.get(donorPalIdx);
                       if (targetPalIdx !== void 0) {
+                        if (options.filterObjectsToBspBounds) {
+                          const posX = sourceBuffer.readFloatLE(mOff + 8);
+                          const posY = sourceBuffer.readFloatLE(mOff + 12);
+                          const posZ = sourceBuffer.readFloatLE(mOff + 16);
+                          const margin = 20;
+                          if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
+                            continue;
+                          }
+                        }
                         const mBytes = Buffer.alloc(64);
                         sourceBuffer.copy(mBytes, 0, mOff, mOff + 64);
                         mBytes.writeInt16LE(targetPalIdx, 0);
@@ -42997,6 +43352,216 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                       out = appendRes.buffer;
                       reinspected.header = appendRes.header;
                       importedMachines = validMachPlaced.length;
+                    }
+                  }
+                  if (shouldImportAiAndScripts) {
+                    const donorToTargetActorPal = /* @__PURE__ */ new Map();
+                    if (srcActorPalCount > 0) {
+                      for (let i = 0; i < srcActorPalCount; i++) {
+                        const entryOff = srcActorPalOffset + i * 16;
+                        const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+                        const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
+                        if (targetTagId !== void 0 && targetTagId !== 4294967295) {
+                          const palRes = ensurePaletteEntry(
+                            out,
+                            reinspected.header,
+                            reinspected.tagIndex,
+                            "actor palette",
+                            "ScenarioActorPalette",
+                            targetTagId,
+                            1633907830
+                            // 'actv'
+                          );
+                          out = palRes.buffer;
+                          reinspected.header = palRes.header;
+                          donorToTargetActorPal.set(i, palRes.paletteIndex);
+                        }
+                      }
+                    }
+                    const curScnrOff = resolveTagDataPointer(
+                      targetScnrEntry.tagDataPointerOrResourceIndex,
+                      reinspected.header,
+                      reinspected.tagIndex.baseMemoryAddress
+                    );
+                    const trigRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 864);
+                    if (trigRefl.count > 0) {
+                      const trigBase = sourceInspected.header.tagDataOffset + (trigRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+                      const validTrigs = [];
+                      const [minX2, minY2, minZ2, maxX2, maxY2, maxZ2] = srcWorldBounds;
+                      const margin = 25;
+                      for (let i = 0; i < trigRefl.count; i++) {
+                        const tOff = trigBase + i * 96;
+                        if (options.filterObjectsToBspBounds) {
+                          const posX = sourceBuffer.readFloatLE(tOff + 72);
+                          const posY = sourceBuffer.readFloatLE(tOff + 76);
+                          const posZ = sourceBuffer.readFloatLE(tOff + 80);
+                          if (posX < minX2 - margin || posX > maxX2 + margin || posY < minY2 - margin || posY > maxY2 + margin || posZ < minZ2 - margin || posZ > maxZ2 + margin) {
+                            continue;
+                          }
+                        }
+                        const tBytes = Buffer.alloc(96);
+                        sourceBuffer.copy(tBytes, 0, tOff, tOff + 96);
+                        validTrigs.push(tBytes);
+                      }
+                      if (validTrigs.length > 0) {
+                        const appendRes = appendReflexiveElements(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          curScnrOff + 864,
+                          Buffer.concat(validTrigs),
+                          validTrigs.length
+                        );
+                        out = appendRes.buffer;
+                        reinspected.header = appendRes.header;
+                        importedTriggers = validTrigs.length;
+                      }
+                    }
+                    const encRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1068);
+                    if (encRefl.count > 0) {
+                      const encBase = sourceInspected.header.tagDataOffset + (encRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+                      const clonedEncBuffers = [];
+                      for (let i = 0; i < encRefl.count; i++) {
+                        const encOff = encBase + i * 176;
+                        const precompBsp = sourceBuffer.readInt16LE(encOff + 126);
+                        const manualBsp = sourceBuffer.readInt16LE(encOff + 42);
+                        if (options.filterObjectsToBspBounds && srcIndices.length === 1) {
+                          if (precompBsp !== -1 && precompBsp !== srcIdx && manualBsp !== srcIdx) {
+                            continue;
+                          }
+                        }
+                        const encBytes = sourceBuffer.subarray(encOff, encOff + 176);
+                        const cloneRes = cloneEncounterWithChildReflexives(
+                          encBytes,
+                          sourceBuffer,
+                          sourceInspected.header,
+                          srcTagIndex,
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          donorToTargetActorPal,
+                          dstIdx
+                        );
+                        out = cloneRes.buffer;
+                        reinspected.header = cloneRes.header;
+                        clonedEncBuffers.push(cloneRes.encounterBytes);
+                      }
+                      if (clonedEncBuffers.length > 0) {
+                        const allEncBytes = Buffer.concat(clonedEncBuffers);
+                        const appendRes = appendReflexiveElements(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          curScnrOff + 1068,
+                          allEncBytes,
+                          clonedEncBuffers.length
+                        );
+                        out = appendRes.buffer;
+                        reinspected.header = appendRes.header;
+                        importedEncounters = clonedEncBuffers.length;
+                      }
+                    }
+                    const syntaxDataSize = sourceBuffer.readUInt32LE(srcScnrOffset + 1140);
+                    const syntaxDataPtr = sourceBuffer.readUInt32LE(srcScnrOffset + 1140 + 12);
+                    const stringDataSize = sourceBuffer.readUInt32LE(srcScnrOffset + 1160);
+                    const stringDataPtr = sourceBuffer.readUInt32LE(srcScnrOffset + 1160 + 12);
+                    const scriptsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1180);
+                    const globalsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1192);
+                    const refsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1204);
+                    if (scriptsRefl.count > 0 && syntaxDataSize > 0) {
+                      const synSrcOff = resolvePointer3(syntaxDataPtr, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
+                      const synData = Buffer.alloc(syntaxDataSize);
+                      sourceBuffer.copy(synData, 0, synSrcOff, synSrcOff + syntaxDataSize);
+                      const synRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, synData);
+                      out = synRes.buffer;
+                      reinspected.header = synRes.header;
+                      out.writeUInt32LE(syntaxDataSize, curScnrOff + 1140);
+                      out.writeUInt32LE(0, curScnrOff + 1140 + 4);
+                      out.writeUInt32LE(0, curScnrOff + 1140 + 8);
+                      out.writeUInt32LE(synRes.virtualAddress, curScnrOff + 1140 + 12);
+                      const strSrcOff = resolvePointer3(stringDataPtr, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
+                      const strData = Buffer.alloc(stringDataSize);
+                      sourceBuffer.copy(strData, 0, strSrcOff, strSrcOff + stringDataSize);
+                      const strRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, strData);
+                      out = strRes.buffer;
+                      reinspected.header = strRes.header;
+                      out.writeUInt32LE(stringDataSize, curScnrOff + 1160);
+                      out.writeUInt32LE(0, curScnrOff + 1160 + 4);
+                      out.writeUInt32LE(0, curScnrOff + 1160 + 8);
+                      out.writeUInt32LE(strRes.virtualAddress, curScnrOff + 1160 + 12);
+                      const scSrcOff = resolvePointer3(scriptsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
+                      const scData = Buffer.alloc(scriptsRefl.count * 92);
+                      sourceBuffer.copy(scData, 0, scSrcOff, scSrcOff + scData.length);
+                      for (let s = 0; s < scriptsRefl.count; s++) {
+                        scData.writeUInt32LE(0, s * 92 + 80);
+                        scData.writeUInt32LE(0, s * 92 + 84);
+                      }
+                      const scRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, scData);
+                      out = scRes.buffer;
+                      reinspected.header = scRes.header;
+                      out.writeUInt32LE(scriptsRefl.count, curScnrOff + 1180);
+                      out.writeUInt32LE(scRes.virtualAddress, curScnrOff + 1180 + 4);
+                      importedScripts = scriptsRefl.count;
+                      if (globalsRefl.count > 0) {
+                        const glSrcOff = resolvePointer3(globalsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
+                        const glData = Buffer.alloc(globalsRefl.count * 92);
+                        sourceBuffer.copy(glData, 0, glSrcOff, glSrcOff + glData.length);
+                        const glRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, glData);
+                        out = glRes.buffer;
+                        reinspected.header = glRes.header;
+                        out.writeUInt32LE(globalsRefl.count, curScnrOff + 1192);
+                        out.writeUInt32LE(glRes.virtualAddress, curScnrOff + 1192 + 4);
+                      }
+                      if (refsRefl.count > 0) {
+                        const refSrcOff = resolvePointer3(refsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
+                        const refData = Buffer.alloc(refsRefl.count * 40);
+                        sourceBuffer.copy(refData, 0, refSrcOff, refSrcOff + refData.length);
+                        for (let r = 0; r < refsRefl.count; r++) {
+                          const donorTagId = refData.readUInt32LE(r * 40 + 36);
+                          const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
+                          if (targetTagId !== void 0) {
+                            refData.writeUInt32LE(targetTagId, r * 40 + 36);
+                          }
+                        }
+                        const refRes = appendDataBlock(out, reinspected.header, reinspected.tagIndex, refData);
+                        out = refRes.buffer;
+                        reinspected.header = refRes.header;
+                        out.writeUInt32LE(refsRefl.count, curScnrOff + 1204);
+                        out.writeUInt32LE(refRes.virtualAddress, curScnrOff + 1204 + 4);
+                      }
+                    }
+                    if (options.clearPlayerSpawns) {
+                      const srcSpawnsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 852);
+                      if (srcSpawnsRefl.count > 0) {
+                        const spSize = resolveStruct("ScenarioPlayerStartingLocation").totalSize;
+                        const spBase = resolvePointer3(srcSpawnsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
+                        const validSpawns = [];
+                        const [minX2, minY2, minZ2, maxX2, maxY2, maxZ2] = srcWorldBounds;
+                        const margin = 20;
+                        for (let i = 0; i < srcSpawnsRefl.count; i++) {
+                          const spOff = spBase + i * spSize;
+                          const posX = sourceBuffer.readFloatLE(spOff + 0);
+                          const posY = sourceBuffer.readFloatLE(spOff + 4);
+                          const posZ = sourceBuffer.readFloatLE(spOff + 8);
+                          if (!options.filterObjectsToBspBounds || posX >= minX2 - margin && posX <= maxX2 + margin && posY >= minY2 - margin && posY <= maxY2 + margin && posZ >= minZ2 - margin && posZ <= maxZ2 + margin) {
+                            const spBytes = Buffer.alloc(spSize);
+                            sourceBuffer.copy(spBytes, 0, spOff, spOff + spSize);
+                            validSpawns.push(spBytes);
+                          }
+                        }
+                        if (validSpawns.length > 0) {
+                          const appendRes = appendReflexiveElements(
+                            out,
+                            reinspected.header,
+                            reinspected.tagIndex,
+                            curScnrOff + 852,
+                            Buffer.concat(validSpawns),
+                            validSpawns.length
+                          );
+                          out = appendRes.buffer;
+                          reinspected.header = appendRes.header;
+                        }
+                      }
                     }
                   }
                   const finalRe = inspectCustomEditionMap(out);
@@ -43132,7 +43697,11 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       harvestedShaders,
       harvestedBitmaps,
       importedScenery,
-      importedMachines
+      importedVehicles,
+      importedMachines,
+      importedEncounters,
+      importedTriggers,
+      importedScripts
     }
   };
 }

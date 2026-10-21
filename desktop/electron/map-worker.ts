@@ -982,6 +982,7 @@ export function runStageTagTestMap(task: { requestId: string; targetPath: string
       targetPath: target,
       crc32: finalized.crc32,
       scenarioName: finalized.scenarioName,
+      mapType: currentMap.header.mapType,
     });
   } catch (err) {
     sendWriteError(task.requestId, err);
@@ -1624,6 +1625,8 @@ export function runExportModel3d(task: {
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    const dir = path.dirname(task.outputPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const lod = task.lod ?? 4;
     const geometry = extractModelRenderGeometry(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.modelTagId, lod);
     if (task.format === 'glb') {
@@ -1651,6 +1654,8 @@ export function runExportBsp3d(task: {
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    const dir = path.dirname(task.outputPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const mesh = extractBspRenderMesh(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.bspIndex);
     if (task.format === 'glb') {
       const glbBytes = exportBspToGlb(mesh);

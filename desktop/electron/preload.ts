@@ -34,7 +34,7 @@ const api: OpenceApi = {
   setResourceMapPath: (kind, filePath) => ipcRenderer.invoke('resourceMaps:setPath', kind, filePath),
   detectDefaultResourceMapPaths: () => ipcRenderer.invoke('resourceMaps:detectDefaultPaths'),
   getVersionSettings: () => ipcRenderer.invoke('resourceMaps:getVersionSettings'),
-  setVersionSettings: (version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null }) =>
+  setVersionSettings: (version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null; loc?: string | null }) =>
     ipcRenderer.invoke('resourceMaps:setVersionSettings', version, maps),
   pickInjectContainer: () => ipcRenderer.invoke('tags:pickInjectContainer'),
   planInject: (containerPath: string, mode: InjectionMode) => ipcRenderer.invoke('tags:planInject', containerPath, mode),
@@ -102,13 +102,16 @@ const api: OpenceApi = {
     ipcRenderer.invoke('sound:replace', tagIndex, pitchRangeIndex, permutationIndex, inputPath),
   pickExport3dPath: (defaultName: string, format: 'obj' | 'glb') =>
     ipcRenderer.invoke('dialog:pickExport3dPath', defaultName, format),
+  pickObjFile: () => ipcRenderer.invoke('dialog:pickObjFile'),
+  analyzeCollisionObj: (filePath?: string) => ipcRenderer.invoke('collision:analyzeObj', filePath),
+  pickExportDirectory: () => ipcRenderer.invoke('dialog:pickExportDirectory'),
   exportModel3d: (modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     ipcRenderer.invoke('3d:exportModel', modelTagId, lod, format, outputPath),
   exportBsp3d: (bspIndex: number, format: 'obj' | 'glb', outputPath: string) =>
     ipcRenderer.invoke('3d:exportBsp', bspIndex, format, outputPath),
   convertPreflight: (source: 'open' | 'pick', resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convertPreflight', source, resourcePaths),
   convertMap: (acknowledgeScripts: boolean, repairs: ConvertRepairChoice, resourcePaths?: ConvertResourcePaths) => ipcRenderer.invoke('map:convert', acknowledgeScripts, repairs, resourcePaths),
-  pickConvertResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickConvertResource', kind),
+  pickConvertResource: (kind: 'bitmaps' | 'sounds' | 'loc') => ipcRenderer.invoke('dialog:pickConvertResource', kind),
   openContainingFolder: (filePath: string) => ipcRenderer.invoke('app:openContainingFolder', filePath),
   getSettings: () => ipcRenderer.invoke('app:getSettings'),
   notImplemented: (feature: string) => ipcRenderer.send('app:notImplemented', feature),
@@ -159,6 +162,9 @@ const api: OpenceApi = {
   pickOpenCeDirectory: () => ipcRenderer.invoke('tagTest:pickDir'),
   getOpenCeConfig: () => ipcRenderer.invoke('tagTest:getConfig'),
   setOpenCeDirectory: (dir: string | null) => ipcRenderer.invoke('tagTest:setDir', dir),
+  tagTestSetAlwaysOnTop: (flag: boolean) => ipcRenderer.invoke('tagTest:setAlwaysOnTop', flag),
+  tagTestIsAlwaysOnTop: () => ipcRenderer.invoke('tagTest:isAlwaysOnTop'),
+  tagTestTriggerFlycam: () => ipcRenderer.invoke('tagTest:triggerFlycam'),
   setAlwaysOnTop: (flag: boolean) => ipcRenderer.invoke('window:setAlwaysOnTop', flag),
   isAlwaysOnTop: () => ipcRenderer.invoke('window:isAlwaysOnTop'),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),

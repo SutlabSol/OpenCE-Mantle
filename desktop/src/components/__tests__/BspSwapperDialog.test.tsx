@@ -167,15 +167,18 @@ describe('BspSwapperDialog', () => {
     fireEvent.click(screen.getByTestId('bsp-swapper-perform-btn'));
 
     await waitFor(() => {
-      expect(window.opence.performBspSwap).toHaveBeenCalledWith('C:\\HaloPC\\maps\\b30.map', {
-        sourceBspIndex: 0,
-        targetBspIndex: 0,
-        stripDobcAndDecals: true,
-        relocateGroundObjects: true,
-        harvestShaders: true,
-        importSceneryAndMachines: true,
-        makeDoorsAutomatic: true,
-      });
+      expect(window.opence.performBspSwap).toHaveBeenCalledWith(
+        'C:\\HaloPC\\maps\\b30.map',
+        expect.objectContaining({
+          sourceBspIndex: 0,
+          targetBspIndex: 0,
+          stripDobcAndDecals: true,
+          relocateGroundObjects: true,
+          harvestShaders: true,
+          importSceneryAndMachines: true,
+          makeDoorsAutomatic: true,
+        })
+      );
       expect(mockOnSuccess).toHaveBeenCalledTimes(1);
       expect(screen.getByTestId('bsp-swapper-success')).toBeInTheDocument();
     });

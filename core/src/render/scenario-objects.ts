@@ -387,7 +387,7 @@ export function ensurePaletteEntry(
   buffer: Buffer,
   header: CacheFileHeader,
   tagIndex: TagIndex,
-  paletteFieldName: 'vehicle palette' | 'scenery palette' | 'biped palette' | 'weapon palette' | 'equipment palette' | 'machine palette',
+  paletteFieldName: 'vehicle palette' | 'scenery palette' | 'biped palette' | 'weapon palette' | 'equipment palette' | 'machine palette' | 'actor palette',
   paletteStructName: string,
   tagId: number,
   classFourCC: number,
@@ -409,20 +409,20 @@ export function ensurePaletteEntry(
 
   const reflOffset = scenarioOffset + field.offset;
   const refl = decodeReflexive(buffer, reflOffset);
-  const structSize = resolveStruct(paletteStructName).totalSize; // 48
+  const structSize = resolveStruct(paletteStructName).totalSize;
 
   if (refl.count > 0) {
     const baseOffset = resolvePointer(refl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
     for (let i = 0; i < refl.count; i++) {
       const decoded = decodeStruct(buffer, baseOffset + i * structSize, paletteStructName);
-      const nameDep = decoded.get('name');
+      const nameDep = decoded.get('name') ?? decoded.get('reference');
       if (nameDep && nameDep.kind === 'dependency' && nameDep.value.tagId === tagId) {
         return { buffer, header, paletteIndex: i };
       }
     }
   }
 
-  // Not in palette yet -> append new 48-byte palette entry
+  // Not in palette yet -> append new palette entry
   const entryBytes = Buffer.alloc(structSize, 0);
   entryBytes.writeUInt32LE(classFourCC, 0);
   entryBytes.writeUInt32LE(0, 4);

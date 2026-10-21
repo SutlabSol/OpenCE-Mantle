@@ -11,6 +11,7 @@ import {
   getGroupDefinition,
   OCETAGS_FORMAT_VERSION,
   readResourceTable,
+  parseAndAnalyzeObj,
   type RandomAccessFile,
 } from '../../core/src/index';
 import { getRecentMaps, addRecentMap } from './recent-maps';
@@ -1440,6 +1441,35 @@ async function pickExportDirectoryFlow(): Promise<{ path: string | null }> {
   return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
 
+async function pickObjFileFlow(): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Wavefront OBJ Mesh for Collision Analysis',
+    filters: [
+      { name: 'Wavefront OBJ (*.obj)', extensions: ['obj'] },
+      { name: 'All Files (*.*)', extensions: ['*'] },
+    ],
+    properties: ['openFile'],
+  });
+  return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
+}
+
+async function analyzeCollisionObjFlow(filePath?: string) {
+  try {
+    let p = filePath;
+    if (!p) {
+      const picked = await pickObjFileFlow();
+      if (!picked.path) return { ok: false, error: 'Cancelled' };
+      p = picked.path;
+    }
+    const text = fs.readFileSync(p, 'utf8');
+    const summary = parseAndAnalyzeObj(text);
+    return { ok: true, summary, filePath: p };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 async function exportModel3dFlow(
   modelTagId: number,
   lod: number | undefined,
@@ -2301,6 +2331,8 @@ app.whenReady().then(() => {
   );
   ipcMain.handle('dialog:pickExport3dPath', (_e, defaultName: string, format: 'obj' | 'glb') => pickExport3dPathFlow(defaultName, format));
   ipcMain.handle('dialog:pickExportDirectory', () => pickExportDirectoryFlow());
+  ipcMain.handle('dialog:pickObjFile', () => pickObjFileFlow());
+  ipcMain.handle('collision:analyzeObj', (_e, filePath?: string) => analyzeCollisionObjFlow(filePath));
   ipcMain.handle('3d:exportModel', (_e, modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     exportModel3dFlow(modelTagId, lod, format, outputPath),
   );

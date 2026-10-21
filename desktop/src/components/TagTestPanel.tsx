@@ -15,7 +15,6 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
   const [openCeDir, setOpenCeDir] = useState<string | null>(null);
   const [gameSpeed, setGameSpeed] = useState<number>(1.0);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [isPinned, setIsPinned] = useState(false);
 
   // Active cheat toggle states
   const [cheats, setCheats] = useState({
@@ -39,7 +38,6 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
     window.opence.getOpenCeConfig().then((cfg) => {
       setOpenCeDir(cfg.directory);
     });
-    window.opence.isAlwaysOnTop?.().then((v) => setIsPinned(!!v));
 
     const unsubStatus = window.opence.onTagTestStatusChange((newStatus) => {
       setStatus(newStatus);
@@ -95,12 +93,6 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
     if (res.path) {
       setOpenCeDir(res.path);
     }
-  };
-
-  const togglePin = async () => {
-    const next = !isPinned;
-    const res = await window.opence.setAlwaysOnTop?.(next);
-    setIsPinned(!!res);
   };
 
   const sendHs = (cmd: string) => {
@@ -190,31 +182,6 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
             }}
           >
             Change Path...
-          </button>
-          <button
-            data-testid="tag-test-pin-on-top"
-            onClick={togglePin}
-            style={{
-              background: isPinned ? 'rgba(56,189,248,0.2)' : 'transparent',
-              border: `1px solid ${isPinned ? 'var(--accent-cyan)' : 'var(--border)'}`,
-              color: isPinned ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-              fontSize: 11,
-              fontWeight: isPinned ? 600 : 400,
-              padding: '2px 8px',
-              borderRadius: 3,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4,
-            }}
-            title={
-              isPinned
-                ? 'Modding Tool is pinned always on top of the game window'
-                : 'Pin Modding Tool window always on top so you can click cheat toggles over the game'
-            }
-          >
-            <span>📌</span>
-            <span>{isPinned ? 'Pinned on Top' : 'Stay on Top'}</span>
           </button>
         </div>
 
@@ -335,10 +302,10 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
               />
               <ToggleCheckbox
                 testid="tag-test-cheat-flycam"
-                label="Flycam (debug_camera)"
-                checked={cheats.flycam}
-                disabled={!status.telnetConnected}
-                onChange={() => toggleCheat('flycam', 'debug_camera 1', 'debug_camera 0')}
+                label="Flycam Mode (WIP)"
+                checked={false}
+                disabled={true}
+                onChange={() => {}}
               />
               <ToggleCheckbox
                 testid="tag-test-cheat-wireframe"
@@ -375,12 +342,6 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
           <div>
             <SectionHeader title="Quick Spawns & Actions" />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 6 }}>
-              <ActionButton
-                testid="tag-test-spawn-warthog"
-                label="🚗 Spawn Warthog"
-                disabled={!status.telnetConnected}
-                onClick={() => sendHs('cheat_spawn_warthog')}
-              />
               <ActionButton
                 testid="tag-test-teleport-cam"
                 label="📍 Teleport to Camera"

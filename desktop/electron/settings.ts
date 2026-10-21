@@ -59,13 +59,14 @@ export function setResourceMapPath(kind: ResourceMapKind, filePath: string | nul
 
 export function setVersionResourceMaps(
   version: HaloBitmapVersion,
-  maps: { bitmaps?: string | null; sounds?: string | null },
+  maps: { bitmaps?: string | null; sounds?: string | null; loc?: string | null },
 ): void {
   const current = getSettings();
-  const existing: VersionResourceMaps = current.versionResourceMaps?.[version] ?? { bitmaps: null, sounds: null };
+  const existing: VersionResourceMaps = current.versionResourceMaps?.[version] ?? { bitmaps: null, sounds: null, loc: null };
   const updatedVersion: VersionResourceMaps = {
     bitmaps: maps.bitmaps !== undefined ? maps.bitmaps : existing.bitmaps,
     sounds: maps.sounds !== undefined ? maps.sounds : existing.sounds,
+    loc: maps.loc !== undefined ? maps.loc : (existing.loc ?? null),
   };
   const updated: AppSettings = {
     ...current,

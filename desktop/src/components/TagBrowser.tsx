@@ -76,6 +76,7 @@ export default function TagBrowser({
   const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set());
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tag: TagEntrySummary } | null>(null);
+  const [hoverSubmenu, setHoverSubmenu] = useState<string | null>(null);
 
   // A brand new `tags` array means a different map was opened - start fully collapsed again.
   // Does NOT fire on re-renders of the same map (e.g. after closing the dependency dialog).
@@ -98,23 +99,53 @@ export default function TagBrowser({
 
   const isSearching = search.trim().length > 0;
 
-  const handleExportModel = async (t: TagEntrySummary, format: 'obj' | 'glb') => {
+  const handleExportModel = async (
+    t: TagEntrySummary,
+    format: 'obj' | 'glb',
+    mode: 'standalone' | 'hierarchy' = 'standalone',
+  ) => {
     try {
-      const baseName = t.path.split('\\').pop() || 'model';
-      const pickRes = await window.opence.pickExport3dPath(baseName, format);
-      if (!pickRes || !pickRes.path) return;
-      await window.opence.exportModel3d(t.tagId, 4, format, pickRes.path);
+      if (mode === 'standalone') {
+        const base = t.path.split('\\').pop() || 'model';
+        const baseName = `${base}.${format}`;
+        const pickRes = await window.opence.pickExport3dPath(baseName, format);
+        if (!pickRes || !pickRes.path) return;
+        const chosenFormat = pickRes.format || (pickRes.path.toLowerCase().endsWith('.glb') ? 'glb' : 'obj');
+        await window.opence.exportModel3d(t.tagId, 4, chosenFormat, pickRes.path);
+      } else {
+        const pickDir = await window.opence.pickExportDirectory();
+        if (!pickDir || !pickDir.path) return;
+        const relPath = t.path.replace(/\//g, '\\');
+        const outPath = `${pickDir.path}\\${relPath}.${format}`;
+        await window.opence.exportModel3d(t.tagId, 4, format, outPath);
+      }
     } catch (err) {
       console.error('Failed to export 3D model:', err);
     }
   };
 
-  const handleExportBsp = async (t: TagEntrySummary, format: 'obj' | 'glb') => {
+  const handleExportBsp = async (
+    t: TagEntrySummary,
+    format: 'obj' | 'glb',
+    mode: 'standalone' | 'hierarchy' = 'standalone',
+  ) => {
     try {
-      const baseName = t.path.split('\\').pop() || 'bsp';
-      const pickRes = await window.opence.pickExport3dPath(baseName, format);
-      if (!pickRes || !pickRes.path) return;
-      await window.opence.exportBsp3d(0, format, pickRes.path);
+      const bspTags = tags.filter((x) => x.primaryClassName === 'scenario_structure_bsp');
+      const bspIndex = Math.max(0, bspTags.findIndex((x) => x.tagId === t.tagId));
+      if (mode === 'standalone') {
+        const base = t.path.split('\\').pop() || 'bsp';
+        const baseName = `${base}.${format}`;
+        const pickRes = await window.opence.pickExport3dPath(baseName, format);
+        if (!pickRes || !pickRes.path) return;
+        const chosenFormat = pickRes.format || (pickRes.path.toLowerCase().endsWith('.glb') ? 'glb' : 'obj');
+        await window.opence.exportBsp3d(bspIndex, chosenFormat, pickRes.path);
+      } else {
+        const pickDir = await window.opence.pickExportDirectory();
+        if (!pickDir || !pickDir.path) return;
+        const relPath = t.path.replace(/\//g, '\\');
+        const outPath = `${pickDir.path}\\${relPath}.${format}`;
+        await window.opence.exportBsp3d(bspIndex, format, outPath);
+      }
     } catch (err) {
       console.error('Failed to export BSP:', err);
     }
@@ -412,58 +443,184 @@ export default function TagBrowser({
           )}
           {contextMenuTag?.primaryClassName === 'gbxmodel' && (
             <>
+              <div
+                style={{ position: 'relative' }}
+                onMouseEnter={() => setHoverSubmenu('model-export')}
+                onMouseLeave={() => setHoverSubmenu(null)}
+              >
+                <button
+                  data-testid="tag-row-context-export-model"
+                  style={{
+                    ...menuItemStyle(false),
+                    color: '#c084fc',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                >
+                  <span>Export 3D Model</span>
+                  <span style={{ fontSize: 10, marginLeft: 8 }}>▸</span>
+                </button>
+                {hoverSubmenu === 'model-export' && (
+                  <div
+                    style={{
+                      position: 'absolute',
+                      left: '100%',
+                      top: 0,
+                      background: 'var(--bg-panel)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 3,
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                      padding: 4,
+                      minWidth: 185,
+                      zIndex: 100,
+                    }}
+                  >
+                    <button
+                      data-testid="export-model-standalone"
+                      onClick={() => {
+                        const t = contextMenuTag;
+                        setContextMenu(null);
+                        setHoverSubmenu(null);
+                        if (t) handleExportModel(t, 'obj', 'standalone');
+                      }}
+                      style={{ ...menuItemStyle(false), color: '#c084fc' }}
+                    >
+                      Standalone (.obj / .glb)...
+                    </button>
+                    <button
+                      data-testid="export-model-hierarchy-obj"
+                      onClick={() => {
+                        const t = contextMenuTag;
+                        setContextMenu(null);
+                        setHoverSubmenu(null);
+                        if (t) handleExportModel(t, 'obj', 'hierarchy');
+                      }}
+                      style={{ ...menuItemStyle(false), color: '#c084fc' }}
+                      title="Export with tag hierarchy folder structure (e.g. objects/characters/elite/elite.obj + elite.mtl)"
+                    >
+                      Hierarchy files (.obj + .mtl)...
+                    </button>
+                    <button
+                      data-testid="export-model-hierarchy-glb"
+                      onClick={() => {
+                        const t = contextMenuTag;
+                        setContextMenu(null);
+                        setHoverSubmenu(null);
+                        if (t) handleExportModel(t, 'glb', 'hierarchy');
+                      }}
+                      style={{ ...menuItemStyle(false), color: '#c084fc' }}
+                      title="Export with tag hierarchy folder structure (e.g. objects/characters/elite/elite.glb)"
+                    >
+                      Hierarchy files (.glb)...
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <button
-                data-testid="tag-row-context-export-model-glb"
-                onClick={() => {
+                data-testid="tag-row-context-collision-gen"
+                onClick={async () => {
                   const t = contextMenuTag;
                   setContextMenu(null);
-                  if (t) handleExportModel(t, 'glb');
+                  if (!t) return;
+                  try {
+                    const res = await window.opence.analyzeCollisionObj();
+                    if (!res.ok) {
+                      if (res.error && res.error !== 'Cancelled') alert(`Collision analysis failed: ${res.error}`);
+                      return;
+                    }
+                    if (res.summary?.isTooComplex) {
+                      alert(`[Model Too Complex for In-App Tool]\n\n${res.summary.message}`);
+                    } else {
+                      alert(`[Collision Model Verified]\n\n${res.summary?.message}\n\nVertices: ${res.summary?.vertexCount}, Triangles: ${res.summary?.triangleCount}\nDimensions: ${res.summary?.bounds.size.map((n: number) => n.toFixed(2)).join(' x ')} world units.\n\nThis simple convex mesh is ready for collision association.`);
+                    }
+                  } catch (err) {
+                    alert(`Failed to analyze collision mesh: ${err instanceof Error ? err.message : String(err)}`);
+                  }
                 }}
-                style={{ ...menuItemStyle(false), color: '#c084fc' }}
+                style={{ ...menuItemStyle(false), color: '#38bdf8' }}
               >
-                Export 3D Model (.glb)...
-              </button>
-              <button
-                data-testid="tag-row-context-export-model-obj"
-                onClick={() => {
-                  const t = contextMenuTag;
-                  setContextMenu(null);
-                  if (t) handleExportModel(t, 'obj');
-                }}
-                style={{ ...menuItemStyle(false), color: '#c084fc' }}
-              >
-                Export 3D Model (.obj)...
+                Generate Collision from OBJ...
               </button>
             </>
           )}
           {contextMenuTag?.primaryClassName === 'scenario_structure_bsp' && (
-            <>
+            <div
+              style={{ position: 'relative' }}
+              onMouseEnter={() => setHoverSubmenu('bsp-export')}
+              onMouseLeave={() => setHoverSubmenu(null)}
+            >
               <button
-                data-testid="tag-row-context-export-bsp-glb"
-                onClick={() => {
-                  const t = contextMenuTag;
-                  setContextMenu(null);
-                  if (t) handleExportBsp(t, 'glb');
+                data-testid="tag-row-context-export-bsp"
+                style={{
+                  ...menuItemStyle(false),
+                  color: '#c084fc',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
                 }}
-                style={{ ...menuItemStyle(false), color: '#c084fc' }}
               >
-                Export BSP (.glb)...
+                <span>Export Structure BSP</span>
+                <span style={{ fontSize: 10, marginLeft: 8 }}>▸</span>
               </button>
-              <button
-                data-testid="tag-row-context-export-bsp-obj"
-                onClick={() => {
-                  const t = contextMenuTag;
-                  setContextMenu(null);
-                  if (t) handleExportBsp(t, 'obj');
-                }}
-                style={{ ...menuItemStyle(false), color: '#c084fc' }}
-              >
-                Export BSP (.obj)...
-              </button>
-            </>
+              {hoverSubmenu === 'bsp-export' && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: '100%',
+                    top: 0,
+                    background: 'var(--bg-panel)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 3,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                    padding: 4,
+                    minWidth: 185,
+                    zIndex: 100,
+                  }}
+                >
+                  <button
+                    data-testid="export-bsp-standalone"
+                    onClick={() => {
+                      const t = contextMenuTag;
+                      setContextMenu(null);
+                      setHoverSubmenu(null);
+                      if (t) handleExportBsp(t, 'obj', 'standalone');
+                    }}
+                    style={{ ...menuItemStyle(false), color: '#c084fc' }}
+                  >
+                    Standalone (.obj / .glb)...
+                  </button>
+                  <button
+                    data-testid="export-bsp-hierarchy-obj"
+                    onClick={() => {
+                      const t = contextMenuTag;
+                      setContextMenu(null);
+                      setHoverSubmenu(null);
+                      if (t) handleExportBsp(t, 'obj', 'hierarchy');
+                    }}
+                    style={{ ...menuItemStyle(false), color: '#c084fc' }}
+                  >
+                    Hierarchy files (.obj + .mtl)...
+                  </button>
+                  <button
+                    data-testid="export-bsp-hierarchy-glb"
+                    onClick={() => {
+                      const t = contextMenuTag;
+                      setContextMenu(null);
+                      setHoverSubmenu(null);
+                      if (t) handleExportBsp(t, 'glb', 'hierarchy');
+                    }}
+                    style={{ ...menuItemStyle(false), color: '#c084fc' }}
+                  >
+                    Hierarchy files (.glb)...
+                  </button>
+                </div>
+              )}
+            </div>
           )}
-          {["weapon_hud_interface", "unit_hud_interface", "grenade_hud_interface", "hud_globals"].includes(
-            contextMenuTag?.primaryClassName ?? "",
+          {['weapon_hud_interface', 'unit_hud_interface', 'grenade_hud_interface', 'hud_globals', 'weapon'].includes(
+            contextMenuTag?.primaryClassName ?? '',
           ) && (
             <button
               data-testid="tag-row-context-hud-previewer"

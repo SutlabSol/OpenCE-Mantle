@@ -23,6 +23,53 @@ export class TagTestRunner {
   private activeOpenCeDir: string | null = null;
   private debugTxtWatcher: NodeJS.Timeout | null = null;
   private debugTxtLastSize = 0;
+  private haloAlwaysOnTop = false;
+
+  public setHaloAlwaysOnTop(topmost: boolean): void {
+    this.haloAlwaysOnTop = topmost;
+    const flag = topmost ? '-1' : '-2';
+    const script = `
+Add-Type @"
+  using System;
+  using System.Runtime.InteropServices;
+  public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+  }
+"@ -ErrorAction SilentlyContinue
+$procs = Get-Process -Name 'halo' -ErrorAction SilentlyContinue
+foreach ($p in $procs) {
+  if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+    [Win32]::SetWindowPos($p.MainWindowHandle, [IntPtr](${flag}), 0, 0, 0, 0, 0x0053)
+  }
+}
+`;
+    spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  }
+
+  public isHaloAlwaysOnTop(): boolean {
+    return this.haloAlwaysOnTop;
+  }
+
+  public triggerFlycamToggle(): void {
+    // In Halo CE devmode, Backspace cycles First Person -> Orbiting -> Free Flying Camera
+    const script = `
+$wshell = New-Object -ComObject wscript.shell
+if ($wshell.AppActivate('Halo')) {
+  Start-Sleep -Milliseconds 50
+  $wshell.SendKeys('{BACKSPACE}')
+}
+`;
+    spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  }
 
   private statusListeners: Array<(status: TagTestStatus) => void> = [];
   private logListeners: Array<(entry: TagTestLogEntry) => void> = [];
@@ -90,6 +137,27 @@ export class TagTestRunner {
       } catch {
         /* ignore listener error */
       }
+    }
+
+    // Auto-close tag test when player leaves game / quits to main menu
+    if (
+      this.statusState === 'running' &&
+      (text.includes("loading 'd:\\ui.map'") ||
+        text.includes("ui.map") ||
+        text.includes("levels\\ui\\ui") ||
+        text.includes("game_dispose") ||
+        text.includes("stop_game") ||
+        text.includes("unload_all_structures") ||
+        text.includes("starting main menu music") ||
+        text.includes("begining filesystem checks") ||
+        text.includes("local player 0, weapon (0x0), deleted unexpectedly") ||
+        text.includes("Couldn't read map file 'd:\\ui.map'"))
+    ) {
+      setTimeout(() => {
+        if (this.statusState === 'running') {
+          void this.stop();
+        }
+      }, 300);
     }
   }
 
@@ -160,19 +228,21 @@ export class TagTestRunner {
       }
       this.emitLog('stdout', `[TagTest] Map staged successfully (CRC32 0x${(stageResult.crc32 >>> 0).toString(16).padStart(8, '0')}).`);
 
-      // 2. Backup and prepare init.txt
+      // 2. Prepare init.txt for boot map loading
+      // Halo CE does NOT support -exec from command line; it strictly executes init.txt on boot.
+      this.restoreInitBackupIfPresent();
       const initPath = path.join(openCeDir, 'init.txt');
       const backupPath = path.join(openCeDir, 'init.txt.opence_backup');
-      if (fs.existsSync(initPath) && !fs.existsSync(backupPath)) {
+      if (fs.existsSync(initPath)) {
         try {
-          fs.copyFileSync(initPath, backupPath);
-          this.initBackupPath = backupPath;
+          const existing = fs.readFileSync(initPath, 'utf-8');
+          if (!existing.includes('_opence_tag_test')) {
+            fs.copyFileSync(initPath, backupPath);
+          }
         } catch {
           /* best effort */
         }
       }
-
-      // Write tailored init.txt
       const initContent = `game_console_log all\r\ndisplay_framerate true\r\nmap_name custom_maps\\${mapSlot}\r\n`;
       fs.writeFileSync(initPath, initContent, 'utf-8');
 
@@ -235,6 +305,13 @@ export class TagTestRunner {
 
       // 6. Connect to Telnet socket (port 2323) with retries
       this.connectTelnet('127.0.0.1', 2323);
+
+      // 7. If Stay on Top is enabled, make halo.exe window topmost once created
+      setTimeout(() => {
+        if (this.child && this.haloAlwaysOnTop) {
+          this.setHaloAlwaysOnTop(true);
+        }
+      }, 1200);
 
       return { ok: true };
     } catch (err) {
@@ -436,8 +513,17 @@ export class TagTestRunner {
     this.child = null;
     this.stopDebugWatcher();
 
-    // Restore init.txt from backup if needed, or remove temporary init.txt
+    // Clean up _opence_tag_test.txt and restore any legacy init.txt if needed
     if (this.activeOpenCeDir) {
+      const scriptPath = path.join(this.activeOpenCeDir, '_opence_tag_test.txt');
+      try {
+        if (fs.existsSync(scriptPath)) {
+          fs.unlinkSync(scriptPath);
+        }
+      } catch {
+        /* best effort */
+      }
+
       const initPath = path.join(this.activeOpenCeDir, 'init.txt');
       const backupPath = path.join(this.activeOpenCeDir, 'init.txt.opence_backup');
       try {
@@ -445,8 +531,10 @@ export class TagTestRunner {
           fs.copyFileSync(backupPath, initPath);
           fs.unlinkSync(backupPath);
         } else if (fs.existsSync(initPath)) {
-          // No original init.txt existed; remove temporary file so normal launches aren't affected
-          fs.unlinkSync(initPath);
+          const content = fs.readFileSync(initPath, 'utf-8');
+          if (content.includes('_opence_tag_test')) {
+            fs.unlinkSync(initPath);
+          }
         }
       } catch {
         /* best effort */

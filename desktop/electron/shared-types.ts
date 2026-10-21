@@ -255,6 +255,7 @@ export interface FinalizeBatchExtractRequest {
 export interface VersionResourceMaps {
   bitmaps: string | null;
   sounds: string | null;
+  loc?: string | null;
 }
 
 export interface AppSettings {
@@ -687,6 +688,7 @@ export interface StageTagTestMapResult {
   targetPath: string;
   crc32: number;
   scenarioName: string;
+  mapType?: number;
 }
 
 /* --------------------------------------------- API --------------------------------------------- */
@@ -814,7 +816,7 @@ export interface OpenceApi {
   setResourceMapPath(kind: ResourceMapKind, filePath: string): Promise<{ ok: boolean }>;
   detectDefaultResourceMapPaths(): Promise<Record<HaloBitmapVersion, string | null>>;
   getVersionSettings?(): Promise<Partial<Record<HaloBitmapVersion, VersionResourceMaps>>>;
-  setVersionSettings?(version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null }): Promise<{ ok: boolean }>;
+  setVersionSettings?(version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null; loc?: string | null }): Promise<{ ok: boolean }>;
   /** M12: OpenCE Tag Test runner & live control deck */
   tagTestLaunch(options?: TagTestLaunchOptions): Promise<{ ok: boolean; error?: string }>;
   tagTestStop(): Promise<{ ok: boolean; error?: string }>;
@@ -843,7 +845,9 @@ export interface OpenceApi {
   /** M13.3: 3D Model & BSP Exporter */
   exportModel3d(modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string): Promise<Export3dResult>;
   exportBsp3d(bspIndex: number, format: 'obj' | 'glb', outputPath: string): Promise<Export3dResult>;
-  pickExport3dPath(defaultName: string, format: 'obj' | 'glb'): Promise<{ path: string | null }>;
+  pickExport3dPath(defaultName: string, format: 'obj' | 'glb'): Promise<{ path: string | null; format?: 'obj' | 'glb' }>;
+  pickObjFile(): Promise<{ path: string | null }>;
+  analyzeCollisionObj(filePath?: string): Promise<{ ok: boolean; summary?: any; filePath?: string; error?: string }>;
   getPathForFile(file: File): string;
 }
 

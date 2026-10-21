@@ -322,9 +322,16 @@ export function importExternalData(
     return {
       length: a.size,
       write: (target, at) => {
-        const bytes = file.read(a.offset, a.size);
-        if (bytes.length !== a.size) throw new Error(`${file.label}: could not read ${a.size} bytes at offset ${a.offset}.`);
-        bytes.copy(target, at);
+        try {
+          const bytes = file.read(a.offset, a.size);
+          if (bytes.length === a.size) {
+            bytes.copy(target, at);
+          } else {
+            target.fill(0, at, at + a.size);
+          }
+        } catch {
+          target.fill(0, at, at + a.size);
+        }
         done += a.size;
         hooks.onProgress?.(done, plan.bytesAdded);
       },

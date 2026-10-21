@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import logoUrl from '../assets/logo.png';
 
 export interface MenuItem {
   label: string;
@@ -46,7 +47,7 @@ export default function MenuBar({ menus }: { menus: Menu[] }) {
           alignSelf: 'stretch',
         }}
       >
-        <img src="/logo.png" alt="OpenCE Mantle" style={{ width: 18, height: 18, objectFit: 'contain' }} />
+        <img src={logoUrl} alt="OpenCE Mantle" style={{ width: 18, height: 18, objectFit: 'contain' }} />
         <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 12 }}>OpenCE Mantle</span>
       </div>
       {menus.map((menu) => (

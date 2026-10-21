@@ -1068,6 +1068,85 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
     }
   }
 
+  // Shift raw file offsets for internal bitmap pixel data in existing tags.
+  // When tags are added or embedded data inserted, bytes at/past oldStructDataOffset shift by
+  // shiftBeforeTagData + delta. Any internal BitmapData whose pixel data was appended inside
+  // targetBuffer (e.g. from an earlier bitmap injection/edit) must have its raw file offset updated.
+  if (shiftBeforeTagData > 0 || delta > 0) {
+    const swappedSet = new Set(plan.toSwap.map((sw) => sw.targetOriginalIndex));
+    for (let entryIdx = 0; entryIdx < oldTagCount; entryIdx++) {
+      if (swappedSet.has(entryIdx)) continue;
+      const entryOffset = newArrayOffset + entryIdx * TAG_ENTRY_SIZE;
+      const groupFourCC = out.readUInt32LE(entryOffset + 0x00);
+      const isExternal = out.readUInt32LE(entryOffset + 0x18);
+      // 'bitm' = 0x6269746d
+      if (groupFourCC === 0x6269746d && !isExternal) {
+        const tagDataPtr = out.readUInt32LE(entryOffset + 0x14);
+        if (tagDataPtr >= baseMemoryAddress) {
+          const tagStructOffset = newTagDataOffset + (tagDataPtr - baseMemoryAddress);
+          if (tagStructOffset + 0x68 <= out.length) {
+            const imgCount = out.readUInt32LE(tagStructOffset + 0x60);
+            const imgPtr = out.readUInt32LE(tagStructOffset + 0x64);
+            if (imgCount > 0 && imgPtr >= baseMemoryAddress) {
+              const imgArrayOffset = newTagDataOffset + (imgPtr - baseMemoryAddress);
+              for (let imgIdx = 0; imgIdx < imgCount; imgIdx++) {
+                const rowOffset = imgArrayOffset + imgIdx * 48;
+                if (rowOffset + 48 <= out.length) {
+                  const flags = out.readUInt16LE(rowOffset + 0x0e);
+                  const isImgExternal = (flags & 0x100) !== 0;
+                  if (!isImgExternal) {
+                    const pixelOff = out.readUInt32LE(rowOffset + 0x18);
+                    if (pixelOff >= oldStructDataOffset && pixelOff < oldFileLength) {
+                      const newPixelOff = outOffsetOf(pixelOff);
+                      out.writeUInt32LE(newPixelOff, rowOffset + 0x18);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } else if (groupFourCC === 0x736e6420 && !isExternal) {
+        // 'snd ' = 0x736e6420: shift internal sound permutation sample offsets
+        const tagDataPtr = out.readUInt32LE(entryOffset + 0x14);
+        if (tagDataPtr >= baseMemoryAddress) {
+          const tagStructOffset = newTagDataOffset + (tagDataPtr - baseMemoryAddress);
+          if (tagStructOffset + 0xa0 <= out.length) {
+            const pitchCount = out.readUInt32LE(tagStructOffset + 0x98);
+            const pitchPtr = out.readUInt32LE(tagStructOffset + 0x9c);
+            if (pitchCount > 0 && pitchCount < 32 && pitchPtr >= baseMemoryAddress) {
+              const pitchArrayOffset = newTagDataOffset + (pitchPtr - baseMemoryAddress);
+              const pitchStructSize = 72;
+              for (let p = 0; p < pitchCount; p++) {
+                const pOffset = pitchArrayOffset + p * pitchStructSize;
+                if (pOffset + pitchStructSize <= out.length) {
+                  const permCount = out.readUInt32LE(pOffset + 0x3c);
+                  const permPtr = out.readUInt32LE(pOffset + 0x40);
+                  if (permCount > 0 && permCount < 256 && permPtr >= baseMemoryAddress) {
+                    const permArrayOffset = newTagDataOffset + (permPtr - baseMemoryAddress);
+                    const permStructSize = 124;
+                    for (let m = 0; m < permCount; m++) {
+                      const mOffset = permArrayOffset + m * permStructSize;
+                      if (mOffset + permStructSize <= out.length) {
+                        const sampleExt = out.readUInt32LE(mOffset + 0x44);
+                        if ((sampleExt & 1) === 0) {
+                          const sampleOffset = out.readUInt32LE(mOffset + 0x48);
+                          if (sampleOffset >= oldStructDataOffset && sampleOffset < oldFileLength) {
+                            out.writeUInt32LE(outOffsetOf(sampleOffset), mOffset + 0x48);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   out.writeUInt32LE(newFileLength, 0x8); // decompressedFileSize
   if (shiftBeforeTagData > 0) out.writeUInt32LE(newTagDataOffset, 0x10); // tagDataOffset
   out.writeUInt32LE(newFileLength - newTagDataOffset, 0x14); // tagDataSize

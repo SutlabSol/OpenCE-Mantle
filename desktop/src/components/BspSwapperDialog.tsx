@@ -26,7 +26,12 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
   const [relocateGroundObjects, setRelocateGroundObjects] = useState(true);
   const [harvestShaders, setHarvestShaders] = useState(true);
   const [importSceneryAndMachines, setImportSceneryAndMachines] = useState(true);
+  const [importVehicles, setImportVehicles] = useState(true);
+  const [importAiAndScripts, setImportAiAndScripts] = useState(true);
   const [makeDoorsAutomatic, setMakeDoorsAutomatic] = useState(true);
+  const [filterObjectsToBspBounds, setFilterObjectsToBspBounds] = useState(true);
+  const [clearExistingPlacements, setClearExistingPlacements] = useState(false);
+  const [clearPlayerSpawns, setClearPlayerSpawns] = useState(false);
   const [isSwapping, setIsSwapping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successSummary, setSuccessSummary] = useState<string | null>(null);
@@ -160,7 +165,12 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         relocateGroundObjects,
         harvestShaders,
         importSceneryAndMachines,
+        importVehicles,
+        importAiAndScripts,
         makeDoorsAutomatic,
+        filterObjectsToBspBounds,
+        clearExistingPlacements,
+        clearPlayerSpawns,
       };
       if (selectedSourceBspIndices.length > 1) {
         payload.sourceBspIndices = selectedSourceBspIndices;
@@ -192,10 +202,14 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         const multiMsg = selectedSourceBspIndices.length > 1
           ? ` Fused ${selectedSourceBspIndices.length} Structure BSPs into structure_bsps[${selectedTargetBspIndex}].`
           : '';
-        const sceneryMsg =
-          (res.summary.importedScenery ?? 0) > 0 || (res.summary.importedMachines ?? 0) > 0
-            ? ` Imported ${res.summary.importedScenery ?? 0} scenery object(s) and ${res.summary.importedMachines ?? 0} door(s)/bridge(s).`
-            : '';
+        const parts: string[] = [];
+        if ((res.summary.importedScenery ?? 0) > 0) parts.push(`${res.summary.importedScenery} scenery object(s)`);
+        if ((res.summary.importedVehicles ?? 0) > 0) parts.push(`${res.summary.importedVehicles} vehicle(s)`);
+        if ((res.summary.importedMachines ?? 0) > 0) parts.push(`${res.summary.importedMachines} door(s)/bridge(s)`);
+        if ((res.summary.importedEncounters ?? 0) > 0) parts.push(`${res.summary.importedEncounters} AI encounter(s)`);
+        if ((res.summary.importedTriggers ?? 0) > 0) parts.push(`${res.summary.importedTriggers} trigger volume(s)`);
+        if ((res.summary.importedScripts ?? 0) > 0) parts.push(`${res.summary.importedScripts} script(s)`);
+        const sceneryMsg = parts.length > 0 ? ` Imported ${parts.join(', ')}.` : '';
         setSuccessSummary(
           `Swapped BSP successfully!${multiMsg} New map size: ${(res.summary.newSize / (1024 * 1024)).toFixed(2)} MB (${deltaSign}${deltaMb} MB). Relocated ${res.summary.relocatedSpawns} spawn/item placement(s).${harvestMsg}${sceneryMsg}`,
         );
@@ -862,6 +876,111 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                     </span>
                   </label>
                 )}
+
+                {importSceneryAndMachines && (
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      fontSize: '12px',
+                      marginLeft: '20px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      data-testid="bsp-swapper-filter-bounds-checkbox"
+                      type="checkbox"
+                      checked={filterObjectsToBspBounds}
+                      onChange={(e) => setFilterObjectsToBspBounds(e.target.checked)}
+                    />
+                    <span>
+                      <strong>Filter to Swapped BSP Bounds</strong> (Excludes donor mission props outside this BSP)
+                    </span>
+                  </label>
+                )}
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    data-testid="bsp-swapper-import-vehicles-checkbox"
+                    type="checkbox"
+                    checked={importVehicles}
+                    onChange={(e) => setImportVehicles(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Import Vehicles</strong> (Imports vehicles placed in the swapped BSP)
+                  </span>
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    data-testid="bsp-swapper-import-ai-scripts-checkbox"
+                    type="checkbox"
+                    checked={importAiAndScripts}
+                    onChange={(e) => setImportAiAndScripts(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Keep AI Squads, Triggers & Scripting</strong> (Preserves campaign encounters, squads, trigger volumes, and scripts from swapped BSP)
+                  </span>
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    color: clearExistingPlacements ? '#f87171' : 'inherit',
+                  }}
+                >
+                  <input
+                    data-testid="bsp-swapper-clear-existing-checkbox"
+                    type="checkbox"
+                    checked={clearExistingPlacements}
+                    onChange={(e) => setClearExistingPlacements(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Clear Old Map Placements</strong> (Removes existing map scenery, vehicles, weapons & equipment)
+                  </span>
+                </label>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                    color: clearPlayerSpawns ? '#f87171' : 'inherit',
+                  }}
+                >
+                  <input
+                    data-testid="bsp-swapper-clear-player-spawns-checkbox"
+                    type="checkbox"
+                    checked={clearPlayerSpawns}
+                    onChange={(e) => setClearPlayerSpawns(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Clear Old Player Spawns</strong> (Removes existing player spawn points and starting locations)
+                  </span>
+                </label>
               </div>
 
               {/* Warnings */}
@@ -991,48 +1110,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
           <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
             Changes are applied in-memory. Use File &gt; Save to commit.
           </div>
-          <div style={{ display: 'flex', gap: '6px' }}>
-            <button
-              data-testid="bsp-export-3d-glb-btn"
-              type="button"
-              onClick={async () => {
-                const pickRes = await window.opence.pickExport3dPath(`bsp_${targetBspIndex}`, 'glb');
-                if (!pickRes || !pickRes.path) return;
-                await window.opence.exportBsp3d(targetBspIndex, 'glb', pickRes.path);
-              }}
-              style={{
-                background: 'transparent',
-                border: '1px solid rgba(192,132,252,0.4)',
-                color: '#c084fc',
-                borderRadius: '4px',
-                padding: '4px 10px',
-                fontSize: '11px',
-                cursor: 'pointer',
-              }}
-            >
-              Export BSP (.glb)
-            </button>
-            <button
-              data-testid="bsp-export-3d-obj-btn"
-              type="button"
-              onClick={async () => {
-                const pickRes = await window.opence.pickExport3dPath(`bsp_${targetBspIndex}`, 'obj');
-                if (!pickRes || !pickRes.path) return;
-                await window.opence.exportBsp3d(targetBspIndex, 'obj', pickRes.path);
-              }}
-              style={{
-                background: 'transparent',
-                border: '1px solid rgba(192,132,252,0.4)',
-                color: '#c084fc',
-                borderRadius: '4px',
-                padding: '4px 10px',
-                fontSize: '11px',
-                cursor: 'pointer',
-              }}
-            >
-              Export BSP (.obj)
-            </button>
-          </div>
+          
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               data-testid="bsp-swapper-cancel-btn"

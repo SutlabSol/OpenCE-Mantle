@@ -586,7 +586,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     [],
   );
 
-  // Snap all player spawns and netgame equipment down to the BSP surface
+  // Snap all player spawns and netgame equipment to the nearest ground BSP surface
   const snapAllSpawnsToGround = useCallback(async () => {
     if (!scenarioData || submeshMeshesRef.current.length === 0) return;
     const bspMeshesList = submeshMeshesRef.current
@@ -594,46 +594,104 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       .map((s) => s.mesh);
     if (bspMeshesList.length === 0) return;
 
+    sceneRef.current?.updateMatrixWorld(true);
+
     const targets = scenarioData.objects.filter((o) => o.kind === 'spawn' || o.kind === 'equipment');
     let snappedCount = 0;
 
     for (const obj of targets) {
       const [curX, curY, curZ] = obj.position;
-      const origin = new THREE.Vector3(curX, curZ + 100, -curY);
-      const raycaster = new THREE.Raycaster(origin, new THREE.Vector3(0, -1, 0), 0.1, 1000);
+      // World space: Halo (X, Y, Z) is Three.js World (X, Z, -Y)
+      // Cast a vertical downward ray along World -Y (Halo -Z)
+      const rayOrigin = new THREE.Vector3(curX, Math.max(curZ + 100, 200), -curY);
+      const raycaster = new THREE.Raycaster(rayOrigin, new THREE.Vector3(0, -1, 0), 0.001, 2000);
       const hits = raycaster.intersectObjects(bspMeshesList, false);
-      if (hits.length > 0) {
-        const groundZ = hits[0].point.y + 0.05;
+
+      // Filter for upward-facing ground surfaces (Halo vertex normal Z >= 0.2) to exclude ceilings and walls
+      const groundHits = hits.filter((h) => {
+        if (!h.face) return true;
+        const normAttr = h.object.geometry.getAttribute('normal');
+        if (!normAttr) return true;
+        const vnz = (normAttr.getZ(h.face.a) + normAttr.getZ(h.face.b) + normAttr.getZ(h.face.c)) / 3;
+        return vnz >= 0.2;
+      });
+
+      if (groundHits.length > 0) {
+        // Prefer ground at or below the object (with 3 unit tolerance for sunken objects)
+        const belowHits = groundHits.filter((h) => h.point.y <= curZ + 3.0);
+        const bestHit = (belowHits.length > 0 ? belowHits : groundHits)
+          .sort((a, b) => Math.abs(a.point.y - curZ) - Math.abs(b.point.y - curZ))[0];
+
+        const groundZ = bestHit.point.y + 0.02;
+        const targetGroup = sceneRef.current?.getObjectByName(obj.id);
+        if (targetGroup) {
+          targetGroup.position.z = groundZ;
+        }
         await handleUpdatePlacement(obj.id, { position: [curX, curY, groundZ] });
         snappedCount++;
       }
     }
+    selectionBoxHelperRef.current?.update();
   }, [scenarioData, handleUpdatePlacement]);
 
-  // Ground Snapping: casts a ray straight down from above the object onto the BSP geometry
+  // Ground Snapping: casts a ray straight down from above the object onto the BSP ground geometry
+  // Can snap upwards (for objects sunken into terrain) or downwards (for hovering objects), while ignoring ceilings
   const snapSelectedToGround = useCallback(async () => {
-    if (!selectedObjectId || !scenarioData || submeshMeshesRef.current.length === 0) return;
-    const placement = scenarioData.objects.find((o) => o.id === selectedObjectId);
-    if (!placement) return;
-
-    const [curX, curY, curZ] = placement.position;
-    // World space conversion:
-    // Halo +X is World +X, Halo +Z (up) is World +Y, Halo +Y is World -Z
-    const worldOrigin = new THREE.Vector3(curX, curZ + 50, -curY);
-    const worldDir = new THREE.Vector3(0, -1, 0);
-    const raycaster = new THREE.Raycaster(worldOrigin, worldDir, 0.1, 1000);
+    if (!scenarioData || submeshMeshesRef.current.length === 0) return;
+    const targetIds = selectedObjectIdsRef.current.length > 0
+      ? selectedObjectIdsRef.current
+      : (selectedObjectId ? [selectedObjectId] : []);
+    if (targetIds.length === 0) return;
 
     const bspMeshesList = submeshMeshesRef.current
       .filter((s) => s.mesh.parent?.visible !== false)
       .map((s) => s.mesh);
-    const hits = raycaster.intersectObjects(bspMeshesList, false);
+    if (bspMeshesList.length === 0) return;
 
-    if (hits.length > 0) {
-      const groundZ = hits[0].point.y; // World Y is Halo Z (height)
-      await handleUpdatePlacement(selectedObjectId, {
-        position: [curX, curY, groundZ],
+    sceneRef.current?.updateMatrixWorld(true);
+
+    for (const id of targetIds) {
+      const placement = scenarioData.objects.find((o) => o.id === id);
+      if (!placement) continue;
+
+      const [curX, curY, curZ] = placement.position;
+      // World space conversion:
+      // Halo +X is World +X, Halo +Z (up) is World +Y, Halo +Y is World -Z
+      // Cast a vertical downward ray along World -Y (Halo -Z)
+      const worldOrigin = new THREE.Vector3(curX, Math.max(curZ + 100, 200), -curY);
+      const worldDir = new THREE.Vector3(0, -1, 0);
+      const raycaster = new THREE.Raycaster(worldOrigin, worldDir, 0.001, 2000);
+
+      const hits = raycaster.intersectObjects(bspMeshesList, false);
+
+      // Filter for upward-facing ground surfaces (Halo vertex normal Z >= 0.2) to exclude ceilings and steep walls
+      const groundHits = hits.filter((h) => {
+        if (!h.face) return true;
+        const normAttr = h.object.geometry.getAttribute('normal');
+        if (!normAttr) return true;
+        const vnz = (normAttr.getZ(h.face.a) + normAttr.getZ(h.face.b) + normAttr.getZ(h.face.c)) / 3;
+        return vnz >= 0.2;
       });
+
+      if (groundHits.length > 0) {
+        // Prefer ground at or below the object (with 3 unit tolerance for sunken objects)
+        const belowHits = groundHits.filter((h) => h.point.y <= curZ + 3.0);
+        const bestHit = (belowHits.length > 0 ? belowHits : groundHits)
+          .sort((a, b) => Math.abs(a.point.y - curZ) - Math.abs(b.point.y - curZ))[0];
+
+        const groundZ = bestHit.point.y + 0.02; // World Y is Halo Z (height)
+
+        const targetGroup = sceneRef.current?.getObjectByName(id);
+        if (targetGroup) {
+          targetGroup.position.z = groundZ;
+        }
+
+        await handleUpdatePlacement(id, {
+          position: [curX, curY, groundZ],
+        });
+      }
     }
+    selectionBoxHelperRef.current?.update();
   }, [selectedObjectId, scenarioData, handleUpdatePlacement]);
 
   const callbacksRef = useRef({
@@ -2232,12 +2290,13 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           <button
             data-testid="viewport-export-bsp-btn"
             onClick={async () => {
-              const defaultName = `bsp_${bspIndex}.glb`;
-              const pick = await window.opence.pickExport3dPath(defaultName, 'glb');
+              const defaultName = `bsp_${bspIndex}.obj`;
+              const pick = await window.opence.pickExport3dPath(defaultName, 'obj');
               if (pick?.path) {
-                const res = await window.opence.exportBsp3d(bspIndex, 'glb', pick.path);
+                const chosenFormat = pick.format || (pick.path.toLowerCase().endsWith('.glb') ? 'glb' : 'obj');
+                const res = await window.opence.exportBsp3d(bspIndex, chosenFormat, pick.path);
                 if (res?.ok) {
-                  alert(`Successfully exported 3D BSP to ${pick.path}`);
+                  alert(`Successfully exported 3D BSP (${chosenFormat.toUpperCase()}) to ${pick.path}`);
                 } else if (res?.message) {
                   alert(`Export failed: ${res.message}`);
                 }
@@ -2496,7 +2555,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           tabIndex={0}
           style={{
             flex: 1,
-            width: '100%',
+            minWidth: 0,
             height: '100%',
             position: 'relative',
             outline: 'none',
@@ -2603,6 +2662,8 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             data-testid="scenario-inspector-panel"
             style={{
               width: 330,
+              minWidth: 330,
+              flexShrink: 0,
               height: '100%',
               background: 'rgba(21, 25, 33, 0.95)',
               borderLeft: '1px solid var(--border)',

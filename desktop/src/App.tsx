@@ -24,7 +24,6 @@ import TagActionDialog, { type TagActionType } from './components/TagActionDialo
 import VerifyEmbeddedDataDialog from './components/VerifyEmbeddedDataDialog';
 import ConvertDialog from './components/ConvertDialog';
 import BatchExtractDialog from './components/BatchExtractDialog';
-import IdentifyBitmapsDialog from './components/IdentifyBitmapsDialog';
 import ConfigureResourcesPromptDialog from './components/ConfigureResourcesPromptDialog';
 import BspSwapperDialog from './components/BspSwapperDialog';
 import type { BatchExtractPreflightResult, HaloBitmapVersion } from '../electron/shared-types';
@@ -45,7 +44,6 @@ export default function App() {
   const [bspSwapperOpen, setBspSwapperOpen] = useState(false);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
-  const [identifyBitmapsVersion, setIdentifyBitmapsVersion] = useState<HaloBitmapVersion | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
   const [editingTag, setEditingTag] = useState<TagEntrySummary | null>(null);
   const [bitmapEditorTag, setBitmapEditorTag] = useState<TagEntrySummary | null>(null);
@@ -352,45 +350,8 @@ export default function App() {
           {
             label: 'Tools',
             items: [
-              { label: 'Decompress Map', onClick: handleDecompress, disabled: !canDecompress },
-              { label: 'Recompress Map', onClick: handleRecompress, disabled: !canRecompress },
-              { label: 'Extract Tags...', onClick: () => requestExtract(Array.from(selectedTagIndices)), disabled: !!extractDisabledReason },
-              { label: 'Extract Whole Map...', onClick: () => void handleBatchExtract(), disabled: !canExtract },
-              { label: 'Inject Tags...', onClick: () => setInjectDialogOpen(true), disabled: !canInject },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
-              { label: '', separator: true },
-              { label: 'Bitmap Editor...', onClick: handleOpenBitmapEditor, disabled: !canExtract },
-              { label: 'Sound Auditor...', onClick: handleOpenSoundAuditor, disabled: !canExtract },
-              { label: 'WYSIWYG HUD Previewer...', onClick: handleOpenHudPreviewer, disabled: !canExtract },
-              {
-                label: 'Export 3D Model',
-                submenu: [
-                  { label: 'glTF Binary (.glb)...', onClick: () => void handleExport3dModel('glb'), disabled: !canExtract },
-                  { label: 'Wavefront OBJ (.obj)...', onClick: () => void handleExport3dModel('obj'), disabled: !canExtract },
-                ],
-              },
-              {
-                label: 'Export Structure BSP',
-                submenu: [
-                  { label: 'glTF Binary (.glb)...', onClick: () => void handleExportBsp('glb'), disabled: !canExtract },
-                  { label: 'Wavefront OBJ (.obj)...', onClick: () => void handleExportBsp('obj'), disabled: !canExtract },
-                ],
-              },
-              { label: '', separator: true },
-              { label: 'Launch In OpenCE (F5)', onClick: () => window.opence.tagTestLaunch({ windowed: true }), disabled: !canExtract },
-              { label: 'Hot-Reload OpenCE (Ctrl+F5)', onClick: () => window.opence.tagTestHotReload(), disabled: !canExtract },
-              { label: '', separator: true },
-              {
-                label: 'Identify Bitmaps',
-                submenu: [
-                  { label: 'HaloMD...', onClick: () => setIdentifyBitmapsVersion('halomd') },
-                  { label: 'Custom Edition...', onClick: () => setIdentifyBitmapsVersion('ce') },
-                  { label: 'Halo PC...', onClick: () => setIdentifyBitmapsVersion('pc') },
-                  { label: 'Halo Mac Demo...', onClick: () => setIdentifyBitmapsVersion('demo') },
-                  { label: 'Halo MCC...', onClick: () => setIdentifyBitmapsVersion('mcc') },
-                ],
-              },
               { label: '', separator: true },
               { label: 'Settings...', onClick: () => setSettingsDialogOpen(true) },
             ],
@@ -400,13 +361,11 @@ export default function App() {
       />
       <Toolbar
         onOpen={handleOpen}
-        canDecompress={canDecompress}
-        canRecompress={canRecompress}
         canExtract={canExtract}
+        canExtractWholeMap={canExtract}
         canInject={canInject}
-        onDecompress={handleDecompress}
-        onRecompress={handleRecompress}
         onExtract={() => requestExtract(Array.from(selectedTagIndices))}
+        onExtractWholeMap={() => void handleBatchExtract()}
         onInject={() => setInjectDialogOpen(true)}
         progress={progress}
       />
@@ -485,15 +444,7 @@ export default function App() {
       {settingsDialogOpen && <SettingsDialog onClose={() => setSettingsDialogOpen(false)} />}
       {verifyDialogOpen && <VerifyEmbeddedDataDialog onClose={() => setVerifyDialogOpen(false)} log={log} />}
       {convertSource && <ConvertDialog source={convertSource} onClose={() => setConvertSource(null)} log={log} />}
-      {identifyBitmapsVersion && (
-        <IdentifyBitmapsDialog
-          initialVersion={identifyBitmapsVersion}
-          isOpen={true}
-          onClose={() => setIdentifyBitmapsVersion(null)}
-          openMapScenarioName={mapState?.status === 'ok' ? mapState.header.scenarioName : null}
-        />
-      )}
-      {resourcePrompt && (
+            {resourcePrompt && (
         <ConfigureResourcesPromptDialog
           isOpen={true}
           mapEdition={resourcePrompt.mapEdition}

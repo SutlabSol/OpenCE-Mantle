@@ -1,3 +1,5 @@
+import logoUrl from '../assets/logo.png';
+
 interface Props {
   onOpen: () => void;
 }
@@ -20,7 +22,7 @@ export default function WelcomeDropZone({ onOpen }: Props) {
       }}
     >
       <img
-        src="/logo.png"
+        src={logoUrl}
         alt="OpenCE Mantle Logo"
         style={{
           width: 96,

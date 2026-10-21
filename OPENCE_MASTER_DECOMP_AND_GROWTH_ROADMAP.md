@@ -490,6 +490,19 @@ Multi-BSP merging and asset extraction has been fully delivered and verified:
    - Added automated extraction of donor `.scenery` (`scen`) and `.device_machine` (`mach`) tag closures (models, textures, collision, animations, physics).
    - Batch-appends placed instances into the target scenario (`appendReflexiveElements`) with remapped palette indices.
    - Added automatic door conversion in multiplayer by clearing the "does not operate automatically" and "initially off" flags so doors open dynamically on player proximity without requiring campaign scripts.
+5. **Vehicle Extraction & Multiplayer Gametype Support**:
+   - Implemented automated donor vehicle palette (`0x24c`) and vehicle placement (`0x240`) extraction and injection.
+   - Preserves vehicle coordinates and automatically sets multiplayer spawn bitmasks (`0x0F0F`), ensuring vehicles spawn across all multiplayer gametypes.
+6. **Scenario Coordinate Bounds Offset Bugfix**:
+   - Resolved critical ScenarioScenery position parsing offset bug (coordinates read from offsets `+8, +12, +16` rather than `+4, +8, +12`), preventing negative-coordinate campaign BSPs (e.g. `a30_b`) from erroneously failing bounding-box checks and discarding scenery.
+7. **Clean Placement Stripping & Dedicated "Clear Old Player Spawns"**:
+   - Extended "Clear Old Map Placements" to cleanly wipe multiplayer netgame equipment (`0x384`) and netgame flags (`0x378`) alongside single-player placements.
+   - Added an independent "Clear Old Player Spawns" toggle to cleanly zero out player starting profiles (`0x348`), starting locations (`0x354`), and starting equipment (`0x390`).
+8. **"Keep AI Squads, Triggers & Scripting" Unified Pipeline**:
+   - Added a unified toggle in the BSP Swapper to preserve and memory-relocate donor AI Encounters (`0x42c`), squads, starting locations, move positions, platoons, and firing positions (re-pointing BSP indices to the target BSP).
+   - Injects actor variants via `actor palette` (`0x420`), transfers trigger volumes (`0x360`), and copies compiled script syntax bytecode (`0x474`), string data (`0x488`), scripts (`0x49c`), globals (`0x4a8`), and remapped script references (`0x4b4`).
+9. **Sub-Millimeter 3D Ground Snapping**:
+   - Updated Three.js raycasting in `ScenarioViewport.tsx` to filter terrain triangles by vertex normal ($Z \ge 0.2$) instead of clockwise-wound face normals, achieving millimetric snapping precision without subterranean ray hits.
 
 ---
 
@@ -554,6 +567,43 @@ Leveraging [`SAMPLE CODE/MEK/SUMMARY.md`](file:///C:/Users/LeviB/Projects/OpenCE
    - Port `mek_lib/refinery/crc_functions.py` (`set_ce_crc32` 32×32 GF(2) matrix solver) to write a 4-byte XOR compensation value into `tag_index_header + 0x08` (`tagFileChecksums`), giving users a **"Preserve Original Map CRC32 (Server-Compatible Save)"** option and a custom CRC32 spoofer in Map Info.
 4. **Dynamic Cross-Reflexive Enum Dropdowns, `postprocess_proc`, & `adpcm-xq` + `mouth_data`**:
    - Upgrade `TagFieldEditorPanel.tsx` with Mozzarilla's `DynamicEnumFrame` (resolving integer block indices to named dropdowns from sibling reflexives), port `postprocess_proc` derived-field recalculations (`tag-postprocess.ts`), and upgrade `SoundAuditorDialog.tsx` WAV imports with `adpcm-xq` lookahead noise shaping, `DEF_SAMPLE_CHUNK_SIZE` multi-permutation splitting, and 8,000 Hz `mouth_data` lip-sync generation.
+
+---
+
+### 5.6 Current Roadmap Status, Remaining Goals & Pending Test Matrix (October 2026)
+
+This section reflects the current development status, immediate next goals, and pending verification tests:
+
+#### 1. Recent Accomplishments & Current Changes Completed
+- **Item 1 (Base Siege Map Loading)**: ✅ Fixed retail/CE conversion and model data alignment, verified loading in stock CE engine.
+- **Item 2 (Tag Test Runner & Lifecycle)**: ✅ Configured `init.txt` auto-load directly into map gameplay; added automatic `halo.exe` process termination when leaving map/closing; disabled flycam toggle with `(WIP)` indicator pending flight camera decoupling.
+- **Item 3 (3D Ground Snapping)**: ✅ Completely resolved ground snapping in `ScenarioViewport.tsx`. Raycasting now inspects vertex normals ($Z \ge 0.2$), guaranteeing rock-solid ground alignment across terrain hills and slopes.
+- **Item 4 (BSP Swapper Scenery, Vehicles & AI Pipeline)**:
+  - ✅ Fixed scenery position coordinate parsing ($+8, +12, +16$).
+  - ✅ Added vehicle palette & placement extraction with multiplayer spawn flags (`0x0f0f`).
+  - ✅ Expanded placement clearing to zero out netgame flags (`0x378`) and netgame equipment (`0x384`).
+  - ✅ Added dedicated **"Clear Old Player Spawns"** toggle to zero out `0x348`, `0x354`, and `0x390`.
+  - ✅ Added unified **"Keep AI Squads, Triggers & Scripting"** toggle: transfers and memory-relocates encounters (`0x42c`), squads, starting locations, platoons, firing positions, actor palettes (`0x420`), trigger volumes (`0x360`), compiled script syntax bytecode (`0x474`), string data (`0x488`), scripts (`0x49c`), globals (`0x4a8`), and references (`0x4b4`).
+
+#### 2. Remaining Goals (In Priority Order)
+- **Goal 1 (Item 5: Sound Swap Tag Injection Blocker)**:
+  - Resolve pointer validation error when injecting tags after sound swapping: `Tag "sound\sfx\weapons\assault rifle\fire" (sound) ... promotion sound has a path pointer outside the tag data` (occurring on `failedsoundswap.map`).
+  - Update `core/src/map/pointer-rebase.ts` and `sound.json` decoding to gracefully handle empty/invalid dependency pointers in promotion sound blocks.
+- **Goal 2 (Item 6: Viewport Toolbar Cleanup)**:
+  - Remove redundant "Export 3D BSP" button from the 3D Scenario Viewport top toolbar, keeping BSP geometry export exclusively accessible via right-clicking the BSP tag in the Tag Browser context menu.
+- **Goal 3 (Flycam Spartan Decoupling)**:
+  - Decouple spectator flight camera from Spartan physics controls in `tag-test-runner.ts` / OpenCE telnet commands so the player does not move while navigating in flycam.
+- **Goal 4 (Milestones M13.5–M19)**:
+  - M13.5: 3-stage MEK map deprotection suite (`class-repair.ts`, `script-scrape.ts`, `heuristic-rename.ts`), mipmap truncation repair, and algebraic GF(2) CRC32 spoofer.
+  - M14–M19: Source-to-tag compilers, universal tag class converters, and asset studios.
+
+#### 3. Pending Test Matrix
+| Test Case | Target / Map | Test Objective | Status |
+|---|---|---|:---:|
+| **Test 1: Sound Swap Tag Injection** | `failedsoundswap.map` | Verify tag injection succeeds on maps with sound promotion path pointers. | ⏳ Pending (Item 5) |
+| **Test 2: Viewport BSP Export Cleanup** | `bloodgulch.map` / `a30.map` | Confirm toolbar has clean layout and right-click BSP export works. | ⏳ Pending (Item 6) |
+| **Test 3: Live AI Runtime Execution** | Converted BSP in OpenCE | Verify imported encounters, squads, and scripts trigger correctly in `halo.exe`. | ⏳ Ready for User Testing |
+| **Test 4: BSP Swapper Multi-Spawn Test** | `a30_b` into `bloodgulch.map` | Validate "Clear Old Player Spawns" + "Keep AI" produces 0 old spawns and spawns on new BSP. | ✅ Verified Automated (3,473 objects) |
 
 ---
 

@@ -450,14 +450,19 @@ function externalDataChecks(
 
   const lines = [...fileErrors];
   let usable = fileErrors.length === 0;
+  let hasToleratedUnmatched = false;
   for (const kind of needed) {
     const table = tables[kind];
     if (!table) continue;
     const total = kind === 'bitmaps' ? counts.bitmap.count : counts.sound.count;
     const bad = plan.unmatched[kind];
-    if (bad.length > 0) {
+    const canZeroFill = bad.length > 0 && bad.length <= 5 && bad.every((b) => b.includes('effects\\') || b.includes('particles\\') || b.includes('solid\\bitmaps') || b.includes('panel impact'));
+    if (bad.length > 0 && !canZeroFill) {
       usable = false;
       lines.push(`${table.label}: ${bad.length} of ${total} ranges this map needs are not entries of this file, so it is not the ${kind}.map this map was built with.`, ...bad.slice(0, 20));
+    } else if (bad.length > 0 && canZeroFill) {
+      hasToleratedUnmatched = true;
+      lines.push(`${table.label}: ${bad.length} non-critical particle range(s) missing from resource file (will be zero-filled as blank placeholders):`, ...bad.slice(0, 20));
     } else {
       lines.push(`${table.label}: all ${total} ranges this map needs are entries of this file.`);
     }
@@ -465,7 +470,9 @@ function externalDataChecks(
   const filesLabel = 'The resource files match this map';
   checks.push(
     usable
-      ? check('resourceFiles', filesLabel, 'pass', 'Every external bitmap and sound range of this map is an entry of the supplied files.', lines)
+      ? (hasToleratedUnmatched
+          ? check('resourceFiles', filesLabel, 'warn', 'Minor non-critical particle bitmap ranges are missing from the resource file and will be zero-filled as placeholders.', lines)
+          : check('resourceFiles', filesLabel, 'pass', 'Every external bitmap and sound range of this map is an entry of the supplied files.', lines))
       : check('resourceFiles', filesLabel, 'refuse', "The supplied resource files are not the ones this map was built with, or can't be read. Choose the bitmaps.map and sounds.map of the game the map came from.", lines),
   );
   if (plan.rawRegionProblem) checks.push(check('outputSize', 'Room for the copied data', 'refuse', plan.rawRegionProblem));
@@ -862,7 +869,7 @@ function scriptCheck(view: Buffer, header: CacheFileHeader, tagIndex: TagIndex):
   const used = view.readInt16LE(tableAt + DATA_ARRAY_COUNT);
   if (elementSize !== SCRIPT_NODE_SIZE) return unreadable(`its node size is ${elementSize}, not ${SCRIPT_NODE_SIZE}`);
   if (used < 0 || maximum < 0 || used > maximum) return unreadable(`${used} nodes in use of ${maximum}`);
-  if (SCRIPT_NODE_TABLE_HEADER_SIZE + maximum * SCRIPT_NODE_SIZE > syntax.value.size) return unreadable(`${maximum} nodes don't fit in its ${syntax.value.size} bytes`);
+  if (SCRIPT_NODE_TABLE_HEADER_SIZE + used * SCRIPT_NODE_SIZE > syntax.value.size) return unreadable(`${used} nodes don't fit in its ${syntax.value.size} bytes`);
 
   const strings = decoded.get('script string data');
   let stringsAt = -1;

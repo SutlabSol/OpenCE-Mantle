@@ -207,7 +207,7 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout, op
         const fieldWhere = `${where}.${field.name}`;
         if (value.kind === 'dependency') {
           const pathPointer = value.value.pathPointer >>> 0;
-          if (pathPointer === 0) continue;
+          if (pathPointer === 0 || pathPointer === 0xffffffff) continue;
           if (stalePath(pathPointer)) {
             tolerate({ kind: 'staleReferencePath', tagIndex: e.index, at: fieldAt + 4, value: pathPointer, where: fieldWhere });
             continue;

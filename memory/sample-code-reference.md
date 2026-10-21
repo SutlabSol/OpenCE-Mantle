@@ -671,4 +671,42 @@ flowchart TD
 3. **Built-in `ustr` Unicode String List Editor (`ustr_edit_control` / `ustr_snippit`)**:
    - Dedicated editor for `ustr` (`unicode_string_list`) tags that decodes UTF-16LE string entries (`maxLength`, `offset`) into an editable list so modders can customize HUD messages, weapon pickup prompts, and multiplayer game-mode text directly.
 
+---
+
+## Part 6: MEK (Mozz Editing Kit — `Mozzarilla`, `Refinery`, `Pool`, `Reclaimer`, `Arbytmap`)
+
+Pulled into `SAMPLE CODE/MEK/` (with all 7 core Sigmmma Python packages in `SAMPLE CODE/MEK/mek_lib/` and full architectural documentation in `SAMPLE CODE/MEK/SUMMARY.md`), **MEK** replaces the official Gearbox HEK (`guerilla.exe`, `tool.exe`) and legacy map extractors (`HEK+`, `Deathstar`).
+
+### 6.1 Core MEK Subsystems (`SAMPLE CODE/MEK/mek_lib/`)
+
+| Package | Path | Core Responsibilities |
+| :--- | :--- | :--- |
+| **Mozzarilla** | `Mozzarilla.pyw`, `mek_lib/mozzarilla/` | Advanced HEK Tag Editor (`Halo 1`, `OS v3`, `OS v4`, `Gametypes`/`XboxSave`, `Stubbs`, `Halo 3`), Direct Source-to-Tag Compiler (`Compile Tag`), Tag-to-Source Decompiler (`Tag Data Extraction`), and Tag Converter Suite |
+| **Refinery** | `Refinery.py`, `mek_lib/refinery/` | Multi-generation Blam! Map Extractor (`H1`/`H2`/`H3`/`ODST`/`Reach`/`H4`/`H5`/`Stubbs`/`Shadowrun`/`bitmaps.map`/`sounds.map`/`loc.map`), 3-Stage Heuristic Map Deprotector, Live In-Map Meta Previewer, and GF(2) Algebraic CRC32 Spoofer |
+| **HEK Pool** | `Pool.pyw`, `mek_lib/hek_pool/` | Multi-process parallel `tool.exe` batch runner (up to 64 concurrent workers) with `#cwd`/`#w` directives and Smart-Assist parameter templates |
+| **Reclaimer (Python)** | `mek_lib/reclaimer/` | Complete Blam! engine library: HEK/OS/Stubbs/H2/H3 tag schemas, map wrappers, `.jms`/`.dae`/`.obj` model compiler, `adpcm-xq` sound compiler, `.jma` animation compiler, `.hsc` HaloScript decompiler, and deterministic class repair |
+| **Arbytmap** | `mek_lib/arbytmap/` | High-performance texture engine (with C extensions in `src/*.c`): 24+ formats (`DXT1-5`, `P8` Halo/Stubbs bump palettes, `A8R8G8B8`, etc.), Xbox Morton 2D/3D/Cubemap swizzler, Xbox 360 tiler, and mipmap generator |
+| **Binilla & Supyr Struct** | `mek_lib/binilla/`, `mek_lib/supyr_struct/` | Declarative binary structure schema engine (`BlockDef`, `TagDef`, `STEPTREE`) and data-driven GUI generator |
+
+### 6.2 Key MEK Capabilities & Algorithms for `OpenCE-Modding-Tool`
+
+1. **Direct Source-to-Tag Compilers (Zero `tool.exe` Required)**:
+   - **Gbxmodel Compiler (`reclaimer/model/model_compilation.py`, `jms/`, `dae.py`, `obj.py`, `stripify.py`)**: Compiles `.jms`, `.dae` (COLLADA), and `.obj` directly into `.gbxmodel` (`mod2`) tags with 5 LOD tiers, vertex deduplication, triangle stripification, and auto-generated placeholder shaders.
+   - **Sound Compiler (`reclaimer/sounds/sound_compilation.py`, `src/adpcm-xq/adpcm-lib.c`)**: Compiles `.wav` folders directly into `.sound` (`snd!`) tags using `adpcm-xq` lookahead noise shaping (`0`–`5` samples), automatic permutation chunk splitting, and **8,000 Hz `mouth_data` amplitude envelope generation** for character lip-syncing.
+   - **Animations & Physics Compilers (`reclaimer/animation/animation_compilation.py`, `reclaimer/physics/physics_compilation.py`)**: Compiles `.jma`/`.jmm`/`.jmt`/`.jmo`/`.jmr`/`.jmw`/`.jmz` into `antr` tags and `.jms` marker spheres into `phys` inertial matrix tensors.
+2. **Scenario HaloScript (`.hsc`) Decompiler (`reclaimer/halo_script/hsc_decompilation.py`)**:
+   - Decompiles compiled `script_syntax_data` (20-byte syntax AST nodes) and `script_string_data` from `scnr` tags back into human-readable `.hsc` Lisp scripts, using **topological sorting (`sort_Cycle`)** so interdependent `global` declarations and `static` helper scripts compile cleanly.
+3. **3-Stage Map Deprotection Pipeline (`reclaimer/meta/class_repair.py` + `refinery/core.py` + `refinery/heuristic_deprotection/functions.py`)**:
+   - **Stage 1 (Class Repair)**: Deterministic offset-driven traversal starting from `tag_index.scenario_tag_id` (`scnr`), `matg`, and `DeLa` that repairs obfuscated/zeroed tag class FourCCs across all 80+ tag classes and resolves polymorphic `obje`/`shdr` headers.
+   - **Stage 2 (Script Scraping)**: `_script_scrape_deprotect` scans `script_syntax_data` nodes with `node.type in range(24, 32)` and `node.flags == 6` to recover **100% verbatim original tag paths** referenced by HaloScript literals.
+   - **Stage 3 (Priority-Weighted Heuristic Renaming)**: Assigns priority levels (`MINIMUM`..`IMMUTABLE`) and synthesizes semantic folder/tag names from HUD pickup strings, markers, actor variants, and BSP lightmap indices.
+4. **Specialized Geometry & Shader Converters (`tools_tag_converters/` & `tools_misc/`)**:
+   - **`collision_converter.py` (`coll` -> `mod2`)**: Reconstructs 3D BSP face/edge loops (`get_edge_loops_by_mats`) and bone transforms (`get_node_transforms`) into a renderable `.gbxmodel` so collision hitboxes can be inspected visually.
+   - **`sbsp_converter.py` (`sbsp` -> `mod2` / `.jms`)**: Converts BSP render meshes, collision surfaces, cluster portals, fog planes, and weather polyhedra (via 3D plane-intersection solver `planes_to_verts_and_tris` in `reclaimer/util/geometry.py`) into `.gbxmodel` or `.jms`.
+   - **`Mod2_Senv_Replacer.py`**: Converts `shader_environment` (`senv`) references on `gbxmodel` tags into newly synthesized `shader_model` (`soso`) tags so BSP-extracted models render properly in Halo.
+   - **`wrl_to_obj.py`**: EBNF parser that converts `tool.exe`'s VRML 1.0 `.wrl` debug error geometry into `.obj` meshes.
+5. **Algebraic Map CRC32 Calculator & Spoofer (`refinery/crc_functions.py`)**:
+   - Computes Halo CE's exact region-based CRC32 (`~crc32(bsps + model_data + tag_data)`) and solves a 32×32 GF(2) bit-matrix (`E`, `U`) to patch 4 bytes at `tag_index_header_offset + 8` (`tag_index.crc32`) so any modified map matches a target multiplayer CRC32 checksum.
+
+
 

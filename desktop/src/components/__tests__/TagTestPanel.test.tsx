@@ -118,11 +118,11 @@ describe('TagTestPanel Component', () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId('tag-test-spawn-warthog')).not.toBeDisabled();
+      expect(screen.getByTestId('tag-test-all-weapons')).not.toBeDisabled();
     });
 
-    fireEvent.click(screen.getByTestId('tag-test-spawn-warthog'));
-    expect(window.opence.tagTestSendCommand).toHaveBeenCalledWith('cheat_spawn_warthog');
+    fireEvent.click(screen.getByTestId('tag-test-teleport-cam'));
+    expect(window.opence.tagTestSendCommand).toHaveBeenCalledWith('cheat_teleport_to_camera');
 
     fireEvent.click(screen.getByTestId('tag-test-all-weapons'));
     expect(window.opence.tagTestSendCommand).toHaveBeenCalledWith('cheat_all_weapons');

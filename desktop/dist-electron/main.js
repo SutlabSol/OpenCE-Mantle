@@ -33999,6 +33999,79 @@ for (let n = 0; n < 256; n++) {
   CRC_TABLE2[n] = c >>> 0;
 }
 
+// ../core/src/render/collision-generator.ts
+function parseAndAnalyzeObj(objText) {
+  const lines = objText.split(/\r?\n/);
+  const vertices = [];
+  const triangles = [];
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const parts = trimmed.split(/\s+/);
+    const prefix = parts[0].toLowerCase();
+    if (prefix === "v") {
+      const x = parseFloat(parts[1]) || 0;
+      const y = parseFloat(parts[2]) || 0;
+      const z = parseFloat(parts[3]) || 0;
+      vertices.push([x, y, z]);
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    } else if (prefix === "f") {
+      const vIndices = [];
+      for (let i = 1; i < parts.length; i++) {
+        const seg = parts[i].split("/")[0];
+        const idx = parseInt(seg, 10);
+        if (!isNaN(idx)) {
+          const resolved = idx > 0 ? idx - 1 : vertices.length + idx;
+          vIndices.push(resolved);
+        }
+      }
+      for (let i = 1; i < vIndices.length - 1; i++) {
+        triangles.push([vIndices[0], vIndices[i], vIndices[i + 1]]);
+      }
+    }
+  }
+  const vertexCount = vertices.length;
+  const triangleCount = triangles.length;
+  if (vertexCount === 0 || triangleCount === 0) {
+    return {
+      vertexCount: 0,
+      triangleCount: 0,
+      bounds: { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0] },
+      isTooComplex: true,
+      message: "No valid 3D mesh vertices or faces were found in this OBJ file."
+    };
+  }
+  const bounds = {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ],
+    size: [maxX - minX, maxY - minY, maxZ - minZ]
+  };
+  const MAX_SIMPLE_TRIANGLES = 64;
+  if (triangleCount > MAX_SIMPLE_TRIANGLES) {
+    return {
+      vertexCount,
+      triangleCount,
+      bounds,
+      isTooComplex: true,
+      message: `Model geometry is too complex for in-app automatic collision generation (${triangleCount} triangles detected; maximum simple threshold is ${MAX_SIMPLE_TRIANGLES}). Halo CE collision models require a binary space partition (BSP) half-space tree with convex hulls. Please use Blender with the Halo CE HEK toolchain (tool collision-geometry) for detailed collision meshes.`
+    };
+  }
+  return {
+    vertexCount,
+    triangleCount,
+    bounds,
+    isTooComplex: false,
+    message: `Simple collision proxy model suitable for in-app generation (${triangleCount} triangles, ${vertexCount} vertices).`
+  };
+}
+
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
@@ -34295,7 +34368,7 @@ if ($wshell.AppActivate('Halo')) {
       } catch {
       }
     }
-    if (this.statusState === "running" && (text.includes("loading 'd:\\ui.map'") || text.includes("ui.map") || text.includes("levels\\ui\\ui") || text.includes("game_dispose") || text.includes("stop_game") || text.includes("unload_all_structures") || text.includes("Couldn't read map file 'd:\\ui.map'"))) {
+    if (this.statusState === "running" && (text.includes("loading 'd:\\ui.map'") || text.includes("ui.map") || text.includes("levels\\ui\\ui") || text.includes("game_dispose") || text.includes("stop_game") || text.includes("unload_all_structures") || text.includes("starting main menu music") || text.includes("begining filesystem checks") || text.includes("local player 0, weapon (0x0), deleted unexpectedly") || text.includes("Couldn't read map file 'd:\\ui.map'"))) {
       setTimeout(() => {
         if (this.statusState === "running") {
           void this.stop();
@@ -34361,28 +34434,22 @@ if ($wshell.AppActivate('Halo')) {
       }
       this.emitLog("stdout", `[TagTest] Map staged successfully (CRC32 0x${(stageResult.crc32 >>> 0).toString(16).padStart(8, "0")}).`);
       this.restoreInitBackupIfPresent();
-      const legacyInitPath = path4.join(openCeDir, "init.txt");
-      if (fs3.existsSync(legacyInitPath)) {
+      const initPath = path4.join(openCeDir, "init.txt");
+      const backupPath = path4.join(openCeDir, "init.txt.opence_backup");
+      if (fs3.existsSync(initPath)) {
         try {
-          const content = fs3.readFileSync(legacyInitPath, "utf-8");
-          if (content.includes("_opence_tag_test")) {
-            fs3.unlinkSync(legacyInitPath);
+          const existing = fs3.readFileSync(initPath, "utf-8");
+          if (!existing.includes("_opence_tag_test")) {
+            fs3.copyFileSync(initPath, backupPath);
           }
         } catch {
         }
       }
-      const isMultiplayer = stageResult.mapType === void 0 || stageResult.mapType === 1;
-      const scriptContent = isMultiplayer ? `game_console_log all\r
-display_framerate true\r
-sv_public 0\r
-sv_maxplayers 16\r
-sv_map custom_maps\\${mapSlot} slayer\r
-` : `game_console_log all\r
+      const initContent = `game_console_log all\r
 display_framerate true\r
 map_name custom_maps\\${mapSlot}\r
 `;
-      const scriptPath = path4.join(openCeDir, "_opence_tag_test.txt");
-      fs3.writeFileSync(scriptPath, scriptContent, "utf-8");
+      fs3.writeFileSync(initPath, initContent, "utf-8");
       const debugTxtPath = path4.join(openCeDir, "debug.txt");
       if (fs3.existsSync(debugTxtPath)) {
         this.debugTxtLastSize = fs3.statSync(debugTxtPath).size;
@@ -34397,7 +34464,7 @@ map_name custom_maps\\${mapSlot}\r
         HALO_DISPLAY_MODE: options.windowed !== false ? "windowed" : "fullscreen",
         HALO_UPDATE_ANSWER: "no"
       };
-      const spawnArgs = ["-window", "-vidmode", "1280,960", "-console", "-devmode", "-exec", "_opence_tag_test.txt"];
+      const spawnArgs = ["-window", "-vidmode", "1280,960", "-console", "-devmode"];
       this.emitLog("stdout", `[TagTest] Spawning ${haloExe} ${spawnArgs.join(" ")}...`);
       const child = (0, import_child_process.spawn)(haloExe, spawnArgs, {
         cwd: openCeDir,
@@ -36179,6 +36246,33 @@ async function pickExportDirectoryFlow() {
   });
   return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
+async function pickObjFileFlow() {
+  if (!mainWindow) return { path: null };
+  const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    title: "Select Wavefront OBJ Mesh for Collision Analysis",
+    filters: [
+      { name: "Wavefront OBJ (*.obj)", extensions: ["obj"] },
+      { name: "All Files (*.*)", extensions: ["*"] }
+    ],
+    properties: ["openFile"]
+  });
+  return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
+}
+async function analyzeCollisionObjFlow(filePath) {
+  try {
+    let p = filePath;
+    if (!p) {
+      const picked = await pickObjFileFlow();
+      if (!picked.path) return { ok: false, error: "Cancelled" };
+      p = picked.path;
+    }
+    const text = fs8.readFileSync(p, "utf8");
+    const summary = parseAndAnalyzeObj(text);
+    return { ok: true, summary, filePath: p };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
 async function exportModel3dFlow(modelTagId, lod, format, outputPath) {
   if (!currentMapPath || currentMapCompressed) {
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
@@ -36928,6 +37022,8 @@ import_electron3.app.whenReady().then(() => {
   );
   import_electron3.ipcMain.handle("dialog:pickExport3dPath", (_e, defaultName, format) => pickExport3dPathFlow(defaultName, format));
   import_electron3.ipcMain.handle("dialog:pickExportDirectory", () => pickExportDirectoryFlow());
+  import_electron3.ipcMain.handle("dialog:pickObjFile", () => pickObjFileFlow());
+  import_electron3.ipcMain.handle("collision:analyzeObj", (_e, filePath) => analyzeCollisionObjFlow(filePath));
   import_electron3.ipcMain.handle(
     "3d:exportModel",
     (_e, modelTagId, lod, format, outputPath) => exportModel3dFlow(modelTagId, lod, format, outputPath)

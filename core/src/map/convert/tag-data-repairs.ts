@@ -188,10 +188,14 @@ export function planTagDataRepairs(view: Buffer, header: Pick<CacheFileHeader, '
       const maximum = headerReadable ? view.readInt16LE(at + DATA_ARRAY_MAXIMUM_COUNT) : -1;
       const elementSize = headerReadable ? view.readInt16LE(at + DATA_ARRAY_ELEMENT_SIZE) : -1;
       const count = headerReadable ? view.readInt16LE(at + DATA_ARRAY_COUNT) : -1;
-      const consistent = headerReadable && elementSize === SCRIPT_NODE_SIZE && maximum > 0 && count >= 0 && count <= maximum && size === DATA_ARRAY_HEADER_SIZE + maximum * elementSize;
+      const fullDeclaredSize = DATA_ARRAY_HEADER_SIZE + maximum * SCRIPT_NODE_SIZE;
+      const validHeader = headerReadable && elementSize === SCRIPT_NODE_SIZE && maximum > 0 && count >= 0 && count <= maximum;
+      const isTruncated = validHeader && size < fullDeclaredSize;
+      const consistent = validHeader && (size === fullDeclaredSize || isTruncated);
+      const targetBlockSize = validHeader ? fullDeclaredSize : size;
       const used = consistent ? DATA_ARRAY_HEADER_SIZE + count * SCRIPT_NODE_SIZE : -1;
       const where = `${scenario!.path}.scenario script syntax data`;
-      const plan = (required: boolean, details: string[]) =>
+      const plan = (required: boolean, details: string[], bSize: number = targetBlockSize) =>
         repairs.push({
           id: 'scriptSyntaxData',
           required,
@@ -199,7 +203,7 @@ export function planTagDataRepairs(view: Buffer, header: Pick<CacheFileHeader, '
           tagPath: scenario!.path,
           pointerAddress: scenarioPointer + field.offset + DATA_FIELD_POINTER,
           oldPointer: address,
-          blockSize: size,
+          blockSize: bSize,
           copyBytes: used,
           details,
         });
@@ -215,13 +219,20 @@ export function planTagDataRepairs(view: Buffer, header: Pick<CacheFileHeader, '
           plan(true, [
             violation.text,
             `Only the first ${fmt(free)} of its ${fmt(size)} bytes are its own; the rest belongs to other tags. ${count} of ${maximum} node slots are used (${fmt(used)} bytes with the header), so everything in use fits.`,
-            `New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes copied, the rest zero (a zeroed slot is a free slot).`,
+            `New block: ${fmt(targetBlockSize)} bytes at the end of the tag data (4-aligned): the header and used nodes copied, the rest zero (a zeroed slot is a free slot).`,
           ]);
         }
-      } else if (!aligned && consistent) {
+      } else if ((!aligned || isTruncated) && consistent) {
+        const reasons: string[] = [];
+        if (!aligned) {
+          reasons.push(`${where} starts at ${hex(address)}, which is not 4-aligned from the tag data start.`);
+        }
+        if (isTruncated) {
+          reasons.push(`${where} is truncated to ${fmt(size)} bytes, smaller than the required ${fmt(fullDeclaredSize)} bytes for ${maximum} node slots. OpenCE stops loading at "the script syntax of '${scenario!.path}' is not laid out as this build's" (a blue screen).`);
+        }
         plan(true, [
-          `${where} starts at ${hex(address)}, which is not 4-aligned from the tag data start. OpenCE stops loading at "the scenario's script data is missing or damaged; its scripts won't run" (a blue screen).`,
-          `${count} of ${maximum} node slots are used. New block: ${fmt(size)} bytes at the end of the tag data (4-aligned): the header and used nodes (${fmt(used)} bytes) copied, the rest zero (a zeroed slot is a free slot).`,
+          ...reasons,
+          `${count} of ${maximum} node slots are used. New block: ${fmt(targetBlockSize)} bytes at the end of the tag data (4-aligned): the header and used nodes (${fmt(used)} bytes) copied, the rest zero (a zeroed slot is a free slot).`,
         ]);
       } else if (!aligned) {
         unrepairable.push(
@@ -378,6 +389,9 @@ export function applyTagDataRepairs(map: Buffer, plan: Pick<TagDataRepairPlan, '
     }
     const newPointer = (base + at) >>> 0;
     out.writeUInt32LE(newPointer, pointerAt);
+    if (r.id === 'scriptSyntaxData') {
+      out.writeUInt32LE(r.blockSize, pointerAt - DATA_FIELD_POINTER);
+    }
     applied.push({ id: r.id, tagIndex: r.tagIndex, tagPath: r.tagPath, oldPointer: r.oldPointer >>> 0, newPointer, padding, blockSize: r.blockSize, copied: r.copyBytes, bytesAppended: padding + r.blockSize });
   }
   out.writeUInt32LE(out.length, TAG_DATA_FILE_SIZE_OFFSET);

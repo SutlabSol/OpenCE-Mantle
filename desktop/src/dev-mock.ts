@@ -967,7 +967,9 @@ export function installDevMock() {
     replaceSoundWav: async () => ({ ok: true, map: currentMock! }),
 
     // M13.3: 3D Model & BSP Exporter
-    pickExport3dPath: async (_name: string, format: 'obj' | 'glb') => ({ path: `C:\\exports\\model.${format}` }),
+    pickExport3dPath: async (_name: string, format: 'obj' | 'glb') => ({ path: `C:\\exports\\model.${format}`, format }),
+    pickObjFile: async () => ({ path: 'C:\\exports\\mesh.obj' }),
+    analyzeCollisionObj: async () => ({ ok: true, summary: { vertexCount: 8, triangleCount: 12, bounds: { min: [0, 0, 0], max: [1, 1, 1], size: [1, 1, 1] }, isTooComplex: false, message: 'Simple mesh' } }),
     exportModel3d: async () => ({ ok: true, filePath: 'C:\\exports\\model.glb' }),
     exportBsp3d: async () => ({ ok: true, filePath: 'C:\\exports\\bsp.glb' }),
     getPathForFile: (file) => (file as unknown as { path?: string }).path ?? file.name,
