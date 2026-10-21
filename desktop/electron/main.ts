@@ -2316,6 +2316,21 @@ app.whenReady().then(() => {
     return { path: dir };
   });
 
+  ipcMain.handle('window:setAlwaysOnTop', (_e, flag: boolean) => {
+    mainWindow?.setAlwaysOnTop(flag, 'floating');
+    return mainWindow?.isAlwaysOnTop() ?? false;
+  });
+  ipcMain.handle('window:isAlwaysOnTop', () => {
+    return mainWindow?.isAlwaysOnTop() ?? false;
+  });
+
+  // Ensure any previous uncleaned init.txt from crashes is restored to normal
+  try {
+    tagTestRunner.restoreInitBackupIfPresent();
+  } catch {
+    /* best effort */
+  }
+
   createWindow();
 
   app.on('activate', () => {

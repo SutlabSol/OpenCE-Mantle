@@ -120,6 +120,8 @@ var api = {
   pickOpenCeDirectory: () => import_electron.ipcRenderer.invoke("tagTest:pickDir"),
   getOpenCeConfig: () => import_electron.ipcRenderer.invoke("tagTest:getConfig"),
   setOpenCeDirectory: (dir) => import_electron.ipcRenderer.invoke("tagTest:setDir", dir),
+  setAlwaysOnTop: (flag) => import_electron.ipcRenderer.invoke("window:setAlwaysOnTop", flag),
+  isAlwaysOnTop: () => import_electron.ipcRenderer.invoke("window:isAlwaysOnTop"),
   getPathForFile: (file) => import_electron.webUtils.getPathForFile(file)
 };
 import_electron.contextBridge.exposeInMainWorld("opence", api);

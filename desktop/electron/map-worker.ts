@@ -65,6 +65,7 @@ import {
   type BspSwapOptions,
   inspectBitmapTag,
   replaceBitmapImageData,
+  encodeBitmapWithMipmaps,
   encodeRgbaToPng,
   decodePngToRgba,
   encodeToDds,
@@ -1373,6 +1374,8 @@ export function runReplaceBitmapImage(task: {
     let height: number;
     let chosenFormat = task.targetFormat;
 
+    let mipmapCount = 0;
+
     // Check if DDS
     if (fileBuf.length > 128 && fileBuf.readUInt32LE(0) === 0x20534444) {
       height = fileBuf.readUInt32LE(12);
@@ -1384,6 +1387,8 @@ export function runReplaceBitmapImage(task: {
         else if (fourCC === 'DXT5') chosenFormat = BitmapFormat.DXT5;
         else chosenFormat = BitmapFormat.A8R8G8B8;
       }
+      const ddsMips = fileBuf.readUInt32LE(28) || 1;
+      mipmapCount = ddsMips > 1 ? ddsMips - 1 : 0;
       pixels = fileBuf.subarray(128);
     } else {
       // Decode PNG
@@ -1402,20 +1407,10 @@ export function runReplaceBitmapImage(task: {
         chosenFormat = hasAlpha ? BitmapFormat.DXT5 : BitmapFormat.DXT1;
       }
 
-      if (chosenFormat === BitmapFormat.DXT1) {
-        pixels = encodeRgbaToDxt1(decoded.rgba, width, height);
-      } else if (chosenFormat === BitmapFormat.DXT5) {
-        pixels = encodeRgbaToDxt5(decoded.rgba, width, height);
-      } else {
-        pixels = new Uint8Array(width * height * 4);
-        for (let i = 0; i < decoded.rgba.length; i += 4) {
-          pixels[i + 0] = decoded.rgba[i + 2]; // B
-          pixels[i + 1] = decoded.rgba[i + 1]; // G
-          pixels[i + 2] = decoded.rgba[i + 0]; // R
-          pixels[i + 3] = decoded.rgba[i + 3]; // A
-        }
-        chosenFormat = BitmapFormat.A8R8G8B8;
-      }
+      // Generate complete mipmap chain down to 1x1 so vehicle/weapon shaders render at all LOD distances
+      const encoded = encodeBitmapWithMipmaps(decoded.rgba, width, height, chosenFormat, true);
+      pixels = encoded.pixelData;
+      mipmapCount = encoded.mipmapCount;
     }
 
     const updatedBuffer = replaceBitmapImageData(
@@ -1429,6 +1424,7 @@ export function runReplaceBitmapImage(task: {
       height,
       chosenFormat,
       externalBitmaps,
+      mipmapCount,
     );
 
     currentMap.buffer = updatedBuffer;

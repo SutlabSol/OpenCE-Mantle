@@ -43598,7 +43598,68 @@ function encodeRgbaToDxt5(rgba, width, height) {
   }
   return out;
 }
-function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageIndex, newPixels, newWidth, newHeight, newFormat, externalBitmapsBuffer) {
+function downsampleRgba2x(src, srcW, srcH) {
+  const dstW = Math.max(1, Math.floor(srcW / 2));
+  const dstH = Math.max(1, Math.floor(srcH / 2));
+  const dst = new Uint8Array(dstW * dstH * 4);
+  for (let y = 0; y < dstH; y++) {
+    const srcY0 = Math.min(srcH - 1, y * 2);
+    const srcY1 = Math.min(srcH - 1, y * 2 + 1);
+    for (let x = 0; x < dstW; x++) {
+      const srcX0 = Math.min(srcW - 1, x * 2);
+      const srcX1 = Math.min(srcW - 1, x * 2 + 1);
+      const p00 = (srcY0 * srcW + srcX0) * 4;
+      const p10 = (srcY0 * srcW + srcX1) * 4;
+      const p01 = (srcY1 * srcW + srcX0) * 4;
+      const p11 = (srcY1 * srcW + srcX1) * 4;
+      const dstIdx = (y * dstW + x) * 4;
+      dst[dstIdx + 0] = Math.round((src[p00 + 0] + src[p10 + 0] + src[p01 + 0] + src[p11 + 0]) / 4);
+      dst[dstIdx + 1] = Math.round((src[p00 + 1] + src[p10 + 1] + src[p01 + 1] + src[p11 + 1]) / 4);
+      dst[dstIdx + 2] = Math.round((src[p00 + 2] + src[p10 + 2] + src[p01 + 2] + src[p11 + 2]) / 4);
+      dst[dstIdx + 3] = Math.round((src[p00 + 3] + src[p10 + 3] + src[p01 + 3] + src[p11 + 3]) / 4);
+    }
+  }
+  return { dst, dstW, dstH };
+}
+function encodeBitmapWithMipmaps(rgba, width, height, format, generateMips = true) {
+  const buffers = [];
+  let curRgba = rgba;
+  let curW = width;
+  let curH = height;
+  const maxMips = generateMips ? Math.floor(Math.log2(Math.max(width, height))) : 0;
+  for (let level = 0; level <= maxMips; level++) {
+    let levelBytes;
+    if (format === BitmapFormat.DXT1) {
+      levelBytes = encodeRgbaToDxt1(curRgba, curW, curH);
+    } else if (format === BitmapFormat.DXT5) {
+      levelBytes = encodeRgbaToDxt5(curRgba, curW, curH);
+    } else {
+      levelBytes = new Uint8Array(curW * curH * 4);
+      for (let i = 0; i < curRgba.length; i += 4) {
+        levelBytes[i + 0] = curRgba[i + 2];
+        levelBytes[i + 1] = curRgba[i + 1];
+        levelBytes[i + 2] = curRgba[i + 0];
+        levelBytes[i + 3] = curRgba[i + 3];
+      }
+    }
+    buffers.push(levelBytes);
+    if (level < maxMips) {
+      const down = downsampleRgba2x(curRgba, curW, curH);
+      curRgba = down.dst;
+      curW = down.dstW;
+      curH = down.dstH;
+    }
+  }
+  const totalLength = buffers.reduce((acc, b) => acc + b.length, 0);
+  const out = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const b of buffers) {
+    out.set(b, offset);
+    offset += b.length;
+  }
+  return { pixelData: out, mipmapCount: maxMips };
+}
+function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageIndex, newPixels, newWidth, newHeight, newFormat, externalBitmapsBuffer, newMipmapCount) {
   const entryIdx = bitmapTagId & 65535;
   const entry = tagIndex.entries[entryIdx];
   if (!entry) {
@@ -43636,6 +43697,9 @@ function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageI
     tagCopy.writeUInt16LE(newWidth, rowOffset + 4);
     tagCopy.writeUInt16LE(newHeight, rowOffset + 6);
     tagCopy.writeUInt16LE(newFormat, rowOffset + 12);
+    if (newMipmapCount !== void 0) {
+      tagCopy.writeUInt16LE(newMipmapCount, rowOffset + 20);
+    }
     const oldFlags2 = tagCopy.readUInt16LE(rowOffset + 14);
     tagCopy.writeUInt16LE(oldFlags2 & ~256, rowOffset + 14);
     tagCopy.writeUInt32LE(pixelsStartInMap, rowOffset + 24);
@@ -43694,6 +43758,9 @@ function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageI
   outputBuffer.writeUInt16LE(newWidth, rowStart + 4);
   outputBuffer.writeUInt16LE(newHeight, rowStart + 6);
   outputBuffer.writeUInt16LE(newFormat, rowStart + 12);
+  if (newMipmapCount !== void 0) {
+    outputBuffer.writeUInt16LE(newMipmapCount, rowStart + 20);
+  }
   const newFlags = oldFlags & ~256;
   outputBuffer.writeUInt16LE(newFlags, rowStart + 14);
   outputBuffer.writeUInt32LE(targetOffset, rowStart + 24);
@@ -45829,6 +45896,7 @@ function runReplaceBitmapImage(task) {
     let width;
     let height;
     let chosenFormat = task.targetFormat;
+    let mipmapCount = 0;
     if (fileBuf.length > 128 && fileBuf.readUInt32LE(0) === 542327876) {
       height = fileBuf.readUInt32LE(12);
       width = fileBuf.readUInt32LE(16);
@@ -45839,6 +45907,8 @@ function runReplaceBitmapImage(task) {
         else if (fourCC === "DXT5") chosenFormat = BitmapFormat.DXT5;
         else chosenFormat = BitmapFormat.A8R8G8B8;
       }
+      const ddsMips = fileBuf.readUInt32LE(28) || 1;
+      mipmapCount = ddsMips > 1 ? ddsMips - 1 : 0;
       pixels = fileBuf.subarray(128);
     } else {
       const decoded = decodePngToRgba(fileBuf);
@@ -45854,20 +45924,9 @@ function runReplaceBitmapImage(task) {
         }
         chosenFormat = hasAlpha ? BitmapFormat.DXT5 : BitmapFormat.DXT1;
       }
-      if (chosenFormat === BitmapFormat.DXT1) {
-        pixels = encodeRgbaToDxt1(decoded.rgba, width, height);
-      } else if (chosenFormat === BitmapFormat.DXT5) {
-        pixels = encodeRgbaToDxt5(decoded.rgba, width, height);
-      } else {
-        pixels = new Uint8Array(width * height * 4);
-        for (let i = 0; i < decoded.rgba.length; i += 4) {
-          pixels[i + 0] = decoded.rgba[i + 2];
-          pixels[i + 1] = decoded.rgba[i + 1];
-          pixels[i + 2] = decoded.rgba[i + 0];
-          pixels[i + 3] = decoded.rgba[i + 3];
-        }
-        chosenFormat = BitmapFormat.A8R8G8B8;
-      }
+      const encoded = encodeBitmapWithMipmaps(decoded.rgba, width, height, chosenFormat, true);
+      pixels = encoded.pixelData;
+      mipmapCount = encoded.mipmapCount;
     }
     const updatedBuffer = replaceBitmapImageData(
       currentMap.buffer,
@@ -45879,7 +45938,8 @@ function runReplaceBitmapImage(task) {
       width,
       height,
       chosenFormat,
-      externalBitmaps
+      externalBitmaps,
+      mipmapCount
     );
     currentMap.buffer = updatedBuffer;
     const reInspected = inspectCustomEditionMap(currentMap.buffer);

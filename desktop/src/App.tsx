@@ -260,6 +260,70 @@ export default function App() {
     log('warn', `${feature} is coming in a later milestone.`);
   };
 
+  const handleOpenSoundAuditor = () => {
+    if (mapState?.status !== 'ok') return;
+    const isSound = (t: TagEntrySummary) => ['snd!', 'snde', 'lsnd'].includes(t.primaryClass);
+    const target = focusedTag && isSound(focusedTag) ? focusedTag : mapState.tags.find(isSound);
+    if (target) {
+      setSoundAuditorTag(target);
+    } else {
+      log('warn', 'No sound (snd!, snde, lsnd) tags found in this map.');
+    }
+  };
+
+  const handleOpenBitmapEditor = () => {
+    if (mapState?.status !== 'ok') return;
+    const target = focusedTag && focusedTag.primaryClass === 'bitm' ? focusedTag : mapState.tags.find((t) => t.primaryClass === 'bitm');
+    if (target) {
+      setBitmapEditorTag(target);
+    } else {
+      log('warn', 'No bitmap (bitm) tags found in this map.');
+    }
+  };
+
+  const handleOpenHudPreviewer = () => {
+    if (mapState?.status !== 'ok') return;
+    const isHud = (t: TagEntrySummary) => ['hudg', 'wphi', 'grhi', 'hud#'].includes(t.primaryClass);
+    const target = focusedTag && isHud(focusedTag) ? focusedTag : mapState.tags.find(isHud);
+    if (target) {
+      setHudPreviewerTag(target);
+    } else {
+      log('warn', 'No HUD definition (hudg, wphi, grhi) tags found in this map.');
+    }
+  };
+
+  const handleExport3dModel = async (format: 'glb' | 'obj') => {
+    if (mapState?.status !== 'ok') return;
+    const isModel = (t: TagEntrySummary) => ['mode', 'mod2'].includes(t.primaryClass);
+    const target = focusedTag && isModel(focusedTag) ? focusedTag : mapState.tags.find(isModel);
+    if (!target) {
+      log('warn', 'No 3D model (mode / mod2) tags found in this map.');
+      return;
+    }
+    const defaultName = `${target.path.split('\\').pop() || 'model'}.${format}`;
+    const pickRes = await window.opence.pickExport3dPath(defaultName, format);
+    if (!pickRes?.path) return;
+    const res = await window.opence.exportModel3d(target.tagId, 4, format, pickRes.path);
+    if (res?.ok) {
+      log('info', `Successfully exported 3D model "${target.path}" to ${pickRes.path}`);
+    } else {
+      log('error', `Failed to export 3D model: ${res?.message}`);
+    }
+  };
+
+  const handleExportBsp = async (format: 'glb' | 'obj') => {
+    if (mapState?.status !== 'ok') return;
+    const defaultName = `${mapState.header.scenarioName || 'structure_bsp'}.${format}`;
+    const pickRes = await window.opence.pickExport3dPath(defaultName, format);
+    if (!pickRes?.path) return;
+    const res = await window.opence.exportBsp3d(0, format, pickRes.path);
+    if (res?.ok) {
+      log('info', `Successfully exported structure BSP to ${pickRes.path}`);
+    } else {
+      log('error', `Failed to export BSP: ${res?.message}`);
+    }
+  };
+
   let extractDisabledReason: string | null = null;
   if (!canExtract) extractDisabledReason = 'Open (and decompress, if needed) a map first.';
   else if (isWalkOrExtractRunning) extractDisabledReason = 'A dependency walk or extraction is already running.';
@@ -295,6 +359,24 @@ export default function App() {
               { label: 'Inject Tags...', onClick: () => setInjectDialogOpen(true), disabled: !canInject },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
+              { label: '', separator: true },
+              { label: 'Bitmap Editor...', onClick: handleOpenBitmapEditor, disabled: !canExtract },
+              { label: 'Sound Auditor...', onClick: handleOpenSoundAuditor, disabled: !canExtract },
+              { label: 'WYSIWYG HUD Previewer...', onClick: handleOpenHudPreviewer, disabled: !canExtract },
+              {
+                label: 'Export 3D Model',
+                submenu: [
+                  { label: 'glTF Binary (.glb)...', onClick: () => void handleExport3dModel('glb'), disabled: !canExtract },
+                  { label: 'Wavefront OBJ (.obj)...', onClick: () => void handleExport3dModel('obj'), disabled: !canExtract },
+                ],
+              },
+              {
+                label: 'Export Structure BSP',
+                submenu: [
+                  { label: 'glTF Binary (.glb)...', onClick: () => void handleExportBsp('glb'), disabled: !canExtract },
+                  { label: 'Wavefront OBJ (.obj)...', onClick: () => void handleExportBsp('obj'), disabled: !canExtract },
+                ],
+              },
               { label: '', separator: true },
               { label: 'Launch In OpenCE (F5)', onClick: () => window.opence.tagTestLaunch({ windowed: true }), disabled: !canExtract },
               { label: 'Hot-Reload OpenCE (Ctrl+F5)', onClick: () => window.opence.tagTestHotReload(), disabled: !canExtract },

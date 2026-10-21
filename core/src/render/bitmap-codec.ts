@@ -691,6 +691,96 @@ export function encodeRgbaToDxt5(rgba: Uint8Array, width: number, height: number
 }
 
 /**
+ * Downsamples RGBA8888 buffer by 2x in width and height using a 2x2 box filter.
+ */
+export function downsampleRgba2x(
+  src: Uint8Array,
+  srcW: number,
+  srcH: number,
+): { dst: Uint8Array; dstW: number; dstH: number } {
+  const dstW = Math.max(1, Math.floor(srcW / 2));
+  const dstH = Math.max(1, Math.floor(srcH / 2));
+  const dst = new Uint8Array(dstW * dstH * 4);
+
+  for (let y = 0; y < dstH; y++) {
+    const srcY0 = Math.min(srcH - 1, y * 2);
+    const srcY1 = Math.min(srcH - 1, y * 2 + 1);
+    for (let x = 0; x < dstW; x++) {
+      const srcX0 = Math.min(srcW - 1, x * 2);
+      const srcX1 = Math.min(srcW - 1, x * 2 + 1);
+
+      const p00 = (srcY0 * srcW + srcX0) * 4;
+      const p10 = (srcY0 * srcW + srcX1) * 4;
+      const p01 = (srcY1 * srcW + srcX0) * 4;
+      const p11 = (srcY1 * srcW + srcX1) * 4;
+
+      const dstIdx = (y * dstW + x) * 4;
+      dst[dstIdx + 0] = Math.round((src[p00 + 0] + src[p10 + 0] + src[p01 + 0] + src[p11 + 0]) / 4);
+      dst[dstIdx + 1] = Math.round((src[p00 + 1] + src[p10 + 1] + src[p01 + 1] + src[p11 + 1]) / 4);
+      dst[dstIdx + 2] = Math.round((src[p00 + 2] + src[p10 + 2] + src[p01 + 2] + src[p11 + 2]) / 4);
+      dst[dstIdx + 3] = Math.round((src[p00 + 3] + src[p10 + 3] + src[p01 + 3] + src[p11 + 3]) / 4);
+    }
+  }
+  return { dst, dstW, dstH };
+}
+
+/**
+ * Encodes RGBA8888 pixels into the full mipmap chain for the specified format.
+ * Returns the combined byte buffer and the number of downsampled mip levels.
+ */
+export function encodeBitmapWithMipmaps(
+  rgba: Uint8Array,
+  width: number,
+  height: number,
+  format: number,
+  generateMips = true,
+): { pixelData: Uint8Array; mipmapCount: number } {
+  const buffers: Uint8Array[] = [];
+  let curRgba = rgba;
+  let curW = width;
+  let curH = height;
+
+  const maxMips = generateMips ? Math.floor(Math.log2(Math.max(width, height))) : 0;
+
+  for (let level = 0; level <= maxMips; level++) {
+    let levelBytes: Uint8Array;
+    if (format === BitmapFormat.DXT1) {
+      levelBytes = encodeRgbaToDxt1(curRgba, curW, curH);
+    } else if (format === BitmapFormat.DXT5) {
+      levelBytes = encodeRgbaToDxt5(curRgba, curW, curH);
+    } else {
+      // Uncompressed ARGB (Halo PC stores as B8G8R8A8 in memory/disk)
+      levelBytes = new Uint8Array(curW * curH * 4);
+      for (let i = 0; i < curRgba.length; i += 4) {
+        levelBytes[i + 0] = curRgba[i + 2]; // B
+        levelBytes[i + 1] = curRgba[i + 1]; // G
+        levelBytes[i + 2] = curRgba[i + 0]; // R
+        levelBytes[i + 3] = curRgba[i + 3]; // A
+      }
+    }
+    buffers.push(levelBytes);
+
+    if (level < maxMips) {
+      const down = downsampleRgba2x(curRgba, curW, curH);
+      curRgba = down.dst;
+      curW = down.dstW;
+      curH = down.dstH;
+    }
+  }
+
+  // Concatenate all mip levels
+  const totalLength = buffers.reduce((acc, b) => acc + b.length, 0);
+  const out = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const b of buffers) {
+    out.set(b, offset);
+    offset += b.length;
+  }
+
+  return { pixelData: out, mipmapCount: maxMips };
+}
+
+/**
  * Replaces an existing bitmap image plate's pixels with new compressed or raw bytes.
  * If external, internalizes the tag definition and image data directly into the map's raw data partition.
  */
@@ -705,6 +795,7 @@ export function replaceBitmapImageData(
   newHeight: number,
   newFormat: number,
   externalBitmapsBuffer?: Buffer,
+  newMipmapCount?: number,
 ): Buffer {
   const entryIdx = bitmapTagId & 0xffff;
   const entry = tagIndex.entries[entryIdx];
@@ -757,6 +848,9 @@ export function replaceBitmapImageData(
     tagCopy.writeUInt16LE(newWidth, rowOffset + 0x04);
     tagCopy.writeUInt16LE(newHeight, rowOffset + 0x06);
     tagCopy.writeUInt16LE(newFormat, rowOffset + 0x0c);
+    if (newMipmapCount !== undefined) {
+      tagCopy.writeUInt16LE(newMipmapCount, rowOffset + 0x14);
+    }
 
     // Clear external flag (bit 8 = 0x100)
     const oldFlags = tagCopy.readUInt16LE(rowOffset + 0x0e);
@@ -840,6 +934,9 @@ export function replaceBitmapImageData(
   outputBuffer.writeUInt16LE(newWidth, rowStart + 0x04);
   outputBuffer.writeUInt16LE(newHeight, rowStart + 0x06);
   outputBuffer.writeUInt16LE(newFormat, rowStart + 0x0c);
+  if (newMipmapCount !== undefined) {
+    outputBuffer.writeUInt16LE(newMipmapCount, rowStart + 0x14);
+  }
 
   // Clear external flag (bit 8 = 0x100) to mark internal
   const newFlags = oldFlags & ~0x100;

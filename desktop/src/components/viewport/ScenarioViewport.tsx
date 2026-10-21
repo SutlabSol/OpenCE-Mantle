@@ -251,49 +251,40 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     let eyeX = cx;
     let eyeY = cy;
     let eyeZ = cz;
-    let yaw = 0;
-    let pitch = 0;
 
     switch (dir) {
-      case 'x': // Front (+X in Halo)
+      case 'x': // Look from Front (+X in Halo: Three.js World +X) towards center
         eyeX = cx + dist;
-        yaw = -Math.PI / 2;
-        pitch = 0;
         break;
-      case '-x': // Back (-X in Halo)
+      case '-x': // Look from Back (-X in Halo: Three.js World -X) towards center
         eyeX = cx - dist;
-        yaw = Math.PI / 2;
-        pitch = 0;
         break;
-      case 'y': // Left (+Y in Halo: Three.js World -Z)
+      case 'y': // Look from Left (+Y in Halo: Three.js World -Z) towards center
         eyeZ = cz - dist;
-        yaw = 0;
-        pitch = 0;
         break;
-      case '-y': // Right (-Y in Halo: Three.js World +Z)
+      case '-y': // Look from Right (-Y in Halo: Three.js World +Z) towards center
         eyeZ = cz + dist;
-        yaw = Math.PI;
-        pitch = 0;
         break;
-      case 'z': // Top (+Z in Halo: Three.js World +Y)
+      case 'z': // Look from Top (+Z in Halo: Three.js World +Y) towards center
         eyeY = cy + dist;
-        yaw = 0;
-        pitch = -Math.PI / 2 + 0.001;
         break;
-      case '-z': // Bottom (-Z in Halo: Three.js World -Y)
+      case '-z': // Look from Bottom (-Z in Halo: Three.js World -Y) towards center
         eyeY = cy - dist;
-        yaw = 0;
-        pitch = Math.PI / 2 - 0.001;
         break;
       case 'iso':
       default:
-        eyeX = cx + dist * 0.6;
+        eyeX = cx + dist * 0.65;
         eyeY = cy + dist * 0.55;
-        eyeZ = cz + dist * 0.6;
-        yaw = -Math.PI / 4;
-        pitch = -Math.PI / 6;
+        eyeZ = cz + dist * 0.65;
         break;
     }
+
+    const dx = cx - eyeX;
+    const dy = cy - eyeY;
+    const dz = cz - eyeZ;
+    const horizDist = Math.hypot(dx, dz);
+    const yaw = Math.atan2(-dx, -dz);
+    const pitch = horizDist === 0 ? (dy < 0 ? -Math.PI / 2 + 0.001 : Math.PI / 2 - 0.001) : Math.atan2(dy, horizDist);
 
     camPosRef.current.set(eyeX, eyeY, eyeZ);
     camEulerRef.current.yaw = yaw;
@@ -2237,6 +2228,39 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             <span>+</span> Add Object
           </button>
 
+          {/* Export 3D BSP Button */}
+          <button
+            data-testid="viewport-export-bsp-btn"
+            onClick={async () => {
+              const defaultName = `bsp_${bspIndex}.glb`;
+              const pick = await window.opence.pickExport3dPath(defaultName, 'glb');
+              if (pick?.path) {
+                const res = await window.opence.exportBsp3d(bspIndex, 'glb', pick.path);
+                if (res?.ok) {
+                  alert(`Successfully exported 3D BSP to ${pick.path}`);
+                } else if (res?.message) {
+                  alert(`Export failed: ${res.message}`);
+                }
+              }
+            }}
+            style={{
+              background: 'var(--bg-main)',
+              color: 'var(--accent-cyan)',
+              border: '1px solid var(--accent-cyan)',
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+            title="Export this 3D Structure BSP to glTF (.glb) for Blender, Maya, or 3ds Max"
+          >
+            <span>⭳</span> Export 3D BSP
+          </button>
+
           {/* Multi-BSP Selector for campaign maps */}
           {bspCount > 1 && (
             <div ref={bspDropdownRef} style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
@@ -2537,167 +2561,38 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             title="Click an axis to align view"
           />
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 26px)', gap: 3, justifyContent: 'center' }}>
-            {/* Top row */}
-            <div />
-            <button
-              data-testid="orientation-btn-top"
-              title="Top View (+Z)"
-              onClick={() => { alignCameraView('z'); }}
-              style={{
-                width: 26,
-                height: 24,
-                background: 'var(--bg-main)',
-                color: '#42a5f5',
-                border: '1px solid var(--border)',
-                borderRadius: 3,
-                fontSize: 10,
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 0,
-              }}
-            >
-              +Z
-            </button>
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 4 }}>
             <button
               data-testid="orientation-btn-iso"
-              title="Isometric View"
+              title="Reset to Isometric View"
               onClick={() => { alignCameraView('iso'); }}
               style={{
-                width: 26,
-                height: 24,
+                width: '100%',
+                maxWidth: 64,
+                height: 22,
                 background: 'var(--bg-main)',
                 color: 'var(--accent-cyan)',
                 border: '1px solid var(--border)',
-                borderRadius: 3,
-                fontSize: 9,
+                borderRadius: 4,
+                fontSize: 10,
                 fontWeight: 700,
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 padding: 0,
+                transition: 'background 0.15s, border-color 0.15s',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'var(--bg-hover)';
+                e.currentTarget.style.borderColor = 'var(--accent-cyan)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'var(--bg-main)';
+                e.currentTarget.style.borderColor = 'var(--border)';
               }}
             >
               ISO
-            </button>
-
-            {/* Middle row */}
-            <button
-              data-testid="orientation-btn-left"
-              title="Left View (+Y)"
-              onClick={() => { alignCameraView('y'); }}
-              style={{
-                width: 26,
-                height: 24,
-                background: 'var(--bg-main)',
-                color: '#66bb6a',
-                border: '1px solid var(--border)',
-                borderRadius: 3,
-                fontSize: 10,
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 0,
-              }}
-            >
-              +Y
-            </button>
-            <button
-              data-testid="orientation-btn-front"
-              title="Front View (+X)"
-              onClick={() => { alignCameraView('x'); }}
-              style={{
-                width: 26,
-                height: 24,
-                background: 'var(--bg-main)',
-                color: '#ef5350',
-                border: '1px solid var(--border)',
-                borderRadius: 3,
-                fontSize: 10,
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 0,
-              }}
-            >
-              +X
-            </button>
-            <button
-              data-testid="orientation-btn-right"
-              title="Right View (-Y)"
-              onClick={() => { alignCameraView('-y'); }}
-              style={{
-                width: 26,
-                height: 24,
-                background: 'var(--bg-main)',
-                color: '#66bb6a',
-                border: '1px solid var(--border)',
-                borderRadius: 3,
-                fontSize: 10,
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 0,
-              }}
-            >
-              -Y
-            </button>
-
-            {/* Bottom row */}
-            <div />
-            <button
-              data-testid="orientation-btn-back"
-              title="Back View (-X)"
-              onClick={() => { alignCameraView('-x'); }}
-              style={{
-                width: 26,
-                height: 24,
-                background: 'var(--bg-main)',
-                color: '#ef5350',
-                border: '1px solid var(--border)',
-                borderRadius: 3,
-                fontSize: 10,
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 0,
-              }}
-            >
-              -X
-            </button>
-            <button
-              data-testid="orientation-btn-bottom"
-              title="Bottom View (-Z)"
-              onClick={() => { alignCameraView('-z'); }}
-              style={{
-                width: 26,
-                height: 24,
-                background: 'var(--bg-main)',
-                color: '#42a5f5',
-                border: '1px solid var(--border)',
-                borderRadius: 3,
-                fontSize: 10,
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 0,
-              }}
-            >
-              -Z
             </button>
           </div>
         </div>

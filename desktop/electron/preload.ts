@@ -159,6 +159,8 @@ const api: OpenceApi = {
   pickOpenCeDirectory: () => ipcRenderer.invoke('tagTest:pickDir'),
   getOpenCeConfig: () => ipcRenderer.invoke('tagTest:getConfig'),
   setOpenCeDirectory: (dir: string | null) => ipcRenderer.invoke('tagTest:setDir', dir),
+  setAlwaysOnTop: (flag: boolean) => ipcRenderer.invoke('window:setAlwaysOnTop', flag),
+  isAlwaysOnTop: () => ipcRenderer.invoke('window:isAlwaysOnTop'),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
 };
 

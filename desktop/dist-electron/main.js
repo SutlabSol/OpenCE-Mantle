@@ -34265,6 +34265,20 @@ var TagTestRunner = class {
     const exists = fs3.existsSync(exe);
     return { directory: dir, executable: exe, exists };
   }
+  restoreInitBackupIfPresent() {
+    const cfg = this.getOpenCeConfig();
+    if (cfg.directory) {
+      const initPath = path4.join(cfg.directory, "init.txt");
+      const backupPath = path4.join(cfg.directory, "init.txt.opence_backup");
+      try {
+        if (fs3.existsSync(backupPath)) {
+          fs3.copyFileSync(backupPath, initPath);
+          fs3.unlinkSync(backupPath);
+        }
+      } catch {
+      }
+    }
+  }
   async launch(options = {}) {
     if (this.statusState === "running" || this.statusState === "launching") {
       return { ok: false, error: "OpenCE is already running." };
@@ -34323,8 +34337,9 @@ map_name custom_maps\\${mapSlot}\r
         HALO_DISPLAY_MODE: options.windowed !== false ? "windowed" : "fullscreen",
         HALO_UPDATE_ANSWER: "no"
       };
-      this.emitLog("stdout", `[TagTest] Spawning ${haloExe}...`);
-      const child = (0, import_child_process.spawn)(haloExe, [], {
+      const spawnArgs = ["-window", "-vidmode", "1280,960", "-console", "-devmode"];
+      this.emitLog("stdout", `[TagTest] Spawning ${haloExe} ${spawnArgs.join(" ")}...`);
+      const child = (0, import_child_process.spawn)(haloExe, spawnArgs, {
         cwd: openCeDir,
         env,
         stdio: ["ignore", "pipe", "pipe"]
@@ -34527,6 +34542,8 @@ map_name custom_maps\\${mapSlot}\r
         if (fs3.existsSync(backupPath)) {
           fs3.copyFileSync(backupPath, initPath);
           fs3.unlinkSync(backupPath);
+        } else if (fs3.existsSync(initPath)) {
+          fs3.unlinkSync(initPath);
         }
       } catch {
       }
@@ -36862,6 +36879,17 @@ import_electron3.app.whenReady().then(() => {
     setOpenCeDirectory(dir);
     return { path: dir };
   });
+  import_electron3.ipcMain.handle("window:setAlwaysOnTop", (_e, flag) => {
+    mainWindow?.setAlwaysOnTop(flag, "floating");
+    return mainWindow?.isAlwaysOnTop() ?? false;
+  });
+  import_electron3.ipcMain.handle("window:isAlwaysOnTop", () => {
+    return mainWindow?.isAlwaysOnTop() ?? false;
+  });
+  try {
+    tagTestRunner.restoreInitBackupIfPresent();
+  } catch {
+  }
   createWindow();
   import_electron3.app.on("activate", () => {
     if (import_electron3.BrowserWindow.getAllWindows().length === 0) createWindow();

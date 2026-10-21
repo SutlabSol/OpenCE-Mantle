@@ -550,31 +550,20 @@ describe('ScenarioViewport', () => {
     expect(window.opence.swapScenarioPlacement).toHaveBeenCalledWith('vehicle-0', 'scenery', 0);
   });
 
-  it('renders View Cube / Orientation Gizmo with +X, -X, +Y, -Y, +Z, -Z, ISO buttons', async () => {
+  it('renders View Orientation Gizmo with rotation canvas and ISO button', async () => {
     render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
 
     await waitFor(() => {
       expect(screen.getByTestId('viewport-orientation-gizmo')).toBeInTheDocument();
     });
 
-    const btnTop = screen.getByTestId('orientation-btn-top');
     const btnIso = screen.getByTestId('orientation-btn-iso');
-    const btnFront = screen.getByTestId('orientation-btn-front');
-    const btnBack = screen.getByTestId('orientation-btn-back');
-    const btnLeft = screen.getByTestId('orientation-btn-left');
-    const btnRight = screen.getByTestId('orientation-btn-right');
-    const btnBottom = screen.getByTestId('orientation-btn-bottom');
-
-    expect(btnTop).toBeInTheDocument();
     expect(btnIso).toBeInTheDocument();
-    expect(btnFront).toBeInTheDocument();
-    expect(btnBack).toBeInTheDocument();
-    expect(btnLeft).toBeInTheDocument();
-    expect(btnRight).toBeInTheDocument();
-    expect(btnBottom).toBeInTheDocument();
 
-    fireEvent.click(btnTop);
-    fireEvent.click(btnFront);
+    const canvas = screen.getByTestId('orientation-gizmo-canvas');
+    expect(canvas).toBeInTheDocument();
+
+    fireEvent.click(canvas, { clientX: 40, clientY: 40 });
     fireEvent.click(btnIso);
   });
 

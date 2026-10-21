@@ -107,6 +107,22 @@ export class TagTestRunner {
     return { directory: dir, executable: exe, exists };
   }
 
+  public restoreInitBackupIfPresent(): void {
+    const cfg = this.getOpenCeConfig();
+    if (cfg.directory) {
+      const initPath = path.join(cfg.directory, 'init.txt');
+      const backupPath = path.join(cfg.directory, 'init.txt.opence_backup');
+      try {
+        if (fs.existsSync(backupPath)) {
+          fs.copyFileSync(backupPath, initPath);
+          fs.unlinkSync(backupPath);
+        }
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
   public async launch(options: TagTestLaunchOptions = {}): Promise<{ ok: boolean; error?: string }> {
     if (this.statusState === 'running' || this.statusState === 'launching') {
       return { ok: false, error: 'OpenCE is already running.' };
@@ -178,8 +194,9 @@ export class TagTestRunner {
         HALO_UPDATE_ANSWER: 'no',
       };
 
-      this.emitLog('stdout', `[TagTest] Spawning ${haloExe}...`);
-      const child = spawn(haloExe, [], {
+      const spawnArgs = ['-window', '-vidmode', '1280,960', '-console', '-devmode'];
+      this.emitLog('stdout', `[TagTest] Spawning ${haloExe} ${spawnArgs.join(' ')}...`);
+      const child = spawn(haloExe, spawnArgs, {
         cwd: openCeDir,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -419,7 +436,7 @@ export class TagTestRunner {
     this.child = null;
     this.stopDebugWatcher();
 
-    // Restore init.txt from backup if needed
+    // Restore init.txt from backup if needed, or remove temporary init.txt
     if (this.activeOpenCeDir) {
       const initPath = path.join(this.activeOpenCeDir, 'init.txt');
       const backupPath = path.join(this.activeOpenCeDir, 'init.txt.opence_backup');
@@ -427,6 +444,9 @@ export class TagTestRunner {
         if (fs.existsSync(backupPath)) {
           fs.copyFileSync(backupPath, initPath);
           fs.unlinkSync(backupPath);
+        } else if (fs.existsSync(initPath)) {
+          // No original init.txt existed; remove temporary file so normal launches aren't affected
+          fs.unlinkSync(initPath);
         }
       } catch {
         /* best effort */
