@@ -2286,40 +2286,6 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             <span>+</span> Add Object
           </button>
 
-          {/* Export 3D BSP Button */}
-          <button
-            data-testid="viewport-export-bsp-btn"
-            onClick={async () => {
-              const defaultName = `bsp_${bspIndex}.obj`;
-              const pick = await window.opence.pickExport3dPath(defaultName, 'obj');
-              if (pick?.path) {
-                const chosenFormat = pick.format || (pick.path.toLowerCase().endsWith('.glb') ? 'glb' : 'obj');
-                const res = await window.opence.exportBsp3d(bspIndex, chosenFormat, pick.path);
-                if (res?.ok) {
-                  alert(`Successfully exported 3D BSP (${chosenFormat.toUpperCase()}) to ${pick.path}`);
-                } else if (res?.message) {
-                  alert(`Export failed: ${res.message}`);
-                }
-              }
-            }}
-            style={{
-              background: 'var(--bg-main)',
-              color: 'var(--accent-cyan)',
-              border: '1px solid var(--accent-cyan)',
-              borderRadius: 4,
-              padding: '4px 10px',
-              fontSize: 11,
-              fontWeight: 600,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 4,
-            }}
-            title="Export this 3D Structure BSP to glTF (.glb) for Blender, Maya, or 3ds Max"
-          >
-            <span>⭳</span> Export 3D BSP
-          </button>
-
           {/* Multi-BSP Selector for campaign maps */}
           {bspCount > 1 && (
             <div ref={bspDropdownRef} style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>

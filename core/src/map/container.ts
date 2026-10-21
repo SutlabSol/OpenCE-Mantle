@@ -34,9 +34,9 @@ export const OCETAGS_FORMAT_VERSION = 5;
 export const OCETAGS_MIN_SUPPORTED_VERSION = 1;
 export const OCETAGS_EXTENSION = '.ocetags';
 
-/** One embedded (external=0) bitmap/sound asset's bytes, stored once even if multiple fields point at it. */
+/** One embedded (external=0) bitmap/sound/model asset's bytes, stored once even if multiple fields point at it. */
 export interface OceContainerEmbeddedRawDataAsset {
-  kind: 'bitmap' | 'sound';
+  kind: 'bitmap' | 'sound' | 'gbxmodel-vertex' | 'gbxmodel-triangle-strip' | string;
   /** Base64-encoded raw bytes, exactly as sliced from the source map. */
   data: string;
 }
@@ -67,6 +67,9 @@ export interface OceContainerTag {
   group: string;
   path: string;
   structName: string;
+  /** Custom item name for OpenCE Forge (e.g. "Gauss Sniper"). */
+  itemName?: string;
+  displayName?: string;
   /** Base64-encoded `ExtractedTag.data`. */
   data: string;
   dependencies: ExtractedDependencyRef[];
@@ -109,6 +112,9 @@ export interface OceContainer {
   formatVersion: number;
   sourceMapName: string;
   createdAt: string;
+  /** Custom item name for OpenCE Forge (e.g. "Gauss Sniper"). */
+  itemName?: string;
+  displayName?: string;
   /** True if any tag in `notExtracted` is a BSP - M5's import flow should refuse or warn. */
   hasUnresolvedBspReferences: boolean;
   rootOriginalIndices: number[];
@@ -143,10 +149,17 @@ const RESOURCE_MAP_BY_NAME: Record<string, 'bitmaps' | 'sounds' | 'loc'> = {
   'loc.map': 'loc',
 };
 
+export interface SerializeContainerOptions {
+  itemName?: string;
+  displayName?: string;
+  itemNames?: Record<number, string>;
+}
+
 export function serializeContainer(
   set: ExtractedTagSet,
   sourceMapName: string,
   resourceMapIdentities: Partial<Record<'bitmaps' | 'sounds' | 'loc', ResourceMapIdentity>> = {},
+  options?: SerializeContainerOptions,
 ): Buffer {
   const localIndexByOriginal = new Map<number, number>();
   set.tags.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
@@ -173,31 +186,38 @@ export function serializeContainer(
     formatVersion: OCETAGS_FORMAT_VERSION,
     sourceMapName,
     createdAt: new Date().toISOString(),
+    itemName: options?.itemName,
+    displayName: options?.displayName ?? options?.itemName,
     hasUnresolvedBspReferences: set.notExtracted.length > 0,
     rootOriginalIndices: set.rootOriginalIndices,
-    tags: set.tags.map((t) => ({
-      originalIndex: t.originalIndex,
-      group: t.group,
-      path: t.path,
-      structName: t.structName,
-      data: t.data.toString('base64'),
-      dependencies: t.dependencies,
-      secondaryClassFourCC: t.secondaryClassFourCC,
-      tertiaryClassFourCC: t.tertiaryClassFourCC,
-      embeddedRawDataAssets: t.embeddedRawDataAssets.map((a: ExtractedEmbeddedAsset) => ({ kind: a.kind, data: a.data.toString('base64') })),
-      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p: ExtractedEmbeddedPatch) => ({ ...p })),
-      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
-      gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
-        geometryIndex: p.geometryIndex,
-        partIndex: p.partIndex,
-        vertexType: p.vertexType,
-        vertexCount: p.vertexCount,
-        vertexData: p.vertexBytes.toString('base64'),
-        triangleBufferType: p.triangleBufferType,
-        triangleCount: p.triangleCount,
-        triangleData: p.triangleBytes.toString('base64'),
-      })),
-    })),
+    tags: set.tags.map((t) => {
+      const tagItemName = options?.itemNames?.[t.originalIndex] ?? (set.rootOriginalIndices.includes(t.originalIndex) ? options?.itemName : undefined);
+      return {
+        originalIndex: t.originalIndex,
+        group: t.group,
+        path: t.path,
+        structName: t.structName,
+        itemName: tagItemName,
+        displayName: tagItemName,
+        data: t.data.toString('base64'),
+        dependencies: t.dependencies,
+        secondaryClassFourCC: t.secondaryClassFourCC,
+        tertiaryClassFourCC: t.tertiaryClassFourCC,
+        embeddedRawDataAssets: t.embeddedRawDataAssets.map((a: ExtractedEmbeddedAsset) => ({ kind: a.kind, data: a.data.toString('base64') })),
+        embeddedRawDataPatches: t.embeddedRawDataPatches.map((p: ExtractedEmbeddedPatch) => ({ ...p })),
+        injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
+        gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
+          geometryIndex: p.geometryIndex,
+          partIndex: p.partIndex,
+          vertexType: p.vertexType,
+          vertexCount: p.vertexCount,
+          vertexData: p.vertexBytes.toString('base64'),
+          triangleBufferType: p.triangleBufferType,
+          triangleCount: p.triangleCount,
+          triangleData: p.triangleBytes.toString('base64'),
+        })),
+      };
+    }),
     notExtracted: set.notExtracted,
     warnings: set.warnings,
     resourceMapIdentities,

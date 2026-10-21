@@ -584,26 +584,39 @@ This section reflects the current development status, immediate next goals, and 
   - ✅ Expanded placement clearing to zero out netgame flags (`0x378`) and netgame equipment (`0x384`).
   - ✅ Added dedicated **"Clear Old Player Spawns"** toggle to zero out `0x348`, `0x354`, and `0x390`.
   - ✅ Added unified **"Keep AI Squads, Triggers & Scripting"** toggle: transfers and memory-relocates encounters (`0x42c`), squads, starting locations, platoons, firing positions, actor palettes (`0x420`), trigger volumes (`0x360`), compiled script syntax bytecode (`0x474`), string data (`0x488`), scripts (`0x49c`), globals (`0x4a8`), and references (`0x4b4`).
+- **Item 5 (Sound Swap Tag Injection Blocker)**: ✅ Resolved pointer validation error when injecting tags into sound-swapped maps (`failedsoundswap.map`). Null tag references (`tagId === 0xFFFFFFFF` / `0`) now bypass path-pointer validation, and `staleReferencePaths` are tolerated during tag injection. Verified automated test passing.
+- **Item 6 (Viewport Toolbar Cleanup)**: ✅ Removed redundant "Export 3D BSP" button from the 3D Scenario Viewport top toolbar, keeping BSP geometry export cleanly accessible via right-clicking the BSP tag in the Tag Browser context menu.
+- **Item 7 (Sound Permutation Internalization & Audio Integrity)**:
+  - ✅ Fixed audio corruption when replacing individual sound permutations on external tags (e.g. Assault Rifle fire sound in `whatitistobe_copy.map`).
+  - ✅ When internalizing an external sound tag, all sibling pitch ranges and permutations are now extracted from `sounds.map` and copied into the map payload buffer with external flags cleared (`0`), pitch range reflexives (`0x9c`) and permutation reflexives (`0x40`) rebased, sample file offsets rebased, and permutation tag IDs (`+0x34`, `+0x3c`) set to the sound's `tagId`.
+  - ✅ Cleared `isExternal = 0` on swapped tags in `tag-injector.ts` so all swapped tags are treated as internal by the engine.
+- **Item 8 (Campaign BSP Swap Player Spawns & External Bitmap Embedding)**:
+  - ✅ Resolved engine "bluescreen" / dead sky fog on tag test launch for BSP-swapped maps (`whatitistobe.map`). Halo CE singleplayer (`map_name`) requires valid entries in scenario `player starting locations` (`0x354`) to spawn local player 0; `bsp-swapper.ts` now transfers donor player spawns rebased to the target BSP index, synthesizes a fallback spawn at the BSP center if missing, and preserves multiplayer netgame flags.
+  - ✅ Automated detection and embedding of PC campaign lightmaps and textures from PC's 317MB `bitmaps.map` into Custom Edition map files (`flags: 0x81`), eliminating missing texture corruption.
+- **New Feature: OpenCE Forge Extraction Suite**:
+  - ✅ Added **"Extract to OpenCE Forge..."** in the Tools menu.
+  - ✅ Tabbed item picker: Vehicles, Weapons, Equipment, Scenery, Devices & Lights (`mach`, `ctrl`, `lifi`, `lgtv`, `effe`).
+  - ✅ In-Forge Item Name customization dialog with live palette preview (`[C] ${NAME}`).
+  - ✅ `gbxmodel-vertex` (68 bytes/vert, patched at `part + 0x64`) & `gbxmodel-triangle-strip` ((strip+2)*2 bytes, patched at `part + 0x4C`) captured into `embeddedRawDataAssets` and `embeddedRawDataPatches`.
+  - ✅ Added `fieldOffset` to dependency references (`dependencies[]`) for zero-scan pointer patching in Forge.
 
 #### 2. Remaining Goals (In Priority Order)
-- **Goal 1 (Item 5: Sound Swap Tag Injection Blocker)**:
-  - Resolve pointer validation error when injecting tags after sound swapping: `Tag "sound\sfx\weapons\assault rifle\fire" (sound) ... promotion sound has a path pointer outside the tag data` (occurring on `failedsoundswap.map`).
-  - Update `core/src/map/pointer-rebase.ts` and `sound.json` decoding to gracefully handle empty/invalid dependency pointers in promotion sound blocks.
-- **Goal 2 (Item 6: Viewport Toolbar Cleanup)**:
-  - Remove redundant "Export 3D BSP" button from the 3D Scenario Viewport top toolbar, keeping BSP geometry export exclusively accessible via right-clicking the BSP tag in the Tag Browser context menu.
-- **Goal 3 (Flycam Spartan Decoupling)**:
+- **Goal 1 (Flycam Spartan Decoupling)**:
   - Decouple spectator flight camera from Spartan physics controls in `tag-test-runner.ts` / OpenCE telnet commands so the player does not move while navigating in flycam.
-- **Goal 4 (Milestones M13.5–M19)**:
+- **Goal 2 (Milestones M13.5–M19)**:
   - M13.5: 3-stage MEK map deprotection suite (`class-repair.ts`, `script-scrape.ts`, `heuristic-rename.ts`), mipmap truncation repair, and algebraic GF(2) CRC32 spoofer.
   - M14–M19: Source-to-tag compilers, universal tag class converters, and asset studios.
 
 #### 3. Pending Test Matrix
 | Test Case | Target / Map | Test Objective | Status |
 |---|---|---|:---:|
-| **Test 1: Sound Swap Tag Injection** | `failedsoundswap.map` | Verify tag injection succeeds on maps with sound promotion path pointers. | ⏳ Pending (Item 5) |
-| **Test 2: Viewport BSP Export Cleanup** | `bloodgulch.map` / `a30.map` | Confirm toolbar has clean layout and right-click BSP export works. | ⏳ Pending (Item 6) |
+| **Test 1: Sound Swap Tag Injection** | `failedsoundswap.map` | Verify tag injection succeeds on maps with sound promotion path pointers. | ✅ Verified Automated (20,792 ptrs) |
+| **Test 2: Viewport BSP Export Cleanup** | `bloodgulch.map` / `a30.map` | Confirm toolbar has clean layout and right-click BSP export works. | ✅ Verified |
 | **Test 3: Live AI Runtime Execution** | Converted BSP in OpenCE | Verify imported encounters, squads, and scripts trigger correctly in `halo.exe`. | ⏳ Ready for User Testing |
 | **Test 4: BSP Swapper Multi-Spawn Test** | `a30_b` into `bloodgulch.map` | Validate "Clear Old Player Spawns" + "Keep AI" produces 0 old spawns and spawns on new BSP. | ✅ Verified Automated (3,473 objects) |
+| **Test 5: OpenCE Forge Extraction** | `bloodgulch.map` (`mp_warthog`) | Verify gbxmodel vertex/strip capture, fieldOffset, and itemName container serialization. | ✅ Verified Automated |
+| **Test 6: Sound Permutation Internalization** | `bloodgulch.map` (`assault rifle\fire`) | Verify replacing 1 permutation keeps sibling permutations uncorrupted and internal. | ✅ Verified Automated (4/4 tests) |
+| **Test 7: Campaign BSP Bluescreen Fix** | `a10.map` into `bloodgulch.map` | Verify donor player spawns are imported, engine spawns player 0 without bluescreen, and PC campaign bitmaps embed. | ✅ Verified Automated |
 
 ---
 

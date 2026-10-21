@@ -447,6 +447,9 @@ export function runExtractTags(task: {
   outputPath: string;
   sourceMapName: string;
   resourceMapPaths?: Partial<Record<ResourceMapKind, string>>;
+  itemName?: string;
+  itemNames?: Record<number, string>;
+  captureGbxmodelRawData?: boolean;
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   const cancelCtl = makeCancelController(task.requestId);
@@ -462,12 +465,18 @@ export function runExtractTags(task: {
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
         signal: cancelCtl.signal,
         resourceFiles: resources.files,
+        captureGbxmodelRawData: task.captureGbxmodelRawData,
         onProgress: (i, total) => progress(task.requestId, `Extracting tag ${i + 1} of ${total}`, 10 + Math.round((i / Math.max(1, total)) * 70)),
       });
       if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
 
       progress(task.requestId, 'Writing container file', 90);
-      const containerBuffer = serializeContainer(set, task.sourceMapName);
+      const tagItemName = task.itemNames?.[task.originalIndices[0]] ?? task.itemName;
+      const containerBuffer = serializeContainer(set, task.sourceMapName, {}, {
+        itemName: tagItemName,
+        displayName: tagItemName,
+        itemNames: task.itemNames,
+      });
       // Temp-file-then-rename so a crash/cancel/failure never leaves a partial file at outputPath.
       fs.writeFileSync(tempPath, containerBuffer);
       fs.renameSync(tempPath, task.outputPath);
@@ -499,9 +508,14 @@ export function runExtractTags(task: {
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [origIndex], {
         signal: cancelCtl.signal,
         resourceFiles: resources.files,
+        captureGbxmodelRawData: task.captureGbxmodelRawData,
       });
       if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
-      const buf = serializeContainer(set, task.sourceMapName);
+      const tagItemName = task.itemNames?.[origIndex] ?? task.itemName;
+      const buf = serializeContainer(set, task.sourceMapName, {}, {
+        itemName: tagItemName,
+        displayName: tagItemName,
+      });
       const tmp = `${targetFile}.tmp-${randomUUID()}`;
       pendingTemps.push(tmp);
       fs.writeFileSync(tmp, buf);

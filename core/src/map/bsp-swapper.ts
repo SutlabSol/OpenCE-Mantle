@@ -878,15 +878,17 @@ export function performBspSwap(
       let srcRefCount = 0;
       let srcRefOffset = 0;
       let srcScnrOffset = 0;
+      const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 0xffff];
+      if (srcScnrEntry) {
+        srcScnrOffset = resolveTagDataPointer(
+          srcScnrEntry.tagDataPointerOrResourceIndex,
+          sourceInspected.header,
+          srcTagIndex.baseMemoryAddress,
+        );
+      }
 
       if (shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
-        const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 0xffff];
-        if (srcScnrEntry) {
-          srcScnrOffset = resolveTagDataPointer(
-            srcScnrEntry.tagDataPointerOrResourceIndex,
-            sourceInspected.header,
-            srcTagIndex.baseMemoryAddress,
-          );
+        if (srcScnrOffset > 0) {
 
           if (shouldImportObjects) {
             // Scenery palette (0x21c) and scenery placements (0x210)
@@ -1061,6 +1063,104 @@ export function performBspSwap(
                   for (const off of spawnClearOffsets) {
                     out.writeUInt32LE(0, curScnrOff + off);
                     out.writeUInt32LE(0, curScnrOff + off + 4);
+                  }
+                }
+              }
+
+              // Import donor player starting locations (or ensure at least one valid spawn in new BSP)
+              const targetScnrEntryForSpawns = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+              if (targetScnrEntryForSpawns) {
+                let curScnrOff = resolveTagDataPointer(
+                  targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
+                  reinspected.header,
+                  reinspected.tagIndex.baseMemoryAddress,
+                );
+                const curSpawnsCount = out.readUInt32LE(curScnrOff + 0x354);
+
+                // If spawns were cleared OR if target currently has 0 spawns:
+                if (options.clearPlayerSpawns || curSpawnsCount === 0) {
+                  const importedSpawns: Buffer[] = [];
+                  const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+
+                  if (srcScnrOffset > 0) {
+                    const donorPslRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x354);
+                    if (donorPslRefl.count > 0) {
+                      const donorPslOffset = resolvePointer(
+                        donorPslRefl.pointerLow,
+                        sourceInspected.header.tagDataOffset,
+                        srcTagIndex.baseMemoryAddress,
+                      );
+                      for (let i = 0; i < donorPslRefl.count; i++) {
+                        const sOff = donorPslOffset + i * 52;
+                        const donorBspIdx = sourceBuffer.readInt16LE(sOff + 18);
+                        const matchesBsp = srcIndices.includes(donorBspIdx) || sourceBsps.length <= 1;
+                        if (matchesBsp) {
+                          const spawnBuf = Buffer.alloc(52);
+                          sourceBuffer.copy(spawnBuf, 0, sOff, sOff + 52);
+                          spawnBuf.writeInt16LE(dstIdx, 18); // Map to target BSP index
+                          importedSpawns.push(spawnBuf);
+                        }
+                      }
+                    }
+                  }
+
+                  // If no spawns found in donor for this BSP, create a default one inside BSP bounds
+                  if (importedSpawns.length === 0) {
+                    const fallback = Buffer.alloc(52);
+                    const midX = (minX + maxX) / 2;
+                    const midY = (minY + maxY) / 2;
+                    const groundZ = minZ + 1.0;
+                    fallback.writeFloatLE(midX, 0);
+                    fallback.writeFloatLE(midY, 4);
+                    fallback.writeFloatLE(groundZ, 8);
+                    fallback.writeFloatLE(0, 12); // facing
+                    fallback.writeInt16LE(0, 16); // team
+                    fallback.writeInt16LE(dstIdx, 18); // bsp index
+                    importedSpawns.push(fallback);
+                  }
+
+                  if (importedSpawns.length > 0) {
+                    const appendRes = appendReflexiveElements(
+                      out,
+                      reinspected.header,
+                      reinspected.tagIndex,
+                      curScnrOff + 0x354,
+                      Buffer.concat(importedSpawns),
+                      importedSpawns.length,
+                    );
+                    out = appendRes.buffer;
+                    reinspected.header = appendRes.header;
+                    curScnrOff = resolveTagDataPointer(
+                      targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
+                      reinspected.header,
+                      reinspected.tagIndex.baseMemoryAddress,
+                    );
+
+                    // Also ensure multiplayer netgame flags (0x36c) has spawn points if cleared/empty
+                    const netgameFlagsCount = out.readUInt32LE(curScnrOff + 0x36c);
+                    if (netgameFlagsCount === 0) {
+                      const importedFlags: Buffer[] = [];
+                      for (const sp of importedSpawns) {
+                        const flag = Buffer.alloc(148);
+                        sp.copy(flag, 0, 0, 12); // position
+                        sp.copy(flag, 12, 12, 16); // facing
+                        flag.writeInt16LE(0, 16); // type 0 = mp spawn point
+                        flag.writeInt16LE(0, 18); // team
+                        importedFlags.push(flag);
+                      }
+                      if (importedFlags.length > 0) {
+                        const flagRes = appendReflexiveElements(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          curScnrOff + 0x36c,
+                          Buffer.concat(importedFlags),
+                          importedFlags.length,
+                        );
+                        out = flagRes.buffer;
+                        reinspected.header = flagRes.header;
+                      }
+                    }
                   }
                 }
               }

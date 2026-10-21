@@ -578,26 +578,56 @@ export function replaceSoundPermutationData(
     const pitchOffsetRel = 164;
     tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel, 0x9c);
 
-    // Rebase permutations reflexive inside each pitch range
-    const permOffsetRel = 164 + 72;
-    tagCopy.writeUInt32LE(tagVirtualAddress + permOffsetRel, pitchOffsetRel + 0x40);
+    let audioCursor = (tagStartInMap + tagCopy.length + 3) & ~3;
+    const audioPayloads: { offset: number; data: Buffer }[] = [];
 
-    // Calculate position of audio payload
-    const audioStartInMap = (tagStartInMap + tagCopy.length + 3) & ~3;
+    const pitchStructSize = 72;
+    for (let p = 0; p < pitchCount; p++) {
+      const pOffset = pitchOffsetRel + p * pitchStructSize;
+      const permCount = tagCopy.readUInt32LE(pOffset + 0x3c);
+      const permRelOffset = tagCopy.readUInt32LE(pOffset + 0x40);
 
-    // Update target SoundPermutation
-    const targetPermOffset = permOffsetRel + permutationIndex * 124;
-    tagCopy.writeUInt16LE(newFormat, targetPermOffset + 0x28);
-    tagCopy.writeUInt32LE(newSamples.length, targetPermOffset + 0x40);
-    tagCopy.writeUInt32LE(0, targetPermOffset + 0x44); // Clear external bit
-    tagCopy.writeUInt32LE(audioStartInMap, targetPermOffset + 0x48);
+      // Rebase permutations reflexive inside this pitch range
+      tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel + permRelOffset, pOffset + 0x40);
+
+      for (let m = 0; m < permCount; m++) {
+        const mOffset = pitchOffsetRel + permRelOffset + m * 124;
+        const isTarget = p === pitchRangeIndex && m === permutationIndex;
+        const curAudioOffset = audioCursor;
+
+        let payloadBytes: Buffer;
+        if (isTarget) {
+          payloadBytes = Buffer.from(newSamples);
+          tagCopy.writeUInt16LE(newFormat, mOffset + 0x28);
+          tagCopy.writeUInt32LE(payloadBytes.length, mOffset + 0x40);
+        } else {
+          const oldSampleOffset = tagCopy.readUInt32LE(mOffset + 0x48);
+          const oldSampleSize = tagCopy.readUInt32LE(mOffset + 0x40);
+          if (oldSampleOffset + oldSampleSize <= externalSoundsBuffer.length) {
+            payloadBytes = Buffer.from(externalSoundsBuffer.subarray(oldSampleOffset, oldSampleOffset + oldSampleSize));
+          } else {
+            payloadBytes = Buffer.alloc(0);
+          }
+        }
+
+        tagCopy.writeUInt32LE(0, mOffset + 0x44); // Clear external bit
+        tagCopy.writeUInt32LE(curAudioOffset, mOffset + 0x48);
+        tagCopy.writeUInt32LE(soundTagId, mOffset + 0x34); // Set tag id 0
+        tagCopy.writeUInt32LE(soundTagId, mOffset + 0x3c); // Set tag id 1
+
+        audioPayloads.push({ offset: curAudioOffset, data: payloadBytes });
+        audioCursor = (audioCursor + payloadBytes.length + 3) & ~3;
+      }
+    }
 
     // Allocate expanded map buffer
-    const totalNewLength = audioStartInMap + newSamples.length;
+    const totalNewLength = audioCursor;
     const outBuffer = Buffer.alloc(totalNewLength);
     mapBuffer.copy(outBuffer, 0);
     tagCopy.copy(outBuffer, tagStartInMap);
-    Buffer.from(newSamples).copy(outBuffer, audioStartInMap);
+    for (const payload of audioPayloads) {
+      payload.data.copy(outBuffer, payload.offset);
+    }
 
     // Update tag table entry
     const tagArrayOffset = header.tagDataOffset + 0x28;
@@ -655,6 +685,8 @@ export function replaceSoundPermutationData(
   outputBuffer.writeUInt32LE(newSamples.length, mOffset + 0x40);
   outputBuffer.writeUInt32LE(0, mOffset + 0x44); // internal
   outputBuffer.writeUInt32LE(targetOffset, mOffset + 0x48);
+  outputBuffer.writeUInt32LE(soundTagId, mOffset + 0x34); // Set tag id 0
+  outputBuffer.writeUInt32LE(soundTagId, mOffset + 0x3c); // Set tag id 1
 
   return outputBuffer;
 }

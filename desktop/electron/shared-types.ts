@@ -150,6 +150,12 @@ export interface ExtractTagsRequest {
   originalIndices: number[];
   /** Base file name (no extension) suggested for the native Save As dialog. */
   suggestedFileName: string;
+  /** Custom item name for OpenCE Forge export (e.g. "Gauss Sniper"). */
+  itemName?: string;
+  /** Optional map of originalIndex -> custom item name when extracting multiple items. */
+  itemNames?: Record<number, string>;
+  /** Whether to capture gbxmodel raw data (vertices and triangle strips) into embeddedRawDataAssets. */
+  captureGbxmodelRawData?: boolean;
 }
 
 export type ExtractTagsResult =
@@ -487,7 +493,17 @@ export type WorkerRequest =
   | { type: 'inspect'; requestId: string; filePath: string }
   | { type: 'compress' | 'decompress'; requestId: string; filePath: string; outputPath: string }
   | { type: 'getDependencies'; requestId: string; originalIndices: number[] }
-  | { type: 'extractTags'; requestId: string; originalIndices: number[]; outputPath: string; sourceMapName: string; resourceMapPaths?: Partial<Record<ResourceMapKind, string>> }
+  | {
+      type: 'extractTags';
+      requestId: string;
+      originalIndices: number[];
+      outputPath: string;
+      sourceMapName: string;
+      resourceMapPaths?: Partial<Record<ResourceMapKind, string>>;
+      itemName?: string;
+      itemNames?: Record<number, string>;
+      captureGbxmodelRawData?: boolean;
+    }
   | { type: 'planInject'; requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
   | { type: 'applyInject'; requestId: string }
   | { type: 'saveMap'; requestId: string }
@@ -848,6 +864,12 @@ export interface OpenceApi {
   pickExport3dPath(defaultName: string, format: 'obj' | 'glb'): Promise<{ path: string | null; format?: 'obj' | 'glb' }>;
   pickObjFile(): Promise<{ path: string | null }>;
   analyzeCollisionObj(filePath?: string): Promise<{ ok: boolean; summary?: any; filePath?: string; error?: string }>;
+  pickExportDirectory(): Promise<{ path: string | null }>;
+  tagTestSetAlwaysOnTop(flag: boolean): Promise<void>;
+  tagTestIsAlwaysOnTop(): Promise<boolean>;
+  tagTestTriggerFlycam(): Promise<{ ok: boolean; message?: string }>;
+  setAlwaysOnTop(flag: boolean): Promise<void>;
+  isAlwaysOnTop(): Promise<boolean>;
   getPathForFile(file: File): string;
 }
 

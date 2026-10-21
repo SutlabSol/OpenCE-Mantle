@@ -35075,10 +35075,62 @@ function captureEmbeddedFields(buffer, resolved, decoded, myBytes, myAbsoluteOff
     capture.patches.push({ assetIndex, patchOffset: myAbsoluteOffset + match.patchOffset, patchWidth: match.patchWidth });
   }
 }
-function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, embeddedCapture, injectionBlockers, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal, resourceFiles, capturedAssetKeys) {
+function captureGbxmodelPartEmbeddedData(buffer, tagIndex, myBytes, myAbsoluteOffset, fieldPath, capture) {
+  if (myBytes.length < 104 || tagIndex.modelDataFileOffset <= 0) return;
+  const stripTriangleCount = myBytes.readUInt32LE(72);
+  const stripOffset = myBytes.readUInt32LE(76);
+  const vertexCount = myBytes.readUInt32LE(88);
+  const vertexOffset = myBytes.readUInt32LE(100);
+  if (vertexCount > 0) {
+    const vertexByteSize = vertexCount * 68;
+    const vertexAbsoluteOffset = tagIndex.modelDataFileOffset + vertexOffset;
+    if (vertexAbsoluteOffset >= 0 && vertexAbsoluteOffset + vertexByteSize <= buffer.length) {
+      const vertexBytes = Buffer.from(buffer.subarray(vertexAbsoluteOffset, vertexAbsoluteOffset + vertexByteSize));
+      const dedupeKey = `gbxmodel-vertex:${vertexAbsoluteOffset}:${vertexByteSize}`;
+      let assetIndex = capture.dedupeKeyToAssetIndex.get(dedupeKey);
+      if (assetIndex === void 0) {
+        assetIndex = capture.assets.length;
+        capture.assets.push({ kind: "gbxmodel-vertex", data: vertexBytes });
+        capture.dedupeKeyToAssetIndex.set(dedupeKey, assetIndex);
+      }
+      capture.patches.push({
+        assetIndex,
+        patchOffset: myAbsoluteOffset + 100,
+        patchWidth: 4
+      });
+    } else {
+      capture.blockedReasons.push(`${fieldPath}: vertex offset ${vertexAbsoluteOffset} + size ${vertexByteSize} is out of bounds of the source map.`);
+    }
+  }
+  if (stripTriangleCount > 0) {
+    const stripByteSize = (stripTriangleCount + 2) * 2;
+    const stripAbsoluteOffset = tagIndex.modelDataFileOffset + tagIndex.vertexSize + stripOffset;
+    if (stripAbsoluteOffset >= 0 && stripAbsoluteOffset + stripByteSize <= buffer.length) {
+      const stripBytes = Buffer.from(buffer.subarray(stripAbsoluteOffset, stripAbsoluteOffset + stripByteSize));
+      const dedupeKey = `gbxmodel-triangle-strip:${stripAbsoluteOffset}:${stripByteSize}`;
+      let assetIndex = capture.dedupeKeyToAssetIndex.get(dedupeKey);
+      if (assetIndex === void 0) {
+        assetIndex = capture.assets.length;
+        capture.assets.push({ kind: "gbxmodel-triangle-strip", data: stripBytes });
+        capture.dedupeKeyToAssetIndex.set(dedupeKey, assetIndex);
+      }
+      capture.patches.push({
+        assetIndex,
+        patchOffset: myAbsoluteOffset + 76,
+        patchWidth: 4
+      });
+    } else {
+      capture.blockedReasons.push(`${fieldPath}: triangle strip offset ${stripAbsoluteOffset} + size ${stripByteSize} is out of bounds of the source map.`);
+    }
+  }
+}
+function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset, fileOffsetAnchor, baseMemoryAddress, outChunks, runningOffset, dependencies, embeddedCapture, injectionBlockers, fieldPath, tagIndex, localIndexByOriginal, notExtractedByOriginal, resourceFiles, capturedAssetKeys, captureGbxmodelRawData) {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(buffer, fileOffset, structName);
   captureEmbeddedFields(buffer, resolved, decoded, myBytes, myAbsoluteOffset, fieldPath, embeddedCapture, resourceFiles, capturedAssetKeys);
+  if (captureGbxmodelRawData && (structName === "GBXModelGeometryPart" || structName === "ModelGeometryPart")) {
+    captureGbxmodelPartEmbeddedData(buffer, tagIndex, myBytes, myAbsoluteOffset, fieldPath, embeddedCapture);
+  }
   const reflexiveWork = [];
   for (const field of resolved.fields) {
     const value = decoded.get(field.name);
@@ -35086,7 +35138,11 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
     if (field.def.nonCached) continue;
     const path3 = childFieldPath(fieldPath, field.name);
     if (value.kind === "dependency") {
-      dependencies.push(classifyDependency(value.value, path3, tagIndex, localIndexByOriginal, notExtractedByOriginal));
+      const depRef = classifyDependency(value.value, path3, tagIndex, localIndexByOriginal, notExtractedByOriginal);
+      if (captureGbxmodelRawData) {
+        depRef.fieldOffset = myAbsoluteOffset + field.offset;
+      }
+      dependencies.push(depRef);
     } else if (value.kind === "reflexive" && value.value.count > 0) {
       const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
       if (!childStructName) continue;
@@ -35144,7 +35200,8 @@ function flattenStruct(buffer, structName, fileOffset, myBytes, myAbsoluteOffset
         localIndexByOriginal,
         notExtractedByOriginal,
         resourceFiles,
-        capturedAssetKeys
+        capturedAssetKeys,
+        captureGbxmodelRawData
       );
     }
   }
@@ -35225,7 +35282,8 @@ function extractTagSet(buffer, header, tagIndex, rootIndices, options = {}) {
         localIndexByOriginal,
         notExtractedByOriginal,
         options.resourceFiles,
-        capturedAssetKeys
+        capturedAssetKeys,
+        options.captureGbxmodelRawData
       );
       if (embeddedCapture.blockedReasons.length > 0) {
         extraWarnings.push({
@@ -35309,7 +35367,7 @@ var RESOURCE_MAP_BY_NAME = {
   "sounds.map": "sounds",
   "loc.map": "loc"
 };
-function serializeContainer(set, sourceMapName, resourceMapIdentities = {}) {
+function serializeContainer(set, sourceMapName, resourceMapIdentities = {}, options) {
   const localIndexByOriginal = /* @__PURE__ */ new Map();
   set.tags.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
   const externalResourceRefs = [];
@@ -35333,31 +35391,38 @@ function serializeContainer(set, sourceMapName, resourceMapIdentities = {}) {
     formatVersion: OCETAGS_FORMAT_VERSION,
     sourceMapName,
     createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    itemName: options?.itemName,
+    displayName: options?.displayName ?? options?.itemName,
     hasUnresolvedBspReferences: set.notExtracted.length > 0,
     rootOriginalIndices: set.rootOriginalIndices,
-    tags: set.tags.map((t) => ({
-      originalIndex: t.originalIndex,
-      group: t.group,
-      path: t.path,
-      structName: t.structName,
-      data: t.data.toString("base64"),
-      dependencies: t.dependencies,
-      secondaryClassFourCC: t.secondaryClassFourCC,
-      tertiaryClassFourCC: t.tertiaryClassFourCC,
-      embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
-      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p })),
-      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
-      gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
-        geometryIndex: p.geometryIndex,
-        partIndex: p.partIndex,
-        vertexType: p.vertexType,
-        vertexCount: p.vertexCount,
-        vertexData: p.vertexBytes.toString("base64"),
-        triangleBufferType: p.triangleBufferType,
-        triangleCount: p.triangleCount,
-        triangleData: p.triangleBytes.toString("base64")
-      }))
-    })),
+    tags: set.tags.map((t) => {
+      const tagItemName = options?.itemNames?.[t.originalIndex] ?? (set.rootOriginalIndices.includes(t.originalIndex) ? options?.itemName : void 0);
+      return {
+        originalIndex: t.originalIndex,
+        group: t.group,
+        path: t.path,
+        structName: t.structName,
+        itemName: tagItemName,
+        displayName: tagItemName,
+        data: t.data.toString("base64"),
+        dependencies: t.dependencies,
+        secondaryClassFourCC: t.secondaryClassFourCC,
+        tertiaryClassFourCC: t.tertiaryClassFourCC,
+        embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
+        embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p })),
+        injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
+        gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
+          geometryIndex: p.geometryIndex,
+          partIndex: p.partIndex,
+          vertexType: p.vertexType,
+          vertexCount: p.vertexCount,
+          vertexData: p.vertexBytes.toString("base64"),
+          triangleBufferType: p.triangleBufferType,
+          triangleCount: p.triangleCount,
+          triangleData: p.triangleBytes.toString("base64")
+        }))
+      };
+    }),
     notExtracted: set.notExtracted,
     warnings: set.warnings,
     resourceMapIdentities,
@@ -35613,7 +35678,7 @@ function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, st
           }
           if (value.kind === "dependency") {
             const pathPointer = value.value.pathPointer >>> 0;
-            if (pathPointer === 0) continue;
+            if (pathPointer === 0 || pathPointer === 4294967295) continue;
             if (stalePath(pathPointer)) {
               tolerate({ kind: "staleReferencePath", tagIndex: name.index, at: at + field.offset + 4, value: pathPointer, where: `${where}.${field.name}` });
               continue;
@@ -35862,7 +35927,7 @@ function planInjection(mode, target, container, resourceMapConfig = {}, options 
   const toAddLocalIndices = Array.from(candidateAdd).filter((li) => !blocked.has(li)).sort((a, b) => a - b);
   if (toAddLocalIndices.length > 0) {
     try {
-      collectTagDataPointers(target.buffer, tagDataLayoutOf(target.header, targetTagIndex));
+      collectTagDataPointers(target.buffer, tagDataLayoutOf(target.header, targetTagIndex), { tolerate: { staleReferencePaths: true } });
     } catch (err) {
       if (!(err instanceof UnwalkableTagError)) throw err;
       return { kind: "refused", reason: `Adding tags moves every pointer in the target map, and one tag can't be handled. ${err.message} Only a SWAP that adds no new tags (every tag already in the map) can be done on this map.` };
@@ -36255,14 +36320,14 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
   const insertTriangleSize = newTriangleBytes.length;
   const totalModelPartCount = injectedParts.length;
   const insertPos = targetTagIndex.modelDataFileOffset;
-  const embeddedAssetBuffers = options.allowEmbeddedRelocation ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).map((a) => Buffer.from(a.data, "base64"))) : [];
+  const embeddedAssetBuffers = options.allowEmbeddedRelocation ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).filter((a) => a.kind === "bitmap" || a.kind === "sound").map((a) => Buffer.from(a.data, "base64"))) : [];
   const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
   const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + (4 - embeddedBlobSize % 4) % 4;
   const shiftBeforeTagData = insertSize + insertVertexSize + insertTriangleSize;
   const posVertex = targetTagIndex.modelDataFileOffset + targetTagIndex.vertexSize;
   const posTriangle = subHeaderOffset;
   const baseMemoryAddress = targetTagIndex.baseMemoryAddress;
-  const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex)) : [];
+  const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex), { tolerate: { staleReferencePaths: true } }) : [];
   const newTagDataOffset = subHeaderOffset + shiftBeforeTagData;
   const newArrayOffset = arrayOffset + shiftBeforeTagData;
   const laidOut = writeTags.map((t) => alignTagData(Buffer.from(t.data, "base64"), t.structName));
@@ -36274,7 +36339,7 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
   if (insertSize > 0) {
     let cursor = insertPos;
     for (let i = 0; i < writeTags.length; i++) {
-      for (const asset of writeTags[i].embeddedRawDataAssets ?? []) {
+      for (const asset of (writeTags[i].embeddedRawDataAssets ?? []).filter((a) => a.kind === "bitmap" || a.kind === "sound")) {
         const bytes = Buffer.from(asset.data, "base64");
         bytes.copy(out, cursor);
         assetAbsoluteOffsets[i].push(cursor);
@@ -36341,6 +36406,7 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
     out.writeUInt32LE(tertiary === null ? 4294967295 : tertiary, entryOffset + 8);
     const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 20);
+    out.writeUInt32LE(0, entryOffset + 24);
   }
   const pathPointerOfTagId = (tagId) => out.readUInt32LE(newArrayOffset + (tagId & 65535) * TAG_ENTRY_SIZE + 16);
   for (let i = 0; i < writeTags.length; i++) {
@@ -42987,14 +43053,16 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       let srcRefCount = 0;
       let srcRefOffset = 0;
       let srcScnrOffset = 0;
+      const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 65535];
+      if (srcScnrEntry) {
+        srcScnrOffset = resolveTagDataPointer(
+          srcScnrEntry.tagDataPointerOrResourceIndex,
+          sourceInspected.header,
+          srcTagIndex.baseMemoryAddress
+        );
+      }
       if (shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
-        const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 65535];
-        if (srcScnrEntry) {
-          srcScnrOffset = resolveTagDataPointer(
-            srcScnrEntry.tagDataPointerOrResourceIndex,
-            sourceInspected.header,
-            srcTagIndex.baseMemoryAddress
-          );
+        if (srcScnrOffset > 0) {
           if (shouldImportObjects) {
             const scenPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 540);
             srcSceneryPalCount = scenPalRefl.count;
@@ -43145,6 +43213,94 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                   for (const off of spawnClearOffsets) {
                     out.writeUInt32LE(0, curScnrOff + off);
                     out.writeUInt32LE(0, curScnrOff + off + 4);
+                  }
+                }
+              }
+              const targetScnrEntryForSpawns = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+              if (targetScnrEntryForSpawns) {
+                let curScnrOff = resolveTagDataPointer(
+                  targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
+                  reinspected.header,
+                  reinspected.tagIndex.baseMemoryAddress
+                );
+                const curSpawnsCount = out.readUInt32LE(curScnrOff + 852);
+                if (options.clearPlayerSpawns || curSpawnsCount === 0) {
+                  const importedSpawns = [];
+                  const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+                  if (srcScnrOffset > 0) {
+                    const donorPslRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 852);
+                    if (donorPslRefl.count > 0) {
+                      const donorPslOffset = resolvePointer3(
+                        donorPslRefl.pointerLow,
+                        sourceInspected.header.tagDataOffset,
+                        srcTagIndex.baseMemoryAddress
+                      );
+                      for (let i = 0; i < donorPslRefl.count; i++) {
+                        const sOff = donorPslOffset + i * 52;
+                        const donorBspIdx = sourceBuffer.readInt16LE(sOff + 18);
+                        const matchesBsp = srcIndices.includes(donorBspIdx) || sourceBsps.length <= 1;
+                        if (matchesBsp) {
+                          const spawnBuf = Buffer.alloc(52);
+                          sourceBuffer.copy(spawnBuf, 0, sOff, sOff + 52);
+                          spawnBuf.writeInt16LE(dstIdx, 18);
+                          importedSpawns.push(spawnBuf);
+                        }
+                      }
+                    }
+                  }
+                  if (importedSpawns.length === 0) {
+                    const fallback = Buffer.alloc(52);
+                    const midX = (minX + maxX) / 2;
+                    const midY = (minY + maxY) / 2;
+                    const groundZ = minZ + 1;
+                    fallback.writeFloatLE(midX, 0);
+                    fallback.writeFloatLE(midY, 4);
+                    fallback.writeFloatLE(groundZ, 8);
+                    fallback.writeFloatLE(0, 12);
+                    fallback.writeInt16LE(0, 16);
+                    fallback.writeInt16LE(dstIdx, 18);
+                    importedSpawns.push(fallback);
+                  }
+                  if (importedSpawns.length > 0) {
+                    const appendRes = appendReflexiveElements(
+                      out,
+                      reinspected.header,
+                      reinspected.tagIndex,
+                      curScnrOff + 852,
+                      Buffer.concat(importedSpawns),
+                      importedSpawns.length
+                    );
+                    out = appendRes.buffer;
+                    reinspected.header = appendRes.header;
+                    curScnrOff = resolveTagDataPointer(
+                      targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
+                      reinspected.header,
+                      reinspected.tagIndex.baseMemoryAddress
+                    );
+                    const netgameFlagsCount = out.readUInt32LE(curScnrOff + 876);
+                    if (netgameFlagsCount === 0) {
+                      const importedFlags = [];
+                      for (const sp of importedSpawns) {
+                        const flag = Buffer.alloc(148);
+                        sp.copy(flag, 0, 0, 12);
+                        sp.copy(flag, 12, 12, 16);
+                        flag.writeInt16LE(0, 16);
+                        flag.writeInt16LE(0, 18);
+                        importedFlags.push(flag);
+                      }
+                      if (importedFlags.length > 0) {
+                        const flagRes = appendReflexiveElements(
+                          out,
+                          reinspected.header,
+                          reinspected.tagIndex,
+                          curScnrOff + 876,
+                          Buffer.concat(importedFlags),
+                          importedFlags.length
+                        );
+                        out = flagRes.buffer;
+                        reinspected.header = flagRes.header;
+                      }
+                    }
                   }
                 }
               }
@@ -44879,19 +45035,47 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
     const pitchCount = tagCopy.readUInt32LE(152);
     const pitchOffsetRel = 164;
     tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel, 156);
-    const permOffsetRel = 164 + 72;
-    tagCopy.writeUInt32LE(tagVirtualAddress + permOffsetRel, pitchOffsetRel + 64);
-    const audioStartInMap = tagStartInMap + tagCopy.length + 3 & ~3;
-    const targetPermOffset = permOffsetRel + permutationIndex * 124;
-    tagCopy.writeUInt16LE(newFormat, targetPermOffset + 40);
-    tagCopy.writeUInt32LE(newSamples.length, targetPermOffset + 64);
-    tagCopy.writeUInt32LE(0, targetPermOffset + 68);
-    tagCopy.writeUInt32LE(audioStartInMap, targetPermOffset + 72);
-    const totalNewLength = audioStartInMap + newSamples.length;
+    let audioCursor = tagStartInMap + tagCopy.length + 3 & ~3;
+    const audioPayloads = [];
+    const pitchStructSize = 72;
+    for (let p = 0; p < pitchCount; p++) {
+      const pOffset2 = pitchOffsetRel + p * pitchStructSize;
+      const permCount = tagCopy.readUInt32LE(pOffset2 + 60);
+      const permRelOffset = tagCopy.readUInt32LE(pOffset2 + 64);
+      tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel + permRelOffset, pOffset2 + 64);
+      for (let m = 0; m < permCount; m++) {
+        const mOffset2 = pitchOffsetRel + permRelOffset + m * 124;
+        const isTarget = p === pitchRangeIndex && m === permutationIndex;
+        const curAudioOffset = audioCursor;
+        let payloadBytes;
+        if (isTarget) {
+          payloadBytes = Buffer.from(newSamples);
+          tagCopy.writeUInt16LE(newFormat, mOffset2 + 40);
+          tagCopy.writeUInt32LE(payloadBytes.length, mOffset2 + 64);
+        } else {
+          const oldSampleOffset = tagCopy.readUInt32LE(mOffset2 + 72);
+          const oldSampleSize = tagCopy.readUInt32LE(mOffset2 + 64);
+          if (oldSampleOffset + oldSampleSize <= externalSoundsBuffer.length) {
+            payloadBytes = Buffer.from(externalSoundsBuffer.subarray(oldSampleOffset, oldSampleOffset + oldSampleSize));
+          } else {
+            payloadBytes = Buffer.alloc(0);
+          }
+        }
+        tagCopy.writeUInt32LE(0, mOffset2 + 68);
+        tagCopy.writeUInt32LE(curAudioOffset, mOffset2 + 72);
+        tagCopy.writeUInt32LE(soundTagId, mOffset2 + 52);
+        tagCopy.writeUInt32LE(soundTagId, mOffset2 + 60);
+        audioPayloads.push({ offset: curAudioOffset, data: payloadBytes });
+        audioCursor = audioCursor + payloadBytes.length + 3 & ~3;
+      }
+    }
+    const totalNewLength = audioCursor;
     const outBuffer = Buffer.alloc(totalNewLength);
     mapBuffer.copy(outBuffer, 0);
     tagCopy.copy(outBuffer, tagStartInMap);
-    Buffer.from(newSamples).copy(outBuffer, audioStartInMap);
+    for (const payload of audioPayloads) {
+      payload.data.copy(outBuffer, payload.offset);
+    }
     const tagArrayOffset = header.tagDataOffset + 40;
     const entryOffset = tagArrayOffset + entryIdx * 32;
     outBuffer.writeUInt32LE(tagVirtualAddress, entryOffset + 20);
@@ -44936,6 +45120,8 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
   outputBuffer.writeUInt32LE(newSamples.length, mOffset + 64);
   outputBuffer.writeUInt32LE(0, mOffset + 68);
   outputBuffer.writeUInt32LE(targetOffset, mOffset + 72);
+  outputBuffer.writeUInt32LE(soundTagId, mOffset + 52);
+  outputBuffer.writeUInt32LE(soundTagId, mOffset + 60);
   return outputBuffer;
 }
 
@@ -45761,11 +45947,17 @@ function runExtractTags(task) {
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
         signal: cancelCtl.signal,
         resourceFiles: resources.files,
+        captureGbxmodelRawData: task.captureGbxmodelRawData,
         onProgress: (i, total) => progress(task.requestId, `Extracting tag ${i + 1} of ${total}`, 10 + Math.round(i / Math.max(1, total) * 70))
       });
       if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
       progress(task.requestId, "Writing container file", 90);
-      const containerBuffer = serializeContainer(set, task.sourceMapName);
+      const tagItemName = task.itemNames?.[task.originalIndices[0]] ?? task.itemName;
+      const containerBuffer = serializeContainer(set, task.sourceMapName, {}, {
+        itemName: tagItemName,
+        displayName: tagItemName,
+        itemNames: task.itemNames
+      });
       fs2.writeFileSync(tempPath, containerBuffer);
       fs2.renameSync(tempPath, task.outputPath);
       progress(task.requestId, "Done", 100);
@@ -45792,10 +45984,15 @@ function runExtractTags(task) {
       progress(task.requestId, `Extracting ${i + 1} of ${task.originalIndices.length}: ${entry.path}`, Math.round(i / task.originalIndices.length * 100));
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [origIndex], {
         signal: cancelCtl.signal,
-        resourceFiles: resources.files
+        resourceFiles: resources.files,
+        captureGbxmodelRawData: task.captureGbxmodelRawData
       });
       if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
-      const buf = serializeContainer(set, task.sourceMapName);
+      const tagItemName = task.itemNames?.[origIndex] ?? task.itemName;
+      const buf = serializeContainer(set, task.sourceMapName, {}, {
+        itemName: tagItemName,
+        displayName: tagItemName
+      });
       const tmp = `${targetFile}.tmp-${(0, import_crypto3.randomUUID)()}`;
       pendingTemps.push(tmp);
       fs2.writeFileSync(tmp, buf);

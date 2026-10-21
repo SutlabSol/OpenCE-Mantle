@@ -26,6 +26,7 @@ import ConvertDialog from './components/ConvertDialog';
 import BatchExtractDialog from './components/BatchExtractDialog';
 import ConfigureResourcesPromptDialog from './components/ConfigureResourcesPromptDialog';
 import BspSwapperDialog from './components/BspSwapperDialog';
+import OpenCeForgeExportDialog from './components/OpenCeForgeExportDialog';
 import type { BatchExtractPreflightResult, HaloBitmapVersion } from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
@@ -42,6 +43,7 @@ export default function App() {
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
   const [batchExtractPreflight, setBatchExtractPreflight] = useState<BatchExtractPreflightResult | null>(null);
   const [bspSwapperOpen, setBspSwapperOpen] = useState(false);
+  const [forgeExportOpen, setForgeExportOpen] = useState(false);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
@@ -109,6 +111,7 @@ export default function App() {
       else if (action === 'inject-tags') setInjectDialogOpen(true);
       else if (action === 'verify-embedded-data') setVerifyDialogOpen(true);
       else if (action === 'swap-bsp') setBspSwapperOpen(true);
+      else if (action === 'extract-to-forge') setForgeExportOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
       else if (action === 'convert-map') setConvertSource('pick');
       else if (action.startsWith('identify-bitmaps:')) {
@@ -350,6 +353,7 @@ export default function App() {
           {
             label: 'Tools',
             items: [
+              { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
               { label: '', separator: true },
@@ -506,6 +510,16 @@ export default function App() {
           onSuccess={() => {
             // BSP swapped in-memory
           }}
+        />
+      )}
+
+      {forgeExportOpen && mapState?.status === 'ok' && (
+        <OpenCeForgeExportDialog
+          open={forgeExportOpen}
+          onClose={() => setForgeExportOpen(false)}
+          allTags={mapState.tags}
+          initiallySelectedIndices={Array.from(selectedTagIndices)}
+          log={log}
         />
       )}
 

@@ -391,7 +391,7 @@ function collectBspReferencePaths(
           }
           if (value.kind === 'dependency') {
             const pathPointer = value.value.pathPointer >>> 0;
-            if (pathPointer === 0) continue;
+            if (pathPointer === 0 || pathPointer === 0xffffffff) continue;
             if (stalePath(pathPointer)) {
               tolerate({ kind: 'staleReferencePath', tagIndex: name.index, at: at + field.offset + 4, value: pathPointer, where: `${where}.${field.name}` });
               continue;

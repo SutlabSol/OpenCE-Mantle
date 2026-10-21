@@ -17,6 +17,8 @@ export interface ExtractOptions extends WalkOptions {
     bitmaps?: RandomAccessFile;
     sounds?: RandomAccessFile;
   };
+  /** When true (e.g. OpenCE Forge export), captures gbxmodel part vertex and triangle strip raw data into embeddedRawDataAssets/embeddedRawDataPatches. */
+  captureGbxmodelRawData?: boolean;
 }
 
 const NULL_TAG_ID = 0xffffffff;
@@ -30,11 +32,13 @@ export interface ExtractedDependencyRef {
   kind: DependencyRefKind;
   /** Only set when kind === 'internal': index into `ExtractedTagSet.tags`. */
   localTagIndex?: number;
+  /** Byte offset of this 16-byte dependency field within the tag's flattened data buffer. */
+  fieldOffset?: number;
 }
 
-/** One unique embedded (external=0) bitmap/sound raw-data range captured from the source map. */
+/** One unique embedded (external=0) bitmap/sound/model raw-data range captured from the source map. */
 export interface ExtractedEmbeddedAsset {
-  kind: 'bitmap' | 'sound';
+  kind: 'bitmap' | 'sound' | 'gbxmodel-vertex' | 'gbxmodel-triangle-strip' | string;
   data: Buffer;
 }
 
@@ -255,6 +259,80 @@ function captureEmbeddedFields(
 }
 
 /**
+ * Captures gbxmodel / model geometry part raw vertices and triangle strip index buffers
+ * directly into embeddedRawDataAssets and embeddedRawDataPatches for OpenCE Forge.
+ *
+ * "gbxmodel-vertex":
+ *   patchOffset: part_offset + 0x64 (+100, vertex_offset), patchWidth: 4
+ *   Payload size: vertex_count * 68 bytes (struct model_vertex_uncompressed)
+ *
+ * "gbxmodel-triangle-strip":
+ *   patchOffset: part_offset + 0x4C (+76, strip_offset), patchWidth: 4 (Forge will also automatically mirror the patched offset to part_offset + 0x50)
+ *   Payload size: (strip_triangle_count + 2) * 2 bytes (uint16 strip indices)
+ */
+function captureGbxmodelPartEmbeddedData(
+  buffer: Buffer,
+  tagIndex: TagIndex,
+  myBytes: Buffer,
+  myAbsoluteOffset: number,
+  fieldPath: string,
+  capture: EmbeddedCaptureState,
+): void {
+  if (myBytes.length < 104 || tagIndex.modelDataFileOffset <= 0) return;
+
+  const stripTriangleCount = myBytes.readUInt32LE(0x48);
+  const stripOffset = myBytes.readUInt32LE(0x4C);
+  const vertexCount = myBytes.readUInt32LE(0x58);
+  const vertexOffset = myBytes.readUInt32LE(0x64);
+
+  // 1. Vertices (68 bytes each in CE uncompressed format)
+  if (vertexCount > 0) {
+    const vertexByteSize = vertexCount * 68;
+    const vertexAbsoluteOffset = tagIndex.modelDataFileOffset + vertexOffset;
+    if (vertexAbsoluteOffset >= 0 && vertexAbsoluteOffset + vertexByteSize <= buffer.length) {
+      const vertexBytes = Buffer.from(buffer.subarray(vertexAbsoluteOffset, vertexAbsoluteOffset + vertexByteSize));
+      const dedupeKey = `gbxmodel-vertex:${vertexAbsoluteOffset}:${vertexByteSize}`;
+      let assetIndex = capture.dedupeKeyToAssetIndex.get(dedupeKey);
+      if (assetIndex === undefined) {
+        assetIndex = capture.assets.length;
+        capture.assets.push({ kind: 'gbxmodel-vertex', data: vertexBytes });
+        capture.dedupeKeyToAssetIndex.set(dedupeKey, assetIndex);
+      }
+      capture.patches.push({
+        assetIndex,
+        patchOffset: myAbsoluteOffset + 0x64,
+        patchWidth: 4,
+      });
+    } else {
+      capture.blockedReasons.push(`${fieldPath}: vertex offset ${vertexAbsoluteOffset} + size ${vertexByteSize} is out of bounds of the source map.`);
+    }
+  }
+
+  // 2. Triangle strip indices: (strip_triangle_count + 2) * 2 bytes
+  if (stripTriangleCount > 0) {
+    const stripByteSize = (stripTriangleCount + 2) * 2;
+    const stripAbsoluteOffset = tagIndex.modelDataFileOffset + tagIndex.vertexSize + stripOffset;
+    if (stripAbsoluteOffset >= 0 && stripAbsoluteOffset + stripByteSize <= buffer.length) {
+      const stripBytes = Buffer.from(buffer.subarray(stripAbsoluteOffset, stripAbsoluteOffset + stripByteSize));
+      const dedupeKey = `gbxmodel-triangle-strip:${stripAbsoluteOffset}:${stripByteSize}`;
+      let assetIndex = capture.dedupeKeyToAssetIndex.get(dedupeKey);
+      if (assetIndex === undefined) {
+        assetIndex = capture.assets.length;
+        capture.assets.push({ kind: 'gbxmodel-triangle-strip', data: stripBytes });
+        capture.dedupeKeyToAssetIndex.set(dedupeKey, assetIndex);
+      }
+      capture.patches.push({
+        assetIndex,
+        patchOffset: myAbsoluteOffset + 0x4C,
+        patchWidth: 4,
+      });
+    } else {
+      capture.blockedReasons.push(`${fieldPath}: triangle strip offset ${stripAbsoluteOffset} + size ${stripByteSize} is out of bounds of the source map.`);
+    }
+  }
+}
+
+/**
  * Flattens one struct instance (and everything reachable from it via TagReflexive) into
  * `outChunks`, appending to the shared `runningOffset`. TagDependency fields are recorded into
  * `dependencies` but left byte-for-byte unchanged. Embedded (external=0) bitmap/sound fields
@@ -288,10 +366,15 @@ function flattenStruct(
   notExtractedByOriginal: Map<number, NotExtractedTag>,
   resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile },
   capturedAssetKeys?: Set<string>,
+  captureGbxmodelRawData?: boolean,
 ): void {
   const resolved = resolveStruct(structName);
   const decoded = decodeStruct(buffer, fileOffset, structName);
   captureEmbeddedFields(buffer, resolved, decoded, myBytes, myAbsoluteOffset, fieldPath, embeddedCapture, resourceFiles, capturedAssetKeys);
+
+  if (captureGbxmodelRawData && (structName === 'GBXModelGeometryPart' || structName === 'ModelGeometryPart')) {
+    captureGbxmodelPartEmbeddedData(buffer, tagIndex, myBytes, myAbsoluteOffset, fieldPath, embeddedCapture);
+  }
 
   interface ReflexiveWork {
     fieldName: string;
@@ -313,7 +396,11 @@ function flattenStruct(
     const path = childFieldPath(fieldPath, field.name);
 
     if (value.kind === 'dependency') {
-      dependencies.push(classifyDependency(value.value, path, tagIndex, localIndexByOriginal, notExtractedByOriginal));
+      const depRef = classifyDependency(value.value, path, tagIndex, localIndexByOriginal, notExtractedByOriginal);
+      if (captureGbxmodelRawData) {
+        depRef.fieldOffset = myAbsoluteOffset + field.offset;
+      }
+      dependencies.push(depRef);
     } else if (value.kind === 'reflexive' && value.value.count > 0) {
       const childStructName = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
       if (!childStructName) continue;
@@ -387,6 +474,7 @@ function flattenStruct(
         notExtractedByOriginal,
         resourceFiles,
         capturedAssetKeys,
+        captureGbxmodelRawData,
       );
     }
   }
@@ -488,6 +576,7 @@ export function extractTagSet(
         notExtractedByOriginal,
         options.resourceFiles,
         capturedAssetKeys,
+        options.captureGbxmodelRawData,
       );
 
       if (embeddedCapture.blockedReasons.length > 0) {

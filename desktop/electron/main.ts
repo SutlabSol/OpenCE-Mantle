@@ -83,6 +83,7 @@ import type {
   BspSwapPreflightResult,
   BspSwapOptions,
   BspSwapResult,
+  Export3dResult,
   GetBitmapInfoResult,
   GetBitmapRgbaResult,
   ExportBitmapResult,
@@ -485,6 +486,9 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
       outputPath: resolvedTarget,
       sourceMapName: currentMapScenarioName ?? path.basename(currentMapPath, '.map'),
       resourceMapPaths,
+      itemName: request.itemName,
+      itemNames: request.itemNames,
+      captureGbxmodelRawData: request.captureGbxmodelRawData,
     },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'extract', stage, percent }),
@@ -947,33 +951,52 @@ function identifyResourceMapFlow(
   }
 }
 
+function getSearchRoots(): string[] {
+  const cwd = process.cwd();
+  return [
+    cwd,
+    path.resolve(cwd, '..'),
+    path.resolve(__dirname, '..'),
+    path.resolve(__dirname, '../..'),
+    'C:\\Users\\LeviB\\Projects\\OpenCE-Mantle',
+  ];
+}
+
 function detectDefaultResourceMapPathsFlow(): Record<HaloBitmapVersion, string | null> {
   const home = process.env.HOME || process.env.USERPROFILE || '';
   const cwd = process.cwd();
+  const searchRoots = getSearchRoots();
+
   const candidates: Record<HaloBitmapVersion, string[]> = {
     halomd: [
-      path.join(cwd, 'sample_maps/HaloMD/bitmaps.map'),
+      ...searchRoots.map((r) => path.join(r, 'sample_maps/HaloMD/bitmaps.map')),
       path.join(home, 'Library/Application Support/HaloMD/GameData/Maps/bitmaps.map'),
       path.join(cwd, 'bitmaps.map'),
     ],
     ce: [
-      path.join(cwd, 'sample_maps/custom edition/bitmaps.map'),
+      ...searchRoots.map((r) => path.join(r, 'sample_maps/custom edition/bitmaps.map')),
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE\\custom_maps\\bitmaps.map',
+      'C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\CUSTOM EDITION DEFAULT MAPS\\bitmaps.map',
       'C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map',
       'C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map',
       path.join(cwd, 'maps/bitmaps.map'),
     ],
     pc: [
-      path.join(cwd, 'sample_maps/PC/bitmaps.map'),
+      ...searchRoots.map((r) => path.join(r, 'sample_maps/PC/bitmaps.map')),
+      ...searchRoots.map((r) => path.join(r, 'sample_maps/HaloMD/bitmaps.map')),
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\bitmaps.map',
+      'C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\bitmaps.map',
       'C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map',
       'C:\\Program Files\\Microsoft Games\\Halo\\maps\\bitmaps.map',
     ],
     demo: [
-      path.join(cwd, 'sample_maps/MacDemo/bitmaps.map'),
+      ...searchRoots.map((r) => path.join(r, 'sample_maps/MacDemo/bitmaps.map')),
+      ...searchRoots.map((r) => path.join(r, 'sample_maps/Base Siege/bitmaps.map')),
       'C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map',
       path.join(home, 'Applications/Halo Demo/Maps/bitmaps.map'),
     ],
     mcc: [
-      path.join(cwd, 'sample_maps/MCC/bitmaps.map'),
+      ...searchRoots.map((r) => path.join(r, 'sample_maps/MCC/bitmaps.map')),
       'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
       'C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
       'D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
@@ -1830,9 +1853,23 @@ function resolveResourceMapsForSource(sourceFilePath: string, options?: BspSwapO
   if (!bitmapsPath && defaults[edition] && fs.existsSync(defaults[edition]!)) {
     bitmapsPath = defaults[edition];
   }
+  // If PC edition and still not found, check HaloMD (uses identical PC bitmaps format)
+  if (!bitmapsPath && edition === 'pc' && defaults.halomd && fs.existsSync(defaults.halomd)) {
+    bitmapsPath = defaults.halomd;
+  }
   if (!soundsPath && bitmapsPath) {
     const siblingSnd = path.join(path.dirname(bitmapsPath), 'sounds.map');
     if (fs.existsSync(siblingSnd)) soundsPath = siblingSnd;
+  }
+  if (!soundsPath && edition === 'pc') {
+    const pcSoundsCandidates = [
+      ...getSearchRoots().map((r) => path.join(r, 'sample_maps/PC/sounds.map')),
+      'C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\sounds.map',
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\sounds.map',
+    ];
+    for (const p of pcSoundsCandidates) {
+      if (fs.existsSync(p)) { soundsPath = p; break; }
+    }
   }
 
   // 5. Fallback for MCC sounds: MCC often shares sounds with CE
@@ -2177,6 +2214,7 @@ function buildMenu() {
         { label: 'Decompress Map', click: () => decompressFlow() },
         { label: 'Recompress Map', click: () => recompressFlow() },
         { type: 'separator' },
+        { label: 'Extract to OpenCE Forge...', click: () => mainWindow?.webContents.send('menu:action', 'extract-to-forge') },
         { label: 'Extract Tags...', accelerator: 'CmdOrCtrl+E', click: () => mainWindow?.webContents.send('menu:action', 'extract-tags') },
         { label: 'Extract Whole Map...', click: () => mainWindow?.webContents.send('menu:action', 'extract-whole-map') },
         { label: 'Inject Tags...', click: () => mainWindow?.webContents.send('menu:action', 'inject-tags') },

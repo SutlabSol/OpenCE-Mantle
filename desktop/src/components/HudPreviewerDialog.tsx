@@ -575,7 +575,7 @@ export default function HudPreviewerDialog({ tag, onClose }: Props) {
               }}
               title={tag.path}
             >
-              {tag.path} ({stats.name})
+              <span>{tag.path}</span> ({stats.name})
             </span>
           </div>
           <button
@@ -781,6 +781,7 @@ export default function HudPreviewerDialog({ tag, onClose }: Props) {
             {/* Firing & Reload */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <button
+                data-testid="hud-fire-btn"
                 onClick={handleFire}
                 style={{
                   background: '#ef4444',
@@ -796,6 +797,7 @@ export default function HudPreviewerDialog({ tag, onClose }: Props) {
                 Fire (F)
               </button>
               <button
+                data-testid="hud-reload-btn"
                 onClick={handleReload}
                 style={{
                   background: '#0ea5e9',

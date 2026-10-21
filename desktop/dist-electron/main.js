@@ -34113,21 +34113,71 @@ var DEFAULT_SETTINGS = {
   openCeDirectory: null,
   openCeExecutablePath: null
 };
+function migratePath(p) {
+  if (typeof p !== "string" || !p) return null;
+  if (!fs2.existsSync(p) && p.includes("OpenCE-Modding-Tool")) {
+    const candidate = p.replace(/OpenCE-Modding-Tool/g, "OpenCE-Mantle");
+    if (fs2.existsSync(candidate)) return candidate;
+  }
+  return p;
+}
 function getSettings() {
   try {
     const raw = fs2.readFileSync(storePath2(), "utf-8");
     const parsed = JSON.parse(raw);
-    return {
+    let changed = false;
+    const resourceMaps = {
+      bitmaps: typeof parsed.resourceMaps?.bitmaps === "string" ? parsed.resourceMaps.bitmaps : null,
+      sounds: typeof parsed.resourceMaps?.sounds === "string" ? parsed.resourceMaps.sounds : null,
+      loc: typeof parsed.resourceMaps?.loc === "string" ? parsed.resourceMaps.loc : null
+    };
+    const migratedBitmaps = migratePath(resourceMaps.bitmaps);
+    if (migratedBitmaps !== resourceMaps.bitmaps) {
+      resourceMaps.bitmaps = migratedBitmaps;
+      changed = true;
+    }
+    const migratedSounds = migratePath(resourceMaps.sounds);
+    if (migratedSounds !== resourceMaps.sounds) {
+      resourceMaps.sounds = migratedSounds;
+      changed = true;
+    }
+    const migratedLoc = migratePath(resourceMaps.loc);
+    if (migratedLoc !== resourceMaps.loc) {
+      resourceMaps.loc = migratedLoc;
+      changed = true;
+    }
+    const versionResourceMaps = parsed.versionResourceMaps && typeof parsed.versionResourceMaps === "object" ? parsed.versionResourceMaps : {};
+    for (const v of Object.keys(versionResourceMaps)) {
+      const entry = versionResourceMaps[v];
+      if (entry) {
+        const nb = migratePath(entry.bitmaps);
+        if (nb !== entry.bitmaps) {
+          entry.bitmaps = nb;
+          changed = true;
+        }
+        const ns = migratePath(entry.sounds);
+        if (ns !== entry.sounds) {
+          entry.sounds = ns;
+          changed = true;
+        }
+        const nl = migratePath(entry.loc);
+        if (nl !== entry.loc) {
+          entry.loc = nl;
+          changed = true;
+        }
+      }
+    }
+    const settings = {
       lastExtractDir: typeof parsed.lastExtractDir === "string" ? parsed.lastExtractDir : null,
-      resourceMaps: {
-        bitmaps: typeof parsed.resourceMaps?.bitmaps === "string" ? parsed.resourceMaps.bitmaps : null,
-        sounds: typeof parsed.resourceMaps?.sounds === "string" ? parsed.resourceMaps.sounds : null,
-        loc: typeof parsed.resourceMaps?.loc === "string" ? parsed.resourceMaps.loc : null
-      },
-      versionResourceMaps: parsed.versionResourceMaps && typeof parsed.versionResourceMaps === "object" ? parsed.versionResourceMaps : {},
+      resourceMaps,
+      versionResourceMaps,
       openCeDirectory: typeof parsed.openCeDirectory === "string" ? parsed.openCeDirectory : detectOpenCeDirectory(),
       openCeExecutablePath: typeof parsed.openCeExecutablePath === "string" ? parsed.openCeExecutablePath : null
     };
+    if (changed) {
+      writeSettings(settings);
+    }
+    return settings;
   } catch {
     return { ...DEFAULT_SETTINGS, resourceMaps: { ...DEFAULT_SETTINGS.resourceMaps }, versionResourceMaps: {}, openCeDirectory: detectOpenCeDirectory() };
   }
@@ -35443,7 +35493,10 @@ async function extractTagsFlow(request) {
       originalIndices: request.originalIndices,
       outputPath: resolvedTarget,
       sourceMapName: currentMapScenarioName ?? path10.basename(currentMapPath, ".map"),
-      resourceMapPaths
+      resourceMapPaths,
+      itemName: request.itemName,
+      itemNames: request.itemNames,
+      captureGbxmodelRawData: request.captureGbxmodelRawData
     },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "extract", stage, percent })
@@ -35822,33 +35875,50 @@ function identifyResourceMapFlow(filePath, expectedVersion, expectedKind) {
     handle.close();
   }
 }
+function getSearchRoots() {
+  const cwd = process.cwd();
+  return [
+    cwd,
+    path10.resolve(cwd, ".."),
+    path10.resolve(__dirname, ".."),
+    path10.resolve(__dirname, "../.."),
+    "C:\\Users\\LeviB\\Projects\\OpenCE-Mantle"
+  ];
+}
 function detectDefaultResourceMapPathsFlow() {
   const home = process.env.HOME || process.env.USERPROFILE || "";
   const cwd = process.cwd();
+  const searchRoots = getSearchRoots();
   const candidates = {
     halomd: [
-      path10.join(cwd, "sample_maps/HaloMD/bitmaps.map"),
+      ...searchRoots.map((r) => path10.join(r, "sample_maps/HaloMD/bitmaps.map")),
       path10.join(home, "Library/Application Support/HaloMD/GameData/Maps/bitmaps.map"),
       path10.join(cwd, "bitmaps.map")
     ],
     ce: [
-      path10.join(cwd, "sample_maps/custom edition/bitmaps.map"),
+      ...searchRoots.map((r) => path10.join(r, "sample_maps/custom edition/bitmaps.map")),
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE\\custom_maps\\bitmaps.map",
+      "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\CUSTOM EDITION DEFAULT MAPS\\bitmaps.map",
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
       path10.join(cwd, "maps/bitmaps.map")
     ],
     pc: [
-      path10.join(cwd, "sample_maps/PC/bitmaps.map"),
+      ...searchRoots.map((r) => path10.join(r, "sample_maps/PC/bitmaps.map")),
+      ...searchRoots.map((r) => path10.join(r, "sample_maps/HaloMD/bitmaps.map")),
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\bitmaps.map",
+      "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\bitmaps.map",
       "C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo\\maps\\bitmaps.map"
     ],
     demo: [
-      path10.join(cwd, "sample_maps/MacDemo/bitmaps.map"),
+      ...searchRoots.map((r) => path10.join(r, "sample_maps/MacDemo/bitmaps.map")),
+      ...searchRoots.map((r) => path10.join(r, "sample_maps/Base Siege/bitmaps.map")),
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map",
       path10.join(home, "Applications/Halo Demo/Maps/bitmaps.map")
     ],
     mcc: [
-      path10.join(cwd, "sample_maps/MCC/bitmaps.map"),
+      ...searchRoots.map((r) => path10.join(r, "sample_maps/MCC/bitmaps.map")),
       "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
@@ -36556,9 +36626,25 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
   if (!bitmapsPath && defaults[edition] && fs8.existsSync(defaults[edition])) {
     bitmapsPath = defaults[edition];
   }
+  if (!bitmapsPath && edition === "pc" && defaults.halomd && fs8.existsSync(defaults.halomd)) {
+    bitmapsPath = defaults.halomd;
+  }
   if (!soundsPath && bitmapsPath) {
     const siblingSnd = path10.join(path10.dirname(bitmapsPath), "sounds.map");
     if (fs8.existsSync(siblingSnd)) soundsPath = siblingSnd;
+  }
+  if (!soundsPath && edition === "pc") {
+    const pcSoundsCandidates = [
+      ...getSearchRoots().map((r) => path10.join(r, "sample_maps/PC/sounds.map")),
+      "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\sounds.map",
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\sounds.map"
+    ];
+    for (const p of pcSoundsCandidates) {
+      if (fs8.existsSync(p)) {
+        soundsPath = p;
+        break;
+      }
+    }
   }
   if (edition === "mcc" && !soundsPath) {
     const ceSounds = settings.versionResourceMaps?.ce?.sounds || settings.resourceMaps.sounds;
@@ -36860,6 +36946,7 @@ function buildMenu() {
         { label: "Decompress Map", click: () => decompressFlow() },
         { label: "Recompress Map", click: () => recompressFlow() },
         { type: "separator" },
+        { label: "Extract to OpenCE Forge...", click: () => mainWindow?.webContents.send("menu:action", "extract-to-forge") },
         { label: "Extract Tags...", accelerator: "CmdOrCtrl+E", click: () => mainWindow?.webContents.send("menu:action", "extract-tags") },
         { label: "Extract Whole Map...", click: () => mainWindow?.webContents.send("menu:action", "extract-whole-map") },
         { label: "Inject Tags...", click: () => mainWindow?.webContents.send("menu:action", "inject-tags") },

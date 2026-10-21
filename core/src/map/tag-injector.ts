@@ -365,7 +365,7 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
   // the target has to be walkable. Refuse (naming the tag) rather than skip one.
   if (toAddLocalIndices.length > 0) {
     try {
-      collectTagDataPointers(target.buffer, tagDataLayoutOf(target.header, targetTagIndex));
+      collectTagDataPointers(target.buffer, tagDataLayoutOf(target.header, targetTagIndex), { tolerate: { staleReferencePaths: true } });
     } catch (err) {
       if (!(err instanceof UnwalkableTagError)) throw err;
       return { kind: 'refused', reason: `Adding tags moves every pointer in the target map, and one tag can't be handled. ${err.message} Only a SWAP that adds no new tags (every tag already in the map) can be done on this map.` };
@@ -920,7 +920,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   // modelDataFileOffset, zero-padded to a 4-byte boundary
   const insertPos = targetTagIndex.modelDataFileOffset;
   const embeddedAssetBuffers: Buffer[] = options.allowEmbeddedRelocation
-    ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).map((a) => Buffer.from(a.data, 'base64')))
+    ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).filter((a) => a.kind === 'bitmap' || a.kind === 'sound').map((a) => Buffer.from(a.data, 'base64')))
     : [];
   const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
   const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + ((4 - (embeddedBlobSize % 4)) % 4);
@@ -934,7 +934,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   // The base and the array pointer never change (module doc). Existing pointers at or past the old
   // array end move by `delta`; collected from the target before anything is copied.
   const baseMemoryAddress = targetTagIndex.baseMemoryAddress;
-  const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex)) : [];
+  const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex), { tolerate: { staleReferencePaths: true } }) : [];
   const newTagDataOffset = subHeaderOffset + shiftBeforeTagData;
   const newArrayOffset = arrayOffset + shiftBeforeTagData;
 
@@ -953,7 +953,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   if (insertSize > 0) {
     let cursor = insertPos;
     for (let i = 0; i < writeTags.length; i++) {
-      for (const asset of writeTags[i].embeddedRawDataAssets ?? []) {
+      for (const asset of (writeTags[i].embeddedRawDataAssets ?? []).filter((a) => a.kind === 'bitmap' || a.kind === 'sound')) {
         const bytes = Buffer.from(asset.data, 'base64');
         bytes.copy(out, cursor);
         assetAbsoluteOffsets[i].push(cursor);
@@ -1036,6 +1036,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
     out.writeUInt32LE(tertiary === null ? 0xffffffff : tertiary, entryOffset + 0x08);
     const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
+    out.writeUInt32LE(0, entryOffset + 0x18); // Swapped tag is now internal
   }
 
   // Tag data is written only after EVERY tag array entry above is final, so a dependency on any
