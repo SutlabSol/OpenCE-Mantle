@@ -117,6 +117,14 @@ function sendLog(level: LogEvent['level'], message: string) {
   mainWindow?.webContents.send('app:log', { level, message, timestamp: Date.now() } satisfies LogEvent);
 }
 
+function getAppIconPath(): string | undefined {
+  const icoCandidate = path.join(__dirname, '../build/icon.ico');
+  const pngCandidate = path.join(__dirname, '../build/icon.png');
+  if (process.platform === 'win32' && fs.existsSync(icoCandidate)) return icoCandidate;
+  if (fs.existsSync(pngCandidate)) return pngCandidate;
+  return undefined;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -124,6 +132,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 600,
     backgroundColor: '#15171c',
+    icon: getAppIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -157,7 +166,7 @@ function createWindow() {
 function updateTitle() {
   if (!mainWindow) return;
   const name = currentMapPath ? `${path.basename(currentMapPath)}${currentMapModified ? ' *' : ''} - ` : '';
-  mainWindow.setTitle(`${name}OpenCE Modding Tool`);
+  mainWindow.setTitle(`${name}OpenCE Mantle`);
 }
 
 /** After Inject / Save / Save As: main's copy of the open map's state, menu, title, and the renderer's view. */
@@ -1391,19 +1400,44 @@ async function replaceSoundFlow(
   return result;
 }
 
-async function pickExport3dPathFlow(defaultName: string, format: 'obj' | 'glb'): Promise<{ path: string | null }> {
+async function pickExport3dPathFlow(
+  defaultName: string,
+  format: 'obj' | 'glb',
+): Promise<{ path: string | null; format?: 'obj' | 'glb' }> {
   if (!mainWindow) return { path: null };
-  const ext = format === 'glb' ? 'glb' : 'obj';
-  const filterName = format === 'glb' ? 'glTF 2.0 Binary (*.glb)' : 'Wavefront OBJ (*.obj)';
+  const filters =
+    format === 'glb'
+      ? [
+          { name: 'glTF 2.0 Binary (*.glb)', extensions: ['glb'] },
+          { name: 'Wavefront OBJ (*.obj)', extensions: ['obj'] },
+          { name: 'All Files (*.*)', extensions: ['*'] },
+        ]
+      : [
+          { name: 'Wavefront OBJ (*.obj)', extensions: ['obj'] },
+          { name: 'glTF 2.0 Binary (*.glb)', extensions: ['glb'] },
+          { name: 'All Files (*.*)', extensions: ['*'] },
+        ];
   const res = await dialog.showSaveDialog(mainWindow, {
-    title: `Export 3D ${format.toUpperCase()}`,
+    title: 'Export 3D Model / BSP',
     defaultPath: defaultName,
-    filters: [
-      { name: filterName, extensions: [ext] },
-      { name: 'All Files', extensions: ['*'] },
-    ],
+    filters,
   });
-  return { path: res.canceled ? null : res.filePath };
+  if (res.canceled || !res.filePath) return { path: null };
+  const chosenFormat = res.filePath.toLowerCase().endsWith('.obj')
+    ? 'obj'
+    : res.filePath.toLowerCase().endsWith('.glb')
+      ? 'glb'
+      : format;
+  return { path: res.filePath, format: chosenFormat };
+}
+
+async function pickExportDirectoryFlow(): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Destination Folder for Hierarchy Export',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
 
 async function exportModel3dFlow(
@@ -1957,7 +1991,7 @@ function canSaveMap(): boolean {
 }
 
 /** Source-game bitmap/sound map picker for Convert (no settings persistence). Returns the selected file path; null on cancel. */
-function pickConvertResourceFlow(kind: 'bitmaps' | 'sounds'): Promise<{ path: string } | null> {
+function pickConvertResourceFlow(kind: 'bitmaps' | 'sounds' | 'loc'): Promise<{ path: string } | null> {
   if (!mainWindow) return Promise.resolve(null);
   const title = kind === 'bitmaps' ? "Choose the source game's bitmaps.map" : "Choose the source game's sounds.map";
   return dialog.showOpenDialog(mainWindow, {
@@ -2065,10 +2099,12 @@ async function verifyEmbeddedDataFlow(): Promise<VerifyEmbeddedDataResult> {
 
 function showAboutDialog() {
   if (!mainWindow) return;
+  const pngIcon = path.join(__dirname, '../build/icon.png');
   dialog.showMessageBox(mainWindow, {
     type: 'info',
     title: 'About',
-    message: `OpenCE Modding Tool v${app.getVersion()}`,
+    icon: fs.existsSync(pngIcon) ? pngIcon : undefined,
+    message: `OpenCE Mantle v${app.getVersion()}`,
     detail:
       'A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\n' +
       'Format references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\n' +
@@ -2135,7 +2171,7 @@ function buildMenu() {
       label: 'Help',
       submenu: [
         {
-          label: 'About OpenCE Modding Tool',
+          label: 'About OpenCE Mantle',
           click: () => showAboutDialog(),
         },
         {
@@ -2178,7 +2214,7 @@ app.whenReady().then(() => {
   ipcMain.handle('resourceMaps:getVersionSettings', () => getSettings().versionResourceMaps ?? {});
   ipcMain.handle(
     'resourceMaps:setVersionSettings',
-    (_e, version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null }) => {
+    (_e, version: HaloBitmapVersion, maps: { bitmaps?: string | null; sounds?: string | null; loc?: string | null }) => {
       setVersionResourceMaps(version, maps);
       if (currentOpenMapSummary) {
         const curEdition =
@@ -2186,6 +2222,7 @@ app.whenReady().then(() => {
         if (curEdition === version) {
           if (maps.bitmaps !== undefined) setResourceMapPath('bitmaps', maps.bitmaps);
           if (maps.sounds !== undefined) setResourceMapPath('sounds', maps.sounds);
+          if (maps.loc !== undefined) setResourceMapPath('loc', maps.loc);
         }
       }
       return { ok: true };
@@ -2263,6 +2300,7 @@ app.whenReady().then(() => {
     replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat),
   );
   ipcMain.handle('dialog:pickExport3dPath', (_e, defaultName: string, format: 'obj' | 'glb') => pickExport3dPathFlow(defaultName, format));
+  ipcMain.handle('dialog:pickExportDirectory', () => pickExportDirectoryFlow());
   ipcMain.handle('3d:exportModel', (_e, modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     exportModel3dFlow(modelTagId, lod, format, outputPath),
   );
@@ -2276,7 +2314,7 @@ app.whenReady().then(() => {
     convertPreflightFlow(source, resourcePaths && typeof resourcePaths === 'object' ? (resourcePaths as ConvertResourcePaths) : undefined),
   );
   ipcMain.handle('map:convert', (_e, acknowledgeScripts: unknown, repairs: unknown, resourcePaths?: unknown) => runConvertMap(acknowledgeScripts, repairs, resourcePaths));
-  ipcMain.handle('dialog:pickConvertResource', (_e, kind: 'bitmaps' | 'sounds') => pickConvertResourceFlow(kind));
+  ipcMain.handle('dialog:pickConvertResource', (_e, kind: 'bitmaps' | 'sounds' | 'loc') => pickConvertResourceFlow(kind));
   ipcMain.handle('app:openContainingFolder', (_e, filePath: string) => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
   });
@@ -2300,6 +2338,15 @@ app.whenReady().then(() => {
   ipcMain.handle('tagTest:hotReload', () => tagTestRunner.hotReload());
   ipcMain.handle('tagTest:getStatus', () => tagTestRunner.getStatus());
   ipcMain.handle('tagTest:getConfig', () => tagTestRunner.getOpenCeConfig());
+  ipcMain.handle('tagTest:setAlwaysOnTop', (_e, flag: boolean) => {
+    tagTestRunner.setHaloAlwaysOnTop(flag);
+    return tagTestRunner.isHaloAlwaysOnTop();
+  });
+  ipcMain.handle('tagTest:isAlwaysOnTop', () => tagTestRunner.isHaloAlwaysOnTop());
+  ipcMain.handle('tagTest:triggerFlycam', () => {
+    tagTestRunner.triggerFlycamToggle();
+    return { ok: true };
+  });
   ipcMain.handle('tagTest:setDir', (_e, dir: string | null) => {
     setOpenCeDirectory(dir);
     return { ok: true };

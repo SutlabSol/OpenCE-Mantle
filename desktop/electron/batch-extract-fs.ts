@@ -169,7 +169,7 @@ export function discardStagedFiles(stagingDir: string): void {
 export function generateBatchReportText(manifest: BatchExtractManifest): string {
   const lines: string[] = [];
   lines.push('======================================================================');
-  lines.push('OpenCE Modding Tool - Batch Map Tag Extraction Report');
+  lines.push('OpenCE Mantle - Batch Map Tag Extraction Report');
   lines.push('======================================================================');
   lines.push(`Map:           ${manifest.mapFileName}`);
   lines.push(`Scenario:      ${manifest.scenarioName}`);

@@ -1,4 +1,4 @@
-# OpenCE Modding Tool — `core` library
+# OpenCE Mantle — `core` library
 
 Pure TypeScript library for reading (and, in later milestones, rebuilding) Halo: Custom
 Edition (PC) `.map` files. **No Electron, React, or DOM dependencies** — this package can be

@@ -1,35 +1,86 @@
-# OpenCE Modding Tool
+<p align="center">
+  <img src="desktop/build/icon.png" width="160" height="160" alt="OpenCE Mantle Logo" />
+</p>
 
-A free, non-commercial GUI desktop tool for modding Halo: Custom Edition (PC, map header
-version `609`) maps — open a map, decompress/recompress it, browse its tags, extract tags
-(with dependencies) to `.ocetags` files, and inject them into other maps. Exporting a
-fully valid `.map` with recalculated checksums is planned (M6). Built for maps intended to run on
-[OpenCE](https://github.com/OpenCommunityEdition/OpenCE), which loads standard Custom
-Edition caches directly.
+<h1 align="center">OpenCE Mantle</h1>
 
-**This is a GUI-only app. There is no command-line interface for end users.**
+<p align="center">
+  <strong>A modern, all-in-one GUI desktop modding suite for Halo: Custom Edition (PC, v609) maps and <a href="https://github.com/OpenCommunityEdition/OpenCE">OpenCE</a>.</strong>
+</p>
 
-## Project layout
+---
 
-```
+## Overview
+
+**OpenCE Mantle** (formerly *OpenCE Modding Tool*) is a free, non-commercial desktop application built with Electron, React, Three.js, and a pure TypeScript map/tag engine (`core/`). It brings together capabilities that historically required juggling half a dozen separate legacy tools (*SparkEdit*, *HMT*, *HHT*, *Eschaton*, *Mozzarilla*, and *Refinery*) into a single cohesive, non-destructive workspace designed specifically for maps targeting **[OpenCE](https://github.com/OpenCommunityEdition/OpenCE)**.
+
+With **OpenCE Mantle**, you can inspect and edit any Halo: Custom Edition (`v609`) `.map` cache file in memory, preview and manipulate 3D scenario placements and BSP geometry, extract and inject self-contained `.ocetags` tag packages with full dependency closures, convert legacy Halo PC Retail (`v7`), HaloMD (`v7`), and Halo Mac Demo (`v6`) maps to Custom Edition, transplant or combine Singleplayer BSPs into Multiplayer maps, edit bitmaps/sounds/HUD layouts directly, and launch or `<1s` hot-reload maps in OpenCE via a live TCP Control Deck.
+
+> **GUI-First & Non-Destructive by Design:** All map modifications (tag edits, injections, scenario object transforms, BSP swaps, asset replacements) happen safely in memory inside a dedicated background worker thread. Source files on disk are never touched until you explicitly run **File > Save** (backed by an automatic `.map.bak` prompt and atomic temp-file-then-rename write) or **File > Save As**.
+
+---
+
+## Key Features
+
+### 1. Tag Browser & Recursive Tag Field Editor
+- **Fast Virtualized Tag Browser**: Browse thousands of tags grouped by Halo tag class (`bipd`, `weap`, `vehi`, `scnr`, `sbsp`, `bitm`, `snd!`, etc.) or by virtual folder hierarchy, with instant search filtering.
+- **Schema-Driven Recursive Tag Editor**: Inspect and edit any tag structure up to reflexive depth `8` using runtime-validated Invader/Reclaimer tag schemas (`core/src/map/definitions/`). Supports scalars, bitmasks/flags, enums, color pickers, bounds, vectors, and adding/cloning reflexive chunks in memory.
+- **HHT-Style Dependency Swapper & Reverse Lookup**: View and swap any outgoing tag reference (`TagDependency`) via searchable dropdowns, or switch to the **Referencing Tags** tab to see every tag in the map that points to the selected tag.
+- **Tag Maintenance Utilities**: Edit `ustr` Unicode String Lists in place, rename tag paths across the map, or duplicate existing tags into independent copies.
+
+### 2. Interactive 3D Scenario & Structure BSP Viewport (SparkEdit-Style)
+- **Full 3D Map Rendering**: Renders textured `scenario_structure_bsp` lightmapped meshes, skies, and 3D `gbxmodel` placements in real time using Three.js.
+- **Interactive Object Manipulation**: Select, translate, rotate, duplicate, swap, add, or delete Scenario placements (`Vehicles`, `Weapons`, `Scenery`, `Bipeds`, `Equipment`, `Netgame Flags`, `Netgame Equipment`, `Player Starting Locations`) with 3D gizmos (`TransformControls`) and automatic vertical raycast ground-snapping.
+- **AI, Scripting & Trigger Overlays**: Visualize and edit AI Encounter Squads and `A–Z` Firing Positions, Trigger Volumes, Cutscene Camera Points, paired 2-way Teleporter (`mann`) links, KOTH hills, and toggle visibility across a 10-layer viewport toolbar.
+
+### 3. 1-Click SP-to-MP & Multi-BSP Swapper / Combiner
+- **Singleplayer-to-Multiplayer BSP Transplant**: Swap any Singleplayer or Multiplayer `scenario_structure_bsp` into a target Multiplayer map in a single guided workflow.
+- **Multi-BSP Combiner**: Merge multiple contiguous Campaign BSPs (e.g., `b30a` + `b30b`) into a single unified Multiplayer Structure BSP with combined lightmap plates, stitched portal/cluster graphs, and unified 3D collision trees within Halo CE's `23 MiB` tag-buffer ceiling.
+- **Automated Dependency & Object Harvesting**: Automatically harvests required shaders, lightmaps, weather particles, skyboxes, lens flares, and optionally imports campaign Scenery and functional Doors/Bridges (`mach`) while relocating MP spawn points onto valid floor surfaces.
+
+### 4. Dependency Walker, `.ocetags` Extraction & In-Memory Injection
+- **Complete Dependency Closure Walking**: Select one or more tags to recursively trace their dependency graph and preview embedded vs. external resource requirements.
+- **Portable `.ocetags` Containers & Whole-Map Batch Extraction**: Extract individual tag closures or batch-extract an entire map into a clean directory hierarchy with a detailed manifest and extraction report.
+- **ADD & SWAP Tag Injection**: Inject `.ocetags` packages into any open map in memory—either adding new tags (`ADD` mode) or replacing existing tags (`SWAP` mode)—with automatic pointer rebasing and resource internalization.
+
+### 5. Multi-Edition Map Converter & Resource Map Identifier
+- **Convert Retail (`v7`), HaloMD (`v7`), and Mac Demo (`v6`) Maps to Custom Edition (`v609`)**: Includes a read-only pre-flight diagnostic checker, schema-driven pointer rebasing (for `v6` Demo maps with base `0x4BF10000`), and automatic internalization of external bitmap/sound ranges into the map's raw data region.
+- **Multi-Version `bitmaps.map` / `sounds.map` Identifier**: Fingerprint and configure resource maps across Halo Custom Edition, Halo PC Retail, HaloMD, Halo Mac Demo, and Halo MCC.
+- **Chimera Zstd Compression**: Decompress and recompress Chimera-compressed (`0x861A0261`) Custom Edition maps using `@mongodb-js/zstd`.
+
+### 6. Built-In Asset Editors & 3D Exporters
+- **Bitmap Editor (`bitm`)**: Preview all mipmaps, cubemap faces, and sprite plates; export textures to `.png` or `.dds`; and import replacement `.png`/`.dds` images with DXT1/DXT3/DXT5/A8R8G8B8 encoding.
+- **Sound Auditor (`snd!`)**: Play back pitch ranges and permutations in the app via Web Audio (supporting Xbox ADPCM and 16-bit PCM), export `.wav` files, or replace sound permutations from `.wav`.
+- **WYSIWYG 2D HUD Previewer (`hudg`, `wphi`, `grhi`)**: Interactive canvas preview of weapon reticles, ammo meters, shield bars, and motion sensor anchors.
+- **Curve Graph Visualizer**: Real-time plotting for Halo's 12 mathematical function types (`Periodic`, `Transition`, `Spark`, `Sawtooth`, etc.).
+- **3D Model & BSP Exporter**: Export any `gbxmodel` (`mod2`) or `scenario_structure_bsp` (`sbsp`) directly to binary glTF 2.0 (`.glb`) or Wavefront (`.obj` + `.mtl`).
+
+### 7. Live OpenCE Tag Test Runner & `<1s` Hot-Reload Control Deck
+- **1-Click Launch in OpenCE (`F5`)**: Launch the currently open map directly in OpenCE (`halo.exe -window -devmode -console`).
+- **Live TCP Control Deck (`127.0.0.1:2323`)**: Toggle developer cheats (`deathless_player`, `infinite_ammo`, `bump_possession`, `medusa`), wireframe/collision/portal debug overlays, AI state inspection, game speed sliders (`0.0x`–`5.0x`), and `<1s` in-place map hot-reloading (`map_name <scenario>`) without restarting the game.
+
+---
+
+## Project Layout
+
+```text
 core/      Pure TypeScript map/tag library (no Electron/React/DOM). Unit tested with Vitest.
-desktop/   Electron main process + preload + React (Vite) renderer - the actual GUI app.
+desktop/   Electron main process + worker thread + preload + React (Vite) renderer GUI.
 memory/    PRD.md (milestone status + approved decisions) and RULES.md (standing dev rules).
 ```
 
-`backend/`, `frontend/`, and `tests/` are unused scaffolding from the original hosting
-template and are not part of the app.
+---
 
-## Install
+## Installation
 
-Requires Node.js 22 LTS (`>=20 <23`) and Yarn 1.
+Requires **Node.js 22 LTS** (`>=20 <23`) and **Yarn 1**.
 
 ```bash
 cd core && yarn install
 cd ../desktop && yarn install
 ```
 
-## Run in development
+## Running in Development
 
 ```bash
 cd desktop
@@ -37,94 +88,35 @@ yarn dev:renderer               # terminal 1: Vite dev server (renderer UI on ht
 yarn dev:electron               # terminal 2: compiles main/preload/worker and launches Electron
 ```
 
-The Electron window loads the Vite dev server in development, so renderer edits hot-reload.
-The desktop app imports `core/src` directly, so there's no separate `core` build step.
+The Electron window loads the Vite dev server in development with hot-reload. The desktop app imports `core/src` directly, so no separate `core` build step is required.
 
-To preview just the UI in a plain browser (no Electron), open http://localhost:5173 while
-`yarn dev:renderer` is running - a dev-only mock of the Electron API is used, and
-`?mock=<scenario>` picks a scenario (see `desktop/src/test-fixtures/dependency-fixtures.ts`).
+To preview the UI in a standard browser without Electron, open `http://localhost:5173` while `yarn dev:renderer` is running (`?mock=<scenario>` selects a mock fixture from `desktop/src/test-fixtures/dependency-fixtures.ts`).
 
-## Test
+## Testing
 
 ```bash
-cd core && yarn test            # Vitest: parsing, compression, definitions, dependency walker,
-                                 # extraction, container, injection, real-map tests
-cd desktop && yarn test         # Vitest (jsdom): renderer components + Electron-side logic
-cd desktop && yarn typecheck
-cd core && yarn inspect-map /path/to/some.map   # developer-only CLI, not part of the shipped app
+cd core && yarn test            # Vitest: header/index parsing, compression, definitions,
+                                # dependency walker, extraction, injection, converter, exporters
+cd desktop && yarn test         # Vitest (jsdom): renderer components + Electron worker/main flows
+cd desktop && yarn typecheck    # TypeScript type-checking across Electron and Renderer
 ```
 
-Real-map tests read `.map` files from `<repo root>/sample_maps` (or `SAMPLE_MAPS_DIR` if set)
-and skip themselves, naming the missing file, when a map isn't there. See `core/README.md`
-for which tests need which maps.
-
-## Build (all platforms, produces unpackaged app)
+## Building & Packaging for Windows
 
 ```bash
 cd desktop
-yarn build                      # builds the renderer (dist/) and bundles Electron main/preload/worker
-                                 # (dist-electron/) via esbuild, inlining core/src directly -
-                                 # no separate core build step needed
-```
-
-## Package a Windows build
-
-Run these on Windows (or Linux/macOS with Wine installed, for cross-building):
-
-```bash
-cd desktop && yarn install
-yarn dist:win            # portable .exe + NSIS installer
-# or, for just the portable exe:
+yarn build                      # builds renderer (dist/) and bundles Electron (dist-electron/)
+yarn dist:win                   # packages portable .exe + NSIS installer into desktop/release/
+# or, for just the portable .exe:
 yarn dist:win:portable
 ```
 
-Output lands in `desktop/release/`.
+Output executables are generated in `desktop/release/`.
 
-**Native module note**: map decompression uses `@mongodb-js/zstd` (a native Node addon).
-`electron-builder` rebuilds native modules for Electron's own Node ABI automatically on
-`yarn dist:win`. If that step fails on your machine, install the
-[Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-("Desktop development with C++" workload) and retry.
+---
 
-## Scope
+## Licensing & Attribution
 
-- **In scope**: Halo: Custom Edition PC maps only (header version `609`).
-- **Out of scope**: Xbox maps, retail PC (version 7), Anniversary/MCC. Opening one of these
-  shows a clear "unsupported map version" dialog instead of attempting to parse it.
-- Target runtime for the maps this tool produces/edits: **OpenCE**
-  ([OpenCommunityEdition/OpenCE](https://github.com/OpenCommunityEdition/OpenCE)), which
-  loads standard, uncompressed Custom Edition caches - Chimera-style zstd compression
-  (implemented in `core` for completeness) is a nice-to-have, not required for OpenCE.
+Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct, and Chimera (all GPL-licensed) were used strictly as **format references** while writing `core`'s struct parsers (see citations in code comments and [`core/README.md`](core/README.md)). No Bungie or Microsoft assets are bundled; **OpenCE Mantle** operates exclusively on map files you supply yourself.
 
-## Licensing note
-
-Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct, and Chimera (all GPL-licensed) were
-used strictly as **format references** while writing `core`'s struct parsers - see citations
-in code comments and `core/README.md`. No code was copied from them, and no Bungie/Microsoft
-assets are bundled. This tool only operates on map files you supply yourself.
-
-**The tag definition files are a different case.** `core/src/map/definitions/groups/*.json`
-are generated by `core/scripts/generate-definitions.mjs` directly from Invader's own tag
-definition JSON (field names, types, offsets, sizes, enum options - see
-`core/src/map/definitions/SOURCES.md` for the full per-group provenance table), and one group
-(`ui_widget_collection`) is transcribed from Reclaimer. Invader and Reclaimer are both
-**GPL-3.0-only**. No source files were copied verbatim, but this data is a derived/transcribed
-product of GPL-3.0-licensed data, not independently authored - under GPL-3.0's definition of a
-derivative work, **this makes the project as a whole GPL-3.0 if you distribute/share it**
-(source code must be made available under GPL-3.0 to recipients). If you need a different
-license for distribution, the definitions layer would need to be re-derived from a
-non-GPL source instead.
-
-## Milestone status
-
-See `memory/PRD.md` for the full status table and progress log. In short:
-
-- **M1** (header/tag index parsing), **M2** (decompress/recompress), **M3** (GUI shell): done.
-- **M4** (dependency walker + tag extraction to `.ocetags`): implemented; needs
-  re-verification on Windows after a data-capture fix.
-- **M5** (tag injection): Step A (ADD) and Step B (SWAP) implemented; Step C (conflict
-  dialog) not started. Tags whose dependencies include a `gbxmodel` are currently blocked
-  (model geometry isn't captured yet). Relocating embedded bitmap/sound data is built but
-  disabled in the app pending approval.
-- **M6** (export + CRC32 recalculation): not started. Until then, maps written by injection
-  have stale checksums and may be rejected by some loaders.
+The tag definition schemas in `core/src/map/definitions/groups/*.json` are generated by `core/scripts/generate-definitions.mjs` from Invader's tag definition JSON (and `ui_widget_collection` from Reclaimer), both licensed under **GPL-3.0-only** (see `core/src/map/definitions/SOURCES.md`). Under GPL-3.0's derivative work provisions, distributing this project places the combined distribution under **GPL-3.0**.

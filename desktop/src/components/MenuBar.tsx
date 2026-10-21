@@ -27,6 +27,7 @@ export default function MenuBar({ menus }: { menus: Menu[] }) {
       data-testid="main-menu-bar"
       style={{
         display: 'flex',
+        alignItems: 'center',
         background: 'var(--bg-panel-header)',
         borderBottom: '1px solid var(--border)',
         fontSize: 12,
@@ -35,6 +36,19 @@ export default function MenuBar({ menus }: { menus: Menu[] }) {
       }}
       onMouseLeave={handleMenuClose}
     >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '0 10px 0 12px',
+          borderRight: '1px solid var(--border)',
+          alignSelf: 'stretch',
+        }}
+      >
+        <img src="/logo.png" alt="OpenCE Mantle" style={{ width: 18, height: 18, objectFit: 'contain' }} />
+        <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: 12 }}>OpenCE Mantle</span>
+      </div>
       {menus.map((menu) => (
         <div key={menu.label} style={{ position: 'relative' }}>
           <div

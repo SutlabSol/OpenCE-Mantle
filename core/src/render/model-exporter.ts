@@ -29,7 +29,7 @@ export function exportModelToObj(geometry: ModelRenderGeometry, options: ObjExpo
   const mtlName = options.mtlFileName ?? `${geometry.modelPath.split('\\').pop() || 'model'}.mtl`;
 
   const objLines: string[] = [
-    `# OpenCE Modding Tool - gbxmodel Wavefront OBJ Exporter`,
+    `# OpenCE Mantle - gbxmodel Wavefront OBJ Exporter`,
     `# Model: ${geometry.modelPath} (LOD ${geometry.lodLevel})`,
     `# Total Vertices: ${geometry.totalVertices}, Total Triangles: ${geometry.totalTriangles}`,
     `mtllib ${mtlName}`,
@@ -37,7 +37,7 @@ export function exportModelToObj(geometry: ModelRenderGeometry, options: ObjExpo
   ];
 
   const mtlLines: string[] = [
-    `# OpenCE Modding Tool - Material Library`,
+    `# OpenCE Mantle - Material Library`,
     `# Model: ${geometry.modelPath}`,
     '',
   ];
@@ -109,7 +109,7 @@ export function exportBspToObj(mesh: BspRenderMesh, options: ObjExportOptions = 
   const mtlName = options.mtlFileName ?? `${bspLabel.split('\\').pop() || 'bsp'}.mtl`;
 
   const objLines: string[] = [
-    `# OpenCE Modding Tool - Structure BSP Wavefront OBJ Exporter`,
+    `# OpenCE Mantle - Structure BSP Wavefront OBJ Exporter`,
     `# BSP: ${bspLabel} (Index ${mesh.bspIndex})`,
     `# Total Vertices: ${mesh.totalVertices}, Total Triangles: ${mesh.totalTriangles}`,
     `mtllib ${mtlName}`,
@@ -117,7 +117,7 @@ export function exportBspToObj(mesh: BspRenderMesh, options: ObjExportOptions = 
   ];
 
   const mtlLines: string[] = [
-    `# OpenCE Modding Tool - Material Library`,
+    `# OpenCE Mantle - Material Library`,
     `# BSP: ${bspLabel}`,
     '',
   ];
@@ -405,7 +405,7 @@ function buildGlbBinary(modelName: string, submeshes: GlbGeometrySubmesh[]): Uin
   const gltfJson = {
     asset: {
       version: '2.0',
-      generator: 'OpenCE Modding Tool glTF 2.0 Exporter',
+      generator: 'OpenCE Mantle glTF 2.0 Exporter',
     },
     scene: 0,
     scenes: [

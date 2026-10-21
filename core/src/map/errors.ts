@@ -15,7 +15,7 @@ export class UnexpectedTagArrayAddressError extends CorruptMapError {
   constructor(public readonly found: number, public readonly expected: number) {
     super(
       `This map's tag array pointer is 0x${found.toString(16).toUpperCase()}, but every Custom Edition map has 0x${expected.toString(16).toUpperCase()}. ` +
-        'It was most likely written by Inject Tags (ADD) in an earlier, broken build of OpenCE Modding Tool, and the game cannot load it. ' +
+        'It was most likely written by Inject Tags (ADD) in an earlier, broken build of OpenCE Mantle, and the game cannot load it. ' +
         'Re-create it from the original map with this build.',
     );
     this.name = 'UnexpectedTagArrayAddressError';
@@ -37,7 +37,7 @@ export class UnsupportedMapVersionError extends Error {
     const known = KNOWN_ENGINE_NAMES[engineValue];
     super(
       known
-        ? `This is a ${known} map. OpenCE Modding Tool only supports Halo: Custom Edition PC maps (version 609).`
+        ? `This is a ${known} map. OpenCE Mantle only supports Halo: Custom Edition PC maps (version 609).`
         : `Unrecognized map version/engine (0x${engineValue.toString(16)}). Only Halo: Custom Edition PC maps (version 609) are supported.`,
     );
     this.name = 'UnsupportedMapVersionError';

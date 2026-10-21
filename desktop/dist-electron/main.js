@@ -34074,10 +34074,11 @@ function setResourceMapPath(kind, filePath) {
 }
 function setVersionResourceMaps(version, maps) {
   const current = getSettings();
-  const existing = current.versionResourceMaps?.[version] ?? { bitmaps: null, sounds: null };
+  const existing = current.versionResourceMaps?.[version] ?? { bitmaps: null, sounds: null, loc: null };
   const updatedVersion = {
     bitmaps: maps.bitmaps !== void 0 ? maps.bitmaps : existing.bitmaps,
-    sounds: maps.sounds !== void 0 ? maps.sounds : existing.sounds
+    sounds: maps.sounds !== void 0 ? maps.sounds : existing.sounds,
+    loc: maps.loc !== void 0 ? maps.loc : existing.loc ?? null
   };
   const updated = {
     ...current,
@@ -34193,8 +34194,51 @@ var TagTestRunner = class {
     this.activeOpenCeDir = null;
     this.debugTxtWatcher = null;
     this.debugTxtLastSize = 0;
+    this.haloAlwaysOnTop = false;
     this.statusListeners = [];
     this.logListeners = [];
+  }
+  setHaloAlwaysOnTop(topmost) {
+    this.haloAlwaysOnTop = topmost;
+    const flag = topmost ? "-1" : "-2";
+    const script = `
+Add-Type @"
+  using System;
+  using System.Runtime.InteropServices;
+  public class Win32 {
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+  }
+"@ -ErrorAction SilentlyContinue
+$procs = Get-Process -Name 'halo' -ErrorAction SilentlyContinue
+foreach ($p in $procs) {
+  if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+    [Win32]::SetWindowPos($p.MainWindowHandle, [IntPtr](${flag}), 0, 0, 0, 0, 0x0053)
+  }
+}
+`;
+    (0, import_child_process.spawn)("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      stdio: "ignore",
+      windowsHide: true
+    });
+  }
+  isHaloAlwaysOnTop() {
+    return this.haloAlwaysOnTop;
+  }
+  triggerFlycamToggle() {
+    const script = `
+$wshell = New-Object -ComObject wscript.shell
+if ($wshell.AppActivate('Halo')) {
+  Start-Sleep -Milliseconds 50
+  $wshell.SendKeys('{BACKSPACE}')
+}
+`;
+    (0, import_child_process.spawn)("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      stdio: "ignore",
+      windowsHide: true
+    });
   }
   onStatusChange(cb) {
     this.statusListeners.push(cb);
@@ -34250,6 +34294,13 @@ var TagTestRunner = class {
         cb(entry);
       } catch {
       }
+    }
+    if (this.statusState === "running" && (text.includes("loading 'd:\\ui.map'") || text.includes("ui.map") || text.includes("levels\\ui\\ui") || text.includes("game_dispose") || text.includes("stop_game") || text.includes("unload_all_structures") || text.includes("Couldn't read map file 'd:\\ui.map'"))) {
+      setTimeout(() => {
+        if (this.statusState === "running") {
+          void this.stop();
+        }
+      }, 300);
     }
   }
   getOpenCeConfig() {
@@ -34309,20 +34360,29 @@ var TagTestRunner = class {
         throw new Error("Failed to stage map for OpenCE.");
       }
       this.emitLog("stdout", `[TagTest] Map staged successfully (CRC32 0x${(stageResult.crc32 >>> 0).toString(16).padStart(8, "0")}).`);
-      const initPath = path4.join(openCeDir, "init.txt");
-      const backupPath = path4.join(openCeDir, "init.txt.opence_backup");
-      if (fs3.existsSync(initPath) && !fs3.existsSync(backupPath)) {
+      this.restoreInitBackupIfPresent();
+      const legacyInitPath = path4.join(openCeDir, "init.txt");
+      if (fs3.existsSync(legacyInitPath)) {
         try {
-          fs3.copyFileSync(initPath, backupPath);
-          this.initBackupPath = backupPath;
+          const content = fs3.readFileSync(legacyInitPath, "utf-8");
+          if (content.includes("_opence_tag_test")) {
+            fs3.unlinkSync(legacyInitPath);
+          }
         } catch {
         }
       }
-      const initContent = `game_console_log all\r
+      const isMultiplayer = stageResult.mapType === void 0 || stageResult.mapType === 1;
+      const scriptContent = isMultiplayer ? `game_console_log all\r
+display_framerate true\r
+sv_public 0\r
+sv_maxplayers 16\r
+sv_map custom_maps\\${mapSlot} slayer\r
+` : `game_console_log all\r
 display_framerate true\r
 map_name custom_maps\\${mapSlot}\r
 `;
-      fs3.writeFileSync(initPath, initContent, "utf-8");
+      const scriptPath = path4.join(openCeDir, "_opence_tag_test.txt");
+      fs3.writeFileSync(scriptPath, scriptContent, "utf-8");
       const debugTxtPath = path4.join(openCeDir, "debug.txt");
       if (fs3.existsSync(debugTxtPath)) {
         this.debugTxtLastSize = fs3.statSync(debugTxtPath).size;
@@ -34337,7 +34397,7 @@ map_name custom_maps\\${mapSlot}\r
         HALO_DISPLAY_MODE: options.windowed !== false ? "windowed" : "fullscreen",
         HALO_UPDATE_ANSWER: "no"
       };
-      const spawnArgs = ["-window", "-vidmode", "1280,960", "-console", "-devmode"];
+      const spawnArgs = ["-window", "-vidmode", "1280,960", "-console", "-devmode", "-exec", "_opence_tag_test.txt"];
       this.emitLog("stdout", `[TagTest] Spawning ${haloExe} ${spawnArgs.join(" ")}...`);
       const child = (0, import_child_process.spawn)(haloExe, spawnArgs, {
         cwd: openCeDir,
@@ -34370,6 +34430,11 @@ map_name custom_maps\\${mapSlot}\r
       });
       this.startDebugWatcher(debugTxtPath);
       this.connectTelnet("127.0.0.1", 2323);
+      setTimeout(() => {
+        if (this.child && this.haloAlwaysOnTop) {
+          this.setHaloAlwaysOnTop(true);
+        }
+      }, 1200);
       return { ok: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -34536,6 +34601,13 @@ map_name custom_maps\\${mapSlot}\r
     this.child = null;
     this.stopDebugWatcher();
     if (this.activeOpenCeDir) {
+      const scriptPath = path4.join(this.activeOpenCeDir, "_opence_tag_test.txt");
+      try {
+        if (fs3.existsSync(scriptPath)) {
+          fs3.unlinkSync(scriptPath);
+        }
+      } catch {
+      }
       const initPath = path4.join(this.activeOpenCeDir, "init.txt");
       const backupPath = path4.join(this.activeOpenCeDir, "init.txt.opence_backup");
       try {
@@ -34543,7 +34615,10 @@ map_name custom_maps\\${mapSlot}\r
           fs3.copyFileSync(backupPath, initPath);
           fs3.unlinkSync(backupPath);
         } else if (fs3.existsSync(initPath)) {
-          fs3.unlinkSync(initPath);
+          const content = fs3.readFileSync(initPath, "utf-8");
+          if (content.includes("_opence_tag_test")) {
+            fs3.unlinkSync(initPath);
+          }
         }
       } catch {
       }
@@ -34915,7 +34990,7 @@ function discardStagedFiles(stagingDir) {
 function generateBatchReportText(manifest) {
   const lines = [];
   lines.push("======================================================================");
-  lines.push("OpenCE Modding Tool - Batch Map Tag Extraction Report");
+  lines.push("OpenCE Mantle - Batch Map Tag Extraction Report");
   lines.push("======================================================================");
   lines.push(`Map:           ${manifest.mapFileName}`);
   lines.push(`Scenario:      ${manifest.scenarioName}`);
@@ -34976,6 +35051,13 @@ var isDev = !import_electron3.app.isPackaged;
 function sendLog(level, message) {
   mainWindow?.webContents.send("app:log", { level, message, timestamp: Date.now() });
 }
+function getAppIconPath() {
+  const icoCandidate = path10.join(__dirname, "../build/icon.ico");
+  const pngCandidate = path10.join(__dirname, "../build/icon.png");
+  if (process.platform === "win32" && fs8.existsSync(icoCandidate)) return icoCandidate;
+  if (fs8.existsSync(pngCandidate)) return pngCandidate;
+  return void 0;
+}
 function createWindow() {
   mainWindow = new import_electron3.BrowserWindow({
     width: 1280,
@@ -34983,6 +35065,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 600,
     backgroundColor: "#15171c",
+    icon: getAppIconPath(),
     webPreferences: {
       preload: path10.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -35011,7 +35094,7 @@ function createWindow() {
 function updateTitle() {
   if (!mainWindow) return;
   const name = currentMapPath ? `${path10.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
-  mainWindow.setTitle(`${name}OpenCE Modding Tool`);
+  mainWindow.setTitle(`${name}OpenCE Mantle`);
 }
 function setOpenMapState(map) {
   currentOpenMapSummary = map;
@@ -36070,17 +36153,31 @@ async function replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inp
 }
 async function pickExport3dPathFlow(defaultName, format) {
   if (!mainWindow) return { path: null };
-  const ext = format === "glb" ? "glb" : "obj";
-  const filterName = format === "glb" ? "glTF 2.0 Binary (*.glb)" : "Wavefront OBJ (*.obj)";
+  const filters = format === "glb" ? [
+    { name: "glTF 2.0 Binary (*.glb)", extensions: ["glb"] },
+    { name: "Wavefront OBJ (*.obj)", extensions: ["obj"] },
+    { name: "All Files (*.*)", extensions: ["*"] }
+  ] : [
+    { name: "Wavefront OBJ (*.obj)", extensions: ["obj"] },
+    { name: "glTF 2.0 Binary (*.glb)", extensions: ["glb"] },
+    { name: "All Files (*.*)", extensions: ["*"] }
+  ];
   const res = await import_electron3.dialog.showSaveDialog(mainWindow, {
-    title: `Export 3D ${format.toUpperCase()}`,
+    title: "Export 3D Model / BSP",
     defaultPath: defaultName,
-    filters: [
-      { name: filterName, extensions: [ext] },
-      { name: "All Files", extensions: ["*"] }
-    ]
+    filters
   });
-  return { path: res.canceled ? null : res.filePath };
+  if (res.canceled || !res.filePath) return { path: null };
+  const chosenFormat = res.filePath.toLowerCase().endsWith(".obj") ? "obj" : res.filePath.toLowerCase().endsWith(".glb") ? "glb" : format;
+  return { path: res.filePath, format: chosenFormat };
+}
+async function pickExportDirectoryFlow() {
+  if (!mainWindow) return { path: null };
+  const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    title: "Select Destination Folder for Hierarchy Export",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
 async function exportModel3dFlow(modelTagId, lod, format, outputPath) {
   if (!currentMapPath || currentMapCompressed) {
@@ -36629,10 +36726,12 @@ async function verifyEmbeddedDataFlow() {
 }
 function showAboutDialog() {
   if (!mainWindow) return;
+  const pngIcon = path10.join(__dirname, "../build/icon.png");
   import_electron3.dialog.showMessageBox(mainWindow, {
     type: "info",
     title: "About",
-    message: `OpenCE Modding Tool v${import_electron3.app.getVersion()}`,
+    icon: fs8.existsSync(pngIcon) ? pngIcon : void 0,
+    message: `OpenCE Mantle v${import_electron3.app.getVersion()}`,
     detail: "A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\nFormat references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\nCompression reference: Chimera.\nTarget runtime: OpenCE (OpenCommunityEdition/OpenCE).\n\nNo Bungie/Microsoft assets are bundled; this tool only operates on files you supply."
   });
 }
@@ -36691,7 +36790,7 @@ function buildMenu() {
       label: "Help",
       submenu: [
         {
-          label: "About OpenCE Modding Tool",
+          label: "About OpenCE Mantle",
           click: () => showAboutDialog()
         },
         {
@@ -36739,6 +36838,7 @@ import_electron3.app.whenReady().then(() => {
         if (curEdition === version) {
           if (maps.bitmaps !== void 0) setResourceMapPath("bitmaps", maps.bitmaps);
           if (maps.sounds !== void 0) setResourceMapPath("sounds", maps.sounds);
+          if (maps.loc !== void 0) setResourceMapPath("loc", maps.loc);
         }
       }
       return { ok: true };
@@ -36827,6 +36927,7 @@ import_electron3.app.whenReady().then(() => {
     (_e, tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat) => replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat)
   );
   import_electron3.ipcMain.handle("dialog:pickExport3dPath", (_e, defaultName, format) => pickExport3dPathFlow(defaultName, format));
+  import_electron3.ipcMain.handle("dialog:pickExportDirectory", () => pickExportDirectoryFlow());
   import_electron3.ipcMain.handle(
     "3d:exportModel",
     (_e, modelTagId, lod, format, outputPath) => exportModel3dFlow(modelTagId, lod, format, outputPath)
@@ -36864,6 +36965,15 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("tagTest:hotReload", () => tagTestRunner.hotReload());
   import_electron3.ipcMain.handle("tagTest:getStatus", () => tagTestRunner.getStatus());
   import_electron3.ipcMain.handle("tagTest:getConfig", () => tagTestRunner.getOpenCeConfig());
+  import_electron3.ipcMain.handle("tagTest:setAlwaysOnTop", (_e, flag) => {
+    tagTestRunner.setHaloAlwaysOnTop(flag);
+    return tagTestRunner.isHaloAlwaysOnTop();
+  });
+  import_electron3.ipcMain.handle("tagTest:isAlwaysOnTop", () => tagTestRunner.isHaloAlwaysOnTop());
+  import_electron3.ipcMain.handle("tagTest:triggerFlycam", () => {
+    tagTestRunner.triggerFlycamToggle();
+    return { ok: true };
+  });
   import_electron3.ipcMain.handle("tagTest:setDir", (_e, dir) => {
     setOpenCeDirectory(dir);
     return { ok: true };

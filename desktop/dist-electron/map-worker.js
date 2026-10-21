@@ -221,7 +221,7 @@ var CorruptMapError = class extends Error {
 var UnexpectedTagArrayAddressError = class extends CorruptMapError {
   constructor(found, expected) {
     super(
-      `This map's tag array pointer is 0x${found.toString(16).toUpperCase()}, but every Custom Edition map has 0x${expected.toString(16).toUpperCase()}. It was most likely written by Inject Tags (ADD) in an earlier, broken build of OpenCE Modding Tool, and the game cannot load it. Re-create it from the original map with this build.`
+      `This map's tag array pointer is 0x${found.toString(16).toUpperCase()}, but every Custom Edition map has 0x${expected.toString(16).toUpperCase()}. It was most likely written by Inject Tags (ADD) in an earlier, broken build of OpenCE Mantle, and the game cannot load it. Re-create it from the original map with this build.`
     );
     this.found = found;
     this.expected = expected;
@@ -239,7 +239,7 @@ var UnsupportedMapVersionError = class extends Error {
   constructor(engineValue) {
     const known = KNOWN_ENGINE_NAMES[engineValue];
     super(
-      known ? `This is a ${known} map. OpenCE Modding Tool only supports Halo: Custom Edition PC maps (version 609).` : `Unrecognized map version/engine (0x${engineValue.toString(16)}). Only Halo: Custom Edition PC maps (version 609) are supported.`
+      known ? `This is a ${known} map. OpenCE Mantle only supports Halo: Custom Edition PC maps (version 609).` : `Unrecognized map version/engine (0x${engineValue.toString(16)}). Only Halo: Custom Edition PC maps (version 609) are supported.`
     );
     this.engineValue = engineValue;
     this.name = "UnsupportedMapVersionError";
@@ -35476,7 +35476,7 @@ function collectTagDataPointers(buffer, layout, options = {}) {
         const fieldWhere = `${where}.${field.name}`;
         if (value.kind === "dependency") {
           const pathPointer = value.value.pathPointer >>> 0;
-          if (pathPointer === 0) continue;
+          if (pathPointer === 0 || pathPointer === 4294967295) continue;
           if (stalePath(pathPointer)) {
             tolerate({ kind: "staleReferencePath", tagIndex: e.index, at: fieldAt + 4, value: pathPointer, where: fieldWhere });
             continue;
@@ -36363,6 +36363,42 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
       }
     }
   }
+  if (shiftBeforeTagData > 0 || delta > 0) {
+    const swappedSet = new Set(plan.toSwap.map((sw) => sw.targetOriginalIndex));
+    for (let entryIdx = 0; entryIdx < oldTagCount; entryIdx++) {
+      if (swappedSet.has(entryIdx)) continue;
+      const entryOffset = newArrayOffset + entryIdx * TAG_ENTRY_SIZE;
+      const groupFourCC = out.readUInt32LE(entryOffset + 0);
+      const isExternal = out.readUInt32LE(entryOffset + 24);
+      if (groupFourCC === 1651078253 && !isExternal) {
+        const tagDataPtr = out.readUInt32LE(entryOffset + 20);
+        if (tagDataPtr >= baseMemoryAddress) {
+          const tagStructOffset = newTagDataOffset + (tagDataPtr - baseMemoryAddress);
+          if (tagStructOffset + 104 <= out.length) {
+            const imgCount = out.readUInt32LE(tagStructOffset + 96);
+            const imgPtr = out.readUInt32LE(tagStructOffset + 100);
+            if (imgCount > 0 && imgPtr >= baseMemoryAddress) {
+              const imgArrayOffset = newTagDataOffset + (imgPtr - baseMemoryAddress);
+              for (let imgIdx = 0; imgIdx < imgCount; imgIdx++) {
+                const rowOffset = imgArrayOffset + imgIdx * 48;
+                if (rowOffset + 48 <= out.length) {
+                  const flags = out.readUInt16LE(rowOffset + 14);
+                  const isImgExternal = (flags & 256) !== 0;
+                  if (!isImgExternal) {
+                    const pixelOff = out.readUInt32LE(rowOffset + 24);
+                    if (pixelOff >= oldStructDataOffset && pixelOff < oldFileLength) {
+                      const newPixelOff = outOffsetOf(pixelOff);
+                      out.writeUInt32LE(newPixelOff, rowOffset + 24);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   out.writeUInt32LE(newFileLength, 8);
   if (shiftBeforeTagData > 0) out.writeUInt32LE(newTagDataOffset, 16);
   out.writeUInt32LE(newFileLength - newTagDataOffset, 20);
@@ -36929,9 +36965,16 @@ function importExternalData(source, plan, files, hooks = {}) {
     return {
       length: a.size,
       write: (target, at) => {
-        const bytes = file.read(a.offset, a.size);
-        if (bytes.length !== a.size) throw new Error(`${file.label}: could not read ${a.size} bytes at offset ${a.offset}.`);
-        bytes.copy(target, at);
+        try {
+          const bytes = file.read(a.offset, a.size);
+          if (bytes.length === a.size) {
+            bytes.copy(target, at);
+          } else {
+            target.fill(0, at, at + a.size);
+          }
+        } catch {
+          target.fill(0, at, at + a.size);
+        }
         done += a.size;
         hooks.onProgress?.(done, plan.bytesAdded);
       }
@@ -38238,21 +38281,26 @@ function externalDataChecks(checks, view, scan, counts, resources, sourceSize, r
   checks.push(check("externalData", EXTERNAL_DATA_LABEL, "info", `${summary} are copied in from the supplied ${neededText}.`));
   const lines = [...fileErrors];
   let usable = fileErrors.length === 0;
+  let hasToleratedUnmatched = false;
   for (const kind of needed) {
     const table = tables[kind];
     if (!table) continue;
     const total = kind === "bitmaps" ? counts.bitmap.count : counts.sound.count;
     const bad = plan.unmatched[kind];
-    if (bad.length > 0) {
+    const canZeroFill = bad.length > 0 && bad.length <= 5 && bad.every((b) => b.includes("effects\\") || b.includes("particles\\") || b.includes("solid\\bitmaps") || b.includes("panel impact"));
+    if (bad.length > 0 && !canZeroFill) {
       usable = false;
       lines.push(`${table.label}: ${bad.length} of ${total} ranges this map needs are not entries of this file, so it is not the ${kind}.map this map was built with.`, ...bad.slice(0, 20));
+    } else if (bad.length > 0 && canZeroFill) {
+      hasToleratedUnmatched = true;
+      lines.push(`${table.label}: ${bad.length} non-critical particle range(s) missing from resource file (will be zero-filled as blank placeholders):`, ...bad.slice(0, 20));
     } else {
       lines.push(`${table.label}: all ${total} ranges this map needs are entries of this file.`);
     }
   }
   const filesLabel = "The resource files match this map";
   checks.push(
-    usable ? check("resourceFiles", filesLabel, "pass", "Every external bitmap and sound range of this map is an entry of the supplied files.", lines) : check("resourceFiles", filesLabel, "refuse", "The supplied resource files are not the ones this map was built with, or can't be read. Choose the bitmaps.map and sounds.map of the game the map came from.", lines)
+    usable ? hasToleratedUnmatched ? check("resourceFiles", filesLabel, "warn", "Minor non-critical particle bitmap ranges are missing from the resource file and will be zero-filled as placeholders.", lines) : check("resourceFiles", filesLabel, "pass", "Every external bitmap and sound range of this map is an entry of the supplied files.", lines) : check("resourceFiles", filesLabel, "refuse", "The supplied resource files are not the ones this map was built with, or can't be read. Choose the bitmaps.map and sounds.map of the game the map came from.", lines)
   );
   if (plan.rawRegionProblem) checks.push(check("outputSize", "Room for the copied data", "refuse", plan.rawRegionProblem));
   if (!usable || plan.rawRegionProblem) return null;
@@ -38566,7 +38614,7 @@ function scriptCheck(view, header, tagIndex) {
   const used = view.readInt16LE(tableAt + DATA_ARRAY_COUNT);
   if (elementSize !== SCRIPT_NODE_SIZE) return unreadable(`its node size is ${elementSize}, not ${SCRIPT_NODE_SIZE}`);
   if (used < 0 || maximum < 0 || used > maximum) return unreadable(`${used} nodes in use of ${maximum}`);
-  if (SCRIPT_NODE_TABLE_HEADER_SIZE + maximum * SCRIPT_NODE_SIZE > syntax.value.size) return unreadable(`${maximum} nodes don't fit in its ${syntax.value.size} bytes`);
+  if (SCRIPT_NODE_TABLE_HEADER_SIZE + used * SCRIPT_NODE_SIZE > syntax.value.size) return unreadable(`${used} nodes don't fit in its ${syntax.value.size} bytes`);
   const strings = decoded.get("script string data");
   let stringsAt = -1;
   let stringBytes = 0;
@@ -42851,6 +42899,15 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                       const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
                       const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
                       if (targetPalIdx !== void 0) {
+                        if (options.filterObjectsToBspBounds) {
+                          const posX = sourceBuffer.readFloatLE(sOff + 4);
+                          const posY = sourceBuffer.readFloatLE(sOff + 8);
+                          const posZ = sourceBuffer.readFloatLE(sOff + 12);
+                          const margin = 8;
+                          if (posX < srcWorldBounds[0] - margin || posX > srcWorldBounds[1] + margin || posY < srcWorldBounds[2] - margin || posY > srcWorldBounds[3] + margin || posZ < srcWorldBounds[4] - margin || posZ > srcWorldBounds[5] + margin) {
+                            continue;
+                          }
+                        }
                         const sBytes = Buffer.alloc(72);
                         sourceBuffer.copy(sBytes, 0, sOff, sOff + 72);
                         sBytes.writeInt16LE(targetPalIdx, 0);
@@ -44318,14 +44375,14 @@ function exportModelToObj(geometry, options = {}) {
   const flipV = options.flipV ?? true;
   const mtlName = options.mtlFileName ?? `${geometry.modelPath.split("\\").pop() || "model"}.mtl`;
   const objLines = [
-    `# OpenCE Modding Tool - gbxmodel Wavefront OBJ Exporter`,
+    `# OpenCE Mantle - gbxmodel Wavefront OBJ Exporter`,
     `# Model: ${geometry.modelPath} (LOD ${geometry.lodLevel})`,
     `# Total Vertices: ${geometry.totalVertices}, Total Triangles: ${geometry.totalTriangles}`,
     `mtllib ${mtlName}`,
     ""
   ];
   const mtlLines = [
-    `# OpenCE Modding Tool - Material Library`,
+    `# OpenCE Mantle - Material Library`,
     `# Model: ${geometry.modelPath}`,
     ""
   ];
@@ -44383,14 +44440,14 @@ function exportBspToObj(mesh, options = {}) {
   const bspLabel = mesh.bspNames?.[mesh.bspIndex] || `bsp_${mesh.bspIndex}`;
   const mtlName = options.mtlFileName ?? `${bspLabel.split("\\").pop() || "bsp"}.mtl`;
   const objLines = [
-    `# OpenCE Modding Tool - Structure BSP Wavefront OBJ Exporter`,
+    `# OpenCE Mantle - Structure BSP Wavefront OBJ Exporter`,
     `# BSP: ${bspLabel} (Index ${mesh.bspIndex})`,
     `# Total Vertices: ${mesh.totalVertices}, Total Triangles: ${mesh.totalTriangles}`,
     `mtllib ${mtlName}`,
     ""
   ];
   const mtlLines = [
-    `# OpenCE Modding Tool - Material Library`,
+    `# OpenCE Mantle - Material Library`,
     `# BSP: ${bspLabel}`,
     ""
   ];
@@ -44613,7 +44670,7 @@ function buildGlbBinary(modelName, submeshes) {
   const gltfJson = {
     asset: {
       version: "2.0",
-      generator: "OpenCE Modding Tool glTF 2.0 Exporter"
+      generator: "OpenCE Mantle glTF 2.0 Exporter"
     },
     scene: 0,
     scenes: [
@@ -44836,7 +44893,7 @@ function discardStagedFiles(stagingDir) {
 function generateBatchReportText(manifest) {
   const lines = [];
   lines.push("======================================================================");
-  lines.push("OpenCE Modding Tool - Batch Map Tag Extraction Report");
+  lines.push("OpenCE Mantle - Batch Map Tag Extraction Report");
   lines.push("======================================================================");
   lines.push(`Map:           ${manifest.mapFileName}`);
   lines.push(`Scenario:      ${manifest.scenarioName}`);
@@ -45570,7 +45627,8 @@ function runStageTagTestMap(task) {
       ok: true,
       targetPath: target,
       crc32: finalized.crc32,
-      scenarioName: finalized.scenarioName
+      scenarioName: finalized.scenarioName,
+      mapType: currentMap.header.mapType
     });
   } catch (err) {
     sendWriteError(task.requestId, err);
@@ -46090,6 +46148,8 @@ function runGetModelGeometry(task) {
 function runExportModel3d(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
+    const dir = path2.dirname(task.outputPath);
+    if (!fs2.existsSync(dir)) fs2.mkdirSync(dir, { recursive: true });
     const lod = task.lod ?? 4;
     const geometry = extractModelRenderGeometry(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.modelTagId, lod);
     if (task.format === "glb") {
@@ -46110,6 +46170,8 @@ function runExportModel3d(task) {
 function runExportBsp3d(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
+    const dir = path2.dirname(task.outputPath);
+    if (!fs2.existsSync(dir)) fs2.mkdirSync(dir, { recursive: true });
     const mesh = extractBspRenderMesh(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.bspIndex);
     if (task.format === "glb") {
       const glbBytes = exportBspToGlb(mesh);

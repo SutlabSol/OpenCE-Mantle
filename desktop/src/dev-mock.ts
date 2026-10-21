@@ -296,7 +296,7 @@ export function installDevMock() {
     },
     getSettings: async (): Promise<AppSettings> => ({ lastExtractDir: null, resourceMaps: { bitmaps: null, sounds: null, loc: null } }),
     notImplemented: (feature) => logListeners.forEach((cb) => cb({ level: 'warn', message: `${feature} not implemented yet`, timestamp: Date.now() })),
-    showAbout: async () => logListeners.forEach((cb) => cb({ level: 'info', message: 'About OpenCE Modding Tool v0.1.0-dev', timestamp: Date.now() })),
+    showAbout: async () => logListeners.forEach((cb) => cb({ level: 'info', message: 'About OpenCE Mantle v0.1.0-dev', timestamp: Date.now() })),
     getAppVersion: async () => '0.1.0-dev',
     getRecentMaps: async () => ['C:/HaloCE/maps/bloodgulch.map'],
     pickResourceMap: async (kind): Promise<ResourceMapPickResult> => {

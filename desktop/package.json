@@ -2,7 +2,7 @@
   "name": "opence-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "OpenCE Modding Tool - GUI desktop app for modding Halo: Custom Edition (PC) maps.",
+  "description": "OpenCE Mantle - GUI desktop app for modding Halo: Custom Edition (PC) maps.",
   "main": "dist-electron/main.js",
   "engines": {
     "node": ">=20 <23"
@@ -45,14 +45,15 @@
     "vitest": "2.1.9"
   },
   "build": {
-    "appId": "com.opence.moddingtool",
-    "productName": "OpenCE Modding Tool",
+    "appId": "com.opence.mantle",
+    "productName": "OpenCE Mantle",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "build/**/*",
       "package.json",
       "!electron/**/*",
       "!src/**/*"
@@ -61,12 +62,14 @@
       "**/node_modules/@mongodb-js/zstd/**"
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "portable",
         "nsis"
       ]
     },
     "linux": {
+      "icon": "build/icon.png",
       "target": [
         "AppImage"
       ]
