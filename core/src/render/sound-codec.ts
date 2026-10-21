@@ -233,6 +233,104 @@ export function encodeXboxAdpcmMono(pcm: Int16Array): Uint8Array {
   return out;
 }
 
+/**
+ * Encodes 16-bit interleaved stereo PCM into Xbox ADPCM 72-byte stereo blocks (36B Left + 36B Right per 64 frames).
+ */
+export function encodeXboxAdpcmStereo(pcm: Int16Array): Uint8Array {
+  const numFrames = Math.floor(pcm.length / 2);
+  const numBlocks = Math.ceil(numFrames / 64);
+  const out = new Uint8Array(numBlocks * 72);
+  let frameIdx = 0;
+
+  for (let b = 0; b < numBlocks; b++) {
+    const leftPcm = new Int16Array(64);
+    const rightPcm = new Int16Array(64);
+    let lastL = 0;
+    let lastR = 0;
+    for (let i = 0; i < 64; i++) {
+      if (frameIdx < numFrames) {
+        lastL = pcm[frameIdx * 2];
+        lastR = pcm[frameIdx * 2 + 1];
+        frameIdx++;
+      }
+      leftPcm[i] = lastL;
+      rightPcm[i] = lastR;
+    }
+    const leftBlock = encodeXboxAdpcmMono(leftPcm);
+    const rightBlock = encodeXboxAdpcmMono(rightPcm);
+    out.set(leftBlock, b * 72);
+    out.set(rightBlock, b * 72 + 36);
+  }
+
+  return out;
+}
+
+/**
+ * Conforms decoded WAV PCM samples (channel count and sample rate) to match a target Halo Sound tag's format.
+ */
+export function conformPcmToSoundTag(
+  pcmSamples: Int16Array,
+  srcChannels: number,
+  srcSampleRate: number,
+  dstChannels: number,
+  dstSampleRate: number,
+): Int16Array {
+  const safeSrcCh = Math.max(1, srcChannels);
+  const safeDstCh = dstChannels === 2 ? 2 : 1;
+  const srcFrames = Math.floor(pcmSamples.length / safeSrcCh);
+  if (srcFrames === 0) return new Int16Array(0);
+
+  // 1. Channel conversion (downmix or upmix)
+  let chConverted: Int16Array;
+  if (safeSrcCh === safeDstCh) {
+    chConverted = pcmSamples;
+  } else if (safeDstCh === 1) {
+    chConverted = new Int16Array(srcFrames);
+    for (let f = 0; f < srcFrames; f++) {
+      let sum = 0;
+      for (let c = 0; c < safeSrcCh; c++) {
+        sum += pcmSamples[f * safeSrcCh + c];
+      }
+      chConverted[f] = Math.max(-32768, Math.min(32767, Math.round(sum / safeSrcCh)));
+    }
+  } else {
+    // Mono -> Stereo
+    chConverted = new Int16Array(srcFrames * 2);
+    for (let f = 0; f < srcFrames; f++) {
+      const s = pcmSamples[f * safeSrcCh];
+      chConverted[f * 2] = s;
+      chConverted[f * 2 + 1] = s;
+    }
+  }
+
+  // 2. Sample rate conversion (linear interpolation per channel)
+  const safeSrcRate = Math.max(1000, srcSampleRate);
+  const safeDstRate = Math.max(1000, dstSampleRate);
+  if (safeSrcRate === safeDstRate) {
+    return chConverted;
+  }
+
+  const dstFrames = Math.max(1, Math.round((srcFrames * safeDstRate) / safeSrcRate));
+  const resampled = new Int16Array(dstFrames * safeDstCh);
+  const ratio = (srcFrames - 1) / Math.max(1, dstFrames - 1);
+
+  for (let df = 0; df < dstFrames; df++) {
+    const srcPos = df * ratio;
+    const idx0 = Math.min(srcFrames - 1, Math.floor(srcPos));
+    const idx1 = Math.min(srcFrames - 1, idx0 + 1);
+    const frac = srcPos - idx0;
+
+    for (let c = 0; c < safeDstCh; c++) {
+      const s0 = chConverted[idx0 * safeDstCh + c];
+      const s1 = chConverted[idx1 * safeDstCh + c];
+      const val = Math.round(s0 + (s1 - s0) * frac);
+      resampled[df * safeDstCh + c] = Math.max(-32768, Math.min(32767, val));
+    }
+  }
+
+  return resampled;
+}
+
 /* --------------------------------- Standard WAV File Encoder --------------------------------- */
 
 /**
@@ -267,6 +365,7 @@ export function encodePcmToWav(pcmSamples: Int16Array, sampleRate: number, chann
 
 /**
  * Decodes a RIFF WAVE (.wav) container into 16-bit linear PCM samples.
+ * Supports 8-bit, 16-bit, 24-bit, 32-bit PCM and 32-bit IEEE Float WAV files.
  */
 export function decodeWavToPcm(wavBuffer: Buffer): { sampleRate: number; channels: number; pcmSamples: Int16Array } {
   if (wavBuffer.length < 44 || wavBuffer.toString('ascii', 0, 4) !== 'RIFF' || wavBuffer.toString('ascii', 8, 12) !== 'WAVE') {
@@ -274,6 +373,7 @@ export function decodeWavToPcm(wavBuffer: Buffer): { sampleRate: number; channel
   }
 
   let offset = 12;
+  let audioFormat = 1;
   let sampleRate = 22050;
   let channels = 1;
   let bitsPerSample = 16;
@@ -285,31 +385,54 @@ export function decodeWavToPcm(wavBuffer: Buffer): { sampleRate: number; channel
     const chunkSize = wavBuffer.readUInt32LE(offset + 4);
     offset += 8;
 
-    if (chunkId === 'fmt ') {
+    if (chunkId === 'fmt ' && offset + 16 <= wavBuffer.length) {
+      audioFormat = wavBuffer.readUInt16LE(offset + 0);
       channels = wavBuffer.readUInt16LE(offset + 2);
       sampleRate = wavBuffer.readUInt32LE(offset + 4);
       bitsPerSample = wavBuffer.readUInt16LE(offset + 14);
+      if (audioFormat === 0xfffe && chunkSize >= 40 && offset + 26 <= wavBuffer.length) {
+        audioFormat = wavBuffer.readUInt16LE(offset + 24);
+      }
     } else if (chunkId === 'data') {
       dataOffset = offset;
       dataSize = Math.min(chunkSize, wavBuffer.length - offset);
       break;
     }
 
-    offset += chunkSize;
+    offset += chunkSize + (chunkSize & 1);
   }
 
   if (dataOffset === 0) {
     throw new SoundCodecError('No "data" chunk found in WAV.');
   }
 
-  if (bitsPerSample !== 16) {
-    throw new SoundCodecError(`Only 16-bit WAV supported (file is ${bitsPerSample}-bit).`);
+  const bytesPerSample = Math.floor(bitsPerSample / 8);
+  if (![1, 2, 3, 4].includes(bytesPerSample)) {
+    throw new SoundCodecError(`Unsupported WAV bit depth (${bitsPerSample}-bit).`);
   }
 
-  const numSamples = Math.floor(dataSize / 2);
+  const numSamples = Math.floor(dataSize / bytesPerSample);
   const pcmSamples = new Int16Array(numSamples);
+
   for (let i = 0; i < numSamples; i++) {
-    pcmSamples[i] = wavBuffer.readInt16LE(dataOffset + i * 2);
+    const pos = dataOffset + i * bytesPerSample;
+    if (audioFormat === 3 && bytesPerSample === 4) {
+      // 32-bit IEEE float
+      const f = wavBuffer.readFloatLE(pos);
+      const clamped = Math.max(-1.0, Math.min(1.0, Number.isFinite(f) ? f : 0));
+      pcmSamples[i] = Math.round(clamped * 32767);
+    } else if (bytesPerSample === 2) {
+      pcmSamples[i] = wavBuffer.readInt16LE(pos);
+    } else if (bytesPerSample === 3) {
+      // 24-bit signed PCM -> take top 16 bits
+      pcmSamples[i] = wavBuffer.readInt16LE(pos + 1);
+    } else if (bytesPerSample === 4) {
+      // 32-bit signed PCM -> take top 16 bits
+      pcmSamples[i] = wavBuffer.readInt16LE(pos + 2);
+    } else if (bytesPerSample === 1) {
+      // 8-bit unsigned PCM (0..255, center 128)
+      pcmSamples[i] = (wavBuffer[pos] - 128) << 8;
+    }
   }
 
   return { sampleRate, channels, pcmSamples };
@@ -398,7 +521,7 @@ export function inspectSoundTag(
         const permutations: SoundPermutationInfo[] = [];
         if (permCount > 0 && permCount < 256) {
           const permBase = isExternal
-            ? pOffset + pitchStructSize
+            ? pitchBase + permPtr
             : header.tagDataOffset + (permPtr - tagIndex.baseMemoryAddress);
           const permStructSize = 124;
 
@@ -599,7 +722,11 @@ export function replaceSoundPermutationData(
         if (isTarget) {
           payloadBytes = Buffer.from(newSamples);
           tagCopy.writeUInt16LE(newFormat, mOffset + 0x28);
+          tagCopy.writeInt16LE(-1, mOffset + 0x2a); // next permutation index = -1
+          tagCopy.writeUInt32LE(newFormat === SoundFormat.PCM16 ? payloadBytes.length : 0, mOffset + 0x38); // buffer size
           tagCopy.writeUInt32LE(payloadBytes.length, mOffset + 0x40);
+          // Clear mouth/subtitle data on replaced permutation
+          tagCopy.fill(0, mOffset + 0x54, mOffset + 0x7c);
         } else {
           const oldSampleOffset = tagCopy.readUInt32LE(mOffset + 0x48);
           const oldSampleSize = tagCopy.readUInt32LE(mOffset + 0x40);
@@ -607,6 +734,21 @@ export function replaceSoundPermutationData(
             payloadBytes = Buffer.from(externalSoundsBuffer.subarray(oldSampleOffset, oldSampleOffset + oldSampleSize));
           } else {
             payloadBytes = Buffer.alloc(0);
+          }
+          // Rebase mouth data & subtitle data pointers if present in sounds.map
+          const mouthSize = tagCopy.readUInt32LE(mOffset + 0x54);
+          const mouthRelPtr = tagCopy.readUInt32LE(mOffset + 0x60);
+          if (mouthSize > 0 && mouthRelPtr > 0 && pitchOffsetRel + mouthRelPtr + mouthSize <= tagCopy.length) {
+            tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel + mouthRelPtr, mOffset + 0x60);
+          } else {
+            tagCopy.fill(0, mOffset + 0x54, mOffset + 0x68);
+          }
+          const subSize = tagCopy.readUInt32LE(mOffset + 0x68);
+          const subRelPtr = tagCopy.readUInt32LE(mOffset + 0x74);
+          if (subSize > 0 && subRelPtr > 0 && pitchOffsetRel + subRelPtr + subSize <= tagCopy.length) {
+            tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel + subRelPtr, mOffset + 0x74);
+          } else {
+            tagCopy.fill(0, mOffset + 0x68, mOffset + 0x7c);
           }
         }
 
@@ -677,11 +819,14 @@ export function replaceSoundPermutationData(
   }
 
   outputBuffer.writeUInt16LE(newFormat, mOffset + 0x28);
+  outputBuffer.writeInt16LE(-1, mOffset + 0x2a); // next permutation index = -1
+  outputBuffer.writeUInt32LE(newFormat === SoundFormat.PCM16 ? newSamples.length : 0, mOffset + 0x38); // buffer size
   outputBuffer.writeUInt32LE(newSamples.length, mOffset + 0x40);
   outputBuffer.writeUInt32LE(0, mOffset + 0x44); // internal
   outputBuffer.writeUInt32LE(targetOffset, mOffset + 0x48);
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 0x34); // Set tag id 0
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 0x3c); // Set tag id 1
+  outputBuffer.fill(0, mOffset + 0x54, mOffset + 0x7c); // Clear mouth/subtitle data on replaced permutation
 
   // Also internalize any remaining external sibling permutations on this sound tag
   if (externalSoundsBuffer && pitchCount > 0 && pitchCount < 32) {

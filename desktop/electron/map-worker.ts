@@ -78,6 +78,8 @@ import {
   encodePcmToWav,
   decodeWavToPcm,
   encodeXboxAdpcmMono,
+  encodeXboxAdpcmStereo,
+  conformPcmToSoundTag,
   SoundFormat,
   exportModelToObj,
   exportBspToObj,
@@ -1560,15 +1562,32 @@ export function runReplaceSound(task: {
     const wavFileBuf = fs.readFileSync(task.inputPath);
     const decodedWav = decodeWavToPcm(wavFileBuf);
     const externalSounds = getSoundsBuffer(task.soundsPath);
+    const tagSummary = inspectSoundTag(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      externalSounds,
+    );
+    const conformedPcm = conformPcmToSoundTag(
+      decodedWav.pcmSamples,
+      decodedWav.channels,
+      decodedWav.sampleRate,
+      tagSummary.channelCount,
+      tagSummary.sampleRate,
+    );
 
     let chosenFormat = task.targetFormat ?? SoundFormat.XboxADPCM;
     let newSamples: Uint8Array;
 
     if (chosenFormat === SoundFormat.XboxADPCM) {
-      newSamples = encodeXboxAdpcmMono(decodedWav.pcmSamples);
+      newSamples =
+        tagSummary.channelCount === 2
+          ? encodeXboxAdpcmStereo(conformedPcm)
+          : encodeXboxAdpcmMono(conformedPcm);
     } else {
       chosenFormat = SoundFormat.PCM16;
-      newSamples = new Uint8Array(decodedWav.pcmSamples.buffer, decodedWav.pcmSamples.byteOffset, decodedWav.pcmSamples.byteLength);
+      newSamples = new Uint8Array(conformedPcm.buffer, conformedPcm.byteOffset, conformedPcm.byteLength);
     }
 
     const updatedBuffer = replaceSoundPermutationData(

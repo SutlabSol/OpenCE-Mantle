@@ -27,7 +27,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
   const [harvestShaders, setHarvestShaders] = useState(true);
   const [importSceneryAndMachines, setImportSceneryAndMachines] = useState(true);
   const [importVehicles, setImportVehicles] = useState(true);
-  const [importAiAndScripts, setImportAiAndScripts] = useState(true);
   const [makeDoorsAutomatic, setMakeDoorsAutomatic] = useState(true);
   const [filterObjectsToBspBounds, setFilterObjectsToBspBounds] = useState(true);
   const [clearExistingPlacements, setClearExistingPlacements] = useState(false);
@@ -166,7 +165,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         harvestShaders,
         importSceneryAndMachines,
         importVehicles,
-        importAiAndScripts,
         makeDoorsAutomatic,
         filterObjectsToBspBounds,
         clearExistingPlacements,
@@ -206,9 +204,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
         if ((res.summary.importedScenery ?? 0) > 0) parts.push(`${res.summary.importedScenery} scenery object(s)`);
         if ((res.summary.importedVehicles ?? 0) > 0) parts.push(`${res.summary.importedVehicles} vehicle(s)`);
         if ((res.summary.importedMachines ?? 0) > 0) parts.push(`${res.summary.importedMachines} door(s)/bridge(s)`);
-        if ((res.summary.importedEncounters ?? 0) > 0) parts.push(`${res.summary.importedEncounters} AI encounter(s)`);
-        if ((res.summary.importedTriggers ?? 0) > 0) parts.push(`${res.summary.importedTriggers} trigger volume(s)`);
-        if ((res.summary.importedScripts ?? 0) > 0) parts.push(`${res.summary.importedScripts} script(s)`);
         const sceneryMsg = parts.length > 0 ? ` Imported ${parts.join(', ')}.` : '';
         setSuccessSummary(
           `Swapped BSP successfully!${multiMsg} New map size: ${(res.summary.newSize / (1024 * 1024)).toFixed(2)} MB (${deltaSign}${deltaMb} MB). Relocated ${res.summary.relocatedSpawns} spawn/item placement(s).${harvestMsg}${sceneryMsg}`,
@@ -917,26 +912,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   />
                   <span>
                     <strong>Import Vehicles</strong> (Imports vehicles placed in the swapped BSP)
-                  </span>
-                </label>
-
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    fontSize: '12px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <input
-                    data-testid="bsp-swapper-import-ai-scripts-checkbox"
-                    type="checkbox"
-                    checked={importAiAndScripts}
-                    onChange={(e) => setImportAiAndScripts(e.target.checked)}
-                  />
-                  <span>
-                    <strong>Keep AI Squads, Triggers & Scripting</strong> (Preserves campaign encounters, squads, trigger volumes, and scripts from swapped BSP)
                   </span>
                 </label>
 

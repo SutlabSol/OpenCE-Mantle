@@ -57,7 +57,6 @@ export interface BspSwapOptions {
   harvestShaders?: boolean;
   importSceneryAndMachines?: boolean;
   importVehicles?: boolean;
-  importAiAndScripts?: boolean;
   makeDoorsAutomatic?: boolean;
   filterObjectsToBspBounds?: boolean;
   clearExistingPlacements?: boolean;
@@ -84,9 +83,6 @@ export interface BspSwapResult {
     importedScenery?: number;
     importedVehicles?: number;
     importedMachines?: number;
-    importedEncounters?: number;
-    importedTriggers?: number;
-    importedScripts?: number;
   };
   error?: string;
 }
@@ -484,10 +480,13 @@ function shiftExistingRawDataOffsets(
               const permSize = resolveStruct('SoundPermutation').totalSize;
               for (let m = 0; m < permRefl.value.count; m++) {
                 const mOffset = permArrOffset + m * permSize;
-                if (mOffset + 20 <= buffer.length) {
-                  const curSampleOff = buffer.readUInt32LE(mOffset + 12);
-                  if (curSampleOff >= cutoffOffset && curSampleOff !== 0xffffffff) {
-                    buffer.writeUInt32LE(curSampleOff + delta, mOffset + 12);
+                if (mOffset + 0x4c <= buffer.length) {
+                  const sampleExt = buffer.readUInt32LE(mOffset + 0x44);
+                  if ((sampleExt & 1) === 0) {
+                    const curSampleOff = buffer.readUInt32LE(mOffset + 0x48);
+                    if (curSampleOff >= cutoffOffset && curSampleOff !== 0xffffffff) {
+                      buffer.writeUInt32LE(curSampleOff + delta, mOffset + 0x48);
+                    }
                   }
                 }
               }
@@ -501,204 +500,6 @@ function shiftExistingRawDataOffsets(
 
 function resolvePointer(pointer: number, tagDataOffset: number, baseMemoryAddress: number): number {
   return tagDataOffset + (pointer - baseMemoryAddress);
-}
-
-function appendDataBlock(
-  buffer: Buffer,
-  header: CacheFileHeader,
-  tagIndex: TagIndex,
-  data: Buffer,
-): { buffer: Buffer; header: CacheFileHeader; virtualAddress: number; fileOffset: number } {
-  if (data.length === 0) {
-    return { buffer, header, virtualAddress: 0, fileOffset: 0 };
-  }
-  const alignedPad = (4 - (buffer.length % 4)) % 4;
-  const padBuffer = alignedPad > 0 ? Buffer.alloc(alignedPad, 0) : Buffer.alloc(0);
-  const fileOffset = buffer.length + padBuffer.length;
-  const virtualAddress = tagIndex.baseMemoryAddress + (fileOffset - header.tagDataOffset);
-
-  const newBuffer = Buffer.concat([buffer, padBuffer, data]);
-  const newHeader: CacheFileHeader = {
-    ...header,
-    tagDataSize: newBuffer.length - header.tagDataOffset,
-    decompressedFileSize: newBuffer.length,
-  };
-  newBuffer.writeUInt32LE(newBuffer.length, 0x08);
-  newBuffer.writeUInt32LE(newHeader.tagDataSize, 0x14);
-  return { buffer: newBuffer, header: newHeader, virtualAddress, fileOffset };
-}
-
-function cloneEncounterWithChildReflexives(
-  encSourceBytes: Buffer,
-  sourceBuffer: Buffer,
-  srcHdr: CacheFileHeader,
-  srcTagIndex: TagIndex,
-  currentOut: Buffer,
-  currentHdr: CacheFileHeader,
-  currentTagIndex: TagIndex,
-  donorToTargetActorPal: Map<number, number>,
-  dstBspIdx: number,
-  bspClusterCount = 65535,
-): { buffer: Buffer; header: CacheFileHeader; encounterBytes: Buffer } {
-  let curOut = currentOut;
-  let curHdr = currentHdr;
-
-  const encCopy = Buffer.alloc(176);
-  encSourceBytes.copy(encCopy);
-
-  // Clear 'not initially created' (0x01), 'initially blind' (0x04), 'initially deaf' (0x08),
-  // 'initially braindead' (0x10), and enable 'respawn enabled' (0x02) + 'manual bsp index specified' (0x40)
-  // so imported campaign encounters spawn and fight automatically without campaign mission scripts.
-  const origEncFlags = encCopy.readUInt32LE(0x20);
-  encCopy.writeUInt32LE(((origEncFlags & ~0x1d) | 0x42) >>> 0, 0x20);
-
-  encCopy.writeInt16LE(dstBspIdx, 0x2a); // manual bsp index
-  encCopy.writeInt16LE(dstBspIdx, 0x7e); // precomputed bsp index
-
-  // 1. Squads
-  const sqCount = encSourceBytes.readUInt32LE(0x80);
-  const sqPtr = encSourceBytes.readUInt32LE(0x84);
-  if (sqCount > 0 && sqPtr !== 0) {
-    const sqSrcBase = resolvePointer(sqPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-    const clonedSquads: Buffer[] = [];
-
-    for (let s = 0; s < sqCount; s++) {
-      const sqSrcOff = sqSrcBase + s * 232;
-      const sqBytes = Buffer.alloc(232);
-      sourceBuffer.copy(sqBytes, 0, sqSrcOff, sqSrcOff + 232);
-
-      const donorActorType = sqBytes.readInt16LE(0x20);
-      if (donorActorType >= 0 && donorToTargetActorPal.has(donorActorType)) {
-        sqBytes.writeInt16LE(donorToTargetActorPal.get(donorActorType)!, 0x20);
-      } else {
-        sqBytes.writeInt16LE(-1, 0x20);
-      }
-
-      // Move positions (ScenarioMovePosition = 80 bytes)
-      const moveCount = sourceBuffer.readUInt32LE(sqSrcOff + 0xc4);
-      const movePtr = sourceBuffer.readUInt32LE(sqSrcOff + 0xc8);
-      if (moveCount > 0 && movePtr !== 0) {
-        const moveSrcOff = resolvePointer(movePtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-        const moveData = Buffer.alloc(moveCount * 80);
-        sourceBuffer.copy(moveData, 0, moveSrcOff, moveSrcOff + moveData.length);
-        for (let m = 0; m < moveCount; m++) {
-          const mBase = m * 80;
-          moveData.writeInt16LE(-1, mBase + 0x1c); // animation index -> -1 (no ai animation references copied)
-          const mCluster = moveData.readInt16LE(mBase + 0x28);
-          if (mCluster < 0 || mCluster >= bspClusterCount) {
-            moveData.writeInt16LE(0, mBase + 0x28);
-          }
-        }
-        const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, moveData);
-        curOut = appRes.buffer;
-        curHdr = appRes.header;
-        sqBytes.writeUInt32LE(moveCount, 0xc4);
-        sqBytes.writeUInt32LE(appRes.virtualAddress, 0xc8);
-      } else {
-        sqBytes.writeUInt32LE(0, 0xc4);
-        sqBytes.writeUInt32LE(0, 0xc8);
-      }
-
-      // Starting locations (ScenarioActorStartingLocation = 28 bytes)
-      const locCount = sourceBuffer.readUInt32LE(sqSrcOff + 0xd0);
-      const locPtr = sourceBuffer.readUInt32LE(sqSrcOff + 0xd4);
-      if (locCount > 0 && locPtr !== 0) {
-        const locSrcOff = resolvePointer(locPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-        const locData = Buffer.alloc(locCount * 28);
-        sourceBuffer.copy(locData, 0, locSrcOff, locSrcOff + locData.length);
-        for (let l = 0; l < locCount; l++) {
-          const lBase = l * 28;
-          const lCluster = locData.readInt16LE(lBase + 0x10);
-          if (lCluster < 0 || lCluster >= bspClusterCount) {
-            locData.writeInt16LE(0, lBase + 0x10);
-          }
-          const lActorType = locData.readInt16LE(lBase + 0x18);
-          if (lActorType >= 0 && donorToTargetActorPal.has(lActorType)) {
-            locData.writeInt16LE(donorToTargetActorPal.get(lActorType)!, lBase + 0x18);
-          } else {
-            locData.writeInt16LE(-1, lBase + 0x18);
-          }
-          locData.writeInt16LE(-1, lBase + 0x1a); // command list -> -1 (no command lists copied)
-        }
-        const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, locData);
-        curOut = appRes.buffer;
-        curHdr = appRes.header;
-        sqBytes.writeUInt32LE(locCount, 0xd0);
-        sqBytes.writeUInt32LE(appRes.virtualAddress, 0xd4);
-
-        // Ensure normal & insane diff counts are > 0 so actors spawn in multiplayer
-        const normalCount = sqBytes.readInt16LE(0x7c);
-        const insaneCount = sqBytes.readInt16LE(0x7e);
-        if (normalCount <= 0) {
-          sqBytes.writeInt16LE(Math.max(1, insaneCount > 0 ? insaneCount : locCount), 0x7c);
-        }
-        if (insaneCount <= 0) {
-          sqBytes.writeInt16LE(Math.max(1, normalCount > 0 ? normalCount : locCount), 0x7e);
-        }
-      } else {
-        sqBytes.writeUInt32LE(0, 0xd0);
-        sqBytes.writeUInt32LE(0, 0xd4);
-      }
-
-      clonedSquads.push(sqBytes);
-    }
-
-    const allSquadsData = Buffer.concat(clonedSquads);
-    const sqAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, allSquadsData);
-    curOut = sqAppRes.buffer;
-    curHdr = sqAppRes.header;
-    encCopy.writeUInt32LE(sqCount, 0x80);
-    encCopy.writeUInt32LE(sqAppRes.virtualAddress, 0x84);
-  } else {
-    encCopy.writeUInt32LE(0, 0x80);
-    encCopy.writeUInt32LE(0, 0x84);
-  }
-
-  // 2. Platoons
-  const plCount = encSourceBytes.readUInt32LE(0x8c);
-  const plPtr = encSourceBytes.readUInt32LE(0x90);
-  if (plCount > 0 && plPtr !== 0) {
-    const plSrcBase = resolvePointer(plPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-    const plData = Buffer.alloc(plCount * 172);
-    sourceBuffer.copy(plData, 0, plSrcBase, plSrcBase + plData.length);
-    const plAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, plData);
-    curOut = plAppRes.buffer;
-    curHdr = plAppRes.header;
-    encCopy.writeUInt32LE(plCount, 0x8c);
-    encCopy.writeUInt32LE(plAppRes.virtualAddress, 0x90);
-  } else {
-    encCopy.writeUInt32LE(0, 0x8c);
-    encCopy.writeUInt32LE(0, 0x90);
-  }
-
-  // 3. Firing Positions (ScenarioFiringPosition = 24 bytes)
-  const fpCount = encSourceBytes.readUInt32LE(0x98);
-  const fpPtr = encSourceBytes.readUInt32LE(0x9c);
-  if (fpCount > 0 && fpPtr !== 0) {
-    const fpSrcBase = resolvePointer(fpPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-    const fpData = Buffer.alloc(fpCount * 24);
-    sourceBuffer.copy(fpData, 0, fpSrcBase, fpSrcBase + fpData.length);
-    for (let f = 0; f < fpCount; f++) {
-      const fCluster = fpData.readInt16LE(f * 24 + 0x0e);
-      if (fCluster < 0 || fCluster >= bspClusterCount) {
-        fpData.writeInt16LE(0, f * 24 + 0x0e);
-      }
-    }
-    const fpAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, fpData);
-    curOut = fpAppRes.buffer;
-    curHdr = fpAppRes.header;
-    encCopy.writeUInt32LE(fpCount, 0x98);
-    encCopy.writeUInt32LE(fpAppRes.virtualAddress, 0x9c);
-  } else {
-    encCopy.writeUInt32LE(0, 0x98);
-    encCopy.writeUInt32LE(0, 0x9c);
-  }
-
-  // 4. Player Starting Locations on encounter -> clear to 0 in multiplayer scenario
-  encCopy.writeUInt32LE(0, 0xa4);
-  encCopy.writeUInt32LE(0, 0xa8);
-
-  return { buffer: curOut, header: curHdr, encounterBytes: encCopy };
 }
 
 /**
@@ -857,9 +658,6 @@ export function performBspSwap(
   let importedScenery = 0;
   let importedVehicles = 0;
   let importedMachines = 0;
-  let importedEncounters = 0;
-  let importedTriggers = 0;
-  let importedScripts = 0;
   const tagIdMap = new Map<number, number>();
   const bspDeps: BspDependencyOccurrence[] = [];
 
@@ -886,10 +684,24 @@ export function performBspSwap(
     const shouldHarvestShaders = options.harvestShaders !== false;
     const shouldImportObjects = Boolean(options.importSceneryAndMachines);
     const shouldImportVehicles = Boolean(options.importVehicles);
-    const shouldImportAiAndScripts = Boolean(options.importAiAndScripts);
+    const srcTagIndex = sourceInspected.tagIndex;
+    let srcScnrOffset = 0;
+    const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 0xffff];
+    if (srcScnrEntry) {
+      srcScnrOffset = resolveTagDataPointer(
+        srcScnrEntry.tagDataPointerOrResourceIndex,
+        sourceInspected.header,
+        srcTagIndex.baseMemoryAddress,
+      );
+    }
 
-    if ((shouldHarvestShaders && bspDeps.length > 0) || shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
-      const srcTagIndex = sourceInspected.tagIndex;
+    if (
+      (shouldHarvestShaders && bspDeps.length > 0) ||
+      shouldImportObjects ||
+      shouldImportVehicles ||
+      Boolean(options.clearExistingPlacements) ||
+      Boolean(options.clearPlayerSpawns)
+    ) {
       const rootIndicesSet = new Set<number>();
 
       if (shouldHarvestShaders) {
@@ -922,23 +734,8 @@ export function performBspSwap(
       let srcPlacedMachinesCount = 0;
       let srcPlacedMachinesOffset = 0;
 
-      let srcActorPalCount = 0;
-      let srcActorPalOffset = 0;
-      let srcRefCount = 0;
-      let srcRefOffset = 0;
-      let srcScnrOffset = 0;
-      const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 0xffff];
-      if (srcScnrEntry) {
-        srcScnrOffset = resolveTagDataPointer(
-          srcScnrEntry.tagDataPointerOrResourceIndex,
-          sourceInspected.header,
-          srcTagIndex.baseMemoryAddress,
-        );
-      }
-
-      if (shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
+      if (shouldImportObjects || shouldImportVehicles) {
         if (srcScnrOffset > 0) {
-
           if (shouldImportObjects) {
             // Scenery palette (0x21c) and scenery placements (0x210)
             const scenPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x21c);
@@ -1001,34 +798,6 @@ export function performBspSwap(
               srcPlacedMachinesOffset = sourceInspected.header.tagDataOffset + (machRefl.pointerLow - srcTagIndex.baseMemoryAddress);
             }
           }
-
-          if (shouldImportAiAndScripts) {
-            // Actor palette (0x420)
-            const actorPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x420);
-            srcActorPalCount = actorPalRefl.count;
-            if (actorPalRefl.count > 0) {
-              srcActorPalOffset = sourceInspected.header.tagDataOffset + (actorPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-              for (let i = 0; i < actorPalRefl.count; i++) {
-                const tagId = sourceBuffer.readUInt32LE(srcActorPalOffset + i * 16 + 12);
-                if (tagId !== 0xffffffff && (tagId & 0xffff) < srcTagIndex.entries.length) {
-                  rootIndicesSet.add(tagId & 0xffff);
-                }
-              }
-            }
-
-            // Script references (0x4b4)
-            const refRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x4b4);
-            srcRefCount = refRefl.count;
-            if (refRefl.count > 0) {
-              srcRefOffset = sourceInspected.header.tagDataOffset + (refRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-              for (let i = 0; i < refRefl.count; i++) {
-                const tagId = sourceBuffer.readUInt32LE(srcRefOffset + i * 40 + 36);
-                if (tagId !== 0xffffffff && (tagId & 0xffff) < srcTagIndex.entries.length) {
-                  rootIndicesSet.add(tagId & 0xffff);
-                }
-              }
-            }
-          }
         }
       }
 
@@ -1076,569 +845,379 @@ export function performBspSwap(
                   tagIdMap.set(cTag.originalIndex, targetTagId);
                 }
               }
-
-              // Optionally clear existing placements from target map (scenery, vehicles, equipment, weapons, etc.)
-              if (options.clearExistingPlacements) {
-                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
-                if (targetScnrEntry) {
-                  const curScnrOff = resolveTagDataPointer(
-                    targetScnrEntry.tagDataPointerOrResourceIndex,
-                    reinspected.header,
-                    reinspected.tagIndex.baseMemoryAddress,
-                  );
-                  // Clear scenery (0x210), bipeds (0x228), vehicles (0x240), equipment (0x258), weapons (0x270), machines (0x294), controls (0x2ac), light fixtures (0x2c4), sound scenery (0x2dc), netgame flags (0x378), netgame equipment (0x384), decals (0x3a8)
-                  const clearOffsets = [0x210, 0x228, 0x240, 0x258, 0x270, 0x294, 0x2ac, 0x2c4, 0x2dc, 0x378, 0x384, 0x3a8];
-                  if (!shouldImportAiAndScripts) {
-                    clearOffsets.push(0x360, 0x42c);
-                  }
-                  for (const off of clearOffsets) {
-                    out.writeUInt32LE(0, curScnrOff + off);
-                    out.writeUInt32LE(0, curScnrOff + off + 4);
-                  }
-                }
-              }
-
-              // Optionally clear player starting locations & profiles from target map
-              if (options.clearPlayerSpawns) {
-                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
-                if (targetScnrEntry) {
-                  const curScnrOff = resolveTagDataPointer(
-                    targetScnrEntry.tagDataPointerOrResourceIndex,
-                    reinspected.header,
-                    reinspected.tagIndex.baseMemoryAddress,
-                  );
-                  // Clear player starting profile (0x348), player starting locations (0x354), starting equipment (0x390)
-                  const spawnClearOffsets = [0x348, 0x354, 0x390];
-                  for (const off of spawnClearOffsets) {
-                    out.writeUInt32LE(0, curScnrOff + off);
-                    out.writeUInt32LE(0, curScnrOff + off + 4);
-                  }
-                }
-              }
-
-              // Import donor player starting locations (or ensure at least one valid spawn in new BSP)
-              const targetScnrEntryForSpawns = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
-              if (targetScnrEntryForSpawns) {
-                let curScnrOff = resolveTagDataPointer(
-                  targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
-                  reinspected.header,
-                  reinspected.tagIndex.baseMemoryAddress,
-                );
-                const curSpawnsCount = out.readUInt32LE(curScnrOff + 0x354);
-
-                // If spawns were cleared OR if target currently has 0 spawns:
-                if (options.clearPlayerSpawns || curSpawnsCount === 0) {
-                  const importedSpawns: Buffer[] = [];
-                  const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
-
-                  if (srcScnrOffset > 0) {
-                    const donorPslRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x354);
-                    if (donorPslRefl.count > 0) {
-                      const donorPslOffset = resolvePointer(
-                        donorPslRefl.pointerLow,
-                        sourceInspected.header.tagDataOffset,
-                        srcTagIndex.baseMemoryAddress,
-                      );
-                      for (let i = 0; i < donorPslRefl.count; i++) {
-                        const sOff = donorPslOffset + i * 52;
-                        const donorBspIdx = sourceBuffer.readInt16LE(sOff + 18);
-                        const matchesBsp = srcIndices.includes(donorBspIdx) || sourceBsps.length <= 1;
-                        if (matchesBsp) {
-                          const spawnBuf = Buffer.alloc(52);
-                          sourceBuffer.copy(spawnBuf, 0, sOff, sOff + 52);
-                          spawnBuf.writeInt16LE(dstIdx, 18); // Map to target BSP index
-                          importedSpawns.push(spawnBuf);
-                        }
-                      }
-                    }
-                  }
-
-                  // If no spawns found in donor for this BSP, create a default one inside BSP bounds
-                  if (importedSpawns.length === 0) {
-                    const fallback = Buffer.alloc(52);
-                    const midX = (minX + maxX) / 2;
-                    const midY = (minY + maxY) / 2;
-                    const groundZ = minZ + 1.0;
-                    fallback.writeFloatLE(midX, 0);
-                    fallback.writeFloatLE(midY, 4);
-                    fallback.writeFloatLE(groundZ, 8);
-                    fallback.writeFloatLE(0, 12); // facing
-                    fallback.writeInt16LE(0, 16); // team
-                    fallback.writeInt16LE(dstIdx, 18); // bsp index
-                    importedSpawns.push(fallback);
-                  }
-
-                  if (importedSpawns.length > 0) {
-                    const appendRes = appendReflexiveElements(
-                      out,
-                      reinspected.header,
-                      reinspected.tagIndex,
-                      curScnrOff + 0x354,
-                      Buffer.concat(importedSpawns),
-                      importedSpawns.length,
-                    );
-                    out = appendRes.buffer;
-                    reinspected.header = appendRes.header;
-                    curScnrOff = resolveTagDataPointer(
-                      targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
-                      reinspected.header,
-                      reinspected.tagIndex.baseMemoryAddress,
-                    );
-
-                    // Also ensure multiplayer netgame flags (0x36c) has spawn points if cleared/empty
-                    const netgameFlagsCount = out.readUInt32LE(curScnrOff + 0x36c);
-                    if (netgameFlagsCount === 0) {
-                      const importedFlags: Buffer[] = [];
-                      for (const sp of importedSpawns) {
-                        const flag = Buffer.alloc(148);
-                        sp.copy(flag, 0, 0, 12); // position
-                        sp.copy(flag, 12, 12, 16); // facing
-                        flag.writeInt16LE(0, 16); // type 0 = mp spawn point
-                        flag.writeInt16LE(0, 18); // team
-                        importedFlags.push(flag);
-                      }
-                      if (importedFlags.length > 0) {
-                        const flagRes = appendReflexiveElements(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          curScnrOff + 0x36c,
-                          Buffer.concat(importedFlags),
-                          importedFlags.length,
-                        );
-                        out = flagRes.buffer;
-                        reinspected.header = flagRes.header;
-                      }
-                    }
-                  }
-                }
-              }
-
-              // Import Scenery, Vehicles, Doors, AI & Scripts into target scenario
-              if (shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
-                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
-                if (targetScnrEntry) {
-                  const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
-                  // 1. Scenery Palette & Placed Scenery
-                  if (shouldImportObjects && srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
-                    const donorToTargetScenPal = new Map<number, number>();
-                    for (let i = 0; i < srcSceneryPalCount; i++) {
-                      const entryOff = srcSceneryPalOffset + i * 48;
-                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
-                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
-                      if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
-                        const palRes = ensurePaletteEntry(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          'scenery palette',
-                          'ScenarioSceneryPalette',
-                          targetTagId,
-                          0x7363656e, // 'scen'
-                        );
-                        out = palRes.buffer;
-                        reinspected.header = palRes.header;
-                        donorToTargetScenPal.set(i, palRes.paletteIndex);
-                      }
-                    }
-
-                    const validPlaced: Buffer[] = [];
-                    for (let i = 0; i < srcPlacedSceneryCount; i++) {
-                      const sOff = srcPlacedSceneryOffset + i * 72;
-                      const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
-                      const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
-                      if (targetPalIdx !== undefined) {
-                        if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(sOff + 8);
-                          const posY = sourceBuffer.readFloatLE(sOff + 12);
-                          const posZ = sourceBuffer.readFloatLE(sOff + 16);
-                          const margin = 20.0;
-                          if (
-                            posX < minX - margin || posX > maxX + margin ||
-                            posY < minY - margin || posY > maxY + margin ||
-                            posZ < minZ - margin || posZ > maxZ + margin
-                          ) {
-                            continue;
-                          }
-                        }
-                        const sBytes = Buffer.alloc(72);
-                        sourceBuffer.copy(sBytes, 0, sOff, sOff + 72);
-                        sBytes.writeInt16LE(targetPalIdx, 0);
-                        sBytes.writeInt16LE(-1, 2);
-                        validPlaced.push(sBytes);
-                      }
-                    }
-
-                    if (validPlaced.length > 0) {
-                      const curScnrOff = resolveTagDataPointer(
-                        targetScnrEntry.tagDataPointerOrResourceIndex,
-                        reinspected.header,
-                        reinspected.tagIndex.baseMemoryAddress,
-                      );
-                      const appendRes = appendReflexiveElements(
-                        out,
-                        reinspected.header,
-                        reinspected.tagIndex,
-                        curScnrOff + 0x210,
-                        Buffer.concat(validPlaced),
-                        validPlaced.length,
-                      );
-                      out = appendRes.buffer;
-                      reinspected.header = appendRes.header;
-                      importedScenery = validPlaced.length;
-                    }
-                  }
-
-                  // 2. Vehicle Palette & Placed Vehicles
-                  if (shouldImportVehicles && srcVehiclePalCount > 0 && srcPlacedVehiclesCount > 0) {
-                    const donorToTargetVehPal = new Map<number, number>();
-                    for (let i = 0; i < srcVehiclePalCount; i++) {
-                      const entryOff = srcVehiclePalOffset + i * 48;
-                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
-                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
-                      if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
-                        const palRes = ensurePaletteEntry(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          'vehicle palette',
-                          'ScenarioVehiclePalette',
-                          targetTagId,
-                          0x76656869, // 'vehi'
-                        );
-                        out = palRes.buffer;
-                        reinspected.header = palRes.header;
-                        donorToTargetVehPal.set(i, palRes.paletteIndex);
-                      }
-                    }
-
-                    const validVehPlaced: Buffer[] = [];
-                    for (let i = 0; i < srcPlacedVehiclesCount; i++) {
-                      const vOff = srcPlacedVehiclesOffset + i * 120;
-                      const donorPalIdx = sourceBuffer.readInt16LE(vOff + 0);
-                      const targetPalIdx = donorToTargetVehPal.get(donorPalIdx);
-                      if (targetPalIdx !== undefined) {
-                        if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(vOff + 8);
-                          const posY = sourceBuffer.readFloatLE(vOff + 12);
-                          const posZ = sourceBuffer.readFloatLE(vOff + 16);
-                          const margin = 20.0;
-                          if (
-                            posX < minX - margin || posX > maxX + margin ||
-                            posY < minY - margin || posY > maxY + margin ||
-                            posZ < minZ - margin || posZ > maxZ + margin
-                          ) {
-                            continue;
-                          }
-                        }
-                        const vBytes = Buffer.alloc(120);
-                        sourceBuffer.copy(vBytes, 0, vOff, vOff + 120);
-                        vBytes.writeInt16LE(targetPalIdx, 0);
-                        vBytes.writeInt16LE(-1, 2);
-                        vBytes.writeUInt16LE(0, 4); // not placed = 0 (spawn immediately)
-                        vBytes.writeUInt16LE(0x0f0f, 90); // multiplayer spawn flags = all gametypes
-                        validVehPlaced.push(vBytes);
-                      }
-                    }
-
-                    if (validVehPlaced.length > 0) {
-                      const curScnrOff = resolveTagDataPointer(
-                        targetScnrEntry.tagDataPointerOrResourceIndex,
-                        reinspected.header,
-                        reinspected.tagIndex.baseMemoryAddress,
-                      );
-                      const appendRes = appendReflexiveElements(
-                        out,
-                        reinspected.header,
-                        reinspected.tagIndex,
-                        curScnrOff + 0x240,
-                        Buffer.concat(validVehPlaced),
-                        validVehPlaced.length,
-                      );
-                      out = appendRes.buffer;
-                      reinspected.header = appendRes.header;
-                      importedVehicles = validVehPlaced.length;
-                    }
-                  }
-
-                  // 3. Machine Palette & Placed Machines (Doors, Bridges)
-                  if (shouldImportObjects && srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
-                    const donorToTargetMachPal = new Map<number, number>();
-                    for (let i = 0; i < srcMachinePalCount; i++) {
-                      const entryOff = srcMachinePalOffset + i * 48;
-                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
-                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
-                      if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
-                        const palRes = ensurePaletteEntry(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          'machine palette',
-                          'ScenarioMachinePalette',
-                          targetTagId,
-                          0x6d616368, // 'mach'
-                        );
-                        out = palRes.buffer;
-                        reinspected.header = palRes.header;
-                        donorToTargetMachPal.set(i, palRes.paletteIndex);
-                      }
-                    }
-
-                    const validMachPlaced: Buffer[] = [];
-                    const makeAutomatic = options.makeDoorsAutomatic !== false;
-                    for (let i = 0; i < srcPlacedMachinesCount; i++) {
-                      const mOff = srcPlacedMachinesOffset + i * 64;
-                      const donorPalIdx = sourceBuffer.readInt16LE(mOff + 0);
-                      const targetPalIdx = donorToTargetMachPal.get(donorPalIdx);
-                      if (targetPalIdx !== undefined) {
-                        if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(mOff + 8);
-                          const posY = sourceBuffer.readFloatLE(mOff + 12);
-                          const posZ = sourceBuffer.readFloatLE(mOff + 16);
-                          const margin = 20.0;
-                          if (
-                            posX < minX - margin || posX > maxX + margin ||
-                            posY < minY - margin || posY > maxY + margin ||
-                            posZ < minZ - margin || posZ > maxZ + margin
-                          ) {
-                            continue;
-                          }
-                        }
-                        const mBytes = Buffer.alloc(64);
-                        sourceBuffer.copy(mBytes, 0, mOff, mOff + 64);
-                        mBytes.writeInt16LE(targetPalIdx, 0);
-                        mBytes.writeInt16LE(-1, 2);
-                        mBytes.writeInt16LE(-1, 40);
-                        mBytes.writeInt16LE(-1, 42);
-                        if (makeAutomatic) {
-                          let devFlags = mBytes.readUInt32LE(44);
-                          devFlags &= ~1;
-                          mBytes.writeUInt32LE(devFlags, 44);
-                          let machFlags = mBytes.readUInt32LE(48);
-                          machFlags &= ~1;
-                          mBytes.writeUInt32LE(machFlags, 48);
-                        }
-                        validMachPlaced.push(mBytes);
-                      }
-                    }
-
-                    if (validMachPlaced.length > 0) {
-                      const curScnrOff = resolveTagDataPointer(
-                        targetScnrEntry.tagDataPointerOrResourceIndex,
-                        reinspected.header,
-                        reinspected.tagIndex.baseMemoryAddress,
-                      );
-                      const appendRes = appendReflexiveElements(
-                        out,
-                        reinspected.header,
-                        reinspected.tagIndex,
-                        curScnrOff + 0x294,
-                        Buffer.concat(validMachPlaced),
-                        validMachPlaced.length,
-                      );
-                      out = appendRes.buffer;
-                      reinspected.header = appendRes.header;
-                      importedMachines = validMachPlaced.length;
-                    }
-                  }
-
-                  // 4. AI Encounters, Squads, Triggers & Scripting
-                  if (shouldImportAiAndScripts) {
-                    // Ensure actor palette entries in target scenario
-                    const donorToTargetActorPal = new Map<number, number>();
-                    if (srcActorPalCount > 0) {
-                      for (let i = 0; i < srcActorPalCount; i++) {
-                        const entryOff = srcActorPalOffset + i * 16;
-                        const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
-                        const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
-                        if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
-                          const palRes = ensurePaletteEntry(
-                            out,
-                            reinspected.header,
-                            reinspected.tagIndex,
-                            'actor palette',
-                            'ScenarioActorPalette',
-                            targetTagId,
-                            0x61637476, // 'actv'
-                          );
-                          out = palRes.buffer;
-                          reinspected.header = palRes.header;
-                          donorToTargetActorPal.set(i, palRes.paletteIndex);
-                        }
-                      }
-                    }
-
-                    const curScnrOff = resolveTagDataPointer(
-                      targetScnrEntry.tagDataPointerOrResourceIndex,
-                      reinspected.header,
-                      reinspected.tagIndex.baseMemoryAddress,
-                    );
-
-                    // A. Trigger Volumes (0x360)
-                    const trigRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x360);
-                    if (trigRefl.count > 0) {
-                      const trigBase = sourceInspected.header.tagDataOffset + (trigRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-                      const validTrigs: Buffer[] = [];
-                      const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
-                      const margin = 25.0;
-
-                      for (let i = 0; i < trigRefl.count; i++) {
-                        const tOff = trigBase + i * 96;
-                        if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(tOff + 72);
-                          const posY = sourceBuffer.readFloatLE(tOff + 76);
-                          const posZ = sourceBuffer.readFloatLE(tOff + 80);
-                          if (
-                            posX < minX - margin || posX > maxX + margin ||
-                            posY < minY - margin || posY > maxY + margin ||
-                            posZ < minZ - margin || posZ > maxZ + margin
-                          ) {
-                            continue;
-                          }
-                        }
-                        const tBytes = Buffer.alloc(96);
-                        sourceBuffer.copy(tBytes, 0, tOff, tOff + 96);
-                        validTrigs.push(tBytes);
-                      }
-
-                      if (validTrigs.length > 0) {
-                        const appendRes = appendReflexiveElements(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          curScnrOff + 0x360,
-                          Buffer.concat(validTrigs),
-                          validTrigs.length,
-                        );
-                        out = appendRes.buffer;
-                        reinspected.header = appendRes.header;
-                        importedTriggers = validTrigs.length;
-                      }
-                    }
-
-                    // B. Encounters & Squads (0x42c)
-                    const encRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x42c);
-                    if (encRefl.count > 0) {
-                      const encBase = sourceInspected.header.tagDataOffset + (encRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-                      const clonedEncBuffers: Buffer[] = [];
-
-                      // Determine cluster count of the swapped BSP for cluster index validation
-                      let bspClusterCount = 65535;
-                      const bspMetaPtr = out.readUInt32LE(dstBsp.bspStart + 0);
-                      const bspRootOff = dstBsp.bspStart + (bspMetaPtr - srcBspAddress);
-                      if (bspRootOff >= dstBsp.bspStart && bspRootOff + 0x140 <= dstBsp.bspStart + srcBspSize) {
-                        const cCount = out.readUInt32LE(bspRootOff + 0x134);
-                        if (cCount > 0 && cCount < 65535) bspClusterCount = cCount;
-                      }
-
-                      for (let i = 0; i < encRefl.count; i++) {
-                        const encOff = encBase + i * 176;
-                        const encFlags = sourceBuffer.readUInt32LE(encOff + 0x20);
-                        const hasManualBsp = (encFlags & 0x40) !== 0;
-                        const precompBsp = sourceBuffer.readInt16LE(encOff + 0x7e);
-                        const manualBsp = sourceBuffer.readInt16LE(encOff + 0x2a);
-                        const effectiveBsp = precompBsp >= 0 ? precompBsp : (hasManualBsp ? manualBsp : -1);
-
-                        if (srcIndices.length === 1 && effectiveBsp !== -1 && effectiveBsp !== srcIdx) {
-                          continue;
-                        }
-
-                        const encBytes = sourceBuffer.subarray(encOff, encOff + 176);
-                        const cloneRes = cloneEncounterWithChildReflexives(
-                          encBytes,
-                          sourceBuffer,
-                          sourceInspected.header,
-                          srcTagIndex,
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          donorToTargetActorPal,
-                          dstIdx,
-                          bspClusterCount,
-                        );
-                        out = cloneRes.buffer;
-                        reinspected.header = cloneRes.header;
-                        clonedEncBuffers.push(cloneRes.encounterBytes);
-                      }
-
-                      if (clonedEncBuffers.length > 0) {
-                        const allEncBytes = Buffer.concat(clonedEncBuffers);
-                        const appendRes = appendReflexiveElements(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          curScnrOff + 0x42c,
-                          allEncBytes,
-                          clonedEncBuffers.length,
-                        );
-                        out = appendRes.buffer;
-                        reinspected.header = appendRes.header;
-                        importedEncounters = clonedEncBuffers.length;
-                      }
-                    }
-
-                    // C. Scripting: Campaign mission scripts (0x474..0x4b4) are tightly bound to
-                    // multi-BSP campaign cutscenes, switch_bsp calls, and named singleplayer objects
-                    // (e.g. bsp0_door) that crash multiplayer maps. Instead, imported encounters have
-                    // their 'not initially created' flag cleared above so AI squads spawn natively.
-
-                    // D. If player spawns were cleared and donor map has starting locations on this BSP, import donor starting locations
-                    if (options.clearPlayerSpawns) {
-                      const srcSpawnsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x354);
-                      if (srcSpawnsRefl.count > 0) {
-                        const spSize = resolveStruct('ScenarioPlayerStartingLocation').totalSize; // 52
-                        const spBase = resolvePointer(srcSpawnsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                        const validSpawns: Buffer[] = [];
-                        const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
-                        const margin = 20.0;
-
-                        for (let i = 0; i < srcSpawnsRefl.count; i++) {
-                          const spOff = spBase + i * spSize;
-                          const posX = sourceBuffer.readFloatLE(spOff + 0);
-                          const posY = sourceBuffer.readFloatLE(spOff + 4);
-                          const posZ = sourceBuffer.readFloatLE(spOff + 8);
-                          if (
-                            !options.filterObjectsToBspBounds ||
-                            (posX >= minX - margin && posX <= maxX + margin &&
-                             posY >= minY - margin && posY <= maxY + margin &&
-                             posZ >= minZ - margin && posZ <= maxZ + margin)
-                          ) {
-                            const spBytes = Buffer.alloc(spSize);
-                            sourceBuffer.copy(spBytes, 0, spOff, spOff + spSize);
-                            spBytes.writeInt16LE(dstIdx, 18); // bsp_index
-                            if (spBytes.readInt16LE(20) === 0) {
-                              spBytes.writeInt16LE(12, 20); // type 0 = 12 (all games) so campaign spawns work in MP
-                            }
-                            validSpawns.push(spBytes);
-                          }
-                        }
-
-                        if (validSpawns.length > 0) {
-                          const appendRes = appendReflexiveElements(
-                            out,
-                            reinspected.header,
-                            reinspected.tagIndex,
-                            curScnrOff + 0x354,
-                            Buffer.concat(validSpawns),
-                            validSpawns.length,
-                          );
-                          out = appendRes.buffer;
-                          reinspected.header = appendRes.header;
-                        }
-                      }
-                    }
-                  }
-
-                  const finalRe = inspectCustomEditionMap(out);
-                  if (finalRe.status === 'ok') {
-                    reinspected = finalRe;
-                  }
-                }
-              }
             }
           }
         } catch {
           // If harvesting encounters an issue with any one tag, proceed with geometry swap
+        }
+      }
+
+      // Optionally clear existing placements from target map (scenery, vehicles, equipment, weapons, etc.)
+      if (options.clearExistingPlacements) {
+        const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+        if (targetScnrEntry) {
+          const curScnrOff = resolveTagDataPointer(
+            targetScnrEntry.tagDataPointerOrResourceIndex,
+            reinspected.header,
+            reinspected.tagIndex.baseMemoryAddress,
+          );
+          const clearOffsets = [0x210, 0x228, 0x240, 0x258, 0x270, 0x294, 0x2ac, 0x2c4, 0x2dc, 0x360, 0x378, 0x384, 0x3a8, 0x42c];
+          for (const off of clearOffsets) {
+            out.writeUInt32LE(0, curScnrOff + off);
+            out.writeUInt32LE(0, curScnrOff + off + 4);
+          }
+        }
+      }
+
+      // Optionally clear player starting locations & profiles from target map
+      if (options.clearPlayerSpawns) {
+        const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+        if (targetScnrEntry) {
+          const curScnrOff = resolveTagDataPointer(
+            targetScnrEntry.tagDataPointerOrResourceIndex,
+            reinspected.header,
+            reinspected.tagIndex.baseMemoryAddress,
+          );
+          const spawnClearOffsets = [0x348, 0x354, 0x390];
+          for (const off of spawnClearOffsets) {
+            out.writeUInt32LE(0, curScnrOff + off);
+            out.writeUInt32LE(0, curScnrOff + off + 4);
+          }
+        }
+      }
+
+      // Import donor player starting locations (or ensure at least one valid spawn in new BSP)
+      const targetScnrEntryForSpawns = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+      if (targetScnrEntryForSpawns) {
+        let curScnrOff = resolveTagDataPointer(
+          targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
+          reinspected.header,
+          reinspected.tagIndex.baseMemoryAddress,
+        );
+        const curSpawnsCount = out.readUInt32LE(curScnrOff + 0x354);
+
+        if (options.clearPlayerSpawns || curSpawnsCount === 0) {
+          const importedSpawns: Buffer[] = [];
+          const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+
+          if (srcScnrOffset > 0) {
+            const donorPslRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x354);
+            if (donorPslRefl.count > 0) {
+              const donorPslOffset = resolvePointer(
+                donorPslRefl.pointerLow,
+                sourceInspected.header.tagDataOffset,
+                srcTagIndex.baseMemoryAddress,
+              );
+              for (let i = 0; i < donorPslRefl.count; i++) {
+                const sOff = donorPslOffset + i * 52;
+                const donorBspIdx = sourceBuffer.readInt16LE(sOff + 18);
+                const matchesBsp = srcIndices.includes(donorBspIdx) || sourceBsps.length <= 1;
+                if (matchesBsp) {
+                  const spawnBuf = Buffer.alloc(52);
+                  sourceBuffer.copy(spawnBuf, 0, sOff, sOff + 52);
+                  spawnBuf.writeInt16LE(dstIdx, 18); // Map to target BSP index
+                  if (spawnBuf.readInt16LE(20) === 0) {
+                    spawnBuf.writeInt16LE(12, 20); // type 0 = 12 (all games) so campaign spawns work in MP
+                  }
+                  importedSpawns.push(spawnBuf);
+                }
+              }
+            }
+          }
+
+          if (importedSpawns.length === 0) {
+            const fallback = Buffer.alloc(52);
+            const midX = (minX + maxX) / 2;
+            const midY = (minY + maxY) / 2;
+            const groundZ = minZ + 1.0;
+            fallback.writeFloatLE(midX, 0);
+            fallback.writeFloatLE(midY, 4);
+            fallback.writeFloatLE(groundZ, 8);
+            fallback.writeFloatLE(0, 12); // facing
+            fallback.writeInt16LE(0, 16); // team
+            fallback.writeInt16LE(dstIdx, 18); // bsp index
+            fallback.writeInt16LE(12, 20); // type 0 = 12 (all games)
+            importedSpawns.push(fallback);
+          }
+
+          if (importedSpawns.length > 0) {
+            const appendRes = appendReflexiveElements(
+              out,
+              reinspected.header,
+              reinspected.tagIndex,
+              curScnrOff + 0x354,
+              Buffer.concat(importedSpawns),
+              importedSpawns.length,
+            );
+            out = appendRes.buffer;
+            reinspected.header = appendRes.header;
+            curScnrOff = resolveTagDataPointer(
+              targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
+              reinspected.header,
+              reinspected.tagIndex.baseMemoryAddress,
+            );
+
+            // Also ensure multiplayer netgame flags (0x36c) has spawn points if cleared/empty
+            const netgameFlagsCount = out.readUInt32LE(curScnrOff + 0x36c);
+            if (netgameFlagsCount === 0) {
+              const importedFlags: Buffer[] = [];
+              for (const sp of importedSpawns) {
+                const flag = Buffer.alloc(148);
+                sp.copy(flag, 0, 0, 12); // position
+                sp.copy(flag, 12, 12, 16); // facing
+                flag.writeInt16LE(0, 16); // type 0 = mp spawn point
+                flag.writeInt16LE(0, 18); // team
+                importedFlags.push(flag);
+              }
+              if (importedFlags.length > 0) {
+                const flagRes = appendReflexiveElements(
+                  out,
+                  reinspected.header,
+                  reinspected.tagIndex,
+                  curScnrOff + 0x36c,
+                  Buffer.concat(importedFlags),
+                  importedFlags.length,
+                );
+                out = flagRes.buffer;
+                reinspected.header = flagRes.header;
+              }
+            }
+          }
+        }
+      }
+
+      // Import Scenery, Vehicles, and Doors into target scenario
+      if (shouldImportObjects || shouldImportVehicles) {
+        const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+        if (targetScnrEntry) {
+          const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+          // 1. Scenery Palette & Placed Scenery
+          if (shouldImportObjects && srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
+            const donorToTargetScenPal = new Map<number, number>();
+            for (let i = 0; i < srcSceneryPalCount; i++) {
+              const entryOff = srcSceneryPalOffset + i * 48;
+              const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+              const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
+              if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
+                const palRes = ensurePaletteEntry(
+                  out,
+                  reinspected.header,
+                  reinspected.tagIndex,
+                  'scenery palette',
+                  'ScenarioSceneryPalette',
+                  targetTagId,
+                  0x7363656e, // 'scen'
+                );
+                out = palRes.buffer;
+                reinspected.header = palRes.header;
+                donorToTargetScenPal.set(i, palRes.paletteIndex);
+              }
+            }
+
+            const validPlaced: Buffer[] = [];
+            for (let i = 0; i < srcPlacedSceneryCount; i++) {
+              const sOff = srcPlacedSceneryOffset + i * 72;
+              const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
+              const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
+              if (targetPalIdx !== undefined) {
+                if (options.filterObjectsToBspBounds) {
+                  const posX = sourceBuffer.readFloatLE(sOff + 8);
+                  const posY = sourceBuffer.readFloatLE(sOff + 12);
+                  const posZ = sourceBuffer.readFloatLE(sOff + 16);
+                  const margin = 20.0;
+                  if (
+                    posX < minX - margin || posX > maxX + margin ||
+                    posY < minY - margin || posY > maxY + margin ||
+                    posZ < minZ - margin || posZ > maxZ + margin
+                  ) {
+                    continue;
+                  }
+                }
+                const sBytes = Buffer.alloc(72);
+                sourceBuffer.copy(sBytes, 0, sOff, sOff + 72);
+                sBytes.writeInt16LE(targetPalIdx, 0);
+                sBytes.writeInt16LE(-1, 2);
+                validPlaced.push(sBytes);
+              }
+            }
+
+            if (validPlaced.length > 0) {
+              const curScnrOff = resolveTagDataPointer(
+                targetScnrEntry.tagDataPointerOrResourceIndex,
+                reinspected.header,
+                reinspected.tagIndex.baseMemoryAddress,
+              );
+              const appendRes = appendReflexiveElements(
+                out,
+                reinspected.header,
+                reinspected.tagIndex,
+                curScnrOff + 0x210,
+                Buffer.concat(validPlaced),
+                validPlaced.length,
+              );
+              out = appendRes.buffer;
+              reinspected.header = appendRes.header;
+              importedScenery = validPlaced.length;
+            }
+          }
+
+          // 2. Vehicle Palette & Placed Vehicles
+          if (shouldImportVehicles && srcVehiclePalCount > 0 && srcPlacedVehiclesCount > 0) {
+            const donorToTargetVehPal = new Map<number, number>();
+            for (let i = 0; i < srcVehiclePalCount; i++) {
+              const entryOff = srcVehiclePalOffset + i * 48;
+              const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+              const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
+              if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
+                const palRes = ensurePaletteEntry(
+                  out,
+                  reinspected.header,
+                  reinspected.tagIndex,
+                  'vehicle palette',
+                  'ScenarioVehiclePalette',
+                  targetTagId,
+                  0x76656869, // 'vehi'
+                );
+                out = palRes.buffer;
+                reinspected.header = palRes.header;
+                donorToTargetVehPal.set(i, palRes.paletteIndex);
+              }
+            }
+
+            const validVehPlaced: Buffer[] = [];
+            for (let i = 0; i < srcPlacedVehiclesCount; i++) {
+              const vOff = srcPlacedVehiclesOffset + i * 120;
+              const donorPalIdx = sourceBuffer.readInt16LE(vOff + 0);
+              const targetPalIdx = donorToTargetVehPal.get(donorPalIdx);
+              if (targetPalIdx !== undefined) {
+                if (options.filterObjectsToBspBounds) {
+                  const posX = sourceBuffer.readFloatLE(vOff + 8);
+                  const posY = sourceBuffer.readFloatLE(vOff + 12);
+                  const posZ = sourceBuffer.readFloatLE(vOff + 16);
+                  const margin = 20.0;
+                  if (
+                    posX < minX - margin || posX > maxX + margin ||
+                    posY < minY - margin || posY > maxY + margin ||
+                    posZ < minZ - margin || posZ > maxZ + margin
+                  ) {
+                    continue;
+                  }
+                }
+                const vBytes = Buffer.alloc(120);
+                sourceBuffer.copy(vBytes, 0, vOff, vOff + 120);
+                vBytes.writeInt16LE(targetPalIdx, 0);
+                vBytes.writeInt16LE(-1, 2);
+                vBytes.writeUInt16LE(0, 4); // not placed = 0 (spawn immediately)
+                vBytes.writeUInt16LE(0x0f0f, 90); // multiplayer spawn flags = all gametypes
+                validVehPlaced.push(vBytes);
+              }
+            }
+
+            if (validVehPlaced.length > 0) {
+              const curScnrOff = resolveTagDataPointer(
+                targetScnrEntry.tagDataPointerOrResourceIndex,
+                reinspected.header,
+                reinspected.tagIndex.baseMemoryAddress,
+              );
+              const appendRes = appendReflexiveElements(
+                out,
+                reinspected.header,
+                reinspected.tagIndex,
+                curScnrOff + 0x240,
+                Buffer.concat(validVehPlaced),
+                validVehPlaced.length,
+              );
+              out = appendRes.buffer;
+              reinspected.header = appendRes.header;
+              importedVehicles = validVehPlaced.length;
+            }
+          }
+
+          // 3. Machine Palette & Placed Machines (Doors, Bridges)
+          if (shouldImportObjects && srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
+            const donorToTargetMachPal = new Map<number, number>();
+            for (let i = 0; i < srcMachinePalCount; i++) {
+              const entryOff = srcMachinePalOffset + i * 48;
+              const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+              const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
+              if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
+                const palRes = ensurePaletteEntry(
+                  out,
+                  reinspected.header,
+                  reinspected.tagIndex,
+                  'machine palette',
+                  'ScenarioMachinePalette',
+                  targetTagId,
+                  0x6d616368, // 'mach'
+                );
+                out = palRes.buffer;
+                reinspected.header = palRes.header;
+                donorToTargetMachPal.set(i, palRes.paletteIndex);
+              }
+            }
+
+            const validMachPlaced: Buffer[] = [];
+            const makeAutomatic = options.makeDoorsAutomatic !== false;
+            for (let i = 0; i < srcPlacedMachinesCount; i++) {
+              const mOff = srcPlacedMachinesOffset + i * 64;
+              const donorPalIdx = sourceBuffer.readInt16LE(mOff + 0);
+              const targetPalIdx = donorToTargetMachPal.get(donorPalIdx);
+              if (targetPalIdx !== undefined) {
+                if (options.filterObjectsToBspBounds) {
+                  const posX = sourceBuffer.readFloatLE(mOff + 8);
+                  const posY = sourceBuffer.readFloatLE(mOff + 12);
+                  const posZ = sourceBuffer.readFloatLE(mOff + 16);
+                  const margin = 20.0;
+                  if (
+                    posX < minX - margin || posX > maxX + margin ||
+                    posY < minY - margin || posY > maxY + margin ||
+                    posZ < minZ - margin || posZ > maxZ + margin
+                  ) {
+                    continue;
+                  }
+                }
+                const mBytes = Buffer.alloc(64);
+                sourceBuffer.copy(mBytes, 0, mOff, mOff + 64);
+                mBytes.writeInt16LE(targetPalIdx, 0);
+                mBytes.writeInt16LE(-1, 2);
+                mBytes.writeInt16LE(-1, 40);
+                mBytes.writeInt16LE(-1, 42);
+                if (makeAutomatic) {
+                  let devFlags = mBytes.readUInt32LE(44);
+                  devFlags &= ~1;
+                  mBytes.writeUInt32LE(devFlags, 44);
+                  let machFlags = mBytes.readUInt32LE(48);
+                  machFlags &= ~1;
+                  mBytes.writeUInt32LE(machFlags, 48);
+                }
+                validMachPlaced.push(mBytes);
+              }
+            }
+
+            if (validMachPlaced.length > 0) {
+              const curScnrOff = resolveTagDataPointer(
+                targetScnrEntry.tagDataPointerOrResourceIndex,
+                reinspected.header,
+                reinspected.tagIndex.baseMemoryAddress,
+              );
+              const appendRes = appendReflexiveElements(
+                out,
+                reinspected.header,
+                reinspected.tagIndex,
+                curScnrOff + 0x294,
+                Buffer.concat(validMachPlaced),
+                validMachPlaced.length,
+              );
+              out = appendRes.buffer;
+              reinspected.header = appendRes.header;
+              importedMachines = validMachPlaced.length;
+            }
+          }
+
+          const finalRe = inspectCustomEditionMap(out);
+          if (finalRe.status === 'ok') {
+            reinspected = finalRe;
+          }
         }
       }
     }
@@ -1786,9 +1365,6 @@ export function performBspSwap(
       importedScenery,
       importedVehicles,
       importedMachines,
-      importedEncounters,
-      importedTriggers,
-      importedScripts,
     },
   };
 }
