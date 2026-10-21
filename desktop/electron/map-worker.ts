@@ -15,6 +15,7 @@ import {
   planSwapInjection,
   applyAddInjection,
   applySwapInjection,
+  hydrateExternalRawDataInContainer,
   computeResourceMapIdentity,
   getGroupDefinition,
   validateAllDefinitions,
@@ -850,12 +851,28 @@ function summarizePlan(containerPath: string, container: OceContainer, plan: Inj
   };
 }
 
-export function runPlanInject(task: { requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }) {
+export function runPlanInject(task: {
+  requestId: string;
+  containerPath: string;
+  mode: InjectionMode;
+  resourceMapPaths: Partial<Record<ResourceMapKind, string>>;
+  fallbackPcResourcePaths?: Partial<Record<ResourceMapKind, string>>;
+}) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open to inject into.');
   try {
     progress(task.requestId, 'Reading container file', 10);
     const containerBuffer = fs.readFileSync(task.containerPath);
     const container = deserializeContainer(containerBuffer);
+
+    const hydrateRes = openConversionResources({
+      bitmaps: task.fallbackPcResourcePaths?.bitmaps ?? task.resourceMapPaths?.bitmaps,
+      sounds: task.fallbackPcResourcePaths?.sounds ?? task.resourceMapPaths?.sounds,
+    });
+    try {
+      hydrateExternalRawDataInContainer(container, hydrateRes.files);
+    } finally {
+      hydrateRes.close();
+    }
 
     progress(task.requestId, 'Checking configured resource maps', 40);
     const resourceMapConfig: ResourceMapConfig = {};

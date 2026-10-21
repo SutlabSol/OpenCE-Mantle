@@ -267,34 +267,13 @@ async function loadMapAtPath(filePath: string, options: { askBackup: boolean }):
       updateTitle();
       sendLog('info', `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
 
-      // If the edition has configured resource maps, automatically activate them
-      const edition = result.header.mapEdition ?? (result.header.engine === 7 ? 'pc' : 'ce');
-      const settings = getSettings();
-      let versionMaps = settings.versionResourceMaps?.[edition];
-      // Fallback between PC and HaloMD if one is unset
-      if ((!versionMaps?.bitmaps || !versionMaps?.sounds) && (edition === 'pc' || edition === 'halomd')) {
-        const altEdition = edition === 'pc' ? 'halomd' : 'pc';
-        const altMaps = settings.versionResourceMaps?.[altEdition];
-        versionMaps = {
-          bitmaps: versionMaps?.bitmaps ?? altMaps?.bitmaps ?? null,
-          sounds: versionMaps?.sounds ?? altMaps?.sounds ?? null,
-        };
+      // If the edition has configured or auto-detected resource maps, automatically activate them
+      const resolvedRes = resolveResourceMapsForSource(filePath);
+      if (resolvedRes.bitmapsPath) {
+        setResourceMapPath('bitmaps', resolvedRes.bitmapsPath);
       }
-      // Fallback for MCC sounds to Custom Edition
-      if (edition === 'mcc' && !versionMaps?.sounds) {
-        const ceSounds = settings.versionResourceMaps?.ce?.sounds;
-        if (ceSounds) {
-          versionMaps = {
-            bitmaps: versionMaps?.bitmaps ?? null,
-            sounds: ceSounds,
-          };
-        }
-      }
-      if (versionMaps?.bitmaps) {
-        setResourceMapPath('bitmaps', versionMaps.bitmaps);
-      }
-      if (versionMaps?.sounds) {
-        setResourceMapPath('sounds', versionMaps.sounds);
+      if (resolvedRes.soundsPath) {
+        setResourceMapPath('sounds', resolvedRes.soundsPath);
       }
 
       if (options.askBackup) await askBackup(filePath);
@@ -474,9 +453,12 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
   setLastExtractDir(path.dirname(resolvedTarget));
   sendLog('info', `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
 
-  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
-  if (settings.resourceMaps?.bitmaps) resourceMapPaths.bitmaps = settings.resourceMaps.bitmaps;
-  if (settings.resourceMaps?.sounds) resourceMapPaths.sounds = settings.resourceMaps.sounds;
+  const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
+  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {
+    ...resolvedSourceRes.resourceMapPaths,
+  };
+  if (!resourceMapPaths.bitmaps && settings.resourceMaps?.bitmaps) resourceMapPaths.bitmaps = settings.resourceMaps.bitmaps;
+  if (!resourceMapPaths.sounds && settings.resourceMaps?.sounds) resourceMapPaths.sounds = settings.resourceMaps.sounds;
   if (settings.resourceMaps?.loc) resourceMapPaths.loc = settings.resourceMaps.loc;
 
   const { requestId, promise } = sendWorkerRequest<ExtractTagsResult>(
@@ -598,10 +580,13 @@ async function startBatchExtractFlow(options: { parentDir: string; mode: BatchEx
   }
 
   const settings = getSettings();
-  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
+  const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
+  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {
+    ...resolvedSourceRes.resourceMapPaths,
+  };
   for (const kind of ['bitmaps', 'sounds', 'loc'] as ResourceMapKind[]) {
     const p = settings.resourceMaps[kind];
-    if (p) resourceMapPaths[kind] = p;
+    if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
 
   const sourceMapName = currentMapScenarioName ?? path.basename(currentMapPath, '.map');
@@ -1042,13 +1027,27 @@ async function planInjectFlow(containerPath: string, mode: InjectionMode): Promi
   if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
   currentInjectContainerPath = containerPath;
   const settings = getSettings();
-  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
+  const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
+  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {
+    ...resolvedSourceRes.resourceMapPaths,
+  };
   for (const kind of ['bitmaps', 'sounds', 'loc'] as ResourceMapKind[]) {
     const p = settings.resourceMaps[kind];
-    if (p) resourceMapPaths[kind] = p;
+    if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
+  const defaults = detectDefaultResourceMapPathsFlow();
+  const pcBitmaps = settings.versionResourceMaps?.pc?.bitmaps ?? settings.versionResourceMaps?.halomd?.bitmaps ?? defaults.pc ?? defaults.halomd ?? undefined;
+  let pcSounds = settings.versionResourceMaps?.pc?.sounds ?? settings.versionResourceMaps?.halomd?.sounds ?? undefined;
+  if (!pcSounds && pcBitmaps) {
+    const sib = path.join(path.dirname(pcBitmaps), 'sounds.map');
+    if (fs.existsSync(sib)) pcSounds = sib;
+  }
+  const fallbackPcResourcePaths: Partial<Record<ResourceMapKind, string>> = {};
+  if (pcBitmaps && fs.existsSync(pcBitmaps)) fallbackPcResourcePaths.bitmaps = pcBitmaps;
+  if (pcSounds && fs.existsSync(pcSounds)) fallbackPcResourcePaths.sounds = pcSounds;
+
   sendLog('info', `Planning ${mode === 'swap' ? 'swap' : 'add'} injection from ${containerPath}`);
-  const { promise } = sendWorkerRequest<PlanInjectResult>({ type: 'planInject', containerPath, mode, resourceMapPaths }, sendLog, (stage, percent) =>
+  const { promise } = sendWorkerRequest<PlanInjectResult>({ type: 'planInject', containerPath, mode, resourceMapPaths, fallbackPcResourcePaths }, sendLog, (stage, percent) =>
     mainWindow?.webContents.send('map:progress', { taskId: 'planInject', stage, percent }),
   );
   try {

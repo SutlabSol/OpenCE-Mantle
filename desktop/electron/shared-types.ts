@@ -504,7 +504,7 @@ export type WorkerRequest =
       itemNames?: Record<number, string>;
       captureGbxmodelRawData?: boolean;
     }
-  | { type: 'planInject'; requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>> }
+  | { type: 'planInject'; requestId: string; containerPath: string; mode: InjectionMode; resourceMapPaths: Partial<Record<ResourceMapKind, string>>; fallbackPcResourcePaths?: Partial<Record<ResourceMapKind, string>> }
   | { type: 'applyInject'; requestId: string }
   | { type: 'saveMap'; requestId: string }
   | { type: 'saveMapAs'; requestId: string; outputPath: string }

@@ -503,6 +503,152 @@ function resolvePointer(pointer: number, tagDataOffset: number, baseMemoryAddres
 }
 
 /**
+ * Repairs any non-external (`!entry.isExternal`) bitmap or sound tags in `buffer` whose
+ * sub-entries still carry the Retail PC / HaloMD `in data file` flag (`BitmapData.flags & 0x100`
+ * or `SoundPermutation.external & 1`) by reading the raw bytes from `resourceFiles` and
+ * appending them to the map's raw-data region (right before `tagDataOffset`).
+ */
+export function internalizeBrokenExternalBitmaps(
+  buffer: Buffer,
+  resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile },
+): Buffer {
+  if (!resourceFiles?.bitmaps && !resourceFiles?.sounds) return buffer;
+  const inspected = inspectCustomEditionMap(buffer);
+  if (inspected.status !== 'ok') return buffer;
+
+  const { header, tagIndex } = inspected;
+  const tagDataOffset = header.tagDataOffset;
+  const base = tagIndex.baseMemoryAddress;
+
+  interface PendingPatch {
+    tagDataRelativeOffset: number;
+    flagTagDataRelativeOffset: number;
+    flagWidth: 2 | 4;
+    flagMask: number;
+    chunkIndex: number;
+  }
+
+  const chunks: Buffer[] = [];
+  const chunkOffsets: number[] = [];
+  const dedupe = new Map<string, number>();
+  const patches: PendingPatch[] = [];
+  let totalInserted = 0;
+
+  for (const entry of tagIndex.entries) {
+    if (entry.isExternal) continue;
+    const tagRel = entry.tagDataPointerOrResourceIndex - base;
+    const tagFileOffset = tagDataOffset + tagRel;
+    if (tagFileOffset < tagDataOffset || tagFileOffset + 64 > buffer.length) continue;
+
+    if (entry.primaryClassName === 'bitmap' && resourceFiles.bitmaps) {
+      const bCount = buffer.readInt32LE(tagFileOffset + 0x60);
+      const bPtr = buffer.readUInt32LE(tagFileOffset + 0x64);
+      if (bCount <= 0 || bCount > 256) continue;
+      const arrRel = bPtr - base;
+      const arrOffset = tagDataOffset + arrRel;
+      if (arrOffset < tagDataOffset || arrOffset + bCount * 48 > buffer.length) continue;
+      for (let i = 0; i < bCount; i++) {
+        const elemRel = arrRel + i * 48;
+        const elemOff = tagDataOffset + elemRel;
+        const flags = buffer.readUInt16LE(elemOff + 14);
+        if ((flags & 0x100) === 0) continue;
+        const pixOff = buffer.readUInt32LE(elemOff + 24);
+        const pixSize = buffer.readUInt32LE(elemOff + 28);
+        if (pixSize <= 0 || pixOff + pixSize > resourceFiles.bitmaps.size) continue;
+        const key = `bitm:${pixOff}:${pixSize}`;
+        let chunkIdx = dedupe.get(key);
+        if (chunkIdx === undefined) {
+          const raw = Buffer.from(resourceFiles.bitmaps.read(pixOff, pixSize));
+          const alignedLen = (raw.length + 3) & ~3;
+          const padded = alignedLen === raw.length ? raw : Buffer.concat([raw, Buffer.alloc(alignedLen - raw.length)]);
+          chunkIdx = chunks.length;
+          chunkOffsets.push(tagDataOffset + totalInserted);
+          chunks.push(padded);
+          totalInserted += padded.length;
+          dedupe.set(key, chunkIdx);
+        }
+        patches.push({
+          tagDataRelativeOffset: elemRel + 24,
+          flagTagDataRelativeOffset: elemRel + 14,
+          flagWidth: 2,
+          flagMask: 0x100,
+          chunkIndex: chunkIdx,
+        });
+      }
+    } else if (entry.primaryClassName === 'sound' && resourceFiles.sounds) {
+      const prCount = buffer.readInt32LE(tagFileOffset + 0x98);
+      const prPtr = buffer.readUInt32LE(tagFileOffset + 0x9c);
+      if (prCount <= 0 || prCount > 64) continue;
+      const prArrRel = prPtr - base;
+      const prArrOff = tagDataOffset + prArrRel;
+      if (prArrOff < tagDataOffset || prArrOff + prCount * 72 > buffer.length) continue;
+      for (let p = 0; p < prCount; p++) {
+        const prOff = prArrOff + p * 72;
+        const permCount = buffer.readInt32LE(prOff + 0x38);
+        const permPtr = buffer.readUInt32LE(prOff + 0x3c);
+        if (permCount <= 0 || permCount > 256) continue;
+        const permArrRel = permPtr - base;
+        const permArrOff = tagDataOffset + permArrRel;
+        if (permArrOff < tagDataOffset || permArrOff + permCount * 124 > buffer.length) continue;
+        for (let m = 0; m < permCount; m++) {
+          const permRel = permArrRel + m * 124;
+          const permOff = tagDataOffset + permRel;
+          const extFlag = buffer.readUInt32LE(permOff + 0x44);
+          if ((extFlag & 1) === 0) continue;
+          const sampleSize = buffer.readUInt32LE(permOff + 0x40);
+          const sampleOff = buffer.readUInt32LE(permOff + 0x48);
+          if (sampleSize <= 0 || sampleOff + sampleSize > resourceFiles.sounds.size) continue;
+          const key = `snd!:${sampleOff}:${sampleSize}`;
+          let chunkIdx = dedupe.get(key);
+          if (chunkIdx === undefined) {
+            const raw = Buffer.from(resourceFiles.sounds.read(sampleOff, sampleSize));
+            const alignedLen = (raw.length + 3) & ~3;
+            const padded = alignedLen === raw.length ? raw : Buffer.concat([raw, Buffer.alloc(alignedLen - raw.length)]);
+            chunkIdx = chunks.length;
+            chunkOffsets.push(tagDataOffset + totalInserted);
+            chunks.push(padded);
+            totalInserted += padded.length;
+            dedupe.set(key, chunkIdx);
+          }
+          patches.push({
+            tagDataRelativeOffset: permRel + 0x48,
+            flagTagDataRelativeOffset: permRel + 0x44,
+            flagWidth: 4,
+            flagMask: 1,
+            chunkIndex: chunkIdx,
+          });
+        }
+      }
+    }
+  }
+
+  if (patches.length === 0) return buffer;
+
+  const newTagDataOffset = tagDataOffset + totalInserted;
+  const out = Buffer.concat([
+    buffer.subarray(0, tagDataOffset),
+    ...chunks,
+    buffer.subarray(tagDataOffset),
+  ]);
+
+  out.writeUInt32LE(out.length, 0x08);
+  out.writeUInt32LE(newTagDataOffset, 0x10);
+
+  for (const patch of patches) {
+    const newFileOff = chunkOffsets[patch.chunkIndex];
+    out.writeUInt32LE(newFileOff >>> 0, newTagDataOffset + patch.tagDataRelativeOffset);
+    const flagOff = newTagDataOffset + patch.flagTagDataRelativeOffset;
+    if (patch.flagWidth === 2) {
+      out.writeUInt16LE(out.readUInt16LE(flagOff) & ~patch.flagMask, flagOff);
+    } else {
+      out.writeUInt32LE((out.readUInt32LE(flagOff) & ~patch.flagMask) >>> 0, flagOff);
+    }
+  }
+
+  return out;
+}
+
+/**
  * Performs the BSP swap from source map into target map buffer in memory.
  */
 export function performBspSwap(
@@ -828,6 +974,7 @@ export function performBspSwap(
                 plan,
                 { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true },
               );
+              out = internalizeBrokenExternalBitmaps(out, options.resourceFiles);
               const afterInject = inspectCustomEditionMap(out);
               if (afterInject.status === 'ok') {
                 reinspected = afterInject;

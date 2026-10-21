@@ -64,6 +64,92 @@ import type { ExtractedDependencyRef } from './tag-extractor';
 import { childFieldPath, reflexiveElementPath, isRelocatedTagDataField } from './tag-extractor';
 import type { ResourceMapIdentity } from './resource-map';
 import { resourceMapIdentitiesMatch } from './resource-map';
+import type { RandomAccessFile } from './convert/resource-files';
+
+/**
+ * Hydrates any un-internalized Retail PC / HaloMD `in data file` bitmap or sound sub-entries
+ * (`BitmapData.flags & 0x100 !== 0` or `SoundPermutation.external & 1 !== 0`) in `container`
+ * using `resourceFiles`. This ensures `.ocetags` containers that were extracted without
+ * `bitmaps.map` / `sounds.map` configured are automatically internalized at injection time.
+ */
+export function hydrateExternalRawDataInContainer(
+  container: OceContainer,
+  resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile },
+): void {
+  if (!resourceFiles?.bitmaps && !resourceFiles?.sounds) return;
+  for (const t of container.tags) {
+    if (t.group !== 'bitmap' && t.group !== 'sound') continue;
+    const dataBuf = Buffer.from(t.data, 'base64');
+    let mutated = false;
+
+    if (t.group === 'bitmap' && resourceFiles.bitmaps && dataBuf.length >= 0x6c) {
+      const bCount = dataBuf.readInt32LE(0x60);
+      const arrOff = dataBuf.readUInt32LE(0x64);
+      if (bCount <= 0 || bCount > 256) continue;
+      if (arrOff <= 0 || arrOff + bCount * 48 > dataBuf.length) continue;
+
+      if (!t.embeddedRawDataAssets) t.embeddedRawDataAssets = [];
+      if (!t.embeddedRawDataPatches) t.embeddedRawDataPatches = [];
+      const existingPatchOffsets = new Set(t.embeddedRawDataPatches.map((p) => p.patchOffset));
+
+      for (let i = 0; i < bCount; i++) {
+        const elemOff = arrOff + i * 48;
+        const patchOff = elemOff + 24;
+        if (existingPatchOffsets.has(patchOff)) continue;
+        const flags = dataBuf.readUInt16LE(elemOff + 14);
+        if ((flags & 0x100) === 0) continue;
+        const pixOff = dataBuf.readUInt32LE(patchOff);
+        const pixSize = dataBuf.readUInt32LE(elemOff + 28);
+        if (pixSize <= 0 || pixOff + pixSize > resourceFiles.bitmaps.size) continue;
+        const rawData = Buffer.from(resourceFiles.bitmaps.read(pixOff, pixSize));
+        const assetIndex = t.embeddedRawDataAssets.length;
+        t.embeddedRawDataAssets.push({ kind: 'bitmap', data: rawData.toString('base64') });
+        t.embeddedRawDataPatches.push({ assetIndex, patchOffset: patchOff, patchWidth: 4 });
+        dataBuf.writeUInt16LE(flags & ~0x100, elemOff + 14);
+        existingPatchOffsets.add(patchOff);
+        mutated = true;
+      }
+    } else if (t.group === 'sound' && resourceFiles.sounds && dataBuf.length >= 0xa4) {
+      const prCount = dataBuf.readInt32LE(0x98);
+      const prArrOff = dataBuf.readUInt32LE(0x9c);
+      if (prCount <= 0 || prCount > 64) continue;
+      if (prArrOff <= 0 || prArrOff + prCount * 72 > dataBuf.length) continue;
+
+      if (!t.embeddedRawDataAssets) t.embeddedRawDataAssets = [];
+      if (!t.embeddedRawDataPatches) t.embeddedRawDataPatches = [];
+      const existingPatchOffsets = new Set(t.embeddedRawDataPatches.map((p) => p.patchOffset));
+
+      for (let p = 0; p < prCount; p++) {
+        const prOff = prArrOff + p * 72;
+        const permCount = dataBuf.readInt32LE(prOff + 0x38);
+        const permArrOff = dataBuf.readUInt32LE(prOff + 0x3c);
+        if (permCount <= 0 || permCount > 256) continue;
+        if (permArrOff <= 0 || permArrOff + permCount * 124 > dataBuf.length) continue;
+        for (let m = 0; m < permCount; m++) {
+          const permOff = permArrOff + m * 124;
+          const patchOff = permOff + 0x48;
+          if (existingPatchOffsets.has(patchOff)) continue;
+          const extFlag = dataBuf.readUInt32LE(permOff + 0x44);
+          if ((extFlag & 1) === 0) continue;
+          const sampleSize = dataBuf.readUInt32LE(permOff + 0x40);
+          const sampleOff = dataBuf.readUInt32LE(patchOff);
+          if (sampleSize <= 0 || sampleOff + sampleSize > resourceFiles.sounds.size) continue;
+          const rawData = Buffer.from(resourceFiles.sounds.read(sampleOff, sampleSize));
+          const assetIndex = t.embeddedRawDataAssets.length;
+          t.embeddedRawDataAssets.push({ kind: 'sound', data: rawData.toString('base64') });
+          t.embeddedRawDataPatches.push({ assetIndex, patchOffset: patchOff, patchWidth: 4 });
+          dataBuf.writeUInt32LE((extFlag & ~1) >>> 0, permOff + 0x44);
+          existingPatchOffsets.add(patchOff);
+          mutated = true;
+        }
+      }
+    }
+
+    if (mutated) {
+      t.data = dataBuf.toString('base64');
+    }
+  }
+}
 
 export type InjectionMode = 'add' | 'swap';
 
