@@ -30,7 +30,7 @@ async function main() {
       afterPack: async (context) => {
         const exePath = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.exe`);
         if (rcedit && fs.existsSync(exePath) && fs.existsSync(iconIco)) {
-          console.log(`Embedding icon into ${exePath} via rcedit...`);
+          console.log(`Embedding icon into unpacked Electron binary ${exePath} via rcedit...`);
           execFileSync(rcedit, [
             exePath,
             '--set-icon', iconIco,
@@ -42,13 +42,10 @@ async function main() {
     },
   });
 
-  // Also apply rcedit icon to portable wrapper .exe if present
+  // Never run rcedit on the finished portable .exe artifact because it is an NSIS
+  // self-extracting archive (makensis already sets its icon from win.icon and computes
+  // an integrity CRC over the file; modifying the PE header afterwards breaks NSIS CRC).
   for (const artifact of results) {
-    if (rcedit && artifact.endsWith('.exe') && fs.existsSync(artifact) && fs.existsSync(iconIco)) {
-      try {
-        execFileSync(rcedit, [artifact, '--set-icon', iconIco]);
-      } catch {}
-    }
     console.log('Artifact:', artifact);
   }
   console.log('Build completed successfully!');
