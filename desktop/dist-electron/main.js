@@ -33974,6 +33974,7 @@ var BitmapFormat = {
 };
 
 // ../core/src/render/bitmap-codec.ts
+var zlib = __toESM(require("zlib"));
 var BITMAP_FORMAT_NAMES = {
   [BitmapFormat.A8]: "A8 (8-bit Alpha)",
   [BitmapFormat.Y8]: "Y8 (8-bit Greyscale)",
@@ -33998,79 +33999,536 @@ for (let n = 0; n < 256; n++) {
   }
   CRC_TABLE2[n] = c >>> 0;
 }
+function pngCrc32(buf, offset = 0, length = buf.length) {
+  let crc = 4294967295;
+  for (let i = offset; i < offset + length; i++) {
+    crc = CRC_TABLE2[(crc ^ buf[i]) & 255] ^ crc >>> 8;
+  }
+  return (crc ^ 4294967295) >>> 0;
+}
+function makePngChunk(type, data) {
+  const typeBuf = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBuf.copy(chunk, 4);
+  data.copy(chunk, 8);
+  const crc = pngCrc32(chunk, 4, 4 + data.length);
+  chunk.writeUInt32BE(crc, 8 + data.length);
+  return chunk;
+}
+function encodeRgbaToPng(rgba, width, height) {
+  const scanlineLength = 1 + width * 4;
+  const rawScanlines = Buffer.alloc(height * scanlineLength);
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * scanlineLength;
+    rawScanlines[rowOffset] = 0;
+    const srcRow = y * width * 4;
+    for (let x = 0; x < width * 4; x++) {
+      rawScanlines[rowOffset + 1 + x] = rgba[srcRow + x];
+    }
+  }
+  const deflated = zlib.deflateSync(rawScanlines, { level: 6 });
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+  const ihdrChunk = makePngChunk("IHDR", ihdr);
+  const idatChunk = makePngChunk("IDAT", deflated);
+  const iendChunk = makePngChunk("IEND", Buffer.alloc(0));
+  return Buffer.concat([PNG_SIGNATURE, ihdrChunk, idatChunk, iendChunk]);
+}
 
 // ../core/src/render/collision-generator.ts
-function parseAndAnalyzeObj(objText) {
+function normalizeVec3(x, y, z) {
+  const len = Math.hypot(x, y, z);
+  if (len < 1e-8) return [0, 0, 1];
+  return [x / len, y / len, z / len];
+}
+function computeOrthonormalBasis(nx, ny, nz) {
+  const ref = Math.abs(nz) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const tx = ref[1] * nz - ref[2] * ny;
+  const ty = ref[2] * nx - ref[0] * nz;
+  const tz = ref[0] * ny - ref[1] * nx;
+  const tangent = normalizeVec3(tx, ty, tz);
+  const bx = ny * tangent[2] - nz * tangent[1];
+  const by = nz * tangent[0] - nx * tangent[2];
+  const bz = nx * tangent[1] - ny * tangent[0];
+  const binormal = normalizeVec3(bx, by, bz);
+  return { binormal, tangent };
+}
+function projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds) {
+  const [nx, ny, nz] = faceNormal;
+  const ax = Math.abs(nx);
+  const ay = Math.abs(ny);
+  const az = Math.abs(nz);
+  const dx = Math.max(1e-3, maxBounds[0] - minBounds[0]);
+  const dy = Math.max(1e-3, maxBounds[1] - minBounds[1]);
+  const dz = Math.max(1e-3, maxBounds[2] - minBounds[2]);
+  const normX = (pos[0] - minBounds[0]) / dx;
+  const normY = (pos[1] - minBounds[1]) / dy;
+  const normZ = (pos[2] - minBounds[2]) / dz;
+  let cellIndex = 0;
+  let localU = 0.5;
+  let localV = 0.5;
+  if (ax >= ay && ax >= az) {
+    if (nx >= 0) {
+      cellIndex = 0;
+      localU = normY;
+      localV = 1 - normZ;
+    } else {
+      cellIndex = 1;
+      localU = 1 - normY;
+      localV = 1 - normZ;
+    }
+  } else if (ay >= ax && ay >= az) {
+    if (ny >= 0) {
+      cellIndex = 2;
+      localU = 1 - normX;
+      localV = 1 - normZ;
+    } else {
+      cellIndex = 3;
+      localU = normX;
+      localV = 1 - normZ;
+    }
+  } else {
+    if (nz >= 0) {
+      cellIndex = 4;
+      localU = normX;
+      localV = 1 - normY;
+    } else {
+      cellIndex = 5;
+      localU = normX;
+      localV = normY;
+    }
+  }
+  const col = cellIndex % 3;
+  const row = Math.floor(cellIndex / 3);
+  const pad = 0.04;
+  const uInCell = pad + Math.max(0, Math.min(1, localU)) * (1 - 2 * pad);
+  const vInCell = pad + Math.max(0, Math.min(1, localV)) * (1 - 2 * pad);
+  return [(col + uInCell) / 3, (row + vInCell) / 2];
+}
+function parseObjMesh(objText, options = {}) {
+  const scale = options.scale && Number.isFinite(options.scale) && options.scale > 0 ? options.scale : 1;
+  const flipYz = Boolean(options.flipYz);
+  const centerOrigin = Boolean(options.centerOrigin);
   const lines = objText.split(/\r?\n/);
-  const vertices = [];
-  const triangles = [];
-  let minX = Infinity, minY = Infinity, minZ = Infinity;
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  const rawPositions = [];
+  const rawUvs = [];
+  const rawNormals = [];
+  const rawTriangles = [];
+  const materialSlots = [];
+  const materialSlotMap = /* @__PURE__ */ new Map();
+  let currentGroupId = 0;
+  let currentMaterialSlotIndex = 0;
+  const getOrCreateMaterialSlot = (name) => {
+    const clean = name.trim() || "default";
+    const existing = materialSlotMap.get(clean);
+    if (existing !== void 0) return existing;
+    const idx = materialSlots.length;
+    materialSlots.push(clean);
+    materialSlotMap.set(clean, idx);
+    return idx;
+  };
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const parts = trimmed.split(/\s+/);
     const prefix = parts[0].toLowerCase();
-    if (prefix === "v") {
-      const x = parseFloat(parts[1]) || 0;
-      const y = parseFloat(parts[2]) || 0;
-      const z = parseFloat(parts[3]) || 0;
-      vertices.push([x, y, z]);
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (z < minZ) minZ = z;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-      if (z > maxZ) maxZ = z;
+    if (prefix === "g" || prefix === "o") {
+      if (rawTriangles.length > 0) currentGroupId++;
+    } else if (prefix === "usemtl") {
+      const matName = trimmed.slice(6).trim() || "default";
+      currentMaterialSlotIndex = getOrCreateMaterialSlot(matName);
+    } else if (prefix === "v") {
+      const rx = (parseFloat(parts[1]) || 0) * scale;
+      const ry = (parseFloat(parts[2]) || 0) * scale;
+      const rz = (parseFloat(parts[3]) || 0) * scale;
+      const pos = flipYz ? [rx, -rz, ry] : [rx, ry, rz];
+      rawPositions.push(pos);
+    } else if (prefix === "vt") {
+      const u = parseFloat(parts[1]) || 0;
+      const v = parseFloat(parts[2]) || 0;
+      rawUvs.push([u, 1 - v]);
+    } else if (prefix === "vn") {
+      const nx = parseFloat(parts[1]) || 0;
+      const ny = parseFloat(parts[2]) || 0;
+      const nz = parseFloat(parts[3]) || 0;
+      const norm = flipYz ? normalizeVec3(nx, -nz, ny) : normalizeVec3(nx, ny, nz);
+      rawNormals.push(norm);
     } else if (prefix === "f") {
-      const vIndices = [];
+      if (materialSlots.length === 0) {
+        currentMaterialSlotIndex = getOrCreateMaterialSlot("default");
+      }
+      const corners = [];
       for (let i = 1; i < parts.length; i++) {
-        const seg = parts[i].split("/")[0];
-        const idx = parseInt(seg, 10);
-        if (!isNaN(idx)) {
-          const resolved = idx > 0 ? idx - 1 : vertices.length + idx;
-          vIndices.push(resolved);
+        const segs = parts[i].split("/");
+        const vRaw = parseInt(segs[0], 10);
+        if (isNaN(vRaw)) continue;
+        const vIdx = vRaw > 0 ? vRaw - 1 : rawPositions.length + vRaw;
+        let vtIdx = -1;
+        if (segs.length > 1 && segs[1] !== "") {
+          const vtRaw = parseInt(segs[1], 10);
+          if (!isNaN(vtRaw)) vtIdx = vtRaw > 0 ? vtRaw - 1 : rawUvs.length + vtRaw;
+        }
+        let vnIdx = -1;
+        if (segs.length > 2 && segs[2] !== "") {
+          const vnRaw = parseInt(segs[2], 10);
+          if (!isNaN(vnRaw)) vnIdx = vnRaw > 0 ? vnRaw - 1 : rawNormals.length + vnRaw;
+        }
+        if (vIdx >= 0 && vIdx < rawPositions.length) {
+          corners.push({ vIdx, vtIdx, vnIdx });
         }
       }
-      for (let i = 1; i < vIndices.length - 1; i++) {
-        triangles.push([vIndices[0], vIndices[i], vIndices[i + 1]]);
+      for (let i = 1; i < corners.length - 1; i++) {
+        rawTriangles.push({
+          corners: [corners[0], corners[i], corners[i + 1]],
+          groupId: currentGroupId,
+          materialSlotIndex: currentMaterialSlotIndex
+        });
       }
     }
   }
-  const vertexCount = vertices.length;
-  const triangleCount = triangles.length;
-  if (vertexCount === 0 || triangleCount === 0) {
-    return {
+  if (rawPositions.length === 0 || rawTriangles.length === 0) {
+    const emptySummary = {
       vertexCount: 0,
       triangleCount: 0,
-      bounds: { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0] },
+      uvCoordCount: 0,
+      normalCount: 0,
+      hasUvCoordinates: false,
+      hasNormals: false,
+      materialSlots: ["default"],
+      bounds: { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0], radius: 0 },
       isTooComplex: true,
       message: "No valid 3D mesh vertices or faces were found in this OBJ file."
     };
-  }
-  const bounds = {
-    min: [minX, minY, minZ],
-    max: [maxX, maxY, maxZ],
-    size: [maxX - minX, maxY - minY, maxZ - minZ]
-  };
-  const MAX_SIMPLE_TRIANGLES = 64;
-  if (triangleCount > MAX_SIMPLE_TRIANGLES) {
     return {
-      vertexCount,
-      triangleCount,
-      bounds,
-      isTooComplex: true,
-      message: `Model geometry is too complex for in-app automatic collision generation (${triangleCount} triangles detected; maximum simple threshold is ${MAX_SIMPLE_TRIANGLES}). Halo CE collision models require a binary space partition (BSP) half-space tree with convex hulls. Please use Blender with the Halo CE HEK toolchain (tool collision-geometry) for detailed collision meshes.`
+      summary: emptySummary,
+      vertices: [],
+      triangles: [],
+      rawPositions: [],
+      rawFaces: [],
+      triangleMaterialSlots: [],
+      usedAutoUv: false,
+      groupBounds: []
     };
   }
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const [x, y, z] of rawPositions) {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  }
+  if (centerOrigin) {
+    const cx = (minX + maxX) * 0.5;
+    const cy = (minY + maxY) * 0.5;
+    const cz = minZ;
+    for (const p of rawPositions) {
+      p[0] -= cx;
+      p[1] -= cy;
+      p[2] -= cz;
+    }
+    minX -= cx;
+    maxX -= cx;
+    minY -= cy;
+    maxY -= cy;
+    maxZ -= cz;
+    minZ = 0;
+  }
+  const minBounds = [minX, minY, minZ];
+  const maxBounds = [maxX, maxY, maxZ];
+  const sizeBounds = [maxX - minX, maxY - minY, maxZ - minZ];
+  const radius = Math.max(0.1, Math.hypot(sizeBounds[0], sizeBounds[1], sizeBounds[2]) * 0.5);
+  const hasUvCoordinates = rawUvs.length > 0 && rawTriangles.some((t) => t.corners.some((c) => c.vtIdx >= 0 && c.vtIdx < rawUvs.length));
+  const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv);
+  const vertices = [];
+  const triangles = [];
+  const rawFaces = [];
+  const triangleMaterialSlots = [];
+  const vertexLookup = /* @__PURE__ */ new Map();
+  const groupMinMax = /* @__PURE__ */ new Map();
+  for (const tri of rawTriangles) {
+    const v0 = tri.corners[0].vIdx;
+    const v1 = tri.corners[1].vIdx;
+    const v2 = tri.corners[2].vIdx;
+    const p0 = rawPositions[v0];
+    const p1 = rawPositions[v1];
+    const p2 = rawPositions[v2];
+    rawFaces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: tri.materialSlotIndex,
+      groupId: tri.groupId
+    });
+    triangleMaterialSlots.push(tri.materialSlotIndex);
+    let gb = groupMinMax.get(tri.groupId);
+    if (!gb) {
+      gb = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+      groupMinMax.set(tri.groupId, gb);
+    }
+    for (const p of [p0, p1, p2]) {
+      if (p[0] < gb.min[0]) gb.min[0] = p[0];
+      if (p[1] < gb.min[1]) gb.min[1] = p[1];
+      if (p[2] < gb.min[2]) gb.min[2] = p[2];
+      if (p[0] > gb.max[0]) gb.max[0] = p[0];
+      if (p[1] > gb.max[1]) gb.max[1] = p[1];
+      if (p[2] > gb.max[2]) gb.max[2] = p[2];
+    }
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const faceNormal = normalizeVec3(
+      uy * vz - uz * vy,
+      uz * vx - ux * vz,
+      ux * vy - uy * vx
+    );
+    const triOut = [0, 0, 0];
+    for (let k = 0; k < 3; k++) {
+      const corner = tri.corners[k];
+      const pos = rawPositions[corner.vIdx];
+      const norm = corner.vnIdx >= 0 && corner.vnIdx < rawNormals.length ? rawNormals[corner.vnIdx] : faceNormal;
+      const uv = !usedAutoUv && corner.vtIdx >= 0 && corner.vtIdx < rawUvs.length ? rawUvs[corner.vtIdx] : projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds);
+      const key = `${corner.vIdx}:${norm[0].toFixed(4)},${norm[1].toFixed(4)},${norm[2].toFixed(4)}:${uv[0].toFixed(4)},${uv[1].toFixed(4)}`;
+      let compiledIdx = vertexLookup.get(key);
+      if (compiledIdx === void 0 && vertices.length < 65534) {
+        const { binormal, tangent } = computeOrthonormalBasis(norm[0], norm[1], norm[2]);
+        compiledIdx = vertices.length;
+        vertices.push({
+          position: [pos[0], pos[1], pos[2]],
+          normal: norm,
+          binormal,
+          tangent,
+          uv,
+          node0Index: 0,
+          node1Index: 0,
+          node0Weight: 1,
+          node1Weight: 0
+        });
+        vertexLookup.set(key, compiledIdx);
+      }
+      triOut[k] = compiledIdx ?? 0;
+    }
+    triangles.push(triOut);
+  }
+  const groupBounds = Array.from(groupMinMax.values()).filter(
+    (g) => Number.isFinite(g.min[0]) && Number.isFinite(g.max[0])
+  );
+  const MAX_SIMPLE_TRIANGLES = 64;
+  const isTooComplex = rawTriangles.length > MAX_SIMPLE_TRIANGLES;
+  const uvStatus = hasUvCoordinates ? `${rawUvs.length} UV coords` : "Auto-unwrapped (6-face Box UV Atlas)";
+  const finalMaterialSlots = materialSlots.length > 0 ? materialSlots : ["default"];
+  const summary = {
+    vertexCount: rawPositions.length,
+    triangleCount: rawTriangles.length,
+    uvCoordCount: rawUvs.length,
+    normalCount: rawNormals.length,
+    hasUvCoordinates,
+    hasNormals: rawNormals.length > 0,
+    materialSlots: finalMaterialSlots,
+    bounds: {
+      min: minBounds,
+      max: maxBounds,
+      size: sizeBounds,
+      radius
+    },
+    isTooComplex,
+    message: `Mesh ready: ${rawPositions.length} vertices, ${rawTriangles.length} triangles (${uvStatus}). Dimensions: ${sizeBounds[0].toFixed(2)} x ${sizeBounds[1].toFixed(2)} x ${sizeBounds[2].toFixed(2)} world units.`
+  };
   return {
-    vertexCount,
-    triangleCount,
-    bounds,
-    isTooComplex: false,
-    message: `Simple collision proxy model suitable for in-app generation (${triangleCount} triangles, ${vertexCount} vertices).`
+    summary,
+    vertices,
+    triangles,
+    rawPositions,
+    rawFaces,
+    triangleMaterialSlots,
+    usedAutoUv,
+    groupBounds
   };
 }
+function parseAndAnalyzeObj(objText, options) {
+  return parseObjMesh(objText, options).summary;
+}
+function drawLineRgba(rgba, size, x0, y0, x1, y1, r, g, b, a = 255) {
+  let ix0 = Math.max(0, Math.min(size - 1, Math.round(x0)));
+  let iy0 = Math.max(0, Math.min(size - 1, Math.round(y0)));
+  const ix1 = Math.max(0, Math.min(size - 1, Math.round(x1)));
+  const iy1 = Math.max(0, Math.min(size - 1, Math.round(y1)));
+  const dx = Math.abs(ix1 - ix0);
+  const sx = ix0 < ix1 ? 1 : -1;
+  const dy = -Math.abs(iy1 - iy0);
+  const sy = iy0 < iy1 ? 1 : -1;
+  let err = dx + dy;
+  while (true) {
+    const idx = (iy0 * size + ix0) * 4;
+    rgba[idx + 0] = r;
+    rgba[idx + 1] = g;
+    rgba[idx + 2] = b;
+    rgba[idx + 3] = a;
+    if (ix0 === ix1 && iy0 === iy1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      ix0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      iy0 += sy;
+    }
+  }
+}
+function fillTriangleRgba(rgba, size, x0, y0, x1, y1, x2, y2, r, g, b, alpha) {
+  const minX = Math.max(0, Math.floor(Math.min(x0, x1, x2)));
+  const maxX = Math.min(size - 1, Math.ceil(Math.max(x0, x1, x2)));
+  const minY = Math.max(0, Math.floor(Math.min(y0, y1, y2)));
+  const maxY = Math.min(size - 1, Math.ceil(Math.max(y0, y1, y2)));
+  const denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+  if (Math.abs(denom) < 1e-5) return;
+  for (let py = minY; py <= maxY; py++) {
+    for (let px = minX; px <= maxX; px++) {
+      const w0 = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / denom;
+      const w1 = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / denom;
+      const w2 = 1 - w0 - w1;
+      if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+        const idx = (py * size + px) * 4;
+        rgba[idx + 0] = Math.round(rgba[idx + 0] * (1 - alpha) + r * alpha);
+        rgba[idx + 1] = Math.round(rgba[idx + 1] * (1 - alpha) + g * alpha);
+        rgba[idx + 2] = Math.round(rgba[idx + 2] * (1 - alpha) + b * alpha);
+        rgba[idx + 3] = 255;
+      }
+    }
+  }
+}
+function renderObjUvTemplateRgba(objText, size = 1024, options = {}) {
+  const parsed = parseObjMesh(objText, options);
+  const rgba = new Uint8Array(size * size * 4);
+  const cellSize = Math.max(8, Math.floor(size / 32));
+  const faceTintColors = [
+    [60, 32, 32],
+    // +X (reddish)
+    [32, 56, 56],
+    // -X (cyanish)
+    [32, 60, 36],
+    // +Y (greenish)
+    [56, 32, 56],
+    // -Y (magenta)
+    [32, 42, 64],
+    // +Z (blueish top)
+    [58, 52, 30]
+    // -Z (amber bottom)
+  ];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const checker = (Math.floor(x / cellSize) + Math.floor(y / cellSize) & 1) === 0;
+      let r = checker ? 28 : 36;
+      let g = checker ? 29 : 38;
+      let b = checker ? 34 : 44;
+      if (parsed.usedAutoUv) {
+        const col = Math.min(2, Math.floor(x / size * 3));
+        const row = Math.min(1, Math.floor(y / size * 2));
+        const tint = faceTintColors[row * 3 + col];
+        r = Math.round(r * 0.65 + tint[0] * 0.35);
+        g = Math.round(g * 0.65 + tint[1] * 0.35);
+        b = Math.round(b * 0.65 + tint[2] * 0.35);
+      }
+      const idx = (y * size + x) * 4;
+      rgba[idx + 0] = r;
+      rgba[idx + 1] = g;
+      rgba[idx + 2] = b;
+      rgba[idx + 3] = 255;
+    }
+  }
+  if (parsed.usedAutoUv) {
+    for (let c = 1; c <= 2; c++) {
+      const x = Math.round(c / 3 * size);
+      drawLineRgba(rgba, size, x, 0, x, size - 1, 90, 100, 120, 255);
+    }
+    const midY = Math.round(size / 2);
+    drawLineRgba(rgba, size, 0, midY, size - 1, midY, 90, 100, 120, 255);
+  }
+  for (const [i0, i1, i2] of parsed.triangles) {
+    const v0 = parsed.vertices[i0];
+    const v1 = parsed.vertices[i1];
+    const v2 = parsed.vertices[i2];
+    if (!v0 || !v1 || !v2) continue;
+    const u0 = (v0.uv[0] % 1 + 1) % 1;
+    const w0 = (v0.uv[1] % 1 + 1) % 1;
+    const u1 = (v1.uv[0] % 1 + 1) % 1;
+    const w1 = (v1.uv[1] % 1 + 1) % 1;
+    const u2 = (v2.uv[0] % 1 + 1) % 1;
+    const w2 = (v2.uv[1] % 1 + 1) % 1;
+    fillTriangleRgba(
+      rgba,
+      size,
+      u0 * (size - 1),
+      w0 * (size - 1),
+      u1 * (size - 1),
+      w1 * (size - 1),
+      u2 * (size - 1),
+      w2 * (size - 1),
+      56,
+      189,
+      248,
+      0.16
+    );
+  }
+  for (const [i0, i1, i2] of parsed.triangles) {
+    const v0 = parsed.vertices[i0];
+    const v1 = parsed.vertices[i1];
+    const v2 = parsed.vertices[i2];
+    if (!v0 || !v1 || !v2) continue;
+    const x0 = (v0.uv[0] % 1 + 1) % 1 * (size - 1);
+    const y0 = (v0.uv[1] % 1 + 1) % 1 * (size - 1);
+    const x1 = (v1.uv[0] % 1 + 1) % 1 * (size - 1);
+    const y1 = (v1.uv[1] % 1 + 1) % 1 * (size - 1);
+    const x2 = (v2.uv[0] % 1 + 1) % 1 * (size - 1);
+    const y2 = (v2.uv[1] % 1 + 1) % 1 * (size - 1);
+    drawLineRgba(rgba, size, x0, y0, x1, y1, 56, 189, 248, 255);
+    drawLineRgba(rgba, size, x1, y1, x2, y2, 56, 189, 248, 255);
+    drawLineRgba(rgba, size, x2, y2, x0, y0, 56, 189, 248, 255);
+  }
+  return { rgba, width: size, height: size, usedAutoUv: parsed.usedAutoUv };
+}
+function renderObjUvTemplatePng(objText, size = 1024, options = {}) {
+  const { rgba, width, height, usedAutoUv } = renderObjUvTemplateRgba(objText, size, options);
+  return {
+    pngBuffer: encodeRgbaToPng(rgba, width, height),
+    usedAutoUv
+  };
+}
+var OBJECT_GROUP_SPEC = {
+  scenery: {
+    structName: "Scenery",
+    objectTypeEnum: 6,
+    secondaryFourCC: fourCCFromString("obje"),
+    tertiaryFourCC: null
+  },
+  weapon: {
+    structName: "Weapon",
+    objectTypeEnum: 2,
+    secondaryFourCC: fourCCFromString("item"),
+    tertiaryFourCC: fourCCFromString("obje")
+  },
+  vehicle: {
+    structName: "Vehicle",
+    objectTypeEnum: 1,
+    secondaryFourCC: fourCCFromString("unit"),
+    tertiaryFourCC: fourCCFromString("obje")
+  },
+  equipment: {
+    structName: "Equipment",
+    objectTypeEnum: 3,
+    secondaryFourCC: fourCCFromString("item"),
+    tertiaryFourCC: fourCCFromString("obje")
+  }
+};
 
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
@@ -35299,31 +35757,12 @@ async function loadMapAtPath(filePath, options) {
       buildMenu();
       updateTitle();
       sendLog("info", `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
-      const edition = result.header.mapEdition ?? (result.header.engine === 7 ? "pc" : "ce");
-      const settings = getSettings();
-      let versionMaps = settings.versionResourceMaps?.[edition];
-      if ((!versionMaps?.bitmaps || !versionMaps?.sounds) && (edition === "pc" || edition === "halomd")) {
-        const altEdition = edition === "pc" ? "halomd" : "pc";
-        const altMaps = settings.versionResourceMaps?.[altEdition];
-        versionMaps = {
-          bitmaps: versionMaps?.bitmaps ?? altMaps?.bitmaps ?? null,
-          sounds: versionMaps?.sounds ?? altMaps?.sounds ?? null
-        };
+      const resolvedRes = resolveResourceMapsForSource(filePath);
+      if (resolvedRes.bitmapsPath) {
+        setResourceMapPath("bitmaps", resolvedRes.bitmapsPath);
       }
-      if (edition === "mcc" && !versionMaps?.sounds) {
-        const ceSounds = settings.versionResourceMaps?.ce?.sounds;
-        if (ceSounds) {
-          versionMaps = {
-            bitmaps: versionMaps?.bitmaps ?? null,
-            sounds: ceSounds
-          };
-        }
-      }
-      if (versionMaps?.bitmaps) {
-        setResourceMapPath("bitmaps", versionMaps.bitmaps);
-      }
-      if (versionMaps?.sounds) {
-        setResourceMapPath("sounds", versionMaps.sounds);
+      if (resolvedRes.soundsPath) {
+        setResourceMapPath("sounds", resolvedRes.soundsPath);
       }
       if (options.askBackup) await askBackup(filePath);
     } else if (result.status === "compressed") {
@@ -35483,9 +35922,12 @@ async function extractTagsFlow(request) {
   }
   setLastExtractDir(path10.dirname(resolvedTarget));
   sendLog("info", `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
-  const resourceMapPaths = {};
-  if (settings.resourceMaps?.bitmaps) resourceMapPaths.bitmaps = settings.resourceMaps.bitmaps;
-  if (settings.resourceMaps?.sounds) resourceMapPaths.sounds = settings.resourceMaps.sounds;
+  const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
+  const resourceMapPaths = {
+    ...resolvedSourceRes.resourceMapPaths
+  };
+  if (!resourceMapPaths.bitmaps && settings.resourceMaps?.bitmaps) resourceMapPaths.bitmaps = settings.resourceMaps.bitmaps;
+  if (!resourceMapPaths.sounds && settings.resourceMaps?.sounds) resourceMapPaths.sounds = settings.resourceMaps.sounds;
   if (settings.resourceMaps?.loc) resourceMapPaths.loc = settings.resourceMaps.loc;
   const { requestId, promise } = sendWorkerRequest(
     {
@@ -35592,10 +36034,13 @@ async function startBatchExtractFlow(options) {
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const resourceMapPaths = {};
+  const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
+  const resourceMapPaths = {
+    ...resolvedSourceRes.resourceMapPaths
+  };
   for (const kind of ["bitmaps", "sounds", "loc"]) {
     const p = settings.resourceMaps[kind];
-    if (p) resourceMapPaths[kind] = p;
+    if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
   const sourceMapName = currentMapScenarioName ?? path10.basename(currentMapPath, ".map");
   sendLog("info", `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode})...`);
@@ -35960,14 +36405,27 @@ async function planInjectFlow(containerPath, mode) {
   if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
   currentInjectContainerPath = containerPath;
   const settings = getSettings();
-  const resourceMapPaths = {};
+  const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
+  const resourceMapPaths = {
+    ...resolvedSourceRes.resourceMapPaths
+  };
   for (const kind of ["bitmaps", "sounds", "loc"]) {
     const p = settings.resourceMaps[kind];
-    if (p) resourceMapPaths[kind] = p;
+    if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
+  const defaults = detectDefaultResourceMapPathsFlow();
+  const pcBitmaps = settings.versionResourceMaps?.pc?.bitmaps ?? settings.versionResourceMaps?.halomd?.bitmaps ?? defaults.pc ?? defaults.halomd ?? void 0;
+  let pcSounds = settings.versionResourceMaps?.pc?.sounds ?? settings.versionResourceMaps?.halomd?.sounds ?? void 0;
+  if (!pcSounds && pcBitmaps) {
+    const sib = path10.join(path10.dirname(pcBitmaps), "sounds.map");
+    if (fs8.existsSync(sib)) pcSounds = sib;
+  }
+  const fallbackPcResourcePaths = {};
+  if (pcBitmaps && fs8.existsSync(pcBitmaps)) fallbackPcResourcePaths.bitmaps = pcBitmaps;
+  if (pcSounds && fs8.existsSync(pcSounds)) fallbackPcResourcePaths.sounds = pcSounds;
   sendLog("info", `Planning ${mode === "swap" ? "swap" : "add"} injection from ${containerPath}`);
   const { promise } = sendWorkerRequest(
-    { type: "planInject", containerPath, mode, resourceMapPaths },
+    { type: "planInject", containerPath, mode, resourceMapPaths, fallbackPcResourcePaths },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "planInject", stage, percent })
   );
@@ -36328,7 +36786,7 @@ async function pickObjFileFlow() {
   });
   return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
-async function analyzeCollisionObjFlow(filePath) {
+async function analyzeCollisionObjFlow(filePath, options) {
   try {
     let p = filePath;
     if (!p) {
@@ -36337,10 +36795,93 @@ async function analyzeCollisionObjFlow(filePath) {
       p = picked.path;
     }
     const text = fs8.readFileSync(p, "utf8");
-    const summary = parseAndAnalyzeObj(text);
+    const summary = parseAndAnalyzeObj(text, options);
     return { ok: true, summary, filePath: p };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+async function exportUvTemplateFlow(options) {
+  try {
+    if (!options.objFilePath || !fs8.existsSync(options.objFilePath)) {
+      return { ok: false, error: "Select a valid .obj model file first." };
+    }
+    const objText = fs8.readFileSync(options.objFilePath, "utf8");
+    const size = options.size ?? (options.previewOnly ? 512 : 1024);
+    const { pngBuffer, usedAutoUv } = renderObjUvTemplatePng(objText, size, {
+      scale: options.scale,
+      flipYz: options.flipYz,
+      centerOrigin: options.centerOrigin,
+      forceAutoUv: options.forceAutoUv
+    });
+    const previewDataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+    if (options.previewOnly) {
+      return { ok: true, usedAutoUv, previewDataUrl };
+    }
+    if (!mainWindow) return { ok: false, error: "Application window is not available." };
+    const baseName = path10.basename(options.objFilePath, path10.extname(options.objFilePath));
+    const defaultPath = path10.join(path10.dirname(options.objFilePath), `${baseName}_uv_template.png`);
+    const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+      title: "Save UV Template Image (.png)",
+      defaultPath,
+      filters: [{ name: "PNG Image (*.png)", extensions: ["png"] }]
+    });
+    if (canceled || !filePath) {
+      return { ok: false, error: "Cancelled" };
+    }
+    fs8.writeFileSync(filePath, pngBuffer);
+    sendLog("info", `Saved UV wireframe template to ${filePath}`);
+    return { ok: true, outputPath: filePath, usedAutoUv, previewDataUrl };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+async function pickSaveOceTagsPathFlow(defaultName) {
+  if (!mainWindow) return { path: null };
+  const settings = getSettings();
+  const baseDir = settings.lastExtractDir ?? (currentMapPath ? path10.dirname(currentMapPath) : import_electron3.app.getPath("documents"));
+  const cleanFile = defaultName.endsWith(OCETAGS_EXTENSION) ? defaultName : `${defaultName}${OCETAGS_EXTENSION}`;
+  const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    title: "Save Custom Object Tag Set (.ocetags)",
+    defaultPath: path10.join(baseDir, cleanFile),
+    filters: [{ name: "OpenCE Tag Set (*.ocetags)", extensions: ["ocetags"] }]
+  });
+  if (canceled || !filePath) return { path: null };
+  setLastExtractDir(path10.dirname(filePath));
+  return { path: filePath };
+}
+async function buildCustomObjectTagFlow(request) {
+  const settings = getSettings();
+  const resourceMapPaths = {};
+  if (currentMapPath) {
+    const resolved = resolveResourceMapsForSource(currentMapPath);
+    Object.assign(resourceMapPaths, resolved.resourceMapPaths);
+  }
+  for (const kind of ["bitmaps", "sounds", "loc"]) {
+    const p = settings.resourceMaps[kind];
+    if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
+  }
+  sendLog("info", `Building custom ${request.tagGroup} tag "${request.tagPath}" from ${path10.basename(request.objFilePath)}...`);
+  const { promise } = sendWorkerRequest(
+    { type: "buildCustomObjectTag", request, resourceMapPaths },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "buildCustomObjectTag", stage, percent })
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      if (result.injectedIntoMap && result.map) {
+        setOpenMapState(result.map);
+        sendLog("info", `Built and injected custom ${result.rootTagGroup} tag "${result.rootTagPath}" (${result.generatedTagPaths.length} tags) into the open map. Use File > Save to write changes.`);
+      } else if (result.outputOceTagsPath) {
+        sendLog("info", `Built and saved custom ${result.rootTagGroup} tag "${result.rootTagPath}" to ${result.outputOceTagsPath}.`);
+      }
+    }
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Failed to build custom object tag: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   }
 }
 async function exportModel3dFlow(modelTagId, lod, format, outputPath) {
@@ -36947,6 +37488,7 @@ function buildMenu() {
         { label: "Recompress Map", click: () => recompressFlow() },
         { type: "separator" },
         { label: "Extract to OpenCE Forge...", click: () => mainWindow?.webContents.send("menu:action", "extract-to-forge") },
+        { label: "Build New Object Tag...", click: () => mainWindow?.webContents.send("menu:action", "build-object-tag") },
         { label: "Extract Tags...", accelerator: "CmdOrCtrl+E", click: () => mainWindow?.webContents.send("menu:action", "extract-tags") },
         { label: "Extract Whole Map...", click: () => mainWindow?.webContents.send("menu:action", "extract-whole-map") },
         { label: "Inject Tags...", click: () => mainWindow?.webContents.send("menu:action", "inject-tags") },
@@ -37110,7 +37652,13 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("dialog:pickExport3dPath", (_e, defaultName, format) => pickExport3dPathFlow(defaultName, format));
   import_electron3.ipcMain.handle("dialog:pickExportDirectory", () => pickExportDirectoryFlow());
   import_electron3.ipcMain.handle("dialog:pickObjFile", () => pickObjFileFlow());
-  import_electron3.ipcMain.handle("collision:analyzeObj", (_e, filePath) => analyzeCollisionObjFlow(filePath));
+  import_electron3.ipcMain.handle(
+    "collision:analyzeObj",
+    (_e, filePath, options) => analyzeCollisionObjFlow(filePath, options)
+  );
+  import_electron3.ipcMain.handle("objectBuilder:exportUvTemplate", (_e, options) => exportUvTemplateFlow(options));
+  import_electron3.ipcMain.handle("objectBuilder:pickSaveOceTagsPath", (_e, defaultName) => pickSaveOceTagsPathFlow(defaultName));
+  import_electron3.ipcMain.handle("objectBuilder:build", (_e, request) => buildCustomObjectTagFlow(request));
   import_electron3.ipcMain.handle(
     "3d:exportModel",
     (_e, modelTagId, lod, format, outputPath) => exportModel3dFlow(modelTagId, lod, format, outputPath)

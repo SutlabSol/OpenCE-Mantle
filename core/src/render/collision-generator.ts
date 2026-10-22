@@ -49,6 +49,8 @@ export interface ObjMeshSummary {
   normalCount: number;
   hasUvCoordinates: boolean;
   hasNormals: boolean;
+  /** Blender / Wavefront `usemtl` material slot names found in the OBJ (defaults to `['default']`). */
+  materialSlots: string[];
   bounds: {
     min: [number, number, number];
     max: [number, number, number];
@@ -71,10 +73,24 @@ export interface CompiledModelVertex {
   node1Weight: number;
 }
 
+export interface RawCollisionTriangle {
+  v0: number;
+  v1: number;
+  v2: number;
+  materialSlotIndex: number;
+  groupId: number;
+}
+
 export interface ParsedObjMesh {
   summary: ObjMeshSummary;
   vertices: CompiledModelVertex[];
   triangles: [number, number, number][];
+  /** Raw 3D vertex positions (without UV/normal split duplicates) for topological 3D collision BSP compilation. */
+  rawPositions: [number, number, number][];
+  /** Raw triangle index triples into `rawPositions` + `usemtl` slot index. */
+  rawFaces: RawCollisionTriangle[];
+  /** `usemtl` material slot index for each triangle in `triangles`. */
+  triangleMaterialSlots: number[];
   usedAutoUv: boolean;
   groupBounds: { min: [number, number, number]; max: [number, number, number] }[];
 }
@@ -196,9 +212,23 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
   interface RawTriangle {
     corners: [RawFaceCorner, RawFaceCorner, RawFaceCorner];
     groupId: number;
+    materialSlotIndex: number;
   }
   const rawTriangles: RawTriangle[] = [];
+  const materialSlots: string[] = [];
+  const materialSlotMap = new Map<string, number>();
   let currentGroupId = 0;
+  let currentMaterialSlotIndex = 0;
+
+  const getOrCreateMaterialSlot = (name: string): number => {
+    const clean = name.trim() || 'default';
+    const existing = materialSlotMap.get(clean);
+    if (existing !== undefined) return existing;
+    const idx = materialSlots.length;
+    materialSlots.push(clean);
+    materialSlotMap.set(clean, idx);
+    return idx;
+  };
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -209,6 +239,9 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
 
     if (prefix === 'g' || prefix === 'o') {
       if (rawTriangles.length > 0) currentGroupId++;
+    } else if (prefix === 'usemtl') {
+      const matName = trimmed.slice(6).trim() || 'default';
+      currentMaterialSlotIndex = getOrCreateMaterialSlot(matName);
     } else if (prefix === 'v') {
       const rx = (parseFloat(parts[1]) || 0) * scale;
       const ry = (parseFloat(parts[2]) || 0) * scale;
@@ -229,6 +262,9 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
         : normalizeVec3(nx, ny, nz);
       rawNormals.push(norm);
     } else if (prefix === 'f') {
+      if (materialSlots.length === 0) {
+        currentMaterialSlotIndex = getOrCreateMaterialSlot('default');
+      }
       const corners: RawFaceCorner[] = [];
       for (let i = 1; i < parts.length; i++) {
         const segs = parts[i].split('/');
@@ -256,6 +292,7 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
         rawTriangles.push({
           corners: [corners[0], corners[i], corners[i + 1]],
           groupId: currentGroupId,
+          materialSlotIndex: currentMaterialSlotIndex,
         });
       }
     }
@@ -269,6 +306,7 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
       normalCount: 0,
       hasUvCoordinates: false,
       hasNormals: false,
+      materialSlots: ['default'],
       bounds: { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0], radius: 0 },
       isTooComplex: true,
       message: 'No valid 3D mesh vertices or faces were found in this OBJ file.',
@@ -277,6 +315,9 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
       summary: emptySummary,
       vertices: [],
       triangles: [],
+      rawPositions: [],
+      rawFaces: [],
+      triangleMaterialSlots: [],
       usedAutoUv: false,
       groupBounds: [],
     };
@@ -322,13 +363,29 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
   // Build deduplicated compiled vertices + triangle index list
   const vertices: CompiledModelVertex[] = [];
   const triangles: [number, number, number][] = [];
+  const rawFaces: RawCollisionTriangle[] = [];
+  const triangleMaterialSlots: number[] = [];
   const vertexLookup = new Map<string, number>();
   const groupMinMax = new Map<number, { min: [number, number, number]; max: [number, number, number] }>();
 
   for (const tri of rawTriangles) {
-    const p0 = rawPositions[tri.corners[0].vIdx];
-    const p1 = rawPositions[tri.corners[1].vIdx];
-    const p2 = rawPositions[tri.corners[2].vIdx];
+    // Note: when flipYz is enabled, (x, y, z) -> (x, -z, y) has determinant +1 (a proper 90-degree rotation around +X),
+    // so vertex winding is preserved.
+    const v0 = tri.corners[0].vIdx;
+    const v1 = tri.corners[1].vIdx;
+    const v2 = tri.corners[2].vIdx;
+    const p0 = rawPositions[v0];
+    const p1 = rawPositions[v1];
+    const p2 = rawPositions[v2];
+
+    rawFaces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: tri.materialSlotIndex,
+      groupId: tri.groupId,
+    });
+    triangleMaterialSlots.push(tri.materialSlotIndex);
 
     // Track per-group bounds for multi-box collision
     let gb = groupMinMax.get(tri.groupId);
@@ -398,6 +455,8 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
     ? `${rawUvs.length} UV coords`
     : 'Auto-unwrapped (6-face Box UV Atlas)';
 
+  const finalMaterialSlots = materialSlots.length > 0 ? materialSlots : ['default'];
+
   const summary: ObjMeshSummary = {
     vertexCount: rawPositions.length,
     triangleCount: rawTriangles.length,
@@ -405,6 +464,7 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
     normalCount: rawNormals.length,
     hasUvCoordinates,
     hasNormals: rawNormals.length > 0,
+    materialSlots: finalMaterialSlots,
     bounds: {
       min: minBounds,
       max: maxBounds,
@@ -419,6 +479,9 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
     summary,
     vertices,
     triangles,
+    rawPositions,
+    rawFaces,
+    triangleMaterialSlots,
     usedAutoUv,
     groupBounds,
   };
@@ -1077,8 +1140,46 @@ export function extractTemplateRigFromMap(
 }
 
 /**
+ * Infers a Halo CE `MaterialType` index (0..32) from a Blender / Wavefront `usemtl` slot name.
+ */
+export function inferHaloMaterialTypeFromName(slotName: string, fallback = 7): number {
+  const s = slotName.trim().toLowerCase();
+  if (!s) return fallback;
+  const exactIdx = HALO_MATERIAL_TYPES.indexOf(s);
+  if (exactIdx >= 0) return exactIdx;
+
+  if (s.includes('glass') || s.includes('windshield') || s.includes('window') || s.includes('visor') || s.includes('canopy')) return 9; // glass
+  if (s.includes('rubber') || s.includes('tire') || s.includes('tyre') || s.includes('wheel') || s.includes('tread')) return 8; // rubber
+  if (s.includes('wood') || s.includes('plank') || s.includes('timber') || s.includes('bark') || s.includes('crate')) return 4; // wood
+  if (s.includes('stone') || s.includes('rock') || s.includes('concrete') || s.includes('brick') || s.includes('granite') || s.includes('boulder')) return 2; // stone
+  if (s.includes('dirt') || s.includes('mud') || s.includes('soil') || s.includes('earth')) return 0; // dirt
+  if (s.includes('sand') || s.includes('desert') || s.includes('dune')) return 1; // sand
+  if (s.includes('snow') || s.includes('frost')) return 3; // snow
+  if (s.includes('ice') || s.includes('glacier')) return 31; // ice
+  if (s.includes('water') || s.includes('liquid')) return 28; // water
+  if (s.includes('leaf') || s.includes('leaves') || s.includes('foliage') || s.includes('grass') || s.includes('bush')) return 29; // leaves
+  if (s.includes('plastic') || s.includes('polymer') || s.includes('vinyl') || s.includes('seat')) return 27; // plastic
+  if (s.includes('cyborg') && s.includes('shield')) return 22; // cyborg energy shield
+  if (s.includes('cyborg')) return 21; // cyborg armor
+  if (s.includes('force') || s.includes('shield') || s.includes('energy')) return 10; // force field
+  if (s.includes('hollow')) return 5; // metal hollow
+  if (s.includes('thin') || s.includes('sheet') || s.includes('tin') || s.includes('aluminum')) return 6; // metal thin
+  if (s.includes('metal') || s.includes('steel') || s.includes('iron') || s.includes('titanium') || s.includes('hull') || s.includes('armor') || s.includes('brass')) return 7; // metal thick
+  return fallback;
+}
+
+/**
  * Encodes independent triangles into a single contiguous D3DPT_TRIANGLESTRIP buffer
  * stitched with degenerate triangles (verified against Halo CE's D3D9 renderer and OpenCE's viewport).
+ *
+ * Important Halo CE D3D9 conventions:
+ * 1. Native Halo CE `gbxmodel` triangle strips use Clockwise (`[a, c, b]`) vertex order for even
+ *    strip triangles (`cross(v1 - v0, v2 - v0) · normal < 0`), whereas Wavefront `.obj` uses
+ *    Counter-Clockwise (`[a, b, c]`).
+ * 2. When bridging from `prev` (the last vertex of triangle `i-1`) to `a` (the first vertex of
+ *    triangle `i`), BOTH `prev` and `a` must be repeated (`prev, a, a`) so every sliding window of
+ *    3 vertices across the transition is degenerate, and an additional `a` is pushed if needed so
+ *    that `[a, c, b]` always starts at an EVEN index in `stripIndices`.
  */
 export function stitchTrianglesToStrip(triangles: [number, number, number][]): {
   stripIndices: number[];
@@ -1089,16 +1190,16 @@ export function stitchTrianglesToStrip(triangles: [number, number, number][]): {
   for (let i = 0; i < triangles.length; i++) {
     const [a, b, c] = triangles[i];
     if (i === 0) {
-      stripIndices.push(a, b, c);
+      stripIndices.push(a, c, b);
     } else {
       const prev = stripIndices[stripIndices.length - 1];
-      // Push degenerate connector: repeat previous vertex, then push next triangle's first vertex
-      stripIndices.push(prev, a);
-      // Ensure `a, b, c` begins at an EVEN triangle index in the strip so winding order is preserved
+      // Push degenerate connector: repeat previous vertex AND repeat next triangle's first vertex
+      stripIndices.push(prev, a, a);
+      // Ensure `a, c, b` begins at an EVEN index in stripIndices so D3D9 does not flip its winding
       if ((stripIndices.length - 1) % 2 === 1) {
         stripIndices.push(a);
       }
-      stripIndices.push(b, c);
+      stripIndices.push(c, b);
     }
   }
 
@@ -1514,41 +1615,480 @@ function writeBoxCollisionBsp(
   return cursor;
 }
 
+interface CompiledMeshCollisionBsp {
+  bsp3dNodes: [number, number, number][];
+  planes: [number, number, number, number][];
+  leaves: [number, number, number][];
+  bsp2dReferences: [number, number][];
+  surfaces: { planeDesignator: number; firstEdgeIndex: number; materialIndex: number }[];
+  edges: { vertexIndices: [number, number]; edgeIndices: [number, number]; surfaceIndices: [number, number] }[];
+  vertices: { point: [number, number, number]; firstEdgeIndex: number }[];
+  byteSize: number;
+}
+
 /**
- * Builds a self-contained Halo CE `model_collision_geometry` (`coll`) tag with a 3D collision BSP
- * fitted to the OBJ mesh bounds (or multi-group sub-boxes).
+ * Compiles an arbitrary triangulated 3D mesh (convex or concave, such as sloped bridges, ramps, arches, or props)
+ * into a Halo CE `ModelCollisionGeometryBSP` structure verified against OpenCE's `collision_bsp.c`.
+ *
+ * Uses:
+ * - Deduplicated directed 3D planes `(nx, ny, nz, d)` with outward normals pointing into empty space (`front`).
+ * - Recursive 3D polygon-splitting BSP tree (`bsp3d_nodes`, strictly acyclic tree with depth <= 48).
+ * - Winged-edge half-edge ring topology (`surfaces`, `edges`, `vertices`) matching `tools/stagekit/collision.c`,
+ *   with counter-clockwise vertex ordering around each outward plane normal and per-surface `material_index`.
+ */
+function compileMeshCollisionBspData(
+  mesh: ParsedObjMesh,
+  materialCount: number,
+): CompiledMeshCollisionBsp | null {
+  if (mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0 || mesh.rawFaces.length > 512) {
+    return null;
+  }
+
+  const planes: [number, number, number, number][] = [];
+  const findOrAddPlane = (nx: number, ny: number, nz: number, d: number): number => {
+    for (let i = 0; i < planes.length; i++) {
+      const p = planes[i];
+      if (
+        Math.abs(p[0] - nx) < 1e-4 &&
+        Math.abs(p[1] - ny) < 1e-4 &&
+        Math.abs(p[2] - nz) < 1e-4 &&
+        Math.abs(p[3] - d) < 1e-3
+      ) {
+        return i;
+      }
+    }
+    const idx = planes.length;
+    planes.push([nx, ny, nz, d]);
+    return idx;
+  };
+
+  interface ValidTri {
+    ring: [number, number, number];
+    planeIdx: number;
+    materialIndex: number;
+  }
+
+  const validTris: ValidTri[] = [];
+  for (const face of mesh.rawFaces) {
+    const p0 = mesh.rawPositions[face.v0];
+    const p1 = mesh.rawPositions[face.v1];
+    const p2 = mesh.rawPositions[face.v2];
+    if (!p0 || !p1 || !p2) continue;
+
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const area2 = Math.hypot(cx, cy, cz);
+    if (area2 < 1e-6) continue; // skip degenerate zero-area triangle
+
+    const nx = cx / area2;
+    const ny = cy / area2;
+    const nz = cz / area2;
+    const d = nx * p0[0] + ny * p0[1] + nz * p0[2];
+    const planeIdx = findOrAddPlane(nx, ny, nz, d);
+
+    // Ensure counter-clockwise winding seen from in front of `planes[planeIdx]`
+    const pl = planes[planeIdx];
+    const winding = cx * pl[0] + cy * pl[1] + cz * pl[2];
+    const ring: [number, number, number] = winding >= 0
+      ? [face.v0, face.v1, face.v2]
+      : [face.v0, face.v2, face.v1];
+
+    const matIdx = Math.max(0, Math.min(materialCount - 1, face.materialSlotIndex));
+    validTris.push({ ring, planeIdx, materialIndex: matIdx });
+  }
+
+  if (validTris.length === 0 || planes.length === 0) {
+    return null;
+  }
+
+  // Build winged-edge topology (`surfaces`, `edges`, `vertices`) matching `tools/stagekit/collision.c`
+  const surfaces: { planeDesignator: number; firstEdgeIndex: number; materialIndex: number }[] = [];
+  const edges: { vertexIndices: [number, number]; edgeIndices: [number, number]; surfaceIndices: [number, number] }[] = [];
+  const vertexFirstEdge = new Array<number>(mesh.rawPositions.length).fill(-1);
+
+  for (let surfIdx = 0; surfIdx < validTris.length; surfIdx++) {
+    const tri = validTris[surfIdx];
+    const ring = tri.ring;
+    const ringEdges: [number, number, number] = [0, 0, 0];
+
+    for (let point = 0; point < 3; point++) {
+      const from = ring[point];
+      const to = ring[(point + 1) % 3];
+      let edgeIndex = -1;
+      for (let e = 0; e < edges.length; e++) {
+        if (
+          edges[e].vertexIndices[0] === to &&
+          edges[e].vertexIndices[1] === from &&
+          edges[e].surfaceIndices[1] === -1
+        ) {
+          edgeIndex = e;
+          break;
+        }
+      }
+      if (edgeIndex === -1) {
+        edgeIndex = edges.length;
+        edges.push({
+          vertexIndices: [from, to],
+          edgeIndices: [-1, -1],
+          surfaceIndices: [surfIdx, -1],
+        });
+      } else {
+        edges[edgeIndex].surfaceIndices[1] = surfIdx;
+      }
+      if (vertexFirstEdge[from] === -1) {
+        vertexFirstEdge[from] = edgeIndex;
+      }
+      ringEdges[point] = edgeIndex;
+    }
+
+    for (let point = 0; point < 3; point++) {
+      const edge = edges[ringEdges[point]];
+      const side = edge.surfaceIndices[1] === surfIdx ? 1 : 0;
+      edge.edgeIndices[side] = ringEdges[(point + 1) % 3];
+    }
+
+    surfaces.push({
+      planeDesignator: tri.planeIdx,
+      firstEdgeIndex: ringEdges[0],
+      materialIndex: tri.materialIndex,
+    });
+  }
+
+  for (let e = 0; e < edges.length; e++) {
+    const [v0, v1] = edges[e].vertexIndices;
+    if (vertexFirstEdge[v0] === -1) vertexFirstEdge[v0] = e;
+    if (vertexFirstEdge[v1] === -1) vertexFirstEdge[v1] = e;
+  }
+
+  const vertices = mesh.rawPositions.map((pt, idx) => ({
+    point: [pt[0], pt[1], pt[2]] as [number, number, number],
+    firstEdgeIndex: vertexFirstEdge[idx] >= 0 ? vertexFirstEdge[idx] : 0,
+  }));
+
+  // Build 3D BSP tree (`bsp3dNodes`) by recursively clipping the mesh polygons
+  interface ClipPoly {
+    pts: [number, number, number][];
+    planeIdx: number;
+  }
+
+  const EPS = 1e-4;
+  const clipPolyAgainstPlane = (
+    pts: [number, number, number][],
+    plane: [number, number, number, number],
+  ): { front: [number, number, number][] | null; back: [number, number, number][] | null; state: 'coplanar' | 'front' | 'back' | 'split' } => {
+    const dists = pts.map((p) => plane[0] * p[0] + plane[1] * p[1] + plane[2] * p[2] - plane[3]);
+    const maxD = Math.max(...dists);
+    const minD = Math.min(...dists);
+    if (Math.abs(maxD) <= EPS && Math.abs(minD) <= EPS) {
+      return { front: null, back: null, state: 'coplanar' };
+    }
+    if (minD >= -EPS) {
+      return { front: pts, back: null, state: 'front' };
+    }
+    if (maxD <= EPS) {
+      return { front: null, back: pts, state: 'back' };
+    }
+    const frontPts: [number, number, number][] = [];
+    const backPts: [number, number, number][] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const j = (i + 1) % pts.length;
+      const pA = pts[i], pB = pts[j];
+      const dA = dists[i], dB = dists[j];
+      if (dA >= -EPS) frontPts.push(pA);
+      if (dA <= EPS) backPts.push(pA);
+      if ((dA > EPS && dB < -EPS) || (dA < -EPS && dB > EPS)) {
+        const t = dA / (dA - dB);
+        const inter: [number, number, number] = [
+          pA[0] + t * (pB[0] - pA[0]),
+          pA[1] + t * (pB[1] - pA[1]),
+          pA[2] + t * (pB[2] - pA[2]),
+        ];
+        frontPts.push(inter);
+        backPts.push(inter);
+      }
+    }
+    return {
+      front: frontPts.length >= 3 ? frontPts : null,
+      back: backPts.length >= 3 ? backPts : null,
+      state: 'split',
+    };
+  };
+
+  const bsp3dNodes: [number, number, number][] = [];
+
+  const buildTree = (polys: ClipPoly[], usedPlanes: Set<number>, depth: number): number => {
+    if (polys.length === 0 || depth >= 48 || bsp3dNodes.length >= 2048) {
+      return 0xffffffff;
+    }
+
+    const candidatePlanes = Array.from(new Set(polys.map((p) => p.planeIdx))).filter(
+      (pIdx) => !usedPlanes.has(pIdx),
+    );
+    if (candidatePlanes.length === 0) {
+      return 0xffffffff;
+    }
+
+    let bestPlane = candidatePlanes[0];
+    let bestScore = Infinity;
+    for (const pIdx of candidatePlanes) {
+      const pl = planes[pIdx];
+      let frontCount = 0, backCount = 0, splitCount = 0;
+      for (const poly of polys) {
+        if (poly.planeIdx === pIdx) continue;
+        const c = clipPolyAgainstPlane(poly.pts, pl);
+        if (c.state === 'front') frontCount++;
+        else if (c.state === 'back') backCount++;
+        else if (c.state === 'split') splitCount++;
+      }
+      // Prefer convex outer hull planes (nothing in front, zero splits) first
+      const score = frontCount === 0 && splitCount === 0
+        ? -1000 - backCount
+        : splitCount * 4 + Math.abs(frontCount - backCount);
+      if (score < bestScore) {
+        bestScore = score;
+        bestPlane = pIdx;
+      }
+    }
+
+    const pl = planes[bestPlane];
+    const frontList: ClipPoly[] = [];
+    const backList: ClipPoly[] = [];
+    for (const poly of polys) {
+      if (poly.planeIdx === bestPlane) continue;
+      const c = clipPolyAgainstPlane(poly.pts, pl);
+      if (c.state === 'coplanar') {
+        const op = planes[poly.planeIdx];
+        const dot = pl[0] * op[0] + pl[1] * op[1] + pl[2] * op[2];
+        if (dot < 0) backList.push(poly);
+      } else {
+        if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx });
+        if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx });
+      }
+    }
+
+    const nodeIdx = bsp3dNodes.length;
+    bsp3dNodes.push([bestPlane, 0xffffffff, 0x80000000]);
+
+    const nextUsed = new Set(usedPlanes);
+    nextUsed.add(bestPlane);
+
+    const frontChild = frontList.length === 0
+      ? 0x80000000
+      : buildTree(frontList, nextUsed, depth + 1);
+    const backChild = backList.length === 0
+      ? 0xffffffff
+      : buildTree(backList, nextUsed, depth + 1);
+
+    bsp3dNodes[nodeIdx][1] = backChild >>> 0;
+    bsp3dNodes[nodeIdx][2] = frontChild >>> 0;
+    return nodeIdx;
+  };
+
+  const initialPolys: ClipPoly[] = validTris.map((tri) => ({
+    pts: [
+      mesh.rawPositions[tri.ring[0]],
+      mesh.rawPositions[tri.ring[1]],
+      mesh.rawPositions[tri.ring[2]],
+    ],
+    planeIdx: tri.planeIdx,
+  }));
+
+  buildTree(initialPolys, new Set(), 0);
+  if (bsp3dNodes.length === 0) {
+    return null;
+  }
+
+  const leaves: [number, number, number][] = [
+    [0, surfaces.length, 0],
+  ];
+  const bsp2dReferences: [number, number][] = surfaces.map((s, idx) => [
+    s.planeDesignator,
+    (0x80000000 | idx) >>> 0,
+  ]);
+
+  const byteSize =
+    bsp3dNodes.length * 12 +
+    planes.length * 16 +
+    leaves.length * 8 +
+    bsp2dReferences.length * 8 +
+    surfaces.length * 12 +
+    edges.length * 24 +
+    vertices.length * 16;
+
+  return {
+    bsp3dNodes,
+    planes,
+    leaves,
+    bsp2dReferences,
+    surfaces,
+    edges,
+    vertices,
+    byteSize,
+  };
+}
+
+/**
+ * Serializes a compiled 3D polyhedral mesh `ModelCollisionGeometryBSP` into `targetBuf` at `structOff`
+ * (with child arrays written starting at `arraysOff`).
+ */
+function writeMeshCollisionBsp(
+  targetBuf: Buffer,
+  structOff: number,
+  arraysOff: number,
+  compiled: CompiledMeshCollisionBsp,
+): number {
+  let cursor = arraysOff;
+
+  // 1. bsp3d_nodes: N * 12 bytes
+  const offBsp3dNodes = cursor;
+  for (const node of compiled.bsp3dNodes) {
+    targetBuf.writeInt32LE(node[0], cursor + 0);
+    targetBuf.writeUInt32LE(node[1] >>> 0, cursor + 4);
+    targetBuf.writeUInt32LE(node[2] >>> 0, cursor + 8);
+    cursor += 12;
+  }
+
+  // 2. planes: P * 16 bytes
+  const offPlanes = cursor;
+  for (const plane of compiled.planes) {
+    targetBuf.writeFloatLE(plane[0], cursor + 0);
+    targetBuf.writeFloatLE(plane[1], cursor + 4);
+    targetBuf.writeFloatLE(plane[2], cursor + 8);
+    targetBuf.writeFloatLE(plane[3], cursor + 12);
+    cursor += 16;
+  }
+
+  // 3. leaves: L * 8 bytes
+  const offLeaves = cursor;
+  for (const leaf of compiled.leaves) {
+    targetBuf.writeUInt16LE(leaf[0] & 0xffff, cursor + 0);
+    targetBuf.writeUInt16LE(leaf[1] & 0xffff, cursor + 2);
+    targetBuf.writeUInt32LE(leaf[2] >>> 0, cursor + 4);
+    cursor += 8;
+  }
+
+  // 4. bsp2d_references: R * 8 bytes
+  const offBsp2dRefs = cursor;
+  for (const ref of compiled.bsp2dReferences) {
+    targetBuf.writeUInt32LE(ref[0] >>> 0, cursor + 0);
+    targetBuf.writeUInt32LE(ref[1] >>> 0, cursor + 4);
+    cursor += 8;
+  }
+
+  // 5. bsp2d_nodes: 0 entries
+
+  // 6. surfaces: S * 12 bytes
+  const offSurfaces = cursor;
+  for (const surf of compiled.surfaces) {
+    targetBuf.writeUInt32LE(surf.planeDesignator >>> 0, cursor + 0);
+    targetBuf.writeUInt32LE(surf.firstEdgeIndex >>> 0, cursor + 4);
+    targetBuf.writeUInt8(0, cursor + 8); // flags = 0
+    targetBuf.writeUInt8(0xff, cursor + 9); // breakable_surface = -1 (0xFF)
+    targetBuf.writeInt16LE(surf.materialIndex, cursor + 10); // material index
+    cursor += 12;
+  }
+
+  // 7. edges: E * 24 bytes
+  const offEdges = cursor;
+  for (const edge of compiled.edges) {
+    targetBuf.writeInt32LE(edge.vertexIndices[0], cursor + 0);
+    targetBuf.writeInt32LE(edge.vertexIndices[1], cursor + 4);
+    targetBuf.writeInt32LE(edge.edgeIndices[0], cursor + 8);
+    targetBuf.writeInt32LE(edge.edgeIndices[1], cursor + 12);
+    targetBuf.writeInt32LE(edge.surfaceIndices[0], cursor + 16);
+    targetBuf.writeInt32LE(edge.surfaceIndices[1], cursor + 20);
+    cursor += 24;
+  }
+
+  // 8. vertices: V * 16 bytes
+  const offVertices = cursor;
+  for (const vert of compiled.vertices) {
+    targetBuf.writeFloatLE(vert.point[0], cursor + 0);
+    targetBuf.writeFloatLE(vert.point[1], cursor + 4);
+    targetBuf.writeFloatLE(vert.point[2], cursor + 8);
+    targetBuf.writeInt32LE(vert.firstEdgeIndex, cursor + 12);
+    cursor += 16;
+  }
+
+  // Write 96-byte ModelCollisionGeometryBSP header at structOff
+  targetBuf.writeUInt32LE(compiled.bsp3dNodes.length, structOff + 0);
+  targetBuf.writeUInt32LE(offBsp3dNodes, structOff + 4);
+  targetBuf.writeUInt32LE(compiled.planes.length, structOff + 12);
+  targetBuf.writeUInt32LE(offPlanes, structOff + 16);
+  targetBuf.writeUInt32LE(compiled.leaves.length, structOff + 24);
+  targetBuf.writeUInt32LE(offLeaves, structOff + 28);
+  targetBuf.writeUInt32LE(compiled.bsp2dReferences.length, structOff + 36);
+  targetBuf.writeUInt32LE(offBsp2dRefs, structOff + 40);
+  targetBuf.writeUInt32LE(0, structOff + 48); // bsp2d_nodes.count = 0
+  targetBuf.writeUInt32LE(0, structOff + 52);
+  targetBuf.writeUInt32LE(compiled.surfaces.length, structOff + 60);
+  targetBuf.writeUInt32LE(offSurfaces, structOff + 64);
+  targetBuf.writeUInt32LE(compiled.edges.length, structOff + 72);
+  targetBuf.writeUInt32LE(offEdges, structOff + 76);
+  targetBuf.writeUInt32LE(compiled.vertices.length, structOff + 84);
+  targetBuf.writeUInt32LE(offVertices, structOff + 88);
+
+  return cursor;
+}
+
+/**
+ * Builds a self-contained Halo CE `model_collision_geometry` (`coll`) tag with a 3D collision BSP.
+ * When `exactMeshCollision` (formerly `multiBox`) is enabled (or by default for <= 512 triangles),
+ * compiles an exact 3D polyhedral mesh BSP from the OBJ's triangles and `usemtl` material slots.
+ * Falls back to a 6-plane bounding box BSP if disabled or if the mesh exceeds 512 triangles.
  */
 export function buildCustomCollisionTag(
   tagPath: string,
   originalIndex: number,
   mesh: ParsedObjMesh,
   rig?: TemplateRigInfo,
-  multiBox = false,
+  exactMeshCollision = true,
   materialType = 7,
+  slotMaterialTypes?: number[],
 ): ExtractedTag {
   const nodeCount = rig && rig.modelNodeCount > 0 ? rig.modelNodeCount : 1;
-  const boxes = multiBox && mesh.groupBounds.length > 1 && mesh.groupBounds.length <= 8
-    ? mesh.groupBounds
-    : [{ min: mesh.summary.bounds.min, max: mesh.summary.bounds.max }];
-  const bspCount = boxes.length;
+
+  // Build material table from Blender `usemtl` slots (or 1 default material)
+  const slotNames = mesh.summary.materialSlots.length > 0 ? mesh.summary.materialSlots : ['default'];
+  const materials: { name: string; haloMaterialType: number }[] = slotNames.map((slotName, idx) => {
+    const explicitType = slotMaterialTypes && slotMaterialTypes[idx] !== undefined
+      ? slotMaterialTypes[idx]
+      : slotNames.length > 1
+        ? inferHaloMaterialTypeFromName(slotName, materialType)
+        : materialType;
+    const safeType = explicitType >= 0 && explicitType < HALO_MATERIAL_TYPES.length ? explicitType : 7;
+    const cleanName = slotName === 'default' ? (HALO_MATERIAL_TYPES[safeType] ?? 'metal thick') : slotName;
+    return { name: cleanName, haloMaterialType: safeType };
+  });
+  const materialCount = Math.max(1, materials.length);
+
+  // Compile exact 3D mesh collision BSP when enabled (and <= 512 triangles)
+  const compiledMeshBsp = exactMeshCollision
+    ? compileMeshCollisionBspData(mesh, materialCount)
+    : null;
+  const bspCount = 1;
+  const bspArraysByteSize = compiledMeshBsp ? compiledMeshBsp.byteSize : 752;
 
   // Layout offsets:
   // 0: ModelCollisionGeometry root (664 bytes)
-  // 664: ModelCollisionGeometryMaterial[1] (72 bytes)
-  // 736: ModelCollisionGeometryRegion[1] (84 bytes)
-  // 820: ModelCollisionGeometryPermutation[1] (32 bytes)
-  // 852: ModelCollisionGeometrySphere[1] (32 bytes)
-  // 884: ModelCollisionGeometryNode[nodeCount] (nodeCount * 64 bytes)
-  // offBsps: ModelCollisionGeometryBSP[bspCount] (bspCount * 96 bytes)
-  // offBspArrays: bspCount * 752 bytes
+  // 664: ModelCollisionGeometryMaterial[materialCount] (materialCount * 72 bytes)
+  // offRegions: ModelCollisionGeometryRegion[1] (84 bytes)
+  // offPermutations: ModelCollisionGeometryPermutation[1] (32 bytes)
+  // offSpheres: ModelCollisionGeometrySphere[1] (32 bytes)
+  // offNodes: ModelCollisionGeometryNode[nodeCount] (nodeCount * 64 bytes)
+  // offBsps: ModelCollisionGeometryBSP[1] (96 bytes)
+  // offBspArrays: bspArraysByteSize bytes
   const offMaterials = 664;
-  const offRegions = offMaterials + 72;
+  const offRegions = offMaterials + materialCount * 72;
   const offPermutations = offRegions + 84;
   const offSpheres = offPermutations + 32;
   const offNodes = offSpheres + 32;
   const offBsps = offNodes + nodeCount * 64;
   const offBspArrays = offBsps + bspCount * 96;
-  const totalSize = offBspArrays + bspCount * 752;
+  const totalSize = offBspArrays + bspArraysByteSize;
 
   const buf = Buffer.alloc(totalSize, 0);
 
@@ -1574,7 +2114,7 @@ export function buildCustomCollisionTag(
   writeDependencyField(buf, 424, 'effe', NULL_TAG_ID); // shield recharging effect
 
   // Reflexives on ModelCollisionGeometry:
-  buf.writeUInt32LE(1, 564); // materials.count
+  buf.writeUInt32LE(materialCount, 564); // materials.count
   buf.writeUInt32LE(offMaterials, 568); // materials.pointer
   buf.writeUInt32LE(1, 576); // regions.count
   buf.writeUInt32LE(offRegions, 580); // regions.pointer
@@ -1597,14 +2137,15 @@ export function buildCustomCollisionTag(
   buf.writeUInt32LE(nodeCount, 652);
   buf.writeUInt32LE(offNodes, 656);
 
-  // Material[0] (72 bytes)
-  const safeMat = materialType >= 0 && materialType < HALO_MATERIAL_TYPES.length ? materialType : 7;
-  const matName = HALO_MATERIAL_TYPES[safeMat] ?? 'metal thick';
-  writeTagString(buf, offMaterials, matName);
-  buf.writeUInt32LE(0, offMaterials + 32); // flags
-  buf.writeUInt16LE(safeMat, offMaterials + 36); // material type (default 7 = metal thick)
-  buf.writeFloatLE(1.0, offMaterials + 40); // shield leak = 0, body damage multiplier = 1.0
-  buf.writeFloatLE(1.0, offMaterials + 44);
+  // Materials[0..materialCount-1] (72 bytes each)
+  for (let m = 0; m < materialCount; m++) {
+    const mOff = offMaterials + m * 72;
+    writeTagString(buf, mOff, materials[m].name);
+    buf.writeUInt32LE(0, mOff + 32); // flags
+    buf.writeUInt16LE(materials[m].haloMaterialType, mOff + 36); // material type
+    buf.writeFloatLE(1.0, mOff + 40); // body damage multiplier = 1.0
+    buf.writeFloatLE(1.0, mOff + 44);
+  }
 
   // Region[0] (84 bytes)
   writeTagString(buf, offRegions, 'default');
@@ -1646,20 +2187,21 @@ export function buildCustomCollisionTag(
       buf.writeInt16LE(-1, nOff + 38); // first child = -1
     }
     if (i === 0) {
-      buf.writeUInt32LE(bspCount, nOff + 52); // bsps.count
+      buf.writeUInt32LE(1, nOff + 52); // bsps.count = 1 (permutation 0)
       buf.writeUInt32LE(offBsps, nOff + 56); // bsps.pointer
     }
   }
 
-  // Write each 6-plane Box BSP into offBsps + offBspArrays
-  let arrayCursor = offBspArrays;
-  for (let b = 0; b < bspCount; b++) {
-    arrayCursor = writeBoxCollisionBsp(
+  // Write either the compiled 3D Mesh Collision BSP or fallback 6-plane Box BSP
+  if (compiledMeshBsp) {
+    writeMeshCollisionBsp(buf, offBsps, offBspArrays, compiledMeshBsp);
+  } else {
+    writeBoxCollisionBsp(
       buf,
-      offBsps + b * 96,
-      arrayCursor,
-      boxes[b].min,
-      boxes[b].max,
+      offBsps,
+      offBspArrays,
+      mesh.summary.bounds.min,
+      mesh.summary.bounds.max,
     );
   }
 
@@ -1835,10 +2377,12 @@ export interface BuildCustomObjectOptions {
   textureRgba?: { rgba: Uint8Array; width: number; height: number };
   /** Bitmap encoding format (default: A8R8G8B8). */
   bitmapFormat?: number;
-  /** Use compound multi-box collision when the OBJ has multiple sub-groups (default: false = 1 tight 3D box BSP). */
+  /** Compile exact 3D mesh collision BSP following every triangle slope/ramp (default: true; false = 6-plane bounding box). */
   multiBoxCollision?: boolean;
   /** Halo CE MaterialType enum index (0..32, default: 7 = "metal thick"). */
   materialType?: number;
+  /** Optional per-slot Halo CE MaterialType enum indices corresponding to `meshSummary.materialSlots` (`usemtl` slots from Blender). */
+  slotMaterialTypes?: number[];
   /** Optional template tag set extracted from the currently open map (for inheriting animations, physics, sounds, seats, and barrels). */
   templateExtractedSet?: ExtractedTagSet;
   /** Optional template rig info (nodes, nodeListChecksum, markers) extracted from the open map. */
@@ -1950,7 +2494,12 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     options.bitmapFormat ?? BitmapFormat.A8R8G8B8,
   );
 
-  const matType = options.materialType !== undefined ? options.materialType : 7;
+  const defaultMatByGroup = options.tagGroup === 'equipment' ? 6 : 7;
+  const matType = options.materialType !== undefined
+    ? options.materialType
+    : options.slotMaterialTypes && options.slotMaterialTypes.length > 0
+      ? options.slotMaterialTypes[0]
+      : defaultMatByGroup;
 
   const shaderTag = buildCustomShaderModelTag(
     shaderPath,
@@ -1969,13 +2518,15 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     options.templateRig,
   );
 
+  const exactMeshCollision = options.multiBoxCollision !== undefined ? Boolean(options.multiBoxCollision) : true;
   const collisionTag = buildCustomCollisionTag(
     collisionPath,
     collisionOrigIdx,
     collisionMesh.triangles.length > 0 ? collisionMesh : renderMesh,
     options.templateRig,
-    Boolean(options.multiBoxCollision),
+    exactMeshCollision,
     matType,
+    options.slotMaterialTypes,
   );
 
   // Map template root tag's existing dependencies (except .model and .collision model) to the new rootPath

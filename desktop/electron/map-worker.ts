@@ -2125,6 +2125,7 @@ export function runBuildCustomObjectTag(task: {
       textureRgba,
       multiBoxCollision: req.multiBoxCollision,
       materialType: req.materialType,
+      slotMaterialTypes: req.slotMaterialTypes,
       templateExtractedSet,
       templateRig,
       sourceMapName: currentMap ? path.basename(currentMap.filePath, '.map') : 'custom_object_builder',

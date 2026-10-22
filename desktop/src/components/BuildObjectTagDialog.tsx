@@ -91,6 +91,29 @@ const HALO_MATERIAL_OPTIONS: { index: number; label: string }[] = [
   { index: 32, label: '32 — hunter shield' },
 ];
 
+function inferMaterialTypeFromSlotName(slotName: string, fallback = 7): number {
+  const s = slotName.trim().toLowerCase();
+  if (!s) return fallback;
+  if (s.includes('glass') || s.includes('windshield') || s.includes('window') || s.includes('visor') || s.includes('canopy')) return 9;
+  if (s.includes('rubber') || s.includes('tire') || s.includes('tyre') || s.includes('wheel') || s.includes('tread')) return 8;
+  if (s.includes('wood') || s.includes('plank') || s.includes('timber') || s.includes('bark') || s.includes('crate')) return 4;
+  if (s.includes('stone') || s.includes('rock') || s.includes('concrete') || s.includes('brick') || s.includes('granite') || s.includes('boulder')) return 2;
+  if (s.includes('dirt') || s.includes('mud') || s.includes('soil') || s.includes('earth')) return 0;
+  if (s.includes('sand') || s.includes('desert') || s.includes('dune')) return 1;
+  if (s.includes('snow') || s.includes('frost')) return 3;
+  if (s.includes('ice') || s.includes('glacier')) return 31;
+  if (s.includes('water') || s.includes('liquid')) return 28;
+  if (s.includes('leaf') || s.includes('leaves') || s.includes('foliage') || s.includes('grass') || s.includes('bush')) return 29;
+  if (s.includes('plastic') || s.includes('polymer') || s.includes('vinyl') || s.includes('seat')) return 27;
+  if (s.includes('cyborg') && s.includes('shield')) return 22;
+  if (s.includes('cyborg')) return 21;
+  if (s.includes('force') || s.includes('shield') || s.includes('energy')) return 10;
+  if (s.includes('hollow')) return 5;
+  if (s.includes('thin') || s.includes('sheet') || s.includes('tin') || s.includes('aluminum')) return 6;
+  if (s.includes('metal') || s.includes('steel') || s.includes('iron') || s.includes('titanium') || s.includes('hull') || s.includes('armor') || s.includes('brass')) return 7;
+  return fallback;
+}
+
 export default function BuildObjectTagDialog({
   open,
   onClose,
@@ -111,8 +134,9 @@ export default function BuildObjectTagDialog({
   const [flipYz, setFlipYz] = useState<boolean>(false);
   const [centerOrigin, setCenterOrigin] = useState<boolean>(true);
   const [forceAutoUv, setForceAutoUv] = useState<boolean>(false);
-  const [multiBoxCollision, setMultiBoxCollision] = useState<boolean>(false);
-  const [materialType, setMaterialType] = useState<number>(7); // 7 = metal thick
+  const [multiBoxCollision, setMultiBoxCollision] = useState<boolean>(true);
+  const [materialType, setMaterialType] = useState<number>(7); // 7 = metal thick (for Scenery)
+  const [slotMaterialTypes, setSlotMaterialTypes] = useState<number[]>([7]);
 
   // Output options
   const [outputMode, setOutputMode] = useState<'inject' | 'ocetags' | 'both'>(
@@ -191,6 +215,10 @@ export default function BuildObjectTagDialog({
         if (cancelled) return;
         if (analysisRes?.ok && analysisRes.summary) {
           setMeshSummary(analysisRes.summary);
+          const slots: string[] = Array.isArray(analysisRes.summary.materialSlots) && analysisRes.summary.materialSlots.length > 0
+            ? analysisRes.summary.materialSlots
+            : ['default'];
+          setSlotMaterialTypes(slots.map((name) => inferMaterialTypeFromSlotName(name, 7)));
         } else if (analysisRes?.error) {
           setErrorMsg(analysisRes.error);
         }
@@ -289,6 +317,20 @@ export default function BuildObjectTagDialog({
 
     setBuilding(true);
     try {
+      const effectiveMaterialType =
+        tagGroup === 'scenery'
+          ? materialType
+          : tagGroup === 'equipment'
+            ? 6 // metal thin
+            : tagGroup === 'weapon'
+              ? 7 // metal thick
+              : slotMaterialTypes[0] ?? 7;
+
+      const effectiveSlotMaterials =
+        tagGroup === 'vehicle' || (meshSummary?.materialSlots?.length ?? 0) > 1
+          ? slotMaterialTypes
+          : undefined;
+
       const res = await window.opence.buildCustomObjectTag({
         tagGroup,
         tagPath,
@@ -301,7 +343,8 @@ export default function BuildObjectTagDialog({
         centerOrigin,
         forceAutoUv,
         multiBoxCollision,
-        materialType,
+        materialType: effectiveMaterialType,
+        slotMaterialTypes: effectiveSlotMaterials,
         templateTagIndex: templateTagIndex >= 0 ? templateTagIndex : undefined,
         outputMode,
         outputOceTagsPath,
@@ -616,7 +659,7 @@ export default function BuildObjectTagDialog({
               </label>
 
               <label
-                title="When enabled, if your .OBJ file contains multiple sub-objects/groups (o / g), generates a separate 3D collision box BSP for each sub-group (up to 8) instead of one single outer bounding box—ideal for L-shapes, archways, tables, or hollow frames."
+                title="When enabled (recommended), compiles a true 3D Polyhedral Mesh Collision BSP directly from the triangulated .OBJ so sloped ramps, bridges, curbs, arches, and concave shapes have exact per-triangle collision. Uncheck only to use a simple 6-plane rectangular bounding box."
                 style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12 }}
               >
                 <input
@@ -624,38 +667,137 @@ export default function BuildObjectTagDialog({
                   checked={multiBoxCollision}
                   onChange={(e) => setMultiBoxCollision(e.target.checked)}
                 />
-                Multi-Group Compound Collision Boxes
+                Exact 3D Mesh Collision BSP (Slopes, Ramps &amp; Concavities)
               </label>
             </div>
 
-            {/* Surface Material Type Selector */}
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
-              <span style={{ fontSize: 11, color: '#a1a1aa', minWidth: 155 }}>
-                Surface Material Type:
-              </span>
-              <select
-                value={materialType}
-                onChange={(e) => setMaterialType(Number(e.target.value))}
+            {/* Tag-Type-Scoped Surface Material Configuration */}
+            {tagGroup === 'scenery' && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
+                <span style={{ fontSize: 11, color: '#a1a1aa', minWidth: 155 }}>
+                  Scenery Surface Material:
+                </span>
+                <select
+                  value={materialType}
+                  onChange={(e) => setMaterialType(Number(e.target.value))}
+                  style={{
+                    flex: 1,
+                    padding: '5px 8px',
+                    backgroundColor: '#18181b',
+                    border: '1px solid #3f3f46',
+                    borderRadius: 4,
+                    color: '#f4f4f5',
+                    fontSize: 12,
+                  }}
+                >
+                  {HALO_MATERIAL_OPTIONS.map((m) => (
+                    <option key={m.index} value={m.index}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+                <span style={{ fontSize: 11, color: '#71717a' }}>
+                  Sets bullet impact effects, decals &amp; footsteps on Scenery Collision &amp; Shader
+                </span>
+              </div>
+            )}
+
+            {(tagGroup === 'weapon' || tagGroup === 'equipment') && (
+              <div
                 style={{
-                  flex: 1,
-                  padding: '5px 8px',
+                  marginTop: 10,
+                  padding: '6px 10px',
                   backgroundColor: '#18181b',
-                  border: '1px solid #3f3f46',
+                  border: '1px solid #32323c',
                   borderRadius: 4,
-                  color: '#f4f4f5',
-                  fontSize: 12,
+                  fontSize: 11,
+                  color: '#a1a1aa',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
                 }}
               >
-                {HALO_MATERIAL_OPTIONS.map((m) => (
-                  <option key={m.index} value={m.index}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-              <span style={{ fontSize: 11, color: '#71717a' }}>
-                Sets bullet impact effects, decals &amp; footsteps on both Collision &amp; Shader tags
-              </span>
-            </div>
+                <span>
+                  Surface Material Type ({tagGroup.toUpperCase()}):{' '}
+                  <strong style={{ color: '#e4e4e7' }}>
+                    {tagGroup === 'weapon'
+                      ? '7 — metal thick (Forced Standard Weapon Casing)'
+                      : '6 — metal thin (Forced Standard Equipment Casing)'}
+                  </strong>
+                </span>
+                <span style={{ color: '#71717a' }}>Automatic for {tagGroup} tags</span>
+              </div>
+            )}
+
+            {(tagGroup === 'vehicle' || ((meshSummary?.materialSlots?.length ?? 0) > 1 && tagGroup === 'scenery')) && (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: '8px 10px',
+                  backgroundColor: '#18181b',
+                  border: '1px solid #32323c',
+                  borderRadius: 5,
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 600, color: '#38bdf8', marginBottom: 6 }}>
+                  Blender Material Slots (<code>usemtl</code>) → Halo CE Collision Surface Materials
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {(meshSummary?.materialSlots?.length ? meshSummary.materialSlots : ['default (hull)']).map(
+                    (slotName: string, idx: number) => (
+                      <div key={`${slotName}-${idx}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span
+                          style={{
+                            minWidth: 165,
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            color: '#e4e4e7',
+                            backgroundColor: '#25252d',
+                            padding: '3px 7px',
+                            borderRadius: 3,
+                            border: '1px solid #383842',
+                          }}
+                        >
+                          usemtl {slotName}
+                        </span>
+                        <span style={{ color: '#71717a', fontSize: 11 }}>→</span>
+                        <select
+                          value={slotMaterialTypes[idx] ?? 7}
+                          onChange={(e) => {
+                            const val = Number(e.target.value);
+                            setSlotMaterialTypes((prev) => {
+                              const next = [...prev];
+                              next[idx] = val;
+                              return next;
+                            });
+                          }}
+                          style={{
+                            flex: 1,
+                            padding: '4px 8px',
+                            backgroundColor: '#22222a',
+                            border: '1px solid #3f3f46',
+                            borderRadius: 4,
+                            color: '#f4f4f5',
+                            fontSize: 12,
+                          }}
+                        >
+                          {HALO_MATERIAL_OPTIONS.map((m) => (
+                            <option key={m.index} value={m.index}>
+                              {m.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ),
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: '#71717a', marginTop: 6 }}>
+                  Assign multiple materials in Blender (e.g. <code>hull_metal</code>, <code>windshield_glass</code>,{' '}
+                  <code>tire_rubber</code>) before exporting <code>.obj</code> — each triangle surface receives its own
+                  Halo CE physics/impact material!
+                </div>
+              </div>
+            )}
 
             {/* Optional Custom Collision Proxy OBJ */}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>

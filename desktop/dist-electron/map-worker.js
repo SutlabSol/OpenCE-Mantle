@@ -39835,9 +39835,9 @@ function decodeTriangleStrip(buffer, stripFileOffset, vertexCount, triangleCount
       else out.push(b, a, idx);
       a = b;
       b = idx;
+      produced++;
     }
     n++;
-    if (n >= 2) produced++;
   }
   return new Uint16Array(out);
 }
@@ -45608,7 +45608,19 @@ function parseObjMesh(objText, options = {}) {
   const rawUvs = [];
   const rawNormals = [];
   const rawTriangles = [];
+  const materialSlots = [];
+  const materialSlotMap = /* @__PURE__ */ new Map();
   let currentGroupId = 0;
+  let currentMaterialSlotIndex = 0;
+  const getOrCreateMaterialSlot = (name) => {
+    const clean = name.trim() || "default";
+    const existing = materialSlotMap.get(clean);
+    if (existing !== void 0) return existing;
+    const idx = materialSlots.length;
+    materialSlots.push(clean);
+    materialSlotMap.set(clean, idx);
+    return idx;
+  };
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
@@ -45616,6 +45628,9 @@ function parseObjMesh(objText, options = {}) {
     const prefix = parts[0].toLowerCase();
     if (prefix === "g" || prefix === "o") {
       if (rawTriangles.length > 0) currentGroupId++;
+    } else if (prefix === "usemtl") {
+      const matName = trimmed.slice(6).trim() || "default";
+      currentMaterialSlotIndex = getOrCreateMaterialSlot(matName);
     } else if (prefix === "v") {
       const rx = (parseFloat(parts[1]) || 0) * scale;
       const ry = (parseFloat(parts[2]) || 0) * scale;
@@ -45633,6 +45648,9 @@ function parseObjMesh(objText, options = {}) {
       const norm = flipYz ? normalizeVec3(nx, -nz, ny) : normalizeVec3(nx, ny, nz);
       rawNormals.push(norm);
     } else if (prefix === "f") {
+      if (materialSlots.length === 0) {
+        currentMaterialSlotIndex = getOrCreateMaterialSlot("default");
+      }
       const corners = [];
       for (let i = 1; i < parts.length; i++) {
         const segs = parts[i].split("/");
@@ -45656,7 +45674,8 @@ function parseObjMesh(objText, options = {}) {
       for (let i = 1; i < corners.length - 1; i++) {
         rawTriangles.push({
           corners: [corners[0], corners[i], corners[i + 1]],
-          groupId: currentGroupId
+          groupId: currentGroupId,
+          materialSlotIndex: currentMaterialSlotIndex
         });
       }
     }
@@ -45669,6 +45688,7 @@ function parseObjMesh(objText, options = {}) {
       normalCount: 0,
       hasUvCoordinates: false,
       hasNormals: false,
+      materialSlots: ["default"],
       bounds: { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0], radius: 0 },
       isTooComplex: true,
       message: "No valid 3D mesh vertices or faces were found in this OBJ file."
@@ -45677,6 +45697,9 @@ function parseObjMesh(objText, options = {}) {
       summary: emptySummary,
       vertices: [],
       triangles: [],
+      rawPositions: [],
+      rawFaces: [],
+      triangleMaterialSlots: [],
       usedAutoUv: false,
       groupBounds: []
     };
@@ -45715,12 +45738,25 @@ function parseObjMesh(objText, options = {}) {
   const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv);
   const vertices = [];
   const triangles = [];
+  const rawFaces = [];
+  const triangleMaterialSlots = [];
   const vertexLookup = /* @__PURE__ */ new Map();
   const groupMinMax = /* @__PURE__ */ new Map();
   for (const tri of rawTriangles) {
-    const p0 = rawPositions[tri.corners[0].vIdx];
-    const p1 = rawPositions[tri.corners[1].vIdx];
-    const p2 = rawPositions[tri.corners[2].vIdx];
+    const v0 = tri.corners[0].vIdx;
+    const v1 = tri.corners[1].vIdx;
+    const v2 = tri.corners[2].vIdx;
+    const p0 = rawPositions[v0];
+    const p1 = rawPositions[v1];
+    const p2 = rawPositions[v2];
+    rawFaces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: tri.materialSlotIndex,
+      groupId: tri.groupId
+    });
+    triangleMaterialSlots.push(tri.materialSlotIndex);
     let gb = groupMinMax.get(tri.groupId);
     if (!gb) {
       gb = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
@@ -45759,7 +45795,7 @@ function parseObjMesh(objText, options = {}) {
           tangent,
           uv,
           node0Index: 0,
-          node1Index: -1,
+          node1Index: 0,
           node0Weight: 1,
           node1Weight: 0
         });
@@ -45775,6 +45811,7 @@ function parseObjMesh(objText, options = {}) {
   const MAX_SIMPLE_TRIANGLES = 64;
   const isTooComplex = rawTriangles.length > MAX_SIMPLE_TRIANGLES;
   const uvStatus = hasUvCoordinates ? `${rawUvs.length} UV coords` : "Auto-unwrapped (6-face Box UV Atlas)";
+  const finalMaterialSlots = materialSlots.length > 0 ? materialSlots : ["default"];
   const summary = {
     vertexCount: rawPositions.length,
     triangleCount: rawTriangles.length,
@@ -45782,6 +45819,7 @@ function parseObjMesh(objText, options = {}) {
     normalCount: rawNormals.length,
     hasUvCoordinates,
     hasNormals: rawNormals.length > 0,
+    materialSlots: finalMaterialSlots,
     bounds: {
       min: minBounds,
       max: maxBounds,
@@ -45795,6 +45833,9 @@ function parseObjMesh(objText, options = {}) {
     summary,
     vertices,
     triangles,
+    rawPositions,
+    rawFaces,
+    triangleMaterialSlots,
     usedAutoUv,
     groupBounds
   };
@@ -46084,12 +46125,49 @@ function buildCustomBitmapTag(tagPath, originalIndex, rgbaInput, inputWidth, inp
     injectionBlockers: []
   };
 }
-function buildCustomShaderModelTag(tagPath, originalIndex, bitmapPath, bitmapLocalIndex) {
+var HALO_MATERIAL_TYPES = [
+  "dirt",
+  "sand",
+  "stone",
+  "snow",
+  "wood",
+  "metal hollow",
+  "metal thin",
+  "metal thick",
+  "rubber",
+  "glass",
+  "force field",
+  "grunt",
+  "hunter armor",
+  "hunter skin",
+  "elite",
+  "jackal",
+  "jackal energy shield",
+  "engineer skin",
+  "engineer force field",
+  "flood combat form",
+  "flood carrier form",
+  "cyborg armor",
+  "cyborg energy shield",
+  "human armor",
+  "human skin",
+  "sentinel",
+  "monitor",
+  "plastic",
+  "water",
+  "leaves",
+  "elite energy shield",
+  "ice",
+  "hunter shield"
+];
+function buildCustomShaderModelTag(tagPath, originalIndex, bitmapPath, bitmapLocalIndex, materialType = 7) {
   const buf = Buffer.alloc(440, 0);
+  const safeMat = materialType >= 0 && materialType < HALO_MATERIAL_TYPES.length ? materialType : 7;
   writeDependencyField(buf, 164, "bitm", bitmapLocalIndex);
   writeDependencyField(buf, 188, "bitm", NULL_TAG_ID);
   writeDependencyField(buf, 220, "bitm", NULL_TAG_ID);
   writeDependencyField(buf, 356, "bitm", NULL_TAG_ID);
+  buf.writeUInt16LE(safeMat, 34);
   buf.writeUInt16LE(4, 36);
   buf.writeFloatLE(1, 116);
   buf.writeFloatLE(1, 156);
@@ -46212,19 +46290,43 @@ function extractTemplateRigFromMap(mapBuffer, header, tagIndex, templateObjectTa
     collisionHeaderBuffer
   };
 }
+function inferHaloMaterialTypeFromName(slotName, fallback = 7) {
+  const s = slotName.trim().toLowerCase();
+  if (!s) return fallback;
+  const exactIdx = HALO_MATERIAL_TYPES.indexOf(s);
+  if (exactIdx >= 0) return exactIdx;
+  if (s.includes("glass") || s.includes("windshield") || s.includes("window") || s.includes("visor") || s.includes("canopy")) return 9;
+  if (s.includes("rubber") || s.includes("tire") || s.includes("tyre") || s.includes("wheel") || s.includes("tread")) return 8;
+  if (s.includes("wood") || s.includes("plank") || s.includes("timber") || s.includes("bark") || s.includes("crate")) return 4;
+  if (s.includes("stone") || s.includes("rock") || s.includes("concrete") || s.includes("brick") || s.includes("granite") || s.includes("boulder")) return 2;
+  if (s.includes("dirt") || s.includes("mud") || s.includes("soil") || s.includes("earth")) return 0;
+  if (s.includes("sand") || s.includes("desert") || s.includes("dune")) return 1;
+  if (s.includes("snow") || s.includes("frost")) return 3;
+  if (s.includes("ice") || s.includes("glacier")) return 31;
+  if (s.includes("water") || s.includes("liquid")) return 28;
+  if (s.includes("leaf") || s.includes("leaves") || s.includes("foliage") || s.includes("grass") || s.includes("bush")) return 29;
+  if (s.includes("plastic") || s.includes("polymer") || s.includes("vinyl") || s.includes("seat")) return 27;
+  if (s.includes("cyborg") && s.includes("shield")) return 22;
+  if (s.includes("cyborg")) return 21;
+  if (s.includes("force") || s.includes("shield") || s.includes("energy")) return 10;
+  if (s.includes("hollow")) return 5;
+  if (s.includes("thin") || s.includes("sheet") || s.includes("tin") || s.includes("aluminum")) return 6;
+  if (s.includes("metal") || s.includes("steel") || s.includes("iron") || s.includes("titanium") || s.includes("hull") || s.includes("armor") || s.includes("brass")) return 7;
+  return fallback;
+}
 function stitchTrianglesToStrip(triangles) {
   const stripIndices = [];
   for (let i = 0; i < triangles.length; i++) {
     const [a, b, c] = triangles[i];
     if (i === 0) {
-      stripIndices.push(a, b, c);
+      stripIndices.push(a, c, b);
     } else {
       const prev = stripIndices[stripIndices.length - 1];
-      stripIndices.push(prev, a);
+      stripIndices.push(prev, a, a);
       if ((stripIndices.length - 1) % 2 === 1) {
         stripIndices.push(a);
       }
-      stripIndices.push(b, c);
+      stripIndices.push(c, b);
     }
   }
   const triangleCount = Math.max(1, stripIndices.length - 2);
@@ -46385,7 +46487,7 @@ function buildCustomGbxmodelTag(tagPath, originalIndex, mesh, shaderPath, shader
   buf.writeUInt16LE(4, offParts + 84);
   buf.writeUInt32LE(mesh.vertices.length, offParts + 88);
   buf.writeUInt32LE(0, offParts + 100);
-  writeDependencyField(buf, offShaders + 0, "shdr", shaderLocalIndex);
+  writeDependencyField(buf, offShaders + 0, "soso", shaderLocalIndex);
   const internalMap = /* @__PURE__ */ new Map();
   internalMap.set(`${reflexiveElementPath(tagPath, "shaders", 0)}.shader`, {
     group: "shader_model",
@@ -46548,54 +46650,360 @@ function writeBoxCollisionBsp(targetBuf, structOff, arraysOff, boundsMin, bounds
   targetBuf.writeUInt32LE(offVertices, structOff + 88);
   return cursor;
 }
-function buildCustomCollisionTag(tagPath, originalIndex, mesh, rig, multiBox = false) {
+function compileMeshCollisionBspData(mesh, materialCount) {
+  if (mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0 || mesh.rawFaces.length > 512) {
+    return null;
+  }
+  const planes = [];
+  const findOrAddPlane = (nx, ny, nz, d) => {
+    for (let i = 0; i < planes.length; i++) {
+      const p = planes[i];
+      if (Math.abs(p[0] - nx) < 1e-4 && Math.abs(p[1] - ny) < 1e-4 && Math.abs(p[2] - nz) < 1e-4 && Math.abs(p[3] - d) < 1e-3) {
+        return i;
+      }
+    }
+    const idx = planes.length;
+    planes.push([nx, ny, nz, d]);
+    return idx;
+  };
+  const validTris = [];
+  for (const face of mesh.rawFaces) {
+    const p0 = mesh.rawPositions[face.v0];
+    const p1 = mesh.rawPositions[face.v1];
+    const p2 = mesh.rawPositions[face.v2];
+    if (!p0 || !p1 || !p2) continue;
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const area2 = Math.hypot(cx, cy, cz);
+    if (area2 < 1e-6) continue;
+    const nx = cx / area2;
+    const ny = cy / area2;
+    const nz = cz / area2;
+    const d = nx * p0[0] + ny * p0[1] + nz * p0[2];
+    const planeIdx = findOrAddPlane(nx, ny, nz, d);
+    const pl = planes[planeIdx];
+    const winding = cx * pl[0] + cy * pl[1] + cz * pl[2];
+    const ring = winding >= 0 ? [face.v0, face.v1, face.v2] : [face.v0, face.v2, face.v1];
+    const matIdx = Math.max(0, Math.min(materialCount - 1, face.materialSlotIndex));
+    validTris.push({ ring, planeIdx, materialIndex: matIdx });
+  }
+  if (validTris.length === 0 || planes.length === 0) {
+    return null;
+  }
+  const surfaces = [];
+  const edges = [];
+  const vertexFirstEdge = new Array(mesh.rawPositions.length).fill(-1);
+  for (let surfIdx = 0; surfIdx < validTris.length; surfIdx++) {
+    const tri = validTris[surfIdx];
+    const ring = tri.ring;
+    const ringEdges = [0, 0, 0];
+    for (let point = 0; point < 3; point++) {
+      const from = ring[point];
+      const to = ring[(point + 1) % 3];
+      let edgeIndex = -1;
+      for (let e = 0; e < edges.length; e++) {
+        if (edges[e].vertexIndices[0] === to && edges[e].vertexIndices[1] === from && edges[e].surfaceIndices[1] === -1) {
+          edgeIndex = e;
+          break;
+        }
+      }
+      if (edgeIndex === -1) {
+        edgeIndex = edges.length;
+        edges.push({
+          vertexIndices: [from, to],
+          edgeIndices: [-1, -1],
+          surfaceIndices: [surfIdx, -1]
+        });
+      } else {
+        edges[edgeIndex].surfaceIndices[1] = surfIdx;
+      }
+      if (vertexFirstEdge[from] === -1) {
+        vertexFirstEdge[from] = edgeIndex;
+      }
+      ringEdges[point] = edgeIndex;
+    }
+    for (let point = 0; point < 3; point++) {
+      const edge = edges[ringEdges[point]];
+      const side = edge.surfaceIndices[1] === surfIdx ? 1 : 0;
+      edge.edgeIndices[side] = ringEdges[(point + 1) % 3];
+    }
+    surfaces.push({
+      planeDesignator: tri.planeIdx,
+      firstEdgeIndex: ringEdges[0],
+      materialIndex: tri.materialIndex
+    });
+  }
+  for (let e = 0; e < edges.length; e++) {
+    const [v0, v1] = edges[e].vertexIndices;
+    if (vertexFirstEdge[v0] === -1) vertexFirstEdge[v0] = e;
+    if (vertexFirstEdge[v1] === -1) vertexFirstEdge[v1] = e;
+  }
+  const vertices = mesh.rawPositions.map((pt, idx) => ({
+    point: [pt[0], pt[1], pt[2]],
+    firstEdgeIndex: vertexFirstEdge[idx] >= 0 ? vertexFirstEdge[idx] : 0
+  }));
+  const EPS = 1e-4;
+  const clipPolyAgainstPlane = (pts, plane) => {
+    const dists = pts.map((p) => plane[0] * p[0] + plane[1] * p[1] + plane[2] * p[2] - plane[3]);
+    const maxD = Math.max(...dists);
+    const minD = Math.min(...dists);
+    if (Math.abs(maxD) <= EPS && Math.abs(minD) <= EPS) {
+      return { front: null, back: null, state: "coplanar" };
+    }
+    if (minD >= -EPS) {
+      return { front: pts, back: null, state: "front" };
+    }
+    if (maxD <= EPS) {
+      return { front: null, back: pts, state: "back" };
+    }
+    const frontPts = [];
+    const backPts = [];
+    for (let i = 0; i < pts.length; i++) {
+      const j = (i + 1) % pts.length;
+      const pA = pts[i], pB = pts[j];
+      const dA = dists[i], dB = dists[j];
+      if (dA >= -EPS) frontPts.push(pA);
+      if (dA <= EPS) backPts.push(pA);
+      if (dA > EPS && dB < -EPS || dA < -EPS && dB > EPS) {
+        const t = dA / (dA - dB);
+        const inter = [
+          pA[0] + t * (pB[0] - pA[0]),
+          pA[1] + t * (pB[1] - pA[1]),
+          pA[2] + t * (pB[2] - pA[2])
+        ];
+        frontPts.push(inter);
+        backPts.push(inter);
+      }
+    }
+    return {
+      front: frontPts.length >= 3 ? frontPts : null,
+      back: backPts.length >= 3 ? backPts : null,
+      state: "split"
+    };
+  };
+  const bsp3dNodes = [];
+  const buildTree = (polys, usedPlanes, depth) => {
+    if (polys.length === 0 || depth >= 48 || bsp3dNodes.length >= 2048) {
+      return 4294967295;
+    }
+    const candidatePlanes = Array.from(new Set(polys.map((p) => p.planeIdx))).filter(
+      (pIdx) => !usedPlanes.has(pIdx)
+    );
+    if (candidatePlanes.length === 0) {
+      return 4294967295;
+    }
+    let bestPlane = candidatePlanes[0];
+    let bestScore = Infinity;
+    for (const pIdx of candidatePlanes) {
+      const pl2 = planes[pIdx];
+      let frontCount = 0, backCount = 0, splitCount = 0;
+      for (const poly of polys) {
+        if (poly.planeIdx === pIdx) continue;
+        const c = clipPolyAgainstPlane(poly.pts, pl2);
+        if (c.state === "front") frontCount++;
+        else if (c.state === "back") backCount++;
+        else if (c.state === "split") splitCount++;
+      }
+      const score = frontCount === 0 && splitCount === 0 ? -1e3 - backCount : splitCount * 4 + Math.abs(frontCount - backCount);
+      if (score < bestScore) {
+        bestScore = score;
+        bestPlane = pIdx;
+      }
+    }
+    const pl = planes[bestPlane];
+    const frontList = [];
+    const backList = [];
+    for (const poly of polys) {
+      if (poly.planeIdx === bestPlane) continue;
+      const c = clipPolyAgainstPlane(poly.pts, pl);
+      if (c.state === "coplanar") {
+        const op = planes[poly.planeIdx];
+        const dot = pl[0] * op[0] + pl[1] * op[1] + pl[2] * op[2];
+        if (dot < 0) backList.push(poly);
+      } else {
+        if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx });
+        if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx });
+      }
+    }
+    const nodeIdx = bsp3dNodes.length;
+    bsp3dNodes.push([bestPlane, 4294967295, 2147483648]);
+    const nextUsed = new Set(usedPlanes);
+    nextUsed.add(bestPlane);
+    const frontChild = frontList.length === 0 ? 2147483648 : buildTree(frontList, nextUsed, depth + 1);
+    const backChild = backList.length === 0 ? 4294967295 : buildTree(backList, nextUsed, depth + 1);
+    bsp3dNodes[nodeIdx][1] = backChild >>> 0;
+    bsp3dNodes[nodeIdx][2] = frontChild >>> 0;
+    return nodeIdx;
+  };
+  const initialPolys = validTris.map((tri) => ({
+    pts: [
+      mesh.rawPositions[tri.ring[0]],
+      mesh.rawPositions[tri.ring[1]],
+      mesh.rawPositions[tri.ring[2]]
+    ],
+    planeIdx: tri.planeIdx
+  }));
+  buildTree(initialPolys, /* @__PURE__ */ new Set(), 0);
+  if (bsp3dNodes.length === 0) {
+    return null;
+  }
+  const leaves = [
+    [0, surfaces.length, 0]
+  ];
+  const bsp2dReferences = surfaces.map((s, idx) => [
+    s.planeDesignator,
+    (2147483648 | idx) >>> 0
+  ]);
+  const byteSize = bsp3dNodes.length * 12 + planes.length * 16 + leaves.length * 8 + bsp2dReferences.length * 8 + surfaces.length * 12 + edges.length * 24 + vertices.length * 16;
+  return {
+    bsp3dNodes,
+    planes,
+    leaves,
+    bsp2dReferences,
+    surfaces,
+    edges,
+    vertices,
+    byteSize
+  };
+}
+function writeMeshCollisionBsp(targetBuf, structOff, arraysOff, compiled) {
+  let cursor = arraysOff;
+  const offBsp3dNodes = cursor;
+  for (const node of compiled.bsp3dNodes) {
+    targetBuf.writeInt32LE(node[0], cursor + 0);
+    targetBuf.writeUInt32LE(node[1] >>> 0, cursor + 4);
+    targetBuf.writeUInt32LE(node[2] >>> 0, cursor + 8);
+    cursor += 12;
+  }
+  const offPlanes = cursor;
+  for (const plane of compiled.planes) {
+    targetBuf.writeFloatLE(plane[0], cursor + 0);
+    targetBuf.writeFloatLE(plane[1], cursor + 4);
+    targetBuf.writeFloatLE(plane[2], cursor + 8);
+    targetBuf.writeFloatLE(plane[3], cursor + 12);
+    cursor += 16;
+  }
+  const offLeaves = cursor;
+  for (const leaf of compiled.leaves) {
+    targetBuf.writeUInt16LE(leaf[0] & 65535, cursor + 0);
+    targetBuf.writeUInt16LE(leaf[1] & 65535, cursor + 2);
+    targetBuf.writeUInt32LE(leaf[2] >>> 0, cursor + 4);
+    cursor += 8;
+  }
+  const offBsp2dRefs = cursor;
+  for (const ref of compiled.bsp2dReferences) {
+    targetBuf.writeUInt32LE(ref[0] >>> 0, cursor + 0);
+    targetBuf.writeUInt32LE(ref[1] >>> 0, cursor + 4);
+    cursor += 8;
+  }
+  const offSurfaces = cursor;
+  for (const surf of compiled.surfaces) {
+    targetBuf.writeUInt32LE(surf.planeDesignator >>> 0, cursor + 0);
+    targetBuf.writeUInt32LE(surf.firstEdgeIndex >>> 0, cursor + 4);
+    targetBuf.writeUInt8(0, cursor + 8);
+    targetBuf.writeUInt8(255, cursor + 9);
+    targetBuf.writeInt16LE(surf.materialIndex, cursor + 10);
+    cursor += 12;
+  }
+  const offEdges = cursor;
+  for (const edge of compiled.edges) {
+    targetBuf.writeInt32LE(edge.vertexIndices[0], cursor + 0);
+    targetBuf.writeInt32LE(edge.vertexIndices[1], cursor + 4);
+    targetBuf.writeInt32LE(edge.edgeIndices[0], cursor + 8);
+    targetBuf.writeInt32LE(edge.edgeIndices[1], cursor + 12);
+    targetBuf.writeInt32LE(edge.surfaceIndices[0], cursor + 16);
+    targetBuf.writeInt32LE(edge.surfaceIndices[1], cursor + 20);
+    cursor += 24;
+  }
+  const offVertices = cursor;
+  for (const vert of compiled.vertices) {
+    targetBuf.writeFloatLE(vert.point[0], cursor + 0);
+    targetBuf.writeFloatLE(vert.point[1], cursor + 4);
+    targetBuf.writeFloatLE(vert.point[2], cursor + 8);
+    targetBuf.writeInt32LE(vert.firstEdgeIndex, cursor + 12);
+    cursor += 16;
+  }
+  targetBuf.writeUInt32LE(compiled.bsp3dNodes.length, structOff + 0);
+  targetBuf.writeUInt32LE(offBsp3dNodes, structOff + 4);
+  targetBuf.writeUInt32LE(compiled.planes.length, structOff + 12);
+  targetBuf.writeUInt32LE(offPlanes, structOff + 16);
+  targetBuf.writeUInt32LE(compiled.leaves.length, structOff + 24);
+  targetBuf.writeUInt32LE(offLeaves, structOff + 28);
+  targetBuf.writeUInt32LE(compiled.bsp2dReferences.length, structOff + 36);
+  targetBuf.writeUInt32LE(offBsp2dRefs, structOff + 40);
+  targetBuf.writeUInt32LE(0, structOff + 48);
+  targetBuf.writeUInt32LE(0, structOff + 52);
+  targetBuf.writeUInt32LE(compiled.surfaces.length, structOff + 60);
+  targetBuf.writeUInt32LE(offSurfaces, structOff + 64);
+  targetBuf.writeUInt32LE(compiled.edges.length, structOff + 72);
+  targetBuf.writeUInt32LE(offEdges, structOff + 76);
+  targetBuf.writeUInt32LE(compiled.vertices.length, structOff + 84);
+  targetBuf.writeUInt32LE(offVertices, structOff + 88);
+  return cursor;
+}
+function buildCustomCollisionTag(tagPath, originalIndex, mesh, rig, exactMeshCollision = true, materialType = 7, slotMaterialTypes) {
   const nodeCount = rig && rig.modelNodeCount > 0 ? rig.modelNodeCount : 1;
-  const boxes = multiBox && mesh.groupBounds.length > 1 && mesh.groupBounds.length <= 8 ? mesh.groupBounds : [{ min: mesh.summary.bounds.min, max: mesh.summary.bounds.max }];
-  const bspCount = boxes.length;
+  const slotNames = mesh.summary.materialSlots.length > 0 ? mesh.summary.materialSlots : ["default"];
+  const materials = slotNames.map((slotName, idx) => {
+    const explicitType = slotMaterialTypes && slotMaterialTypes[idx] !== void 0 ? slotMaterialTypes[idx] : slotNames.length > 1 ? inferHaloMaterialTypeFromName(slotName, materialType) : materialType;
+    const safeType = explicitType >= 0 && explicitType < HALO_MATERIAL_TYPES.length ? explicitType : 7;
+    const cleanName = slotName === "default" ? HALO_MATERIAL_TYPES[safeType] ?? "metal thick" : slotName;
+    return { name: cleanName, haloMaterialType: safeType };
+  });
+  const materialCount = Math.max(1, materials.length);
+  const compiledMeshBsp = exactMeshCollision ? compileMeshCollisionBspData(mesh, materialCount) : null;
+  const bspCount = 1;
+  const bspArraysByteSize = compiledMeshBsp ? compiledMeshBsp.byteSize : 752;
   const offMaterials = 664;
-  const offRegions = offMaterials + 72;
+  const offRegions = offMaterials + materialCount * 72;
   const offPermutations = offRegions + 84;
   const offSpheres = offPermutations + 32;
   const offNodes = offSpheres + 32;
   const offBsps = offNodes + nodeCount * 64;
   const offBspArrays = offBsps + bspCount * 96;
-  const totalSize = offBspArrays + bspCount * 752;
+  const totalSize = offBspArrays + bspArraysByteSize;
   const buf = Buffer.alloc(totalSize, 0);
   if (rig?.collisionHeaderBuffer && rig.collisionHeaderBuffer.length >= 664) {
-    rig.collisionHeaderBuffer.copy(buf, 0, 0, 556);
+    rig.collisionHeaderBuffer.copy(buf, 0, 0, 564);
   }
-  writeDependencyField(buf, 16, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 40, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 60, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 76, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 96, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 192, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 208, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 224, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 252, "shdr", NULL_TAG_ID);
-  writeDependencyField(buf, 268, "effe", NULL_TAG_ID);
-  writeDependencyField(buf, 284, "snd!", NULL_TAG_ID);
-  buf.writeUInt32LE(1, 556);
-  buf.writeUInt32LE(offMaterials, 560);
-  buf.writeUInt32LE(1, 568);
-  buf.writeUInt32LE(offRegions, 572);
-  buf.writeUInt32LE(0, 580);
-  buf.writeUInt32LE(0, 584);
-  buf.writeFloatLE(mesh.summary.bounds.min[0], 600);
-  buf.writeFloatLE(mesh.summary.bounds.max[0], 604);
-  buf.writeFloatLE(mesh.summary.bounds.min[1], 608);
-  buf.writeFloatLE(mesh.summary.bounds.max[1], 612);
-  buf.writeFloatLE(mesh.summary.bounds.min[2], 616);
-  buf.writeFloatLE(mesh.summary.bounds.max[2], 620);
+  buf.writeInt16LE(0, 4);
+  if (buf.readUInt16LE(210) >= 33) buf.writeUInt16LE(0, 210);
+  if (buf.readInt16LE(236) < 0 || buf.readInt16LE(236) >= 6) buf.writeInt16LE(0, 236);
+  writeDependencyField(buf, 112, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 132, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 152, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 168, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 188, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 392, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 408, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 424, "effe", NULL_TAG_ID);
+  buf.writeUInt32LE(materialCount, 564);
+  buf.writeUInt32LE(offMaterials, 568);
+  buf.writeUInt32LE(1, 576);
+  buf.writeUInt32LE(offRegions, 580);
+  buf.writeUInt32LE(0, 588);
+  buf.writeUInt32LE(0, 592);
+  buf.writeFloatLE(mesh.summary.bounds.min[0], 616);
+  buf.writeFloatLE(mesh.summary.bounds.max[0], 620);
+  buf.writeFloatLE(mesh.summary.bounds.min[1], 624);
+  buf.writeFloatLE(mesh.summary.bounds.max[1], 628);
+  buf.writeFloatLE(mesh.summary.bounds.min[2], 632);
+  buf.writeFloatLE(mesh.summary.bounds.max[2], 636);
   buf.writeUInt32LE(1, 640);
   buf.writeUInt32LE(offSpheres, 644);
   buf.writeUInt32LE(nodeCount, 652);
   buf.writeUInt32LE(offNodes, 656);
-  writeTagString(buf, offMaterials, "metal (solid)");
-  buf.writeUInt32LE(0, offMaterials + 32);
-  buf.writeUInt16LE(9, offMaterials + 36);
-  buf.writeFloatLE(1, offMaterials + 40);
-  buf.writeFloatLE(1, offMaterials + 44);
+  for (let m = 0; m < materialCount; m++) {
+    const mOff = offMaterials + m * 72;
+    writeTagString(buf, mOff, materials[m].name);
+    buf.writeUInt32LE(0, mOff + 32);
+    buf.writeUInt16LE(materials[m].haloMaterialType, mOff + 36);
+    buf.writeFloatLE(1, mOff + 40);
+    buf.writeFloatLE(1, mOff + 44);
+  }
   writeTagString(buf, offRegions, "default");
   writeDependencyField(buf, offRegions + 56, "effe", NULL_TAG_ID);
   buf.writeUInt32LE(1, offRegions + 72);
@@ -46629,18 +47037,19 @@ function buildCustomCollisionTag(tagPath, originalIndex, mesh, rig, multiBox = f
       buf.writeInt16LE(-1, nOff + 38);
     }
     if (i === 0) {
-      buf.writeUInt32LE(bspCount, nOff + 52);
+      buf.writeUInt32LE(1, nOff + 52);
       buf.writeUInt32LE(offBsps, nOff + 56);
     }
   }
-  let arrayCursor = offBspArrays;
-  for (let b = 0; b < bspCount; b++) {
-    arrayCursor = writeBoxCollisionBsp(
+  if (compiledMeshBsp) {
+    writeMeshCollisionBsp(buf, offBsps, offBspArrays, compiledMeshBsp);
+  } else {
+    writeBoxCollisionBsp(
       buf,
-      offBsps + b * 96,
-      arrayCursor,
-      boxes[b].min,
-      boxes[b].max
+      offBsps,
+      offBspArrays,
+      mesh.summary.bounds.min,
+      mesh.summary.bounds.max
     );
   }
   const dependencies = buildTagDependenciesFromBuffer(
@@ -46826,11 +47235,14 @@ function buildCustomObjectContainer(options) {
     texture.height,
     options.bitmapFormat ?? BitmapFormat.A8R8G8B8
   );
+  const defaultMatByGroup = options.tagGroup === "equipment" ? 6 : 7;
+  const matType = options.materialType !== void 0 ? options.materialType : options.slotMaterialTypes && options.slotMaterialTypes.length > 0 ? options.slotMaterialTypes[0] : defaultMatByGroup;
   const shaderTag = buildCustomShaderModelTag(
     shaderPath,
     shaderOrigIdx,
     bitmapPath,
-    bitmapLocalIdx
+    bitmapLocalIdx,
+    matType
   );
   const gbxmodelTag = buildCustomGbxmodelTag(
     gbxmodelPath,
@@ -46840,12 +47252,15 @@ function buildCustomObjectContainer(options) {
     shaderLocalIdx,
     options.templateRig
   );
+  const exactMeshCollision = options.multiBoxCollision !== void 0 ? Boolean(options.multiBoxCollision) : true;
   const collisionTag = buildCustomCollisionTag(
     collisionPath,
     collisionOrigIdx,
     collisionMesh.triangles.length > 0 ? collisionMesh : renderMesh,
     options.templateRig,
-    Boolean(options.multiBoxCollision)
+    exactMeshCollision,
+    matType,
+    options.slotMaterialTypes
   );
   const templateDepRemap = /* @__PURE__ */ new Map();
   if (templateRootTag) {
@@ -48716,6 +49131,8 @@ function runBuildCustomObjectTag(task) {
       },
       textureRgba,
       multiBoxCollision: req.multiBoxCollision,
+      materialType: req.materialType,
+      slotMaterialTypes: req.slotMaterialTypes,
       templateExtractedSet,
       templateRig,
       sourceMapName: currentMap ? path2.basename(currentMap.filePath, ".map") : "custom_object_builder"
@@ -48729,7 +49146,18 @@ function runBuildCustomObjectTag(task) {
     let injectedIntoMap = false;
     if (needsInject && currentMap) {
       progress(task.requestId, "Injecting compiled object tags into open map...", 90);
-      const planResult = planAddInjection(
+      const rootAlreadyExists = built.container.tags.length === 5 && currentMap.tagIndex.entries.some(
+        (e) => e.primaryClassName === built.rootTagGroup && e.path.toLowerCase() === built.rootTagPath.toLowerCase()
+      );
+      if (rootAlreadyExists) {
+        built.container.rootTagIndices = [0, 1, 2, 3, 4];
+      }
+      const planResult = rootAlreadyExists ? planSwapInjection(
+        currentMap,
+        built.container,
+        {},
+        { allowEmbeddedRelocation: true }
+      ) : planAddInjection(
         currentMap,
         built.container,
         {},
@@ -48742,7 +49170,14 @@ function runBuildCustomObjectTag(task) {
         const reasons = [...planResult.blockedOther, ...planResult.blockedEmbedded].flatMap((b) => b.reasons).join("; ");
         return sendError(task.requestId, "INJECT_BLOCKED", `Tag injection blocked: ${reasons}`);
       }
-      const nextBuffer = applyAddInjection(
+      const nextBuffer = rootAlreadyExists ? applySwapInjection(
+        currentMap.buffer,
+        currentMap.header,
+        currentMap.tagIndex,
+        built.container,
+        planResult,
+        { allowEmbeddedRelocation: true }
+      ) : applyAddInjection(
         currentMap.buffer,
         currentMap.header,
         currentMap.tagIndex,

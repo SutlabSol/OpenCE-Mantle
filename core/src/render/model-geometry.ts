@@ -95,9 +95,9 @@ function decodeTriangleStrip(
       else out.push(b, a, idx);
       a = b;
       b = idx;
+      produced++;
     }
     n++;
-    if (n >= 2) produced++;
   }
   return new Uint16Array(out);
 }
