@@ -60,7 +60,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     cutsceneCameras: true,
     netgameFlags: true,
   });
-  const [renderMode, setRenderMode] = useState<RenderMode>('textured-wireframe');
+  const [renderMode, setRenderMode] = useState<RenderMode>('textured');
   const [cameraSpeed, setCameraSpeed] = useState<number>(60);
   const [cameraPosDisplay, setCameraPosDisplay] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
   const [webGLSupported] = useState<boolean>(() => isWebGLAvailable());
@@ -162,7 +162,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     netgameFlags: THREE.Group;
   } | null>(null);
   const submeshMeshesRef = useRef<{ mesh: THREE.Mesh; lines: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial; bspIndex?: number }[]>([]);
-  const objectMeshesRef = useRef<{ mesh: THREE.Mesh; lines?: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial }[]>([]);
+  const objectMeshesRef = useRef<{ mesh: THREE.Mesh; lines?: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial; shaderTagId?: number }[]>([]);
   const textureCacheRef = useRef<Map<number, Promise<THREE.Texture | null>>>(new Map());
   const modelCacheRef = useRef<Map<number, Promise<ModelRenderGeometry | null>>>(new Map());
 
@@ -791,6 +791,26 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     return promise;
   }, []);
 
+  // Refresh 3D viewport textures immediately when a bitmap tag is modified in the Bitmap Editor
+  useEffect(() => {
+    const onBitmapUpdated = () => {
+      textureCacheRef.current.clear();
+      for (const item of objectMeshesRef.current) {
+        if (item.shaderTagId) {
+          loadTexture(item.shaderTagId).then((tex) => {
+            if (tex && item.solidMat) {
+              item.solidMat.map = tex;
+              item.solidMat.color.setHex(0xffffff);
+              item.solidMat.needsUpdate = true;
+            }
+          });
+        }
+      }
+    };
+    window.addEventListener('opence:bitmap-updated', onBitmapUpdated);
+    return () => window.removeEventListener('opence:bitmap-updated', onBitmapUpdated);
+  }, [loadTexture]);
+
   // Load Scenario Objects
   useEffect(() => {
     let active = true;
@@ -1196,7 +1216,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
               mesh.visible = renderMode !== 'wireframe';
               mesh.add(lines);
 
-              objectMeshesRef.current.push({ mesh, lines, solidMat });
+              objectMeshesRef.current.push({ mesh, lines, solidMat, shaderTagId: submesh.shaderTagId });
 
               if (submesh.shaderTagId) {
                 loadTexture(submesh.shaderTagId).then((tex) => {

@@ -704,6 +704,92 @@ export function renderObjUvTemplatePng(
   };
 }
 
+/**
+ * Generates a clean default neutral surface texture (no light-blue UV wireframe overlay)
+ * when the user does not supply a custom texture file.
+ */
+export function renderCleanDefaultTextureRgba(size = 512): { rgba: Uint8Array; width: number; height: number } {
+  const rgba = new Uint8Array(size * size * 4);
+  const cellSize = Math.max(8, Math.floor(size / 16));
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const checker = ((Math.floor(x / cellSize) + Math.floor(y / cellSize)) & 1) === 0;
+      const base = checker ? 132 : 142;
+      const idx = (y * size + x) * 4;
+      rgba[idx + 0] = base;
+      rgba[idx + 1] = base + 2;
+      rgba[idx + 2] = base + 5;
+      rgba[idx + 3] = 255;
+    }
+  }
+  return { rgba, width: size, height: size };
+}
+
+/**
+ * If a user painted over an exported UV wireframe template PNG (`#38bdf8` = `rgb(56, 189, 248)`),
+ * strips the light-blue UV guide lines by replacing exact/near `#38bdf8` guide pixels with
+ * the average of surrounding painted pixels (or neutral gray if unpainted).
+ */
+export function stripUvWireframeOverlayFromRgba(
+  rgba: Uint8Array,
+  width: number,
+  height: number,
+): Uint8Array {
+  const out = new Uint8Array(rgba);
+  const isUvGuideLine = (r: number, g: number, b: number): boolean =>
+    Math.abs(r - 56) <= 6 && Math.abs(g - 189) <= 6 && Math.abs(b - 248) <= 6;
+
+  // Quick check if any guide pixels exist
+  let hasGuidePixels = false;
+  for (let i = 0; i < rgba.length; i += 4) {
+    if (isUvGuideLine(rgba[i], rgba[i + 1], rgba[i + 2])) {
+      hasGuidePixels = true;
+      break;
+    }
+  }
+  if (!hasGuidePixels) return out;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      if (!isUvGuideLine(rgba[idx], rgba[idx + 1], rgba[idx + 2])) continue;
+
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let count = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -2; dx <= 2; dx++) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const nIdx = (ny * width + nx) * 4;
+          const nr = rgba[nIdx];
+          const ng = rgba[nIdx + 1];
+          const nb = rgba[nIdx + 2];
+          if (!isUvGuideLine(nr, ng, nb)) {
+            sumR += nr;
+            sumG += ng;
+            sumB += nb;
+            count++;
+          }
+        }
+      }
+      if (count > 0) {
+        out[idx + 0] = Math.round(sumR / count);
+        out[idx + 1] = Math.round(sumG / count);
+        out[idx + 2] = Math.round(sumB / count);
+      } else {
+        out[idx + 0] = 136;
+        out[idx + 1] = 138;
+        out[idx + 2] = 142;
+      }
+    }
+  }
+  return out;
+}
+
 function nearestPowerOfTwo(n: number, min = 16, max = 2048): number {
   const clamped = Math.max(min, Math.min(max, n));
   return Math.pow(2, Math.round(Math.log2(clamped)));
@@ -1266,10 +1352,6 @@ export function buildCustomGbxmodelTag(
   if (rig && rig.modelNodeCount > 0 && rig.modelNodesBuffer.length === rig.modelNodeCount * 156) {
     nodeCount = rig.modelNodeCount;
     nodesBuf = Buffer.from(rig.modelNodesBuffer);
-    // Clear any runtime pointers inside nodes
-    for (let i = 0; i < nodeCount; i++) {
-      nodesBuf.writeUInt32LE(0, i * 156 + 144);
-    }
   } else {
     nodesBuf = Buffer.alloc(156, 0);
     writeTagString(nodesBuf, 0, 'frame root');
@@ -1283,10 +1365,10 @@ export function buildCustomGbxmodelTag(
     nodesBuf.writeFloatLE(0, 56); // default rotation j
     nodesBuf.writeFloatLE(0, 60); // default rotation k
     nodesBuf.writeFloatLE(1.0, 64); // default rotation w
-    nodesBuf.writeFloatLE(1.0, 104); // scale
-    nodesBuf.writeFloatLE(1.0, 108); // rot matrix [0][0]
-    nodesBuf.writeFloatLE(1.0, 120); // rot matrix [1][1]
-    nodesBuf.writeFloatLE(1.0, 132); // rot matrix [2][2]
+    nodesBuf.writeFloatLE(1.0, 104); // runtime_default_inverse_matrix.scale
+    nodesBuf.writeFloatLE(1.0, 108); // runtime_default_inverse_matrix.forward.i (+108..+119)
+    nodesBuf.writeFloatLE(1.0, 124); // runtime_default_inverse_matrix.left.j    (+120..+131)
+    nodesBuf.writeFloatLE(1.0, 140); // runtime_default_inverse_matrix.up.k      (+132..+143)
   }
 
   const markerCount = rig?.markerCount ?? 0;
@@ -2102,6 +2184,7 @@ export function buildCustomCollisionTag(
   buf.writeInt16LE(0, 4); // indirect damage material = 0 (first material)
   if (buf.readUInt16LE(210) >= 33) buf.writeUInt16LE(0, 210); // shield material type in [0, 32]
   if (buf.readInt16LE(236) < 0 || buf.readInt16LE(236) >= 6) buf.writeInt16LE(0, 236); // shield failure function in [0, 5]
+  if (buf.readFloatLE(448) === 0) buf.writeFloatLE(1.0, 448); // runtime_shield_recharge_velocity = 1.0f
 
   // Initialize all 8 TagDependency fields in ModelCollisionGeometry to NULL_TAG_ID
   writeDependencyField(buf, 112, 'effe', NULL_TAG_ID); // localized damage effect
@@ -2143,8 +2226,9 @@ export function buildCustomCollisionTag(
     writeTagString(buf, mOff, materials[m].name);
     buf.writeUInt32LE(0, mOff + 32); // flags
     buf.writeUInt16LE(materials[m].haloMaterialType, mOff + 36); // material type
-    buf.writeFloatLE(1.0, mOff + 40); // body damage multiplier = 1.0
-    buf.writeFloatLE(1.0, mOff + 44);
+    buf.writeFloatLE(0.0, mOff + 40); // shield_leak_fraction = 0.0
+    buf.writeFloatLE(1.0, mOff + 44); // shield_damage_multiplier = 1.0
+    buf.writeFloatLE(1.0, mOff + 60); // body_damage_multiplier = 1.0
   }
 
   // Region[0] (84 bytes)
@@ -2432,8 +2516,20 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     ? parseObjMesh(options.collisionObjText, options.meshOptions)
     : renderMesh;
 
-  // 2. Prepare texture RGBA (use provided PNG/DDS RGBA, or auto-generate the UV template texture)
-  const texture = options.textureRgba ?? renderObjUvTemplateRgba(options.objText, 512, options.meshOptions);
+  // 2. Prepare texture RGBA:
+  //    - If user provided a texture, automatically strip any unpainted #38bdf8 UV guide lines
+  //    - If omitted, generate a clean neutral surface texture (never bake the light-blue UV wireframe guide onto the model)
+  const texture = options.textureRgba
+    ? {
+        width: options.textureRgba.width,
+        height: options.textureRgba.height,
+        rgba: stripUvWireframeOverlayFromRgba(
+          options.textureRgba.rgba,
+          options.textureRgba.width,
+          options.textureRgba.height,
+        ),
+      }
+    : renderCleanDefaultTextureRgba(512);
 
   // 3. If a template tag set was extracted from the open map, carry over its auxiliary tags
   //    (animations, physics, firing effects, sounds, HUD, etc.) so internal dependencies resolve!

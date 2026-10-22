@@ -290,9 +290,6 @@ export default function BuildObjectTagDialog({
     });
     if (res.ok && res.outputPath) {
       setSavedUvPath(res.outputPath);
-      if (!textureFilePath) {
-        setTextureFilePath(res.outputPath);
-      }
     } else if (res.error && res.error !== 'Cancelled') {
       setErrorMsg(res.error);
     }
@@ -925,7 +922,7 @@ export default function BuildObjectTagDialog({
                     type="text"
                     readOnly
                     value={textureFilePath}
-                    placeholder="Optional: Select .png or .dds texture (if blank, uses generated UV grid texture)"
+                    placeholder="Optional: Select painted .png or .dds texture (if blank, uses clean neutral surface)"
                     style={{
                       flex: 1,
                       padding: '6px 9px',
@@ -1012,7 +1009,7 @@ export default function BuildObjectTagDialog({
                   </div>
                   <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
                     Don&apos;t have a UV map for your model? OpenCE Mantle automatically unwraps models without UVs into a 3×2 6-face Box UV Atlas. Click{' '}
-                    <strong>Export UV Wireframe Template (.PNG)</strong> to save a 1024×1024 wireframe layout you can paint in any image editor!
+                    <strong>Export UV Wireframe Template (.PNG)</strong> to save a 1024×1024 drawing guide you can paint over in any image editor (the light-blue UV guide lines are for reference only and will not be applied to the 3D model).
                   </div>
                   {savedUvPath && (
                     <div style={{ fontSize: 11, color: '#34d399' }}>

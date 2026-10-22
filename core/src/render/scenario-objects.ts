@@ -1522,6 +1522,7 @@ export function addScenarioPlacement(
     newItemBytes.writeFloatLE(rotation[0], 20);
     newItemBytes.writeFloatLE(rotation[1], 24);
     newItemBytes.writeFloatLE(rotation[2], 28);
+    newItemBytes.writeUInt16LE(1, 32); // on_bsp_flags = 1 (BSP 0)
     newItemBytes.writeFloatLE(1.0, 72); // body vitality = 1.0 (full health)
     newItemBytes.writeUInt16LE(0x0f0f, 90); // default & allowed for all multiplayer gametypes
 
@@ -1550,6 +1551,7 @@ export function addScenarioPlacement(
     newItemBytes.writeFloatLE(rotation[0], 20);
     newItemBytes.writeFloatLE(rotation[1], 24);
     newItemBytes.writeFloatLE(rotation[2], 28);
+    newItemBytes.writeUInt16LE(1, 32); // on_bsp_flags = 1 (BSP 0)
 
     const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
     const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
@@ -1576,6 +1578,7 @@ export function addScenarioPlacement(
     newItemBytes.writeFloatLE(rotation[0], 20);
     newItemBytes.writeFloatLE(rotation[1], 24);
     newItemBytes.writeFloatLE(rotation[2], 28);
+    newItemBytes.writeUInt16LE(1, 32); // on_bsp_flags = 1 (BSP 0)
 
     const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
     const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);

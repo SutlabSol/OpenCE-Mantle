@@ -241,6 +241,7 @@ export default function BitmapEditorDialog({ tag, onClose }: Props) {
       const res = await window.opence.replaceBitmapImage(tag.index, selectedImageIndex, pick.path);
       if (res.ok) {
         setStatusMsg({ text: 'Image replaced and internalized successfully! Open map marked modified.' });
+        window.dispatchEvent(new CustomEvent('opence:bitmap-updated', { detail: { tagIndex: tag.index } }));
         await loadSummary();
       } else {
         setStatusMsg({ text: res.message || 'Replace failed', isError: true });
