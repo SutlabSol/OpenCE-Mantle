@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type {
   BuildCustomObjectResult,
   CustomObjectTagGroup,
+  MapInspectionState,
   TagEntrySummary,
 } from '../../electron/shared-types';
 
@@ -10,7 +11,11 @@ interface Props {
   onClose: () => void;
   allTags: TagEntrySummary[];
   canInjectIntoOpenMap: boolean;
-  onSelectInjectedTag?: (tagPath: string, group: CustomObjectTagGroup) => void;
+  onSelectInjectedTag?: (
+    tagPath: string,
+    group: CustomObjectTagGroup,
+    updatedMap?: Extract<MapInspectionState, { status: 'ok' }>,
+  ) => void;
 }
 
 const TAG_TYPE_OPTIONS: {
@@ -50,6 +55,42 @@ const TAG_TYPE_OPTIONS: {
   },
 ];
 
+const HALO_MATERIAL_OPTIONS: { index: number; label: string }[] = [
+  { index: 0, label: '0 — dirt' },
+  { index: 1, label: '1 — sand' },
+  { index: 2, label: '2 — stone' },
+  { index: 3, label: '3 — snow' },
+  { index: 4, label: '4 — wood' },
+  { index: 5, label: '5 — metal hollow' },
+  { index: 6, label: '6 — metal thin' },
+  { index: 7, label: '7 — metal thick (Default Solid Metal)' },
+  { index: 8, label: '8 — rubber' },
+  { index: 9, label: '9 — glass' },
+  { index: 10, label: '10 — force field' },
+  { index: 11, label: '11 — grunt' },
+  { index: 12, label: '12 — hunter armor' },
+  { index: 13, label: '13 — hunter skin' },
+  { index: 14, label: '14 — elite' },
+  { index: 15, label: '15 — jackal' },
+  { index: 16, label: '16 — jackal energy shield' },
+  { index: 17, label: '17 — engineer skin' },
+  { index: 18, label: '18 — engineer force field' },
+  { index: 19, label: '19 — flood combat form' },
+  { index: 20, label: '20 — flood carrier form' },
+  { index: 21, label: '21 — cyborg armor' },
+  { index: 22, label: '22 — cyborg energy shield' },
+  { index: 23, label: '23 — human armor' },
+  { index: 24, label: '24 — human skin' },
+  { index: 25, label: '25 — sentinel' },
+  { index: 26, label: '26 — monitor' },
+  { index: 27, label: '27 — plastic' },
+  { index: 28, label: '28 — water' },
+  { index: 29, label: '29 — leaves' },
+  { index: 30, label: '30 — elite energy shield' },
+  { index: 31, label: '31 — ice' },
+  { index: 32, label: '32 — hunter shield' },
+];
+
 export default function BuildObjectTagDialog({
   open,
   onClose,
@@ -71,6 +112,7 @@ export default function BuildObjectTagDialog({
   const [centerOrigin, setCenterOrigin] = useState<boolean>(true);
   const [forceAutoUv, setForceAutoUv] = useState<boolean>(false);
   const [multiBoxCollision, setMultiBoxCollision] = useState<boolean>(false);
+  const [materialType, setMaterialType] = useState<number>(7); // 7 = metal thick
 
   // Output options
   const [outputMode, setOutputMode] = useState<'inject' | 'ocetags' | 'both'>(
@@ -95,7 +137,7 @@ export default function BuildObjectTagDialog({
 
   // Filter candidate template tags in the open map matching the selected tagGroup
   const templateCandidates = useMemo(() => {
-    return allTags.filter((t) => t.group === tagGroup && !t.isExternal);
+    return allTags.filter((t) => t.primaryClassName === tagGroup && !t.isExternal);
   }, [allTags, tagGroup]);
 
   // Reset template selection when tagGroup changes
@@ -259,6 +301,7 @@ export default function BuildObjectTagDialog({
         centerOrigin,
         forceAutoUv,
         multiBoxCollision,
+        materialType,
         templateTagIndex: templateTagIndex >= 0 ? templateTagIndex : undefined,
         outputMode,
         outputOceTagsPath,
@@ -449,7 +492,7 @@ export default function BuildObjectTagDialog({
                   </option>
                   {templateCandidates.map((t) => (
                     <option key={t.index} value={t.index}>
-                      {t.path} ({t.group})
+                      {t.path} ({t.primaryClassName})
                     </option>
                   ))}
                 </select>
@@ -572,7 +615,10 @@ export default function BuildObjectTagDialog({
                 Center X/Y & Rest on Z=0
               </label>
 
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12 }}>
+              <label
+                title="When enabled, if your .OBJ file contains multiple sub-objects/groups (o / g), generates a separate 3D collision box BSP for each sub-group (up to 8) instead of one single outer bounding box—ideal for L-shapes, archways, tables, or hollow frames."
+                style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12 }}
+              >
                 <input
                   type="checkbox"
                   checked={multiBoxCollision}
@@ -580,6 +626,35 @@ export default function BuildObjectTagDialog({
                 />
                 Multi-Group Compound Collision Boxes
               </label>
+            </div>
+
+            {/* Surface Material Type Selector */}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
+              <span style={{ fontSize: 11, color: '#a1a1aa', minWidth: 155 }}>
+                Surface Material Type:
+              </span>
+              <select
+                value={materialType}
+                onChange={(e) => setMaterialType(Number(e.target.value))}
+                style={{
+                  flex: 1,
+                  padding: '5px 8px',
+                  backgroundColor: '#18181b',
+                  border: '1px solid #3f3f46',
+                  borderRadius: 4,
+                  color: '#f4f4f5',
+                  fontSize: 12,
+                }}
+              >
+                {HALO_MATERIAL_OPTIONS.map((m) => (
+                  <option key={m.index} value={m.index}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+              <span style={{ fontSize: 11, color: '#71717a' }}>
+                Sets bullet impact effects, decals &amp; footsteps on both Collision &amp; Shader tags
+              </span>
             </div>
 
             {/* Optional Custom Collision Proxy OBJ */}
@@ -934,7 +1009,11 @@ export default function BuildObjectTagDialog({
                     <button
                       type="button"
                       onClick={() => {
-                        onSelectInjectedTag(buildSuccess.rootTagPath, buildSuccess.rootTagGroup);
+                        onSelectInjectedTag(
+                          buildSuccess.rootTagPath,
+                          buildSuccess.rootTagGroup,
+                          buildSuccess.map,
+                        );
                         onClose();
                       }}
                       style={{

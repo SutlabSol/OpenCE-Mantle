@@ -4,6 +4,7 @@ import type { TagEntrySummary } from '../../electron/shared-types';
 
 interface Props {
   tags: TagEntrySummary[];
+  focusedTag?: TagEntrySummary | null;
   onFocusTag: (tag: TagEntrySummary) => void;
   selected: Set<number>;
   onSelectedChange: (next: Set<number>) => void;
@@ -56,6 +57,7 @@ function smallButtonStyle(): CSSProperties {
 
 export default function TagBrowser({
   tags,
+  focusedTag,
   onFocusTag,
   selected,
   onSelectedChange,
@@ -85,6 +87,25 @@ export default function TagBrowser({
     setSearch('');
     setFocusedIndex(null);
   }, [tags]);
+
+  useEffect(() => {
+    if (!focusedTag) return;
+    setFocusedIndex(focusedTag.index);
+    const key = groupMode === 'class' ? focusedTag.primaryClassName : topFolder(focusedTag.path);
+    setOpenGroups((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+    const timer = window.setTimeout(() => {
+      const el = document.querySelector(`[data-testid="tag-row-${focusedTag.index}"]`);
+      if (el && typeof (el as HTMLElement).scrollIntoView === 'function') {
+        (el as HTMLElement).scrollIntoView({ block: 'nearest' });
+      }
+    }, 30);
+    return () => window.clearTimeout(timer);
+  }, [focusedTag, groupMode, tags]);
 
   useEffect(() => {
     if (!contextMenu) return;

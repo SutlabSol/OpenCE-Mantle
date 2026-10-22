@@ -607,6 +607,7 @@ export interface BuildCustomObjectRequest {
   centerOrigin?: boolean;
   forceAutoUv?: boolean;
   multiBoxCollision?: boolean;
+  materialType?: number;
   templateTagIndex?: number;
   outputMode: 'inject' | 'ocetags' | 'both';
   outputOceTagsPath?: string;

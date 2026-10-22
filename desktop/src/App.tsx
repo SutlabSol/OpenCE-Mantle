@@ -387,6 +387,7 @@ export default function App() {
           <>
             <TagBrowser
               tags={mapState.tags}
+              focusedTag={focusedTag}
               onFocusTag={setFocusedTag}
               selected={selectedTagIndices}
               onSelectedChange={setSelectedTagIndices}
@@ -533,14 +534,20 @@ export default function App() {
           onClose={() => setBuildObjectTagOpen(false)}
           allTags={mapState?.status === 'ok' ? mapState.tags : []}
           canInjectIntoOpenMap={mapState?.status === 'ok'}
-          onSelectInjectedTag={(newTagPath, newGroup) => {
-            if (mapState?.status !== 'ok') return;
-            const found = mapState.tags.find(
-              (t) => t.group === newGroup && t.path.toLowerCase() === newTagPath.toLowerCase(),
+          onSelectInjectedTag={(newTagPath, newGroup, updatedMap) => {
+            if (updatedMap) {
+              setMapState(updatedMap);
+            }
+            const tagsList = updatedMap?.tags ?? (mapState?.status === 'ok' ? mapState.tags : []);
+            const found = tagsList.find(
+              (t) =>
+                t.primaryClassName === newGroup &&
+                t.path.toLowerCase() === newTagPath.toLowerCase(),
             );
             if (found) {
               setFocusedTag(found);
               setSelectedTagIndices(new Set([found.index]));
+              setPropertiesPaletteTab('properties');
             }
           }}
         />

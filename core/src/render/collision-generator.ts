@@ -377,7 +377,7 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
           tangent,
           uv,
           node0Index: 0,
-          node1Index: -1,
+          node1Index: 0,
           node0Weight: 1.0,
           node1Weight: 0.0,
         });
@@ -846,6 +846,46 @@ export function buildCustomBitmapTag(
 }
 
 /**
+ * Official Halo CE `MaterialType` enum values (indices 0..32), used by `shader_model` (+34)
+ * and `model_collision_geometry.materials` (+36) to control bullet impacts, footsteps, and physics.
+ */
+export const HALO_MATERIAL_TYPES: readonly string[] = [
+  'dirt',
+  'sand',
+  'stone',
+  'snow',
+  'wood',
+  'metal hollow',
+  'metal thin',
+  'metal thick',
+  'rubber',
+  'glass',
+  'force field',
+  'grunt',
+  'hunter armor',
+  'hunter skin',
+  'elite',
+  'jackal',
+  'jackal energy shield',
+  'engineer skin',
+  'engineer force field',
+  'flood combat form',
+  'flood carrier form',
+  'cyborg armor',
+  'cyborg energy shield',
+  'human armor',
+  'human skin',
+  'sentinel',
+  'monitor',
+  'plastic',
+  'water',
+  'leaves',
+  'elite energy shield',
+  'ice',
+  'hunter shield',
+] as const;
+
+/**
  * Builds a self-contained Halo CE `shader_model` (`soso`) tag referencing the given `bitmap` tag.
  */
 export function buildCustomShaderModelTag(
@@ -853,9 +893,11 @@ export function buildCustomShaderModelTag(
   originalIndex: number,
   bitmapPath: string,
   bitmapLocalIndex: number,
+  materialType = 7,
 ): ExtractedTag {
   // ShaderModel is 440 bytes
   const buf = Buffer.alloc(440, 0);
+  const safeMat = materialType >= 0 && materialType < HALO_MATERIAL_TYPES.length ? materialType : 7;
 
   // Initialize all 4 TagDependency fields in ShaderModel (+164, +188, +220, +356)
   writeDependencyField(buf, 164, 'bitm', bitmapLocalIndex); // base map
@@ -864,6 +906,7 @@ export function buildCustomShaderModelTag(
   writeDependencyField(buf, 356, 'bitm', NULL_TAG_ID); // reflection cube map
 
   // Standard ShaderModel defaults verified from bloodgulch.map
+  buf.writeUInt16LE(safeMat, 34); // material type (default 7 = metal thick)
   buf.writeUInt16LE(4, 36); // shader type = soso (4)
   buf.writeFloatLE(1.0, 116);
   buf.writeFloatLE(1.0, 156); // map u-scale
@@ -1268,7 +1311,7 @@ export function buildCustomGbxmodelTag(
   buf.writeUInt32LE(0, offParts + 100); // vertex offset (patched on inject / Forge load)
 
   // ModelShaderReference[0] (32 bytes)
-  writeDependencyField(buf, offShaders + 0, 'shdr', shaderLocalIndex);
+  writeDependencyField(buf, offShaders + 0, 'soso', shaderLocalIndex);
 
   const internalMap = new Map<string, { group: string; path: string; localTagIndex: number }>();
   internalMap.set(`${reflexiveElementPath(tagPath, 'shaders', 0)}.shader`, {
@@ -1481,6 +1524,7 @@ export function buildCustomCollisionTag(
   mesh: ParsedObjMesh,
   rig?: TemplateRigInfo,
   multiBox = false,
+  materialType = 7,
 ): ExtractedTag {
   const nodeCount = rig && rig.modelNodeCount > 0 ? rig.modelNodeCount : 1;
   const boxes = multiBox && mesh.groupBounds.length > 1 && mesh.groupBounds.length <= 8
@@ -1508,40 +1552,42 @@ export function buildCustomCollisionTag(
 
   const buf = Buffer.alloc(totalSize, 0);
 
-  // If template has a collision header, copy its non-pointer damage/shield settings (+0..+556),
-  // then clear all 11 TagDependency fields so it doesn't require extra damage/effect tags unless wired.
+  // If template has a collision header, copy its non-pointer damage/shield settings (+0..+564),
+  // then clear all 8 TagDependency fields so it doesn't require extra damage/effect tags unless wired.
   if (rig?.collisionHeaderBuffer && rig.collisionHeaderBuffer.length >= 664) {
-    rig.collisionHeaderBuffer.copy(buf, 0, 0, 556);
+    rig.collisionHeaderBuffer.copy(buf, 0, 0, 564);
   }
 
-  // Initialize all 11 TagDependency fields in ModelCollisionGeometry to NULL_TAG_ID
-  writeDependencyField(buf, 16, 'effe', NULL_TAG_ID); // localized damage effect
-  writeDependencyField(buf, 40, 'effe', NULL_TAG_ID); // area damage effect
-  writeDependencyField(buf, 60, 'effe', NULL_TAG_ID); // body damaged effect
-  writeDependencyField(buf, 76, 'effe', NULL_TAG_ID); // body depleted effect
-  writeDependencyField(buf, 96, 'effe', NULL_TAG_ID); // body destroyed effect
-  writeDependencyField(buf, 192, 'effe', NULL_TAG_ID); // shield damaged effect
-  writeDependencyField(buf, 208, 'effe', NULL_TAG_ID); // shield depleted effect
-  writeDependencyField(buf, 224, 'effe', NULL_TAG_ID); // shield recharging effect
-  writeDependencyField(buf, 252, 'shdr', NULL_TAG_ID); // shield recharge shader
-  writeDependencyField(buf, 268, 'effe', NULL_TAG_ID); // shield stun effect
-  writeDependencyField(buf, 284, 'snd!', NULL_TAG_ID); // shield recharge sound
+  // Ensure valid enum values for indirect damage material, shield material type, and shield failure function
+  buf.writeInt16LE(0, 4); // indirect damage material = 0 (first material)
+  if (buf.readUInt16LE(210) >= 33) buf.writeUInt16LE(0, 210); // shield material type in [0, 32]
+  if (buf.readInt16LE(236) < 0 || buf.readInt16LE(236) >= 6) buf.writeInt16LE(0, 236); // shield failure function in [0, 5]
+
+  // Initialize all 8 TagDependency fields in ModelCollisionGeometry to NULL_TAG_ID
+  writeDependencyField(buf, 112, 'effe', NULL_TAG_ID); // localized damage effect
+  writeDependencyField(buf, 132, 'effe', NULL_TAG_ID); // area damage effect
+  writeDependencyField(buf, 152, 'effe', NULL_TAG_ID); // body damaged effect
+  writeDependencyField(buf, 168, 'effe', NULL_TAG_ID); // body depleted effect
+  writeDependencyField(buf, 188, 'effe', NULL_TAG_ID); // body destroyed effect
+  writeDependencyField(buf, 392, 'effe', NULL_TAG_ID); // shield damaged effect
+  writeDependencyField(buf, 408, 'effe', NULL_TAG_ID); // shield depleted effect
+  writeDependencyField(buf, 424, 'effe', NULL_TAG_ID); // shield recharging effect
 
   // Reflexives on ModelCollisionGeometry:
-  buf.writeUInt32LE(1, 556); // materials.count
-  buf.writeUInt32LE(offMaterials, 560); // materials.pointer
-  buf.writeUInt32LE(1, 568); // regions.count
-  buf.writeUInt32LE(offRegions, 572); // regions.pointer
-  buf.writeUInt32LE(0, 580); // modifiers.count = 0
-  buf.writeUInt32LE(0, 584);
+  buf.writeUInt32LE(1, 564); // materials.count
+  buf.writeUInt32LE(offMaterials, 568); // materials.pointer
+  buf.writeUInt32LE(1, 576); // regions.count
+  buf.writeUInt32LE(offRegions, 580); // regions.pointer
+  buf.writeUInt32LE(0, 588); // modifiers.count = 0
+  buf.writeUInt32LE(0, 592);
 
-  // Pathfinding box at +600..+624
-  buf.writeFloatLE(mesh.summary.bounds.min[0], 600);
-  buf.writeFloatLE(mesh.summary.bounds.max[0], 604);
-  buf.writeFloatLE(mesh.summary.bounds.min[1], 608);
-  buf.writeFloatLE(mesh.summary.bounds.max[1], 612);
-  buf.writeFloatLE(mesh.summary.bounds.min[2], 616);
-  buf.writeFloatLE(mesh.summary.bounds.max[2], 620);
+  // Pathfinding box at +616..+640
+  buf.writeFloatLE(mesh.summary.bounds.min[0], 616);
+  buf.writeFloatLE(mesh.summary.bounds.max[0], 620);
+  buf.writeFloatLE(mesh.summary.bounds.min[1], 624);
+  buf.writeFloatLE(mesh.summary.bounds.max[1], 628);
+  buf.writeFloatLE(mesh.summary.bounds.min[2], 632);
+  buf.writeFloatLE(mesh.summary.bounds.max[2], 636);
 
   // pathfinding spheres reflexive at +640
   buf.writeUInt32LE(1, 640);
@@ -1552,9 +1598,11 @@ export function buildCustomCollisionTag(
   buf.writeUInt32LE(offNodes, 656);
 
   // Material[0] (72 bytes)
-  writeTagString(buf, offMaterials, 'metal (solid)');
+  const safeMat = materialType >= 0 && materialType < HALO_MATERIAL_TYPES.length ? materialType : 7;
+  const matName = HALO_MATERIAL_TYPES[safeMat] ?? 'metal thick';
+  writeTagString(buf, offMaterials, matName);
   buf.writeUInt32LE(0, offMaterials + 32); // flags
-  buf.writeUInt16LE(9, offMaterials + 36); // material type = 9 (metal solid)
+  buf.writeUInt16LE(safeMat, offMaterials + 36); // material type (default 7 = metal thick)
   buf.writeFloatLE(1.0, offMaterials + 40); // shield leak = 0, body damage multiplier = 1.0
   buf.writeFloatLE(1.0, offMaterials + 44);
 
@@ -1789,6 +1837,8 @@ export interface BuildCustomObjectOptions {
   bitmapFormat?: number;
   /** Use compound multi-box collision when the OBJ has multiple sub-groups (default: false = 1 tight 3D box BSP). */
   multiBoxCollision?: boolean;
+  /** Halo CE MaterialType enum index (0..32, default: 7 = "metal thick"). */
+  materialType?: number;
   /** Optional template tag set extracted from the currently open map (for inheriting animations, physics, sounds, seats, and barrels). */
   templateExtractedSet?: ExtractedTagSet;
   /** Optional template rig info (nodes, nodeListChecksum, markers) extracted from the open map. */
@@ -1900,11 +1950,14 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     options.bitmapFormat ?? BitmapFormat.A8R8G8B8,
   );
 
+  const matType = options.materialType !== undefined ? options.materialType : 7;
+
   const shaderTag = buildCustomShaderModelTag(
     shaderPath,
     shaderOrigIdx,
     bitmapPath,
     bitmapLocalIdx,
+    matType,
   );
 
   const gbxmodelTag = buildCustomGbxmodelTag(
@@ -1922,6 +1975,7 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     collisionMesh.triangles.length > 0 ? collisionMesh : renderMesh,
     options.templateRig,
     Boolean(options.multiBoxCollision),
+    matType,
   );
 
   // Map template root tag's existing dependencies (except .model and .collision model) to the new rootPath

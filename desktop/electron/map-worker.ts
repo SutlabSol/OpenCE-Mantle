@@ -2124,6 +2124,7 @@ export function runBuildCustomObjectTag(task: {
       },
       textureRgba,
       multiBoxCollision: req.multiBoxCollision,
+      materialType: req.materialType,
       templateExtractedSet,
       templateRig,
       sourceMapName: currentMap ? path.basename(currentMap.filePath, '.map') : 'custom_object_builder',
@@ -2139,12 +2140,29 @@ export function runBuildCustomObjectTag(task: {
     let injectedIntoMap = false;
     if (needsInject && currentMap) {
       progress(task.requestId, 'Injecting compiled object tags into open map...', 90);
-      const planResult = planAddInjection(
-        currentMap,
-        built.container,
-        {},
-        { allowEmbeddedRelocation: true },
-      );
+      const rootAlreadyExists =
+        built.container.tags.length === 5 &&
+        currentMap.tagIndex.entries.some(
+          (e) =>
+            e.primaryClassName === built.rootTagGroup &&
+            e.path.toLowerCase() === built.rootTagPath.toLowerCase(),
+        );
+      if (rootAlreadyExists) {
+        built.container.rootTagIndices = [0, 1, 2, 3, 4];
+      }
+      const planResult = rootAlreadyExists
+        ? planSwapInjection(
+            currentMap,
+            built.container,
+            {},
+            { allowEmbeddedRelocation: true },
+          )
+        : planAddInjection(
+            currentMap,
+            built.container,
+            {},
+            { allowEmbeddedRelocation: true },
+          );
       if (planResult.kind === 'refused') {
         return sendError(task.requestId, 'INJECT_REFUSED', planResult.reason);
       }
@@ -2154,14 +2172,23 @@ export function runBuildCustomObjectTag(task: {
           .join('; ');
         return sendError(task.requestId, 'INJECT_BLOCKED', `Tag injection blocked: ${reasons}`);
       }
-      const nextBuffer = applyAddInjection(
-        currentMap.buffer,
-        currentMap.header,
-        currentMap.tagIndex,
-        built.container,
-        planResult,
-        { allowEmbeddedRelocation: true },
-      );
+      const nextBuffer = rootAlreadyExists
+        ? applySwapInjection(
+            currentMap.buffer,
+            currentMap.header,
+            currentMap.tagIndex,
+            built.container,
+            planResult,
+            { allowEmbeddedRelocation: true },
+          )
+        : applyAddInjection(
+            currentMap.buffer,
+            currentMap.header,
+            currentMap.tagIndex,
+            built.container,
+            planResult,
+            { allowEmbeddedRelocation: true },
+          );
       const reInspected = inspectCustomEditionMap(nextBuffer);
       if (reInspected.status !== 'ok') {
         return sendError(task.requestId, 'REINSPECT_FAILED', 'Failed to re-inspect map after injecting custom object.');
