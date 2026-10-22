@@ -2395,7 +2395,10 @@ export function buildCustomRootObjectTag(
     writeDependencyField(buf, 144, 'shdr', NULL_TAG_ID);
     writeDependencyField(buf, 160, 'effe', NULL_TAG_ID);
     buf.writeInt16LE(spec.objectTypeEnum, 0);
-    buf.writeFloatLE(1.0, 28); // acceleration scale = 1.0
+    buf.writeFloatLE(0.0, 20); // origin_offset.x = 0.0
+    buf.writeFloatLE(0.0, 24); // origin_offset.y = 0.0
+    buf.writeFloatLE(0.0, 28); // origin_offset.z = 0.0
+    buf.writeFloatLE(1.0, 32); // acceleration_scale = 1.0
   }
 
   // Always update bounding sphere and wire new model + collision model
@@ -2404,6 +2407,11 @@ export function buildCustomRootObjectTag(
   buf.writeFloatLE(cx, 8); // bounding offset x
   buf.writeFloatLE(cy, 12); // bounding offset y
   buf.writeFloatLE(cz, 16); // bounding offset z
+  if (group === 'scenery') {
+    buf.writeFloatLE(0.0, 20); // origin_offset.x = 0.0
+    buf.writeFloatLE(0.0, 24); // origin_offset.y = 0.0
+    buf.writeFloatLE(0.0, 28); // origin_offset.z = 0.0
+  }
   buf.writeFloatLE(radius, 260); // render bounding radius
 
   writeDependencyField(buf, 40, 'mod2', gbxmodelLocalIndex);

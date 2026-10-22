@@ -3943,7 +3943,8 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                     -spawnWorldZ,
                     spawnWorldY,
                   ];
-                  const spawnHaloRot: [number, number, number] = [yaw, 0, 0];
+                  // Keep the exact [0, 0, 0] rotation exported from Blender by default
+                  const spawnHaloRot: [number, number, number] = [0, 0, 0];
                   handleAddPlacement(addKind, addPaletteIndex, spawnHaloPos, spawnHaloRot, addTeam);
                 }}
                 style={{
