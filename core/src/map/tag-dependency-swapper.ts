@@ -120,7 +120,8 @@ export function setTagDependencySlot(
 
   const target = tagIndex.entries.find((e) => e.tagId === (newTagId >>> 0));
   if (!target) throw new TagDependencySwapError(`Target tag ID 0x${(newTagId >>> 0).toString(16)} is not in this map.`);
-  const arrayOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE; // tag array follows the tag data header
+  const tagHeaderSize = header.engine === 5 ? 0x24 : TAG_DATA_HEADER_PC_SIZE;
+  const arrayOffset = header.tagDataOffset + tagHeaderSize; // tag array follows the tag data header
   const pathPointer = buffer.readUInt32LE(arrayOffset + target.index * TAG_ENTRY_SIZE + 0x10);
   encodeDependency(buffer, slot.absOffset, { fourcc: target.primaryClassFourCC, pathPointer, pathSize: 0, tagId: target.tagId });
   return { fieldPath, newTagId: target.tagId };

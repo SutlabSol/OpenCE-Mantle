@@ -179,6 +179,7 @@ export default function App() {
     if (!mapState || mapState.status !== 'ok') return;
     if (typeof window.opence.getVersionSettings !== 'function') return;
     const edition: HaloBitmapVersion = mapState.header.mapEdition || 'ce';
+    if (edition === 'xbox') return;
     const filePath = mapState.filePath;
     if (skippedPromptMapPaths.has(filePath)) return;
 
@@ -360,7 +361,6 @@ export default function App() {
             items: [
               { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
               { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
-              { label: 'Deprotect, Integrity & CRC32...', onClick: () => setDeprotectDialogOpen(true), disabled: !canExtract },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
               { label: '', separator: true },
@@ -378,7 +378,6 @@ export default function App() {
         onExtract={() => requestExtract(Array.from(selectedTagIndices))}
         onExtractWholeMap={() => void handleBatchExtract()}
         onInject={() => setInjectDialogOpen(true)}
-        onDeprotect={() => setDeprotectDialogOpen(true)}
         progress={progress}
       />
 

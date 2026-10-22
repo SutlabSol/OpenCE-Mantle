@@ -100,6 +100,9 @@ var CE_BASE_MEMORY_ADDRESS = 1078198272;
 var CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 var MCC_BASE_MEMORY_ADDRESS = 1342177280;
 var MCC_TAG_ARRAY_ADDRESS = MCC_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
+var TAG_DATA_HEADER_XBOX_SIZE = 36;
+var XBOX_BASE_MEMORY_ADDRESS = 2151309312;
+var XBOX_TAG_ARRAY_ADDRESS = XBOX_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_XBOX_SIZE;
 var CE_TAG_SPACE_SIZE = 23 * 1024 * 1024;
 
 // ../core/src/constants/tag-classes.ts
@@ -303,7 +306,7 @@ function parseCacheFileHeader(buffer) {
     throw new CorruptMapError('Missing "head"/"foot" magic values. This does not look like a Halo map file.');
   }
   const engine = buffer.readUInt32LE(4);
-  if (engine !== 609 /* CUSTOM_EDITION */ && engine !== 7 /* RETAIL */ && engine !== 13 /* MCC_CEA */) {
+  if (engine !== 609 /* CUSTOM_EDITION */ && engine !== 7 /* RETAIL */ && engine !== 13 /* MCC_CEA */ && engine !== 5 /* XBOX */) {
     throw new UnsupportedMapVersionError(engine);
   }
   return {
@@ -324,11 +327,16 @@ function resolveTagDataPointer(pointer, header, baseMemoryAddress) {
   return header.tagDataOffset + (pointer - baseMemoryAddress);
 }
 function inferBaseMemoryAddressForClassifier(tagArrayAddress) {
+  if (tagArrayAddress === XBOX_TAG_ARRAY_ADDRESS) {
+    return XBOX_BASE_MEMORY_ADDRESS;
+  }
   return tagArrayAddress - TAG_DATA_HEADER_PC_SIZE >>> 0;
 }
 function parseTagIndex(buffer, header) {
   const tagDataHeaderOffset = header.tagDataOffset;
-  if (tagDataHeaderOffset + TAG_DATA_HEADER_PC_SIZE > buffer.length) {
+  const isXbox = header.engine === 5 /* XBOX */;
+  const tagHeaderSize = isXbox ? TAG_DATA_HEADER_XBOX_SIZE : TAG_DATA_HEADER_PC_SIZE;
+  if (tagDataHeaderOffset + tagHeaderSize > buffer.length) {
     throw new CorruptMapError("Tag data offset from the header is out of bounds of the file.");
   }
   const tagArrayAddress = buffer.readUInt32LE(tagDataHeaderOffset + 0);
@@ -338,12 +346,14 @@ function parseTagIndex(buffer, header) {
   const modelPartCount = buffer.readUInt32LE(tagDataHeaderOffset + 16);
   const modelDataFileOffset = buffer.readUInt32LE(tagDataHeaderOffset + 20);
   const vertexSize = buffer.readUInt32LE(tagDataHeaderOffset + 28);
-  const modelDataSize = buffer.readUInt32LE(tagDataHeaderOffset + 32);
-  const isMcc = header.engine === 13 /* MCC_CEA */ || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS;
-  const expectedTagArrayAddress = isMcc ? MCC_TAG_ARRAY_ADDRESS : CE_TAG_ARRAY_ADDRESS;
-  if (tagArrayAddress !== expectedTagArrayAddress) throw new UnexpectedTagArrayAddressError(tagArrayAddress, expectedTagArrayAddress);
-  const tagArrayFileOffset = tagDataHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
-  const baseMemoryAddress = isMcc ? MCC_BASE_MEMORY_ADDRESS : CE_BASE_MEMORY_ADDRESS;
+  const modelDataSize = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 32);
+  const isMcc = !isXbox && (header.engine === 13 /* MCC_CEA */ || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS);
+  const expectedTagArrayAddress = isXbox ? XBOX_TAG_ARRAY_ADDRESS : isMcc ? MCC_TAG_ARRAY_ADDRESS : CE_TAG_ARRAY_ADDRESS;
+  if (tagArrayAddress !== expectedTagArrayAddress) {
+    throw new UnexpectedTagArrayAddressError(tagArrayAddress, expectedTagArrayAddress);
+  }
+  const tagArrayFileOffset = tagDataHeaderOffset + tagHeaderSize;
+  const baseMemoryAddress = isXbox ? XBOX_BASE_MEMORY_ADDRESS : isMcc ? MCC_BASE_MEMORY_ADDRESS : CE_BASE_MEMORY_ADDRESS;
   if (tagArrayFileOffset + tagCount * TAG_ENTRY_SIZE > buffer.length) {
     throw new CorruptMapError("Tag count from the tag index is out of bounds of the file (map may be corrupt).");
   }
@@ -356,7 +366,7 @@ function parseTagIndex(buffer, header) {
     const tagId = buffer.readUInt32LE(entryOffset + 12);
     const tagPathPointer = buffer.readUInt32LE(entryOffset + 16);
     const tagDataPointerOrResourceIndex = buffer.readUInt32LE(entryOffset + 20);
-    const isExternal = buffer.readUInt32LE(entryOffset + 24) === 1;
+    const isExternal = !isXbox && buffer.readUInt32LE(entryOffset + 24) === 1;
     const pathFileOffset = resolveTagDataPointer(tagPathPointer, header, baseMemoryAddress);
     if (pathFileOffset < 0 || pathFileOffset >= buffer.length) {
       throw new CorruptMapError(`Tag #${i}: path pointer resolves outside of the file; map may be corrupt or protected.`);
@@ -406,24 +416,8 @@ function estimateTagFootprints(header, tagIndex) {
   }));
 }
 
-// ../core/src/map/open-map.ts
-function inspectCustomEditionMap(buffer) {
-  if (isChimeraCompressedCustomEdition(buffer)) {
-    return { status: "compressed" };
-  }
-  try {
-    const header = parseCacheFileHeader(buffer);
-    const tagIndex = parseTagIndex(buffer, header);
-    return { status: "ok", header, tagIndex };
-  } catch (error) {
-    if (error instanceof UnsupportedMapVersionError) {
-      return { status: "unsupported", message: error.message };
-    }
-    throw error;
-  }
-}
-
 // ../core/src/map/compression.ts
+var zlib = __toESM(require("zlib"));
 var import_zstd = require("@mongodb-js/zstd");
 var CUSTOM_EDITION_COMPRESSED_ENGINE = (609 /* CUSTOM_EDITION */ | CHIMERA_COMPRESSED_ENGINE_MASK) >>> 0;
 async function compressCustomEditionMap(buffer, level = 19) {
@@ -456,6 +450,47 @@ async function decompressCustomEditionMap(buffer) {
   output.writeUInt32LE(609 /* CUSTOM_EDITION */, 4);
   decompressedBody.copy(output, CACHE_FILE_HEADER_SIZE);
   return output;
+}
+function ensureXboxMapDecompressed(buffer) {
+  if (!hasValidMagic(buffer)) return buffer;
+  const engine = buffer.readUInt32LE(4);
+  if (engine !== 5 /* XBOX */) return buffer;
+  const decompressedFileSize = buffer.readUInt32LE(8);
+  const tagDataOffset = buffer.readUInt32LE(16);
+  if (buffer.length >= decompressedFileSize && tagDataOffset + 36 <= buffer.length && buffer.readUInt32LE(tagDataOffset) === 2151309348) {
+    return buffer;
+  }
+  if (buffer.length <= CACHE_FILE_HEADER_SIZE || buffer[CACHE_FILE_HEADER_SIZE] !== 120) {
+    return buffer;
+  }
+  try {
+    const inflated = zlib.inflateSync(buffer.subarray(CACHE_FILE_HEADER_SIZE));
+    const totalSize = Math.max(decompressedFileSize, CACHE_FILE_HEADER_SIZE + inflated.length);
+    const out = Buffer.alloc(totalSize, 202);
+    buffer.copy(out, 0, 0, CACHE_FILE_HEADER_SIZE);
+    inflated.copy(out, CACHE_FILE_HEADER_SIZE);
+    return out;
+  } catch {
+    return buffer;
+  }
+}
+
+// ../core/src/map/open-map.ts
+function inspectCustomEditionMap(buffer) {
+  if (isChimeraCompressedCustomEdition(buffer)) {
+    return { status: "compressed" };
+  }
+  try {
+    const decompressedBuffer = ensureXboxMapDecompressed(buffer);
+    const header = parseCacheFileHeader(decompressedBuffer);
+    const tagIndex = parseTagIndex(decompressedBuffer, header);
+    return { status: "ok", header, tagIndex };
+  } catch (error) {
+    if (error instanceof UnsupportedMapVersionError) {
+      return { status: "unsupported", message: error.message };
+    }
+    throw error;
+  }
 }
 
 // ../core/src/map/resource-map.ts
@@ -35691,8 +35726,20 @@ function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, st
             if (!childStruct) return fail(`${where}.${field.name} has no block definition`);
             const childSize = resolveStruct(childStruct).totalSize;
             const childPointer = value.value.pointerLow >>> 0;
-            if (!inBsp(childPointer, value.value.count * childSize)) fail(`${where}.${field.name} (${value.value.count} blocks) is outside the BSP data`);
-            for (let i = 0; i < value.value.count; i++) walk2(childStruct, childPointer + i * childSize >>> 0, `${where}.${field.name}[${i}]`);
+            let count2 = value.value.count;
+            if (count2 === 4294967295 && childSize > 0) {
+              const fields = resolveStruct(structName).fields;
+              const fIdx = fields.indexOf(field);
+              const nextField = fIdx >= 0 ? fields[fIdx + 1] : void 0;
+              const nextVal = nextField ? decoded.get(nextField.name) : void 0;
+              const nextPtr = nextVal?.kind === "reflexive" ? nextVal.value.pointerLow >>> 0 : 0;
+              if (nextPtr > childPointer && (nextPtr - childPointer) % childSize === 0 && inBsp(childPointer, nextPtr - childPointer)) {
+                count2 = (nextPtr - childPointer) / childSize;
+                buffer.writeUInt32LE(count2, at + field.offset);
+              }
+            }
+            if (!inBsp(childPointer, count2 * childSize)) fail(`${where}.${field.name} (${count2} blocks) is outside the BSP data`);
+            for (let i = 0; i < count2; i++) walk2(childStruct, childPointer + i * childSize >>> 0, `${where}.${field.name}[${i}]`);
           }
         }
       };
@@ -35769,7 +35816,9 @@ function ceStructureBspRegions(buffer, header, tagIndex, purpose = "Cannot compu
 }
 function ceCrcRegions(buffer, header, tagIndex) {
   const regions = ceStructureBspRegions(buffer, header, tagIndex);
-  regions.push({ offset: tagIndex.modelDataFileOffset, size: tagIndex.modelDataSize, label: "model data" });
+  if (header.engine !== 5 && tagIndex.modelDataSize > 0) {
+    regions.push({ offset: tagIndex.modelDataFileOffset, size: tagIndex.modelDataSize, label: "model data" });
+  }
   regions.push({ offset: header.tagDataOffset, size: header.tagDataSize, label: "tag data" });
   return regions;
 }
@@ -38314,11 +38363,56 @@ function planTagDataAlignment(buffer, header, tagIndex) {
   const tdo = header.tagDataOffset;
   const remainders = [0, 1, 2, 3].filter((r) => blocks.byRemainder[r] + roots.byRemainder[r] + dataBlocks.byRemainder[r] > 0);
   if (remainders.length !== 1) {
-    plan.problems.push(`The tag data's roots and blocks start at different remainders mod 4 (${remainders.join(", ")}), so no single shift aligns them; a per-block re-layout is not supported.`);
-    return plan;
+    let tailAligned = false;
+    if (remainders.length === 2 && !remainders.includes(0)) {
+      const skipped = new Set(walked.tolerated.filter((t) => t.kind === "rootOutsideTagData").map((t) => t.tagIndex));
+      const measuredOffsets = [];
+      for (const s of walked.sites) {
+        const offset = s.value - base;
+        if (s.kind === "reflexive") {
+          if (buffer.readInt32LE(s.at - REFLEXIVE_COUNT_BEFORE_POINTER) > 0) measuredOffsets.push(offset);
+        } else if (s.kind === "tagData") {
+          if (!skipped.has(s.tagIndex)) measuredOffsets.push(offset);
+        } else if (s.kind === "dataBlock") {
+          if (buffer.readInt32LE(s.at - DATA_SIZE_BEFORE_POINTER) > 0) measuredOffsets.push(offset);
+        }
+      }
+      measuredOffsets.sort((a, b) => a - b);
+      if (measuredOffsets.length >= 2) {
+        const firstRem = (measuredOffsets[0] % ALIGNMENT2 + ALIGNMENT2) % ALIGNMENT2;
+        let transitions = 0;
+        let tailStart = -1;
+        let tailCount = 0;
+        let prevRem = firstRem;
+        for (const off of measuredOffsets) {
+          const r = (off % ALIGNMENT2 + ALIGNMENT2) % ALIGNMENT2;
+          if (r !== prevRem) {
+            transitions++;
+            tailStart = off;
+            prevRem = r;
+          }
+          if (transitions === 1) tailCount++;
+        }
+        if (transitions === 1 && tailStart > 0 && tailCount >= 10) {
+          const primaryBytes = (ALIGNMENT2 - firstRem) % ALIGNMENT2;
+          const tailRemAfterPrimary = (prevRem + primaryBytes) % ALIGNMENT2;
+          const tailBytes = (ALIGNMENT2 - tailRemAfterPrimary) % ALIGNMENT2;
+          plan.remainder = firstRem;
+          plan.tailInsertAt = tailStart;
+          plan.tailBytes = tailBytes;
+          plan.bytes = primaryBytes + tailBytes;
+          tailAligned = true;
+        }
+      }
+    }
+    if (!tailAligned) {
+      plan.problems.push(`The tag data's roots and blocks start at different remainders mod 4 (${remainders.join(", ")}), so no single shift aligns them; a per-block re-layout is not supported.`);
+      return plan;
+    }
+  } else {
+    plan.remainder = remainders[0];
+    plan.bytes = (ALIGNMENT2 - plan.remainder) % ALIGNMENT2;
   }
-  plan.remainder = remainders[0];
-  plan.bytes = (ALIGNMENT2 - plan.remainder) % ALIGNMENT2;
   const isPath = (k) => k === "tagPath" || k === "referencePath" || k === "bspReferencePath";
   const inTagData = (v) => v >= base && v - base < tds;
   let pathEnd = TAG_DATA_HEADER_PC_SIZE + tagIndex.tagCount * 32;
@@ -38355,16 +38449,903 @@ function applyTagDataAlignment(map, expected) {
   const tdo = map.readUInt32LE(TAG_DATA_TAG_DATA_OFFSET2);
   const tds = map.readUInt32LE(TAG_DATA_SIZE_OFFSET3);
   if (map.readUInt32LE(TAG_DATA_FILE_SIZE_OFFSET2) !== map.length || tdo + tds !== map.length) throw new TagDataAlignmentError("The tag data is not the last block of the file. Nothing was written.");
+  const primaryBytes = plan.tailBytes ? plan.bytes - plan.tailBytes : plan.bytes;
   const cut = tdo + plan.insertAt;
-  const out = Buffer.alloc(map.length + plan.bytes);
+  let out = Buffer.alloc(map.length + primaryBytes);
   map.copy(out, 0, 0, cut);
-  map.copy(out, cut + plan.bytes, cut);
+  map.copy(out, cut + primaryBytes, cut);
   const sites = collectTagDataPointers(map, tagDataLayoutOf(header, tagIndex), { tolerate: { staleReferencePaths: true, rootsOutsideTagData: true }, tolerated: [] });
-  const outOffset = (at) => at < cut ? at : at + plan.bytes;
-  const counts = applyPointerShift(sites, { from: base + plan.insertAt >>> 0, to: base + tds >>> 0, delta: plan.bytes }, (at, value) => out.writeUInt32LE(value, outOffset(at)));
+  const outOffset = (at) => at < cut ? at : at + primaryBytes;
+  const counts = applyPointerShift(sites, { from: base + plan.insertAt >>> 0, to: base + tds >>> 0, delta: primaryBytes }, (at, value) => out.writeUInt32LE(value, outOffset(at)));
   out.writeUInt32LE(out.length, TAG_DATA_FILE_SIZE_OFFSET2);
-  out.writeUInt32LE(tds + plan.bytes, TAG_DATA_SIZE_OFFSET3);
+  out.writeUInt32LE(tds + primaryBytes, TAG_DATA_SIZE_OFFSET3);
+  if (plan.tailInsertAt !== void 0 && plan.tailBytes && plan.tailBytes > 0) {
+    const midHeader = parseCacheFileHeader(out);
+    const midTagIndex = parseTagIndexForConversion(out, midHeader);
+    const midTds = out.readUInt32LE(TAG_DATA_SIZE_OFFSET3);
+    const tailOffsetInMid = plan.tailInsertAt + primaryBytes;
+    const tailCut = tdo + tailOffsetInMid;
+    const out2 = Buffer.alloc(out.length + plan.tailBytes);
+    out.copy(out2, 0, 0, tailCut);
+    out.copy(out2, tailCut + plan.tailBytes, tailCut);
+    const midSites = collectTagDataPointers(out, tagDataLayoutOf(midHeader, midTagIndex), { tolerate: { staleReferencePaths: true, rootsOutsideTagData: true }, tolerated: [] });
+    const out2Offset = (at) => at < tailCut ? at : at + plan.tailBytes;
+    applyPointerShift(midSites, { from: base + tailOffsetInMid >>> 0, to: base + midTds >>> 0, delta: plan.tailBytes }, (at, value) => out2.writeUInt32LE(value, out2Offset(at)));
+    out2.writeUInt32LE(out2.length, TAG_DATA_FILE_SIZE_OFFSET2);
+    out2.writeUInt32LE(midTds + plan.tailBytes, TAG_DATA_SIZE_OFFSET3);
+    out = out2;
+  }
   return { buffer: out, plan, moved: counts.totalRebased };
+}
+
+// ../core/src/map/tag-index-editor.ts
+var TagIndexEditorError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "TagIndexEditorError";
+  }
+};
+function renameTagInMap(buffer, header, tagIndex, tagEntryIndex, newPath) {
+  const entry = tagIndex.entries[tagEntryIndex];
+  if (!entry) {
+    throw new TagIndexEditorError(`Tag #${tagEntryIndex} not found in map.`);
+  }
+  const cleanPath = newPath.trim().replace(/\//g, "\\");
+  if (!cleanPath) {
+    throw new TagIndexEditorError("Tag path cannot be empty.");
+  }
+  const normalizedNew = normalizeTagPath(cleanPath);
+  const exists = tagIndex.entries.some(
+    (e, idx) => idx !== tagEntryIndex && normalizeTagPath(e.path) === normalizedNew && e.primaryClassName === entry.primaryClassName
+  );
+  if (exists) {
+    throw new TagIndexEditorError(`A tag with path "${cleanPath}" and class "${entry.primaryClassName}" already exists.`);
+  }
+  const tagHeaderSize = header.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE;
+  const tagArrayFileOffset = header.tagDataOffset + tagHeaderSize;
+  const entryOffset = tagArrayFileOffset + tagEntryIndex * TAG_ENTRY_SIZE;
+  const pathPointer = buffer.readUInt32LE(entryOffset + 16);
+  const pathFileOffset = resolveTagDataPointer(pathPointer, header, tagIndex.baseMemoryAddress);
+  const oldPathLength = entry.path.length;
+  if (cleanPath.length <= oldPathLength) {
+    buffer.write(cleanPath, pathFileOffset, "ascii");
+    buffer.fill(0, pathFileOffset + cleanPath.length, pathFileOffset + oldPathLength + 1);
+    entry.path = cleanPath;
+    return { buffer, path: cleanPath };
+  }
+  const newPathBytes = Buffer.from(cleanPath + "\0", "ascii");
+  const pad = (4 - newPathBytes.length % 4) % 4;
+  const paddedBytes = pad > 0 ? Buffer.concat([newPathBytes, Buffer.alloc(pad, 0)]) : newPathBytes;
+  const newOffset = buffer.length;
+  const outBuffer = Buffer.concat([buffer, paddedBytes]);
+  outBuffer.writeUInt32LE(outBuffer.length, 8);
+  outBuffer.writeUInt32LE(header.tagDataSize + paddedBytes.length, 20);
+  const newPathPointer = tagIndex.baseMemoryAddress + (newOffset - header.tagDataOffset) >>> 0;
+  outBuffer.writeUInt32LE(newPathPointer, entryOffset + 16);
+  entry.path = cleanPath;
+  return { buffer: outBuffer, path: cleanPath };
+}
+function duplicateTagInMap(buffer, header, tagIndex, sourceTagEntryIndex, newPath) {
+  const sourceEntry = tagIndex.entries[sourceTagEntryIndex];
+  if (!sourceEntry) {
+    throw new TagIndexEditorError(`Source tag #${sourceTagEntryIndex} not found in map.`);
+  }
+  const cleanPath = newPath.trim().replace(/\//g, "\\");
+  if (!cleanPath) {
+    throw new TagIndexEditorError("New tag path cannot be empty.");
+  }
+  const normalizedNew = normalizeTagPath(cleanPath);
+  const exists = tagIndex.entries.some(
+    (e) => normalizeTagPath(e.path) === normalizedNew && e.primaryClassName === sourceEntry.primaryClassName
+  );
+  if (exists) {
+    throw new TagIndexEditorError(`A tag with path "${cleanPath}" and class "${sourceEntry.primaryClassName}" already exists.`);
+  }
+  const extractedSet = extractTagSet(buffer, header, tagIndex, [sourceTagEntryIndex]);
+  const rootExtracted = extractedSet.tags.find((t) => t.originalIndex === sourceTagEntryIndex);
+  if (!rootExtracted) {
+    throw new TagIndexEditorError(`Failed to extract source tag "${sourceEntry.path}".`);
+  }
+  const oldRootPath = rootExtracted.path;
+  const containerTags = extractedSet.tags.map((t) => {
+    const isRoot = t.originalIndex === sourceTagEntryIndex;
+    return {
+      originalIndex: t.originalIndex,
+      group: t.group,
+      path: isRoot ? cleanPath : t.path,
+      structName: t.structName,
+      data: t.data.toString("base64"),
+      dependencies: t.dependencies.map((d) => {
+        if (isRoot && d.fieldPath.startsWith(oldRootPath)) {
+          return {
+            ...d,
+            fieldPath: cleanPath + d.fieldPath.slice(oldRootPath.length)
+          };
+        }
+        return d;
+      }),
+      secondaryClassFourCC: t.secondaryClassFourCC,
+      tertiaryClassFourCC: t.tertiaryClassFourCC,
+      embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
+      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p })),
+      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
+      gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
+        geometryIndex: p.geometryIndex,
+        partIndex: p.partIndex,
+        vertexType: p.vertexType,
+        vertexCount: p.vertexCount,
+        vertexData: p.vertexBytes.toString("base64"),
+        triangleBufferType: p.triangleBufferType,
+        triangleCount: p.triangleCount,
+        triangleData: p.triangleBytes.toString("base64")
+      }))
+    };
+  });
+  const container = {
+    magic: OCETAGS_MAGIC,
+    formatVersion: OCETAGS_FORMAT_VERSION,
+    sourceMapName: header.scenarioName,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    hasUnresolvedBspReferences: false,
+    rootOriginalIndices: [sourceTagEntryIndex],
+    tags: containerTags,
+    notExtracted: [],
+    warnings: [],
+    resourceMapIdentities: {},
+    externalResourceRefs: [],
+    externalData: "referenced"
+  };
+  const plan = planAddInjection(
+    { buffer, header, tagIndex },
+    container,
+    {},
+    { allowEmbeddedRelocation: true }
+  );
+  if (plan.kind === "refused") {
+    throw new TagIndexEditorError(`Cannot duplicate tag: ${plan.reason}`);
+  }
+  if (plan.toAdd.length === 0) {
+    const blockers = [...plan.blockedOther, ...plan.blockedEmbedded];
+    const reasons = blockers.map((b) => `${b.path}: ${b.reasons.join("; ")}`).join("\n");
+    throw new TagIndexEditorError(`Cannot duplicate tag: no tags were planned for addition. Reasons:
+${reasons}`);
+  }
+  const report = applyInjectionWithReport(
+    buffer,
+    header,
+    tagIndex,
+    container,
+    plan,
+    { allowEmbeddedRelocation: true }
+  );
+  const rootLocalIndex = containerTags.findIndex((t) => t.originalIndex === sourceTagEntryIndex);
+  const newTagId = plan.resolvedTagIdByLocalIndex.get(rootLocalIndex) ?? computeNewTagId(tagIndex.entries.length);
+  const newTagIndex = tagIndex.entries.length;
+  return {
+    buffer: report.buffer,
+    newTagIndex,
+    newTagId,
+    path: cleanPath
+  };
+}
+
+// ../core/src/map/deprotect.ts
+var OBJECT_TYPE_MAP = {
+  0: "biped",
+  1: "vehicle",
+  2: "weapon",
+  3: "equipment",
+  4: "garbage",
+  5: "projectile",
+  6: "scenery",
+  7: "device_machine",
+  8: "device_control",
+  9: "device_light_fixture",
+  10: "placeholder",
+  11: "sound_scenery"
+};
+var SHADER_TYPE_MAP = {
+  3: "shader_environment",
+  4: "shader_model",
+  5: "shader_transparent_generic",
+  6: "shader_transparent_chicago",
+  7: "shader_transparent_chicago_extended",
+  8: "shader_transparent_water",
+  9: "shader_transparent_glass",
+  10: "shader_transparent_meter",
+  11: "shader_transparent_plasma"
+};
+var SCRIPT_TAG_REF_NODE_TYPE_CLASSES = {
+  24: "sound",
+  25: "effect",
+  26: "damage_effect",
+  27: "sound_looping",
+  28: "model_animations",
+  29: "actor_variant",
+  30: "damage_effect",
+  31: "object"
+};
+function isProtectedPathName(path3) {
+  const trimmed = path3.trim().toLowerCase();
+  if (!trimmed) return true;
+  if (trimmed.includes("protected") || trimmed.includes("zteam") || trimmed.includes("hek+") || trimmed.includes(" obfuscated")) {
+    return true;
+  }
+  for (let i = 0; i < path3.length; i++) {
+    const code = path3.charCodeAt(i);
+    if (code < 32 || code > 126) return true;
+  }
+  return false;
+}
+function resolveClassHierarchyFourCCs(className) {
+  const info = lookupTagClassByName(className);
+  if (!info) {
+    throw new Error(`Unknown tag class name "${className}"`);
+  }
+  const primaryFourCC = fourCCFromString(info.groupId);
+  let secondaryFourCC = TAG_CLASS_NONE;
+  let tertiaryFourCC = TAG_CLASS_NONE;
+  if (info.parent) {
+    const parentInfo = lookupTagClassByName(info.parent);
+    if (parentInfo) {
+      secondaryFourCC = fourCCFromString(parentInfo.groupId);
+      if (parentInfo.parent) {
+        const grandParentInfo = lookupTagClassByName(parentInfo.parent);
+        if (grandParentInfo) {
+          tertiaryFourCC = fourCCFromString(grandParentInfo.groupId);
+        }
+      }
+    }
+  }
+  return { primaryFourCC, secondaryFourCC, tertiaryFourCC };
+}
+function looksLikeBitmapTag(buffer, header, baseMemoryAddress, rootOffset) {
+  if (!isRangeInBuffer(rootOffset, 108, buffer.length)) return false;
+  const count2 = buffer.readUInt32LE(rootOffset + 96);
+  const ptr = buffer.readUInt32LE(rootOffset + 100);
+  if (count2 === 0 || count2 > 2048) return false;
+  const dataOffset = resolvePointer(ptr, header.tagDataOffset, baseMemoryAddress);
+  if (!isRangeInBuffer(dataOffset, 48, buffer.length)) return false;
+  return buffer.readUInt32LE(dataOffset) === 1651078253;
+}
+function inferConcreteClassFromStruct(buffer, header, baseMemoryAddress, tagDataPointer, candidateClass) {
+  const rootOffset = resolveTagDataPointer(tagDataPointer, header, baseMemoryAddress);
+  if (candidateClass === "object" || candidateClass === "unit" || candidateClass === "item" || candidateClass === "device" || OBJECT_TYPE_MAP[0] === candidateClass || Object.values(OBJECT_TYPE_MAP).includes(candidateClass)) {
+    if (isRangeInBuffer(rootOffset, 2, buffer.length)) {
+      const objType = buffer.readInt16LE(rootOffset);
+      if (objType in OBJECT_TYPE_MAP) {
+        return OBJECT_TYPE_MAP[objType];
+      }
+    }
+  }
+  if (candidateClass === "shader" || candidateClass.startsWith("shader_")) {
+    if (isRangeInBuffer(rootOffset + 36, 2, buffer.length)) {
+      const shdrType = buffer.readInt16LE(rootOffset + 36);
+      if (shdrType in SHADER_TYPE_MAP) {
+        return SHADER_TYPE_MAP[shdrType];
+      }
+    }
+  }
+  if (candidateClass === "bitmap" || looksLikeBitmapTag(buffer, header, baseMemoryAddress, rootOffset)) {
+    if (looksLikeBitmapTag(buffer, header, baseMemoryAddress, rootOffset)) {
+      return "bitmap";
+    }
+  }
+  return candidateClass;
+}
+function writeTagClassToEntry(buffer, header, tagIndex, tagIdx, className) {
+  const entry = tagIndex.entries[tagIdx];
+  if (!entry) return false;
+  const { primaryFourCC, secondaryFourCC, tertiaryFourCC } = resolveClassHierarchyFourCCs(className);
+  const changed = entry.primaryClassName !== className || entry.primaryClassFourCC !== primaryFourCC || (entry.secondaryClassFourCC ?? TAG_CLASS_NONE) !== secondaryFourCC || (entry.tertiaryClassFourCC ?? TAG_CLASS_NONE) !== tertiaryFourCC;
+  const entryOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE + tagIdx * TAG_ENTRY_SIZE;
+  if (isRangeInBuffer(entryOffset, TAG_ENTRY_SIZE, buffer.length)) {
+    buffer.writeUInt32LE(primaryFourCC >>> 0, entryOffset + 0);
+    buffer.writeUInt32LE(secondaryFourCC >>> 0, entryOffset + 4);
+    buffer.writeUInt32LE(tertiaryFourCC >>> 0, entryOffset + 8);
+  }
+  entry.primaryClassFourCC = primaryFourCC;
+  entry.secondaryClassFourCC = secondaryFourCC === TAG_CLASS_NONE ? null : secondaryFourCC;
+  entry.tertiaryClassFourCC = tertiaryFourCC === TAG_CLASS_NONE ? null : tertiaryFourCC;
+  entry.primaryClassName = className;
+  return changed;
+}
+function repairProtectedTagClasses(buffer, header, tagIndex) {
+  let classesRepaired = 0;
+  const log = [];
+  const queue = [];
+  const visited = /* @__PURE__ */ new Set();
+  const assignClass = (idx, rawClassName, reason) => {
+    const entry = tagIndex.entries[idx];
+    if (!entry) return;
+    const concrete = entry.isExternal ? rawClassName : inferConcreteClassFromStruct(buffer, header, tagIndex.baseMemoryAddress, entry.tagDataPointerOrResourceIndex, rawClassName);
+    if (!lookupTagClassByName(concrete)) return;
+    if (writeTagClassToEntry(buffer, header, tagIndex, idx, concrete)) {
+      classesRepaired++;
+      log.push(`Repaired tag #${idx} ("${entry.path}") class -> ${concrete} (${reason})`);
+    }
+    if (!visited.has(idx)) {
+      queue.push(idx);
+    }
+  };
+  const scnrIndex = tagIndex.scenarioTagId & 65535;
+  if (tagIndex.entries[scnrIndex]) {
+    assignClass(scnrIndex, "scenario", "scenarioTagId root");
+  } else if (tagIndex.entries[0]) {
+    assignClass(0, "scenario", "index 0 fallback root");
+  }
+  for (const entry of tagIndex.entries) {
+    const lowerPath = entry.path.toLowerCase();
+    if (lowerPath === "globals\\globals" && entry.primaryClassName !== "globals") {
+      assignClass(entry.index, "globals", "globals\\globals path");
+    } else if (!entry.isExternal && entry.primaryClassName === null) {
+      const rootOff = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+      if (looksLikeBitmapTag(buffer, header, tagIndex.baseMemoryAddress, rootOff)) {
+        assignClass(entry.index, "bitmap", 'BitmapData "bitm" signature');
+      }
+    } else if (entry.primaryClassName) {
+      const concrete = entry.isExternal ? entry.primaryClassName : inferConcreteClassFromStruct(
+        buffer,
+        header,
+        tagIndex.baseMemoryAddress,
+        entry.tagDataPointerOrResourceIndex,
+        entry.primaryClassName
+      );
+      if (concrete !== entry.primaryClassName && lookupTagClassByName(concrete)) {
+        assignClass(entry.index, concrete, `polymorphic ${entry.primaryClassName} discriminator`);
+      } else {
+        queue.push(entry.index);
+      }
+    }
+  }
+  const walkStruct2 = (structDef, baseAbs, depth) => {
+    if (depth > 8) return;
+    if (!isRangeInBuffer(baseAbs, structDef.totalSize, buffer.length)) return;
+    for (const f of structDef.fields) {
+      const absOffset = baseAbs + f.offset;
+      if (f.def.type === "TagDependency") {
+        if (!isRangeInBuffer(absOffset, 16, buffer.length)) continue;
+        const depFourCC = buffer.readUInt32LE(absOffset);
+        const tagId = buffer.readUInt32LE(absOffset + 12);
+        if (tagId === NULL_TAG_ID || tagId === 0) continue;
+        const targetIdx = tagId & 65535;
+        const targetEntry = tagIndex.entries[targetIdx];
+        if (!targetEntry || targetEntry.tagId !== tagId >>> 0) continue;
+        let inferredClass = targetEntry.primaryClassName;
+        if (!inferredClass) {
+          const fromDepFourCC = lookupTagClass(depFourCC);
+          if (fromDepFourCC) {
+            inferredClass = fromDepFourCC.name;
+          } else if (f.def.classes && f.def.classes.length > 0 && f.def.classes[0] !== "*") {
+            const firstAllowed = f.def.classes[0];
+            const byCode = firstAllowed.length === 4 ? lookupTagClass(fourCCFromString(firstAllowed)) : null;
+            const byName = lookupTagClassByName(firstAllowed);
+            inferredClass = byCode?.name ?? byName?.name ?? null;
+          }
+        }
+        if (inferredClass) {
+          assignClass(targetIdx, inferredClass, `dependency "${f.name}"`);
+          const concreteEntry = tagIndex.entries[targetIdx];
+          if (concreteEntry.primaryClassName) {
+            const info = lookupTagClassByName(concreteEntry.primaryClassName);
+            if (info) {
+              const expectedFourCC = fourCCFromString(info.groupId);
+              if (depFourCC !== expectedFourCC) {
+                buffer.writeUInt32LE(expectedFourCC >>> 0, absOffset);
+              }
+            }
+          }
+        }
+      } else if (f.def.type === "TagReflexive" && f.def.struct) {
+        if (!isRangeInBuffer(absOffset, 12, buffer.length)) continue;
+        const decoded = decodeValueField(buffer, absOffset, f.def);
+        const ref = decoded.value;
+        if (ref.count <= 0 || ref.count > 8192) continue;
+        let childStruct;
+        try {
+          childStruct = resolveStruct(f.def.struct);
+        } catch {
+          continue;
+        }
+        const childBase = resolvePointer(ref.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        if (!isRangeInBuffer(childBase, ref.count * childStruct.totalSize, buffer.length)) continue;
+        for (let i = 0; i < ref.count; i++) {
+          walkStruct2(childStruct, childBase + i * childStruct.totalSize, depth + 1);
+        }
+      }
+    }
+  };
+  while (queue.length > 0) {
+    const idx = queue.shift();
+    if (visited.has(idx)) continue;
+    visited.add(idx);
+    const entry = tagIndex.entries[idx];
+    if (!entry || entry.isExternal || !entry.primaryClassName) continue;
+    let structDef;
+    try {
+      structDef = getGroupDefinition(entry.primaryClassName);
+    } catch {
+      continue;
+    }
+    const rootOffset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    walkStruct2(structDef, rootOffset, 0);
+  }
+  return { classesRepaired, log };
+}
+function scrapeScenarioScriptTagPaths(buffer, header, tagIndex) {
+  const recovered = /* @__PURE__ */ new Map();
+  const scnrIdx = tagIndex.scenarioTagId & 65535;
+  const scnrEntry = tagIndex.entries[scnrIdx];
+  if (!scnrEntry || scnrEntry.isExternal) return recovered;
+  const scenarioStruct = getGroupStructName("scenario");
+  if (!scenarioStruct) return recovered;
+  const scnrOffset = resolveTagDataPointer(scnrEntry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(scnrOffset, resolveStruct(scenarioStruct).totalSize, buffer.length)) return recovered;
+  const decoded = decodeStruct(buffer, scnrOffset, scenarioStruct);
+  const syntaxField = decoded.get("script syntax data");
+  const stringsField = decoded.get("script string data");
+  if (syntaxField?.kind !== "tagDataOffset" || stringsField?.kind !== "tagDataOffset") return recovered;
+  if (syntaxField.value.size < DATA_ARRAY_HEADER_SIZE || stringsField.value.size <= 0) return recovered;
+  const syntaxOffset = resolvePointer(syntaxField.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  const stringsOffset = resolvePointer(stringsField.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(syntaxOffset, DATA_ARRAY_HEADER_SIZE, buffer.length) || !isRangeInBuffer(stringsOffset, stringsField.value.size, buffer.length)) {
+    return recovered;
+  }
+  const maxNodes = buffer.readInt16LE(syntaxOffset + DATA_ARRAY_MAXIMUM_COUNT);
+  const elemSize = buffer.readInt16LE(syntaxOffset + DATA_ARRAY_ELEMENT_SIZE);
+  const countNodes = buffer.readInt16LE(syntaxOffset + DATA_ARRAY_COUNT);
+  if (elemSize !== SCRIPT_NODE_SIZE || maxNodes <= 0) return recovered;
+  const nodesToScan = Math.min(Math.max(countNodes, 0), maxNodes);
+  for (let i = 0; i < nodesToScan; i++) {
+    const nodeAt = syntaxOffset + DATA_ARRAY_HEADER_SIZE + i * SCRIPT_NODE_SIZE;
+    if (!isRangeInBuffer(nodeAt, SCRIPT_NODE_SIZE, buffer.length)) break;
+    const datumSalt = buffer.readUInt16LE(nodeAt + 0);
+    if (datumSalt === 0) continue;
+    const nodeType = buffer.readInt16LE(nodeAt + 4);
+    const nodeFlags = buffer.readUInt16LE(nodeAt + 6);
+    if (nodeType >= 24 && nodeType <= 31 && nodeFlags === 6) {
+      const stringOff = buffer.readUInt32LE(nodeAt + 16);
+      const tagId = buffer.readUInt32LE(nodeAt + 12);
+      if (tagId === NULL_TAG_ID || tagId === 0) continue;
+      const tagIdx = tagId & 65535;
+      if (tagIdx >= tagIndex.entries.length) continue;
+      if (stringOff < stringsField.value.size) {
+        const strVal = readCString(buffer, stringsOffset + stringOff);
+        const cleaned = strVal.trim().replace(/\//g, "\\");
+        if (cleaned.length > 0 && !isProtectedPathName(cleaned) && cleaned.toLowerCase() !== "none") {
+          recovered.set(tagIdx, { path: cleaned, nodeType });
+        }
+      }
+    }
+  }
+  return recovered;
+}
+function repairTruncatedBitmapMipmaps(buffer, header, tagIndex) {
+  let bitmapsRepaired = 0;
+  const log = [];
+  const bitmapSize = resolveStruct("BitmapData").totalSize;
+  const groupSize = resolveStruct("Bitmap").totalSize;
+  for (const e of tagIndex.entries) {
+    if (e.primaryClassName !== "bitmap" || e.isExternal) continue;
+    const root = resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(root, groupSize, buffer.length)) continue;
+    const list = decodeStruct(buffer, root, "Bitmap").get("bitmap data");
+    if (list?.kind !== "reflexive") continue;
+    for (let i = 0; i < list.value.count; i++) {
+      const at = resolveTagDataPointer(list.value.pointerLow + i * bitmapSize >>> 0, header, tagIndex.baseMemoryAddress);
+      if (!isRangeInBuffer(at, bitmapSize, buffer.length)) break;
+      const signature = buffer.readUInt32LE(at);
+      const width = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.width);
+      const height = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.height);
+      const depth = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.depth);
+      const type = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.type);
+      const format = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.format);
+      const flags = buffer.readUInt16LE(at + BITMAP_DATA_OFFSETS.flags) & ~256;
+      const mipmapCount = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.mipmapCount);
+      const pixelsSize = buffer.readInt32LE(at + BITMAP_DATA_OFFSETS.pixelsSize);
+      if (signature !== 1651078253 || width <= 0 || height <= 0 || depth <= 0 || mipmapCount < 0) continue;
+      const needed = requiredPixelDataSize({
+        signature,
+        width,
+        height,
+        depth,
+        type,
+        format,
+        flags,
+        mipmapCount,
+        pixelsSize
+      });
+      if (pixelsSize < needed) {
+        let curWidth = width;
+        let curHeight = height;
+        let curDepth = depth;
+        let clampedMipmaps = mipmapCount;
+        let fits = false;
+        for (let m = mipmapCount; m >= 0; m--) {
+          const tryNeeded = requiredPixelDataSize({
+            signature,
+            width: curWidth,
+            height: curHeight,
+            depth: curDepth,
+            type,
+            format,
+            flags,
+            mipmapCount: m,
+            pixelsSize
+          });
+          if (pixelsSize >= tryNeeded) {
+            clampedMipmaps = m;
+            fits = true;
+            break;
+          }
+        }
+        if (!fits) {
+          while ((curWidth > 1 || curHeight > 1) && !fits) {
+            curWidth = Math.max(1, curWidth >> 1);
+            curHeight = Math.max(1, curHeight >> 1);
+            const maxMip = Math.max(0, 31 - Math.clz32(Math.max(curWidth, curHeight, curDepth)));
+            for (let m = Math.min(mipmapCount, maxMip); m >= 0; m--) {
+              const tryNeeded = requiredPixelDataSize({
+                signature,
+                width: curWidth,
+                height: curHeight,
+                depth: curDepth,
+                type,
+                format,
+                flags,
+                mipmapCount: m,
+                pixelsSize
+              });
+              if (pixelsSize >= tryNeeded) {
+                clampedMipmaps = m;
+                fits = true;
+                break;
+              }
+            }
+          }
+        }
+        buffer.writeInt16LE(curWidth, at + BITMAP_DATA_OFFSETS.width);
+        buffer.writeInt16LE(curHeight, at + BITMAP_DATA_OFFSETS.height);
+        buffer.writeInt16LE(clampedMipmaps, at + BITMAP_DATA_OFFSETS.mipmapCount);
+        bitmapsRepaired++;
+        log.push(
+          `Clamped truncated bitmap #${e.index} "${e.path}" bitmap ${i}: ${width}x${height} (${mipmapCount} mips) -> ${curWidth}x${curHeight} (${clampedMipmaps} mips, ${pixelsSize} bytes available)`
+        );
+      }
+    }
+  }
+  return { bitmapsRepaired, log };
+}
+function repairCorruptedModelPartStrips(buffer, header, tagIndex) {
+  let modelPartsRepaired = 0;
+  let stripIndicesClamped = 0;
+  const log = [];
+  const geometrySize = resolveStruct("GBXModelGeometry").totalSize;
+  const base = tagIndex.baseMemoryAddress;
+  const modelDataAt = tagIndex.modelDataFileOffset;
+  const indexDataOffset = tagIndex.vertexSize;
+  for (const entry of tagIndex.entries) {
+    if (entry.isExternal || entry.primaryClassName !== "gbxmodel") continue;
+    const modelAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, base);
+    if (!isRangeInBuffer(modelAt, resolveStruct("GBXModel").totalSize, buffer.length)) continue;
+    const model = decodeStruct(buffer, modelAt, "GBXModel");
+    const flags = buffer.readUInt32LE(modelAt);
+    const localNodes = (flags & 1 << 1) !== 0;
+    const nodesBlock = model.get("nodes");
+    const nodeCount = Math.max(1, nodesBlock?.kind === "reflexive" ? nodesBlock.value.count : 1);
+    const geometries = model.get("geometries");
+    if (!geometries || geometries.kind !== "reflexive" || geometries.value.count <= 0) continue;
+    const geometriesAt = resolvePointer(geometries.value.pointerLow, header.tagDataOffset, base);
+    for (let g = 0; g < geometries.value.count; g++) {
+      const gAt = geometriesAt + g * geometrySize;
+      if (!isRangeInBuffer(gAt, geometrySize, buffer.length)) break;
+      const geometry = decodeStruct(buffer, gAt, "GBXModelGeometry");
+      const parts = geometry.get("parts");
+      if (!parts || parts.kind !== "reflexive" || parts.value.count <= 0) continue;
+      const partsAt = resolvePointer(parts.value.pointerLow, header.tagDataOffset, base);
+      for (let p = 0; p < parts.value.count; p++) {
+        const at = partsAt + p * 132;
+        if (!isRangeInBuffer(at, 132, buffer.length)) break;
+        const triangleCount = buffer.readInt32LE(at + 72);
+        const stripOffset = buffer.readUInt32LE(at + 76);
+        const vertexCount = buffer.readInt32LE(at + 88);
+        const vertexOffset = buffer.readUInt32LE(at + 100);
+        const stripIndexCount = triangleCount + 2;
+        if (vertexCount <= 0 || triangleCount < 1) continue;
+        let partRepaired = false;
+        const primaryNode = buffer.readInt16LE(at + 8);
+        const secondaryNode = buffer.readInt16LE(at + 10);
+        if (primaryNode < 0 || primaryNode >= nodeCount) {
+          buffer.writeInt16LE(Math.max(0, Math.min(nodeCount - 1, primaryNode)), at + 8);
+          partRepaired = true;
+        }
+        if (secondaryNode < 0 || secondaryNode >= nodeCount) {
+          buffer.writeInt16LE(Math.max(0, Math.min(nodeCount - 1, secondaryNode)), at + 10);
+          partRepaired = true;
+        }
+        const localCount = buffer[at + 107];
+        const nodeLimit = localNodes && localCount > 0 ? localCount : nodeCount;
+        const vertexBaseAt = modelDataAt + vertexOffset;
+        let nodesClamped = 0;
+        if (isRangeInBuffer(vertexBaseAt, vertexCount * 68, buffer.length)) {
+          for (let v = 0; v < vertexCount; v++) {
+            const vAt = vertexBaseAt + v * 68;
+            const n0 = buffer.readInt16LE(vAt + 56);
+            const n1 = buffer.readInt16LE(vAt + 58);
+            if (n0 < 0 || n0 >= nodeLimit) {
+              buffer.writeInt16LE(Math.max(0, Math.min(nodeLimit - 1, n0)), vAt + 56);
+              nodesClamped++;
+              partRepaired = true;
+            }
+            if (n1 < 0 || n1 >= nodeLimit) {
+              buffer.writeInt16LE(Math.max(0, Math.min(nodeLimit - 1, n1)), vAt + 58);
+              nodesClamped++;
+              partRepaired = true;
+            }
+            for (const vecOff of [12, 24, 36]) {
+              for (let c = 0; c < 3; c++) {
+                const fVal = buffer.readFloatLE(vAt + vecOff + c * 4);
+                if (!Number.isFinite(fVal)) {
+                  buffer.writeFloatLE(c === 0 ? 1 : 0, vAt + vecOff + c * 4);
+                  partRepaired = true;
+                } else if (Math.abs(fVal) > 1) {
+                  buffer.writeFloatLE(Math.max(-1, Math.min(1, fVal)), vAt + vecOff + c * 4);
+                  partRepaired = true;
+                }
+              }
+            }
+          }
+        }
+        const stripAt = modelDataAt + indexDataOffset + stripOffset;
+        let clampedInPart = 0;
+        if (isRangeInBuffer(stripAt, stripIndexCount * 2, buffer.length)) {
+          let lastValidVertex = Math.max(0, vertexCount - 1);
+          for (let k = 0; k < stripIndexCount; k++) {
+            const val = buffer.readUInt16LE(stripAt + k * 2);
+            if (val < vertexCount) {
+              lastValidVertex = val;
+              break;
+            }
+          }
+          for (let k = 0; k < stripIndexCount; k++) {
+            const val = buffer.readUInt16LE(stripAt + k * 2);
+            if (val >= vertexCount) {
+              buffer.writeUInt16LE(lastValidVertex, stripAt + k * 2);
+              clampedInPart++;
+              stripIndicesClamped++;
+              partRepaired = true;
+            } else {
+              lastValidVertex = val;
+            }
+          }
+        }
+        if (partRepaired) {
+          modelPartsRepaired++;
+          log.push(
+            `Repaired #${entry.index} "${entry.path}" geometry ${g} part ${p} (${clampedInPart} strip indices, ${nodesClamped} vertex nodes clamped; vertexCount=${vertexCount})`
+          );
+        }
+      }
+    }
+  }
+  return { modelPartsRepaired, stripIndicesClamped, log };
+}
+function inspectMapProtectionAndIntegrity(buffer, header, tagIndex) {
+  let protectedClassCount = 0;
+  let protectedNameCount = 0;
+  let duplicateNameCount = 0;
+  const seenKey = /* @__PURE__ */ new Set();
+  const details = [];
+  for (const e of tagIndex.entries) {
+    if (!e.primaryClassName) {
+      protectedClassCount++;
+    } else if (!e.isExternal && (e.primaryClassName === "object" || e.primaryClassName === "shader")) {
+      protectedClassCount++;
+    }
+    if (isProtectedPathName(e.path)) {
+      protectedNameCount++;
+    }
+    const key = `${e.primaryClassName ?? fourCCToString(e.primaryClassFourCC)}:${e.path.toLowerCase()}`;
+    if (seenKey.has(key)) {
+      duplicateNameCount++;
+    } else {
+      seenKey.add(key);
+    }
+  }
+  const scriptMap = scrapeScenarioScriptTagPaths(buffer, header, tagIndex);
+  let scriptRecoverableNamesCount = 0;
+  for (const [idx, info] of scriptMap.entries()) {
+    const entry = tagIndex.entries[idx];
+    if (entry && (isProtectedPathName(entry.path) || entry.path.toLowerCase() !== info.path.toLowerCase())) {
+      scriptRecoverableNamesCount++;
+    }
+  }
+  const bmpReport = checkDrawableBitmaps(buffer, header, tagIndex, { ignoreExternalBit: true });
+  const modelReport = checkModelParts(buffer, header, tagIndex);
+  if (protectedClassCount > 0) details.push(`${protectedClassCount} tag(s) have obfuscated or base polymorphic classes.`);
+  if (protectedNameCount > 0) details.push(`${protectedNameCount} tag(s) have protected/corrupted path strings (e.g. "<protected>").`);
+  if (duplicateNameCount > 0) details.push(`${duplicateNameCount} tag(s) share duplicate (class, path) names.`);
+  if (scriptRecoverableNamesCount > 0) details.push(`${scriptRecoverableNamesCount} tag path(s) can be recovered from compiled HaloScript syntax nodes.`);
+  if (bmpReport.problems.length > 0) details.push(`${bmpReport.problems.length} bitmap(s) have drawable/mipmap truncation issues.`);
+  if (modelReport.problems.length > 0) details.push(`${modelReport.problems.length} model part(s) have out-of-range strip index or geometry issues.`);
+  return {
+    totalTags: tagIndex.entries.length,
+    protectedClassCount,
+    protectedNameCount,
+    duplicateNameCount,
+    scriptRecoverableNamesCount,
+    truncatedBitmapCount: bmpReport.problems.length,
+    corruptedModelPartCount: modelReport.problems.length,
+    headerCrc32: header.crc32 >>> 0,
+    tagChecksum: tagIndex.tagChecksum >>> 0,
+    details
+  };
+}
+function defaultFolderPrefixForClass(className, scenarioName) {
+  switch (className) {
+    case "scenario":
+    case "scenario_structure_bsp":
+      return `levels\\${scenarioName}\\${scenarioName}`;
+    case "globals":
+      return "globals\\globals";
+    case "biped":
+      return "characters\\biped";
+    case "vehicle":
+      return "vehicles\\vehicle";
+    case "weapon":
+      return "weapons\\weapon";
+    case "equipment":
+      return "powerups\\equipment";
+    case "projectile":
+      return "weapons\\projectile";
+    case "scenery":
+      return "scenery\\scenery";
+    case "sound":
+      return "sound\\sfx\\sound";
+    case "sound_looping":
+      return "sound\\looping\\sound_looping";
+    case "bitmap":
+      return "bitmaps\\bitmap";
+    case "gbxmodel":
+      return "models\\model";
+    case "model_collision_geometry":
+      return "models\\collision";
+    case "model_animations":
+      return "models\\animations";
+    case "ui_widget_definition":
+    case "ui_widget_collection":
+      return "ui\\shell\\widget";
+    default:
+      if (className?.startsWith("shader")) return `shaders\\${className}`;
+      return `repaired\\${className ?? "tag"}`;
+  }
+}
+function deprotectAndRepairMap(buffer, header, tagIndex, options = {}) {
+  const {
+    repairClasses = true,
+    scrapeScriptPaths = true,
+    heuristicRename = true,
+    repairBitmaps = true,
+    repairModelStrips = true
+  } = options;
+  let workBuffer = Buffer.from(buffer);
+  let workHeader = { ...header };
+  let workTagIndex = {
+    ...tagIndex,
+    entries: tagIndex.entries.map((e) => ({ ...e }))
+  };
+  const log = [];
+  let classesRepaired = 0;
+  let scriptPathsRecovered = 0;
+  let heuristicPathsRenamed = 0;
+  let bitmapsRepaired = 0;
+  let modelPartsRepaired = 0;
+  let stripIndicesClamped = 0;
+  if (repairClasses) {
+    const res1 = repairProtectedTagClasses(workBuffer, workHeader, workTagIndex);
+    classesRepaired = res1.classesRepaired;
+    log.push(...res1.log);
+  }
+  if (scrapeScriptPaths) {
+    const recovered = scrapeScenarioScriptTagPaths(workBuffer, workHeader, workTagIndex);
+    for (const [idx, info] of recovered.entries()) {
+      const entry = workTagIndex.entries[idx];
+      if (!entry) continue;
+      if (!entry.primaryClassName && info.nodeType in SCRIPT_TAG_REF_NODE_TYPE_CLASSES) {
+        const nodeClass = SCRIPT_TAG_REF_NODE_TYPE_CLASSES[info.nodeType];
+        const concrete = entry.isExternal ? nodeClass : inferConcreteClassFromStruct(workBuffer, workHeader, workTagIndex.baseMemoryAddress, entry.tagDataPointerOrResourceIndex, nodeClass);
+        if (writeTagClassToEntry(workBuffer, workHeader, workTagIndex, idx, concrete)) {
+          classesRepaired++;
+        }
+      }
+      if (isProtectedPathName(entry.path)) {
+        try {
+          const ren = renameTagInMap(workBuffer, workHeader, workTagIndex, idx, info.path);
+          workBuffer = ren.buffer;
+          workHeader = parseCacheFileHeader(workBuffer);
+          scriptPathsRecovered++;
+          log.push(`Recovered tag #${idx} path from HaloScript -> "${info.path}"`);
+        } catch {
+          try {
+            const fallbackPath = `${info.path}_${idx}`;
+            const ren = renameTagInMap(workBuffer, workHeader, workTagIndex, idx, fallbackPath);
+            workBuffer = ren.buffer;
+            workHeader = parseCacheFileHeader(workBuffer);
+            scriptPathsRecovered++;
+            log.push(`Recovered tag #${idx} path from HaloScript -> "${fallbackPath}"`);
+          } catch {
+          }
+        }
+      }
+    }
+  }
+  if (heuristicRename) {
+    const scnrName = workHeader.scenarioName || "map";
+    const seenKeys = /* @__PURE__ */ new Set();
+    for (const entry of workTagIndex.entries) {
+      if (!isProtectedPathName(entry.path)) {
+        const key = `${entry.primaryClassName ?? entry.primaryClassFourCC}:${entry.path.toLowerCase()}`;
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+        }
+      }
+    }
+    const usedKeys = /* @__PURE__ */ new Set();
+    for (let i = 0; i < workTagIndex.entries.length; i++) {
+      const entry = workTagIndex.entries[i];
+      const classKey = entry.primaryClassName ?? fourCCToString(entry.primaryClassFourCC);
+      const currentKey = `${classKey}:${entry.path.toLowerCase()}`;
+      const needsRename = isProtectedPathName(entry.path) || usedKeys.has(currentKey);
+      if (!needsRename) {
+        usedKeys.add(currentKey);
+        continue;
+      }
+      let basePrefix = defaultFolderPrefixForClass(entry.primaryClassName, scnrName);
+      let candidate = entry.primaryClassName === "scenario" || entry.primaryClassName === "globals" ? basePrefix : `${basePrefix}_${i}`;
+      let suffix = 1;
+      while (usedKeys.has(`${classKey}:${candidate.toLowerCase()}`) || seenKeys.has(`${classKey}:${candidate.toLowerCase()}`)) {
+        candidate = `${basePrefix}_${i}_${suffix++}`;
+      }
+      try {
+        const ren = renameTagInMap(workBuffer, workHeader, workTagIndex, i, candidate);
+        workBuffer = ren.buffer;
+        workHeader = parseCacheFileHeader(workBuffer);
+        usedKeys.add(`${classKey}:${candidate.toLowerCase()}`);
+        seenKeys.add(`${classKey}:${candidate.toLowerCase()}`);
+        heuristicPathsRenamed++;
+        log.push(`Renamed protected/duplicate tag #${i} (${classKey}) -> "${candidate}"`);
+      } catch {
+      }
+    }
+  }
+  if (repairBitmaps) {
+    const bmpRes = repairTruncatedBitmapMipmaps(workBuffer, workHeader, workTagIndex);
+    bitmapsRepaired = bmpRes.bitmapsRepaired;
+    log.push(...bmpRes.log);
+  }
+  if (repairModelStrips) {
+    const modRes = repairCorruptedModelPartStrips(workBuffer, workHeader, workTagIndex);
+    modelPartsRepaired = modRes.modelPartsRepaired;
+    stripIndicesClamped = modRes.stripIndicesClamped;
+    log.push(...modRes.log);
+  }
+  try {
+    workHeader = parseCacheFileHeader(workBuffer);
+    workTagIndex = parseTagIndex(workBuffer, workHeader);
+  } catch {
+  }
+  return {
+    buffer: workBuffer,
+    header: workHeader,
+    tagIndex: workTagIndex,
+    classesRepaired,
+    scriptPathsRecovered,
+    heuristicPathsRenamed,
+    bitmapsRepaired,
+    modelPartsRepaired,
+    stripIndicesClamped,
+    log
+  };
 }
 
 // ../core/src/map/convert/retail-to-ce.ts
@@ -38466,6 +39447,14 @@ function runChecks(buffer, full, resources = {}, origin) {
   try {
     const view2 = Buffer.from(buffer);
     view2.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
+    const tdoPre = view2.readUInt32LE(16);
+    if (tdoPre + 36 <= view2.length) {
+      const modelOffPre = view2.readUInt32LE(tdoPre + 20);
+      const modelSizePre = view2.readUInt32LE(tdoPre + 32);
+      if (modelOffPre > 0 && modelSizePre > 0 && modelOffPre + modelSizePre < tdoPre && tdoPre - (modelOffPre + modelSizePre) >= 1024) {
+        view2.writeUInt32LE(tdoPre - modelOffPre, tdoPre + 32);
+      }
+    }
     const header2 = parseCacheFileHeader(view2);
     const tagIndex2 = parseTagIndexForConversion(view2, header2);
     parsed = { header: header2, tagIndex: tagIndex2, view: view2, importPlan: null, repairPlan: null, alignment: null, requiredRepairBytes: 0 };
@@ -38542,7 +39531,12 @@ function runChecks(buffer, full, resources = {}, origin) {
     checks.push(check("externalData", "Bitmap and sound data is inside the map", "pass", "No bitmap image or sound permutation keeps its data in a resource file."));
   } else {
     if (headerOnlyCrc !== null) checks.push(check("regions", regionsLabel, "pass", "The new CRC32 is computed after the bitmap and sound data is copied in."));
-    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + parsed.requiredRepairBytes, report);
+    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + parsed.requiredRepairBytes, report, origin);
+  }
+  const isProtectedMod = origin !== void 0 || tagIndex.entries.filter((e) => e.path === "<protected>" || e.path.includes("F***")).length > 10;
+  if (isProtectedMod) {
+    repairTruncatedBitmapMipmaps(view, header, tagIndex);
+    repairCorruptedModelPartStrips(view, header, tagIndex);
   }
   checks.push(modelPartsCheck(view, header, tagIndex));
   checks.push(drawableBitmapsCheck(view, header, tagIndex));
@@ -38565,7 +39559,7 @@ function runChecks(buffer, full, resources = {}, origin) {
 }
 var fmtBytes = (n) => `${n.toLocaleString("en-US")} bytes`;
 var EXTERNAL_DATA_LABEL = "Bitmap and sound data is inside the map";
-function externalDataChecks(checks, view, scan, counts, resources, sourceSize, report) {
+function externalDataChecks(checks, view, scan, counts, resources, sourceSize, report, origin) {
   const summary = `${counts.bitmap.count} bitmap image(s) (${fmtBytes(counts.bitmap.bytes)}) and ${counts.sound.count} sound permutation(s) (${fmtBytes(counts.sound.bytes)})`;
   if (scan.blocked.length > 0) {
     checks.push(check("externalData", EXTERNAL_DATA_LABEL, "refuse", "Some bitmap or sound data can't be read, so it is not known whether it is inside the map. The map is not converted.", scan.blocked));
@@ -38607,7 +39601,7 @@ function externalDataChecks(checks, view, scan, counts, resources, sourceSize, r
     if (!table) continue;
     const total = kind === "bitmaps" ? counts.bitmap.count : counts.sound.count;
     const bad = plan.unmatched[kind];
-    const canZeroFill = bad.length > 0 && bad.length <= 5 && bad.every((b) => b.includes("effects\\") || b.includes("particles\\") || b.includes("solid\\bitmaps") || b.includes("panel impact"));
+    const canZeroFill = bad.length > 0 && (bad.length <= 5 && bad.every((b) => b.includes("effects\\") || b.includes("particles\\") || b.includes("solid\\bitmaps") || b.includes("panel impact")) || origin !== void 0 && bad.length <= 25 && bad.length < total * 0.05);
     if (bad.length > 0 && !canZeroFill) {
       usable = false;
       lines.push(`${table.label}: ${bad.length} of ${total} ranges this map needs are not entries of this file, so it is not the ${kind}.map this map was built with.`, ...bad.slice(0, 20));
@@ -39046,9 +40040,18 @@ function convertRetailLayout(source, options, origin) {
   let out;
   let imported = null;
   const plan = parsed?.importPlan ?? null;
+  let workingSource = origin ? source : Buffer.from(source);
+  const tdoWork = workingSource.readUInt32LE(16);
+  if (tdoWork + 36 <= workingSource.length) {
+    const modelOffWork = workingSource.readUInt32LE(tdoWork + 20);
+    const modelSizeWork = workingSource.readUInt32LE(tdoWork + 32);
+    if (modelOffWork > 0 && modelSizeWork > 0 && modelOffWork + modelSizeWork < tdoWork && tdoWork - (modelOffWork + modelSizeWork) >= 1024) {
+      workingSource.writeUInt32LE(tdoWork - modelOffWork, tdoWork + 32);
+    }
+  }
   if (plan) {
     try {
-      const result = importExternalData(source, plan, options.resources ?? {}, { onProgress: options.onProgress, shouldCancel: options.shouldCancel });
+      const result = importExternalData(workingSource, plan, options.resources ?? {}, { onProgress: options.onProgress, shouldCancel: options.shouldCancel });
       out = result.buffer;
       imported = { rangesCopied: result.rangesCopied, bytesAdded: result.bytesAdded, insertAt: result.insertAt, warnings: [...plan.nameMismatches, ...plan.sizeMismatches] };
     } catch (err) {
@@ -39056,7 +40059,7 @@ function convertRetailLayout(source, options, origin) {
       throw err;
     }
   } else {
-    out = origin ? source : Buffer.from(source);
+    out = workingSource;
   }
   out.writeUInt32LE(609 /* CUSTOM_EDITION */, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
@@ -39072,6 +40075,12 @@ function convertRetailLayout(source, options, origin) {
     const applied = applyTagDataRepairs(out, repairPlan, chosen);
     out = applied.buffer;
     repairs = applied.applied;
+  }
+  if (origin !== void 0 || parsed && parsed.tagIndex.entries.filter((e) => e.path === "<protected>" || e.path.includes("F***")).length > 10) {
+    const outHdr = parseCacheFileHeader(out);
+    const outIdx = parseTagIndexForConversion(out, outHdr);
+    repairTruncatedBitmapMipmaps(out, outHdr, outIdx);
+    repairCorruptedModelPartStrips(out, outHdr, outIdx);
   }
   verifyOutputExtents(out);
   verifyOutputAlignment(out);
@@ -39193,12 +40202,13 @@ function normalizeDemoMap(source) {
       isExternal: source.readUInt32LE(at + 24) === 1
     });
   }
+  const copy = Buffer.from(source);
   const tagLayout = { tagDataOffset: tdo, tagDataSize: tds, baseMemoryAddress: DEMO_BASE_MEMORY_ADDRESS, tagArrayFileOffset: arrayAt, entries };
   const tolerated = [];
   const tolerate = { staleReferencePaths: true, rootsOutsideTagData: true };
   let sites;
   try {
-    sites = [...collectTagDataPointers(source, tagLayout, { tolerate, tolerated }), ...collectBspSpacePointers(source, tagLayout, { tolerate })];
+    sites = [...collectTagDataPointers(copy, tagLayout, { tolerate, tolerated }), ...collectBspSpacePointers(copy, tagLayout, { tolerate })];
   } catch (err) {
     if (!(err instanceof UnwalkableTagError)) throw err;
     return refuse("demoRebase", `The tag data can't be moved: ${err.message}`, [], [layoutRow]);
@@ -39213,7 +40223,6 @@ function normalizeDemoMap(source) {
       [layoutRow]
     );
   }
-  const copy = Buffer.from(source);
   const moved = Object.fromEntries([...TAG_DATA_POINTER_KINDS, ...BSP_SPACE_POINTER_KINDS].map((k) => [k, 0]));
   for (const s of sites) {
     copy.writeUInt32LE(s.value + DEMO_TO_CE_DELTA >>> 0, s.at);
@@ -39597,7 +40606,8 @@ function writeTagFieldValue(buffer, header, tagIndex, tagEntryIndex, fieldName, 
     if (!targetEntry) {
       throw new TagFieldEditorError(`Target tag ID 0x${targetTagId.toString(16)} not found in this map.`);
     }
-    const tagArrayFileOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
+    const tagHeaderSize = header.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE;
+    const tagArrayFileOffset = header.tagDataOffset + tagHeaderSize;
     const pathPointer = buffer.readUInt32LE(tagArrayFileOffset + targetEntry.index * TAG_ENTRY_SIZE + 16);
     encodeValueField(buffer, absOffset, {
       kind: "dependency",
@@ -39788,13 +40798,32 @@ function setTagDependencySlot(buffer, header, tagIndex, tagEntryIndex, fieldPath
   }
   const target = tagIndex.entries.find((e) => e.tagId === newTagId >>> 0);
   if (!target) throw new TagDependencySwapError(`Target tag ID 0x${(newTagId >>> 0).toString(16)} is not in this map.`);
-  const arrayOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
+  const tagHeaderSize = header.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE;
+  const arrayOffset = header.tagDataOffset + tagHeaderSize;
   const pathPointer = buffer.readUInt32LE(arrayOffset + target.index * TAG_ENTRY_SIZE + 16);
   encodeDependency(buffer, slot.absOffset, { fourcc: target.primaryClassFourCC, pathPointer, pathSize: 0, tagId: target.tagId });
   return { fieldPath, newTagId: target.tagId };
 }
 
 // ../core/src/render/bsp-geometry.ts
+function unpackCompressedUnitVector32(packed) {
+  let ix = packed & 2047;
+  if (ix & 1024) ix -= 2048;
+  let iy = packed >>> 11 & 2047;
+  if (iy & 1024) iy -= 2048;
+  let iz = packed >>> 22 & 1023;
+  if (iz & 512) iz -= 1024;
+  let nx = ix / 1023;
+  let ny = iy / 1023;
+  let nz = iz / 511;
+  const len = Math.hypot(nx, ny, nz);
+  if (len > 1e-6) {
+    nx /= len;
+    ny /= len;
+    nz /= len;
+  }
+  return [nx, ny, nz];
+}
 function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
   const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
   if (!scenarioEntry) {
@@ -39890,17 +40919,33 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
       const surfStartField = decodedMat.get("surfaces");
       const surfCountField = decodedMat.get("surface count");
       const vertCountField = decodedMat.get("rendered vertices count");
+      const lmVertCountField = decodedMat.get("lightmap vertices count");
       const surfaceIndexStart = surfStartField?.value ?? 0;
       const surfaceCount = surfCountField?.value ?? 0;
       const vertexCount = vertCountField?.value ?? 0;
+      const lmVertexCount = lmVertCountField?.value ?? 0;
       if (vertexCount === 0 || surfaceCount === 0) {
         continue;
       }
       const uncompressedData = decodedMat.get("uncompressed vertices");
       const vertPtr = uncompressedData && uncompressedData.kind === "tagDataOffset" ? uncompressedData.value.pointerLow : 0;
+      const rvIdxPtrField = decodedMat.get("rendered vertices index pointer");
+      const lmvIdxPtrField = decodedMat.get("lightmap vertices index pointer");
+      const rvIdxPtr = rvIdxPtrField?.value ?? 0;
+      const lmvIdxPtr = lmvIdxPtrField?.value ?? 0;
+      const isXboxCompressedBsp = vertPtr === 0 && rvIdxPtr !== 0 && header.engine === 5;
       let vertOffset;
-      let lmVertOffset;
-      if (vertPtr !== 0) {
+      let lmVertOffset = 0;
+      if (isXboxCompressedBsp) {
+        const rvRefOff = bspLocation.fileOffsetAnchor + (rvIdxPtr - bspLocation.baseMemoryAddress);
+        const actualVertPtr = buffer.readUInt32LE(rvRefOff + 4);
+        vertOffset = bspLocation.fileOffsetAnchor + (actualVertPtr - bspLocation.baseMemoryAddress);
+        if (lmVertexCount > 0 && lmvIdxPtr !== 0) {
+          const lmvRefOff = bspLocation.fileOffsetAnchor + (lmvIdxPtr - bspLocation.baseMemoryAddress);
+          const actualLmVertPtr = buffer.readUInt32LE(lmvRefOff + 4);
+          lmVertOffset = bspLocation.fileOffsetAnchor + (actualLmVertPtr - bspLocation.baseMemoryAddress);
+        }
+      } else if (vertPtr !== 0) {
         vertOffset = bspLocation.fileOffsetAnchor + (vertPtr - bspLocation.baseMemoryAddress);
         lmVertOffset = vertOffset + vertexCount * 56;
       } else {
@@ -39912,39 +40957,78 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
       const vertices = new Float32Array(vertexCount * 8);
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-      for (let v = 0; v < vertexCount; v++) {
-        const vOff = vertOffset + v * 56;
-        const x = buffer.readFloatLE(vOff + 0);
-        const y = buffer.readFloatLE(vOff + 4);
-        const z = buffer.readFloatLE(vOff + 8);
-        const nx = buffer.readFloatLE(vOff + 12);
-        const ny = buffer.readFloatLE(vOff + 16);
-        const nz = buffer.readFloatLE(vOff + 20);
-        const u = buffer.readFloatLE(vOff + 48);
-        const vCoord = buffer.readFloatLE(vOff + 52);
-        const outIdx = v * 8;
-        vertices[outIdx + 0] = x;
-        vertices[outIdx + 1] = y;
-        vertices[outIdx + 2] = z;
-        vertices[outIdx + 3] = nx;
-        vertices[outIdx + 4] = ny;
-        vertices[outIdx + 5] = nz;
-        vertices[outIdx + 6] = u;
-        vertices[outIdx + 7] = vCoord;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-        if (z < minZ) minZ = z;
-        if (z > maxZ) maxZ = z;
+      if (isXboxCompressedBsp) {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = vertOffset + v * 32;
+          const x = buffer.readFloatLE(vOff + 0);
+          const y = buffer.readFloatLE(vOff + 4);
+          const z = buffer.readFloatLE(vOff + 8);
+          const [nx, ny, nz] = unpackCompressedUnitVector32(buffer.readUInt32LE(vOff + 12));
+          const u = buffer.readFloatLE(vOff + 24);
+          const vCoord = buffer.readFloatLE(vOff + 28);
+          const outIdx = v * 8;
+          vertices[outIdx + 0] = x;
+          vertices[outIdx + 1] = y;
+          vertices[outIdx + 2] = z;
+          vertices[outIdx + 3] = nx;
+          vertices[outIdx + 4] = ny;
+          vertices[outIdx + 5] = nz;
+          vertices[outIdx + 6] = u;
+          vertices[outIdx + 7] = vCoord;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
+      } else {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = vertOffset + v * 56;
+          const x = buffer.readFloatLE(vOff + 0);
+          const y = buffer.readFloatLE(vOff + 4);
+          const z = buffer.readFloatLE(vOff + 8);
+          const nx = buffer.readFloatLE(vOff + 12);
+          const ny = buffer.readFloatLE(vOff + 16);
+          const nz = buffer.readFloatLE(vOff + 20);
+          const u = buffer.readFloatLE(vOff + 48);
+          const vCoord = buffer.readFloatLE(vOff + 52);
+          const outIdx = v * 8;
+          vertices[outIdx + 0] = x;
+          vertices[outIdx + 1] = y;
+          vertices[outIdx + 2] = z;
+          vertices[outIdx + 3] = nx;
+          vertices[outIdx + 4] = ny;
+          vertices[outIdx + 5] = nz;
+          vertices[outIdx + 6] = u;
+          vertices[outIdx + 7] = vCoord;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
       }
       const lightmapUvs = new Float32Array(vertexCount * 2);
-      for (let v = 0; v < vertexCount; v++) {
-        const lmvOff = lmVertOffset + v * 20;
-        const lu = buffer.readFloatLE(lmvOff + 12);
-        const lv = buffer.readFloatLE(lmvOff + 16);
-        lightmapUvs[v * 2 + 0] = lu;
-        lightmapUvs[v * 2 + 1] = lv;
+      if (isXboxCompressedBsp) {
+        if (lmVertOffset > 0 && lmVertexCount >= vertexCount) {
+          for (let v = 0; v < vertexCount; v++) {
+            const lmvOff = lmVertOffset + v * 8;
+            const lu = buffer.readInt16LE(lmvOff + 4) / 32767;
+            const lv = buffer.readInt16LE(lmvOff + 6) / 32767;
+            lightmapUvs[v * 2 + 0] = lu;
+            lightmapUvs[v * 2 + 1] = lv;
+          }
+        }
+      } else {
+        for (let v = 0; v < vertexCount; v++) {
+          const lmvOff = lmVertOffset + v * 20;
+          const lu = buffer.readFloatLE(lmvOff + 12);
+          const lv = buffer.readFloatLE(lmvOff + 16);
+          lightmapUvs[v * 2 + 0] = lu;
+          lightmapUvs[v * 2 + 1] = lv;
+        }
       }
       const indices = new Uint16Array(surfaceCount * 3);
       for (let s = 0; s < surfaceCount; s++) {
@@ -39992,7 +41076,9 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
 
 // ../core/src/render/model-geometry.ts
 var VERTEX_TYPE_UNCOMPRESSED2 = 4;
+var VERTEX_TYPE_COMPRESSED = 5;
 var UNCOMPRESSED_VERTEX_SIZE = 68;
+var COMPRESSED_VERTEX_SIZE = 32;
 var TRIANGLE_BUFFER_TYPE_STRIP = 1;
 var PRIMITIVE_RESTART_INDEX2 = 65535;
 var LOD_FIELD_NAMES = ["super low", "low", "medium", "high", "super high"];
@@ -40035,12 +41121,16 @@ function extractModelRenderGeometry(buffer, header, tagIndex, modelTagId, lod = 
   if (!entry) {
     throw new Error(`Model tag (ID: 0x${modelTagId.toString(16)}) not found in tag index.`);
   }
+  const isXboxModel = header.engine === 5 /* XBOX */ || entry.primaryClassFourCC === 1836016741 || entry.primaryClassName === "model";
+  const rootStructName = isXboxModel ? "Model" : "GBXModel";
+  const geomStructName = isXboxModel ? "ModelGeometry" : "GBXModelGeometry";
+  const partStructName = isXboxModel ? "ModelGeometryPart" : "GBXModelGeometryPart";
   const modelFileOffset = resolveTagDataPointer(
     entry.tagDataPointerOrResourceIndex,
     header,
     tagIndex.baseMemoryAddress
   );
-  const model = decodeStruct(buffer, modelFileOffset, "GBXModel");
+  const model = decodeStruct(buffer, modelFileOffset, rootStructName);
   const uScaleRaw = numeric2(model.get("base map u scale"));
   const vScaleRaw = numeric2(model.get("base map v scale"));
   const uScale = uScaleRaw && Number.isFinite(uScaleRaw) && uScaleRaw > 0 ? uScaleRaw : 1;
@@ -40049,8 +41139,8 @@ function extractModelRenderGeometry(buffer, header, tagIndex, modelTagId, lod = 
   if (!geoms || geoms.kind !== "reflexive" || geoms.value.count === 0) {
     throw new Error(`Model "${entry.path}" has no geometries.`);
   }
-  const geomSize = resolveStruct("GBXModelGeometry").totalSize;
-  const partSize = resolveStruct("GBXModelGeometryPart").totalSize;
+  const geomSize = resolveStruct(geomStructName).totalSize;
+  const partSize = resolveStruct(partStructName).totalSize;
   const chosenGeomIndices = /* @__PURE__ */ new Set();
   const regions = model.get("regions");
   if (regions && regions.kind === "reflexive" && regions.value.count > 0) {
@@ -40104,12 +41194,12 @@ function extractModelRenderGeometry(buffer, header, tagIndex, modelTagId, lod = 
   let totalTriangles = 0;
   let partIndexCounter = 0;
   for (const geomIndex of chosenGeomIndices) {
-    const geom = decodeStruct(buffer, geomsFileOffset + geomIndex * geomSize, "GBXModelGeometry");
+    const geom = decodeStruct(buffer, geomsFileOffset + geomIndex * geomSize, geomStructName);
     const parts = geom.get("parts");
     if (!parts || parts.kind !== "reflexive" || parts.value.count === 0) continue;
     const partsFileOffset = resolvePointer(parts.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
     for (let p = 0; p < parts.value.count; p++) {
-      const part = decodeStruct(buffer, partsFileOffset + p * partSize, "GBXModelGeometryPart");
+      const part = decodeStruct(buffer, partsFileOffset + p * partSize, partStructName);
       const vertexType = numeric2(part.get("vertex type")) ?? -1;
       const vertexCount = numeric2(part.get("vertex count")) ?? 0;
       const vertexOffset = numeric2(part.get("vertex offset")) ?? 0;
@@ -40118,39 +41208,81 @@ function extractModelRenderGeometry(buffer, header, tagIndex, modelTagId, lod = 
       const triangleOffset = numeric2(part.get("triangle offset")) ?? 0;
       const shaderIndex = numeric2(part.get("shader index")) ?? 0;
       if (vertexCount === 0 || triangleCount === 0) continue;
-      if (vertexType !== VERTEX_TYPE_UNCOMPRESSED2 || triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
-      const partVertOffset = vertexBase + vertexOffset;
-      const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
-      if (partVertEnd > header.tagDataOffset) continue;
-      const partStripOffset = indexBase + triangleOffset;
+      if (triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
+      let partVertOffset = 0;
+      let partStripOffset = 0;
+      const isCompressedVert = vertexType === VERTEX_TYPE_COMPRESSED || isXboxModel;
+      if (isXboxModel) {
+        const vertIndirectOff = resolvePointer(vertexOffset, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        if (vertIndirectOff < 0 || vertIndirectOff + 12 > buffer.length) continue;
+        const vertVirtualPtr = buffer.readUInt32LE(vertIndirectOff + 4);
+        partVertOffset = resolvePointer(vertVirtualPtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        partStripOffset = resolvePointer(triangleOffset, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        if (partVertOffset < 0 || partVertOffset + vertexCount * COMPRESSED_VERTEX_SIZE > buffer.length || partStripOffset < 0 || partStripOffset >= buffer.length) {
+          continue;
+        }
+      } else {
+        if (vertexType !== VERTEX_TYPE_UNCOMPRESSED2) continue;
+        partVertOffset = vertexBase + vertexOffset;
+        const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
+        if (partVertEnd > header.tagDataOffset) continue;
+        partStripOffset = indexBase + triangleOffset;
+      }
       const vertices = new Float32Array(vertexCount * 8);
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-      for (let v = 0; v < vertexCount; v++) {
-        const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
-        const x = buffer.readFloatLE(vOff + 0);
-        const y = buffer.readFloatLE(vOff + 4);
-        const z = buffer.readFloatLE(vOff + 8);
-        const nx = buffer.readFloatLE(vOff + 12);
-        const ny = buffer.readFloatLE(vOff + 16);
-        const nz = buffer.readFloatLE(vOff + 20);
-        const u = buffer.readFloatLE(vOff + 48) * uScale;
-        const vCoord = buffer.readFloatLE(vOff + 52) * vScale;
-        const o = v * 8;
-        vertices[o + 0] = x;
-        vertices[o + 1] = y;
-        vertices[o + 2] = z;
-        vertices[o + 3] = nx;
-        vertices[o + 4] = ny;
-        vertices[o + 5] = nz;
-        vertices[o + 6] = u;
-        vertices[o + 7] = vCoord;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-        if (z < minZ) minZ = z;
-        if (z > maxZ) maxZ = z;
+      if (isCompressedVert) {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = partVertOffset + v * COMPRESSED_VERTEX_SIZE;
+          const x = buffer.readFloatLE(vOff + 0);
+          const y = buffer.readFloatLE(vOff + 4);
+          const z = buffer.readFloatLE(vOff + 8);
+          const [nx, ny, nz] = unpackCompressedUnitVector32(buffer.readUInt32LE(vOff + 12));
+          const u = buffer.readInt16LE(vOff + 24) / 32767 * uScale;
+          const vCoord = buffer.readInt16LE(vOff + 26) / 32767 * vScale;
+          const o = v * 8;
+          vertices[o + 0] = x;
+          vertices[o + 1] = y;
+          vertices[o + 2] = z;
+          vertices[o + 3] = nx;
+          vertices[o + 4] = ny;
+          vertices[o + 5] = nz;
+          vertices[o + 6] = u;
+          vertices[o + 7] = vCoord;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
+      } else {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
+          const x = buffer.readFloatLE(vOff + 0);
+          const y = buffer.readFloatLE(vOff + 4);
+          const z = buffer.readFloatLE(vOff + 8);
+          const nx = buffer.readFloatLE(vOff + 12);
+          const ny = buffer.readFloatLE(vOff + 16);
+          const nz = buffer.readFloatLE(vOff + 20);
+          const u = buffer.readFloatLE(vOff + 48) * uScale;
+          const vCoord = buffer.readFloatLE(vOff + 52) * vScale;
+          const o = v * 8;
+          vertices[o + 0] = x;
+          vertices[o + 1] = y;
+          vertices[o + 2] = z;
+          vertices[o + 3] = nx;
+          vertices[o + 4] = ny;
+          vertices[o + 5] = nz;
+          vertices[o + 6] = u;
+          vertices[o + 7] = vCoord;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
       }
       const raw = decodeTriangleStrip(buffer, partStripOffset, vertexCount, triangleCount);
       const indices = [];
@@ -40222,6 +41354,62 @@ var BitmapFormat = {
   DXT5: 16,
   P8: 17
 };
+function unswizzleMorton2D(src, srcOffset, width, height, bytesPerPixel) {
+  const totalBytes = width * height * bytesPerPixel;
+  const out = Buffer.alloc(totalBytes);
+  if (width <= 1 || height <= 1) {
+    Buffer.from(src.buffer, src.byteOffset + srcOffset, Math.min(totalBytes, src.length - srcOffset)).copy(out, 0);
+    return out;
+  }
+  let maskX = 0;
+  let maskY = 0;
+  let bit = 1;
+  let step = 1;
+  while (step < width || step < height) {
+    if (step < width) {
+      maskX |= bit;
+      bit <<= 1;
+    }
+    if (step < height) {
+      maskY |= bit;
+      bit <<= 1;
+    }
+    step <<= 1;
+  }
+  const spreadBits = (val, mask) => {
+    let result = 0;
+    let v = val;
+    let b = 1;
+    while (b <= mask && b > 0) {
+      if (mask & b) {
+        if (v & 1) result |= b;
+        v >>>= 1;
+      }
+      b <<= 1;
+    }
+    return result;
+  };
+  const xIndices = new Uint32Array(width);
+  for (let x = 0; x < width; x++) {
+    xIndices[x] = spreadBits(x, maskX);
+  }
+  const yIndices = new Uint32Array(height);
+  for (let y = 0; y < height; y++) {
+    yIndices[y] = spreadBits(y, maskY);
+  }
+  let dstIdx = 0;
+  for (let y = 0; y < height; y++) {
+    const ySwiz = yIndices[y];
+    for (let x = 0; x < width; x++) {
+      const swizPixel = (ySwiz | xIndices[x]) * bytesPerPixel;
+      const sOff = srcOffset + swizPixel;
+      for (let b = 0; b < bytesPerPixel; b++) {
+        out[dstIdx++] = src[sOff + b] ?? 0;
+      }
+    }
+  }
+  return out;
+}
 function resolveShaderBaseBitmapTagId(buffer, header, tagIndex, shaderTagId) {
   const entry = tagIndex.entries.find((e) => e.tagId === shaderTagId);
   if (!entry || entry.isExternal) return null;
@@ -40320,7 +41508,7 @@ function readBitmapImageDescriptor(buffer, header, tagIndex, bitmapTagId, imageI
   const flags = buffer.readUInt16LE(rowStart + 14);
   const pixelsOffset = buffer.readUInt32LE(rowStart + 24);
   const pixelsSize = buffer.readUInt32LE(rowStart + 28);
-  const isExternal = (flags & 256) !== 0 || header.engine === 7;
+  const isExternal = header.engine !== 5 && ((flags & 256) !== 0 || header.engine === 7);
   return {
     width,
     height,
@@ -40537,18 +41725,22 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
       `Bitmap pixel data (offset 0x${desc.pixelsOffset.toString(16)}, size ${desc.pixelsSize}) exceeds buffer length (${srcBuffer.length}).`
     );
   }
-  const { width, height, format, pixelsOffset } = desc;
+  const { width, height, format, flags } = desc;
+  const isSwizzled = (flags & 8) !== 0 && format !== BitmapFormat.DXT1 && format !== BitmapFormat.DXT3 && format !== BitmapFormat.DXT5;
+  const bytesPerPixel = format === BitmapFormat.X8R8G8B8 || format === BitmapFormat.A8R8G8B8 ? 4 : format === BitmapFormat.R5G6B5 || format === BitmapFormat.A1R5G5B5 || format === BitmapFormat.A4R4G4B4 || format === BitmapFormat.A8Y8 ? 2 : 1;
+  const pixelSrc = isSwizzled ? unswizzleMorton2D(srcBuffer, desc.pixelsOffset, width, height, bytesPerPixel) : srcBuffer;
+  const pixelsOffset = isSwizzled ? 0 : desc.pixelsOffset;
   switch (format) {
     case BitmapFormat.DXT1: {
-      const rgbaData = decodeDxt1(srcBuffer, pixelsOffset, width, height);
+      const rgbaData = decodeDxt1(srcBuffer, desc.pixelsOffset, width, height);
       return { width, height, format, rgbaData };
     }
     case BitmapFormat.DXT3: {
-      const rgbaData = decodeDxt3(srcBuffer, pixelsOffset, width, height);
+      const rgbaData = decodeDxt3(srcBuffer, desc.pixelsOffset, width, height);
       return { width, height, format, rgbaData };
     }
     case BitmapFormat.DXT5: {
-      const rgbaData = decodeDxt5(srcBuffer, pixelsOffset, width, height);
+      const rgbaData = decodeDxt5(srcBuffer, desc.pixelsOffset, width, height);
       return { width, height, format, rgbaData };
     }
     case BitmapFormat.X8R8G8B8:
@@ -40557,10 +41749,10 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const b = srcBuffer[src + 0];
-        const g = srcBuffer[src + 1];
-        const r = srcBuffer[src + 2];
-        const a = format === BitmapFormat.X8R8G8B8 ? 255 : srcBuffer[src + 3];
+        const b = pixelSrc[src + 0];
+        const g = pixelSrc[src + 1];
+        const r = pixelSrc[src + 2];
+        const a = format === BitmapFormat.X8R8G8B8 ? 255 : pixelSrc[src + 3];
         src += 4;
         rgbaData[dst + 0] = r;
         rgbaData[dst + 1] = g;
@@ -40575,7 +41767,7 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const val = srcBuffer.readUInt16LE(src);
+        const val = pixelSrc.readUInt16LE(src);
         src += 2;
         const [r, g, b] = unpackRgb565(val);
         rgbaData[dst + 0] = r;
@@ -40591,7 +41783,7 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const val = srcBuffer.readUInt16LE(src);
+        const val = pixelSrc.readUInt16LE(src);
         src += 2;
         const a = val & 32768 ? 255 : 0;
         const r = Math.round((val >> 10 & 31) * 255 / 31);
@@ -40610,7 +41802,7 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const val = srcBuffer.readUInt16LE(src);
+        const val = pixelSrc.readUInt16LE(src);
         src += 2;
         const a = (val >> 12 & 15) * 17;
         const r = (val >> 8 & 15) * 17;
@@ -40629,7 +41821,7 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const a = srcBuffer[src++];
+        const a = pixelSrc[src++];
         rgbaData[dst + 0] = 255;
         rgbaData[dst + 1] = 255;
         rgbaData[dst + 2] = 255;
@@ -40638,12 +41830,13 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
       }
       return { width, height, format, rgbaData };
     }
-    case BitmapFormat.Y8: {
+    case BitmapFormat.Y8:
+    case BitmapFormat.P8: {
       const rgbaData = new Uint8Array(width * height * 4);
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const y = srcBuffer[src++];
+        const y = pixelSrc[src++];
         rgbaData[dst + 0] = y;
         rgbaData[dst + 1] = y;
         rgbaData[dst + 2] = y;
@@ -40657,8 +41850,22 @@ function decodeBitmapTagImage(buffer, header, tagIndex, bitmapTagId, imageIndex 
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const y = srcBuffer[src + 0];
-        const a = srcBuffer[src + 1];
+        const val = pixelSrc[src++];
+        rgbaData[dst + 0] = val;
+        rgbaData[dst + 1] = val;
+        rgbaData[dst + 2] = val;
+        rgbaData[dst + 3] = val;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.A8Y8: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const y = pixelSrc[src + 0];
+        const a = pixelSrc[src + 1];
         src += 2;
         rgbaData[dst + 0] = y;
         rgbaData[dst + 1] = y;
@@ -40881,7 +42088,8 @@ function ensurePaletteEntry(buffer, header, tagIndex, paletteFieldName, paletteS
       }
     }
   }
-  const tagEntryOff = header.tagDataOffset + 40 + (tagId & 65535) * 32;
+  const tagHeaderSize = header.engine === 5 ? 36 : 40;
+  const tagEntryOff = header.tagDataOffset + tagHeaderSize + (tagId & 65535) * 32;
   const pathPointer = tagEntryOff + 20 <= buffer.length ? buffer.readUInt32LE(tagEntryOff + 16) : 0;
   const entryBytes = Buffer.alloc(structSize, 0);
   entryBytes.writeUInt32LE(classFourCC, 0);
@@ -41176,6 +42384,7 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
       const itemCollDep = item.get("item collection");
       const itmcTagId = itemCollDep && itemCollDep.kind === "dependency" ? itemCollDep.value.tagId : 4294967295;
       const itmcEntry = itmcTagId !== 4294967295 ? tagIndex.entries[itmcTagId & 65535] : void 0;
+      const resolvedItemTagId = resolveItemCollectionItemTagId(buffer, header, tagIndex, itmcTagId);
       const modelTagId = resolveItemCollectionModelTagId(buffer, header, tagIndex, itmcTagId);
       const isWeapon = itmcTagId !== 4294967295 && getItemCollectionCategory(buffer, header, tagIndex, itmcTagId) === "weapon";
       const kind = isWeapon ? "weapon" : "equipment";
@@ -41189,6 +42398,7 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
         paletteIndex: palIdx >= 0 ? palIdx : 0,
         nameIndex: -1,
         objectTagId: itmcTagId,
+        resolvedItemTagId: resolvedItemTagId !== 4294967295 ? resolvedItemTagId : void 0,
         objectPath: itmcEntry ? itmcEntry.path : "Netgame Equipment",
         modelTagId,
         position: pos,
@@ -42270,156 +43480,6 @@ function writeUnicodeString(buffer, header, tagIndex, tagEntryIndex, stringIndex
     ok: true,
     newText,
     bytesWritten: encodedTextBytes
-  };
-}
-
-// ../core/src/map/tag-index-editor.ts
-var TagIndexEditorError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "TagIndexEditorError";
-  }
-};
-function renameTagInMap(buffer, header, tagIndex, tagEntryIndex, newPath) {
-  const entry = tagIndex.entries[tagEntryIndex];
-  if (!entry) {
-    throw new TagIndexEditorError(`Tag #${tagEntryIndex} not found in map.`);
-  }
-  const cleanPath = newPath.trim().replace(/\//g, "\\");
-  if (!cleanPath) {
-    throw new TagIndexEditorError("Tag path cannot be empty.");
-  }
-  const normalizedNew = normalizeTagPath(cleanPath);
-  const exists = tagIndex.entries.some(
-    (e, idx) => idx !== tagEntryIndex && normalizeTagPath(e.path) === normalizedNew && e.primaryClassName === entry.primaryClassName
-  );
-  if (exists) {
-    throw new TagIndexEditorError(`A tag with path "${cleanPath}" and class "${entry.primaryClassName}" already exists.`);
-  }
-  const tagArrayFileOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
-  const entryOffset = tagArrayFileOffset + tagEntryIndex * TAG_ENTRY_SIZE;
-  const pathPointer = buffer.readUInt32LE(entryOffset + 16);
-  const pathFileOffset = resolveTagDataPointer(pathPointer, header, tagIndex.baseMemoryAddress);
-  const oldPathLength = entry.path.length;
-  if (cleanPath.length <= oldPathLength) {
-    buffer.write(cleanPath, pathFileOffset, "ascii");
-    buffer.fill(0, pathFileOffset + cleanPath.length, pathFileOffset + oldPathLength + 1);
-    entry.path = cleanPath;
-    return { buffer, path: cleanPath };
-  }
-  const newPathBytes = Buffer.from(cleanPath + "\0", "ascii");
-  const pad = (4 - newPathBytes.length % 4) % 4;
-  const paddedBytes = pad > 0 ? Buffer.concat([newPathBytes, Buffer.alloc(pad, 0)]) : newPathBytes;
-  const newOffset = buffer.length;
-  const outBuffer = Buffer.concat([buffer, paddedBytes]);
-  outBuffer.writeUInt32LE(outBuffer.length, 8);
-  outBuffer.writeUInt32LE(header.tagDataSize + paddedBytes.length, 20);
-  const newPathPointer = tagIndex.baseMemoryAddress + (newOffset - header.tagDataOffset) >>> 0;
-  outBuffer.writeUInt32LE(newPathPointer, entryOffset + 16);
-  entry.path = cleanPath;
-  return { buffer: outBuffer, path: cleanPath };
-}
-function duplicateTagInMap(buffer, header, tagIndex, sourceTagEntryIndex, newPath) {
-  const sourceEntry = tagIndex.entries[sourceTagEntryIndex];
-  if (!sourceEntry) {
-    throw new TagIndexEditorError(`Source tag #${sourceTagEntryIndex} not found in map.`);
-  }
-  const cleanPath = newPath.trim().replace(/\//g, "\\");
-  if (!cleanPath) {
-    throw new TagIndexEditorError("New tag path cannot be empty.");
-  }
-  const normalizedNew = normalizeTagPath(cleanPath);
-  const exists = tagIndex.entries.some(
-    (e) => normalizeTagPath(e.path) === normalizedNew && e.primaryClassName === sourceEntry.primaryClassName
-  );
-  if (exists) {
-    throw new TagIndexEditorError(`A tag with path "${cleanPath}" and class "${sourceEntry.primaryClassName}" already exists.`);
-  }
-  const extractedSet = extractTagSet(buffer, header, tagIndex, [sourceTagEntryIndex]);
-  const rootExtracted = extractedSet.tags.find((t) => t.originalIndex === sourceTagEntryIndex);
-  if (!rootExtracted) {
-    throw new TagIndexEditorError(`Failed to extract source tag "${sourceEntry.path}".`);
-  }
-  const oldRootPath = rootExtracted.path;
-  const containerTags = extractedSet.tags.map((t) => {
-    const isRoot = t.originalIndex === sourceTagEntryIndex;
-    return {
-      originalIndex: t.originalIndex,
-      group: t.group,
-      path: isRoot ? cleanPath : t.path,
-      structName: t.structName,
-      data: t.data.toString("base64"),
-      dependencies: t.dependencies.map((d) => {
-        if (isRoot && d.fieldPath.startsWith(oldRootPath)) {
-          return {
-            ...d,
-            fieldPath: cleanPath + d.fieldPath.slice(oldRootPath.length)
-          };
-        }
-        return d;
-      }),
-      secondaryClassFourCC: t.secondaryClassFourCC,
-      tertiaryClassFourCC: t.tertiaryClassFourCC,
-      embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
-      embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p })),
-      injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
-      gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
-        geometryIndex: p.geometryIndex,
-        partIndex: p.partIndex,
-        vertexType: p.vertexType,
-        vertexCount: p.vertexCount,
-        vertexData: p.vertexBytes.toString("base64"),
-        triangleBufferType: p.triangleBufferType,
-        triangleCount: p.triangleCount,
-        triangleData: p.triangleBytes.toString("base64")
-      }))
-    };
-  });
-  const container = {
-    magic: OCETAGS_MAGIC,
-    formatVersion: OCETAGS_FORMAT_VERSION,
-    sourceMapName: header.scenarioName,
-    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-    hasUnresolvedBspReferences: false,
-    rootOriginalIndices: [sourceTagEntryIndex],
-    tags: containerTags,
-    notExtracted: [],
-    warnings: [],
-    resourceMapIdentities: {},
-    externalResourceRefs: [],
-    externalData: "referenced"
-  };
-  const plan = planAddInjection(
-    { buffer, header, tagIndex },
-    container,
-    {},
-    { allowEmbeddedRelocation: true }
-  );
-  if (plan.kind === "refused") {
-    throw new TagIndexEditorError(`Cannot duplicate tag: ${plan.reason}`);
-  }
-  if (plan.toAdd.length === 0) {
-    const blockers = [...plan.blockedOther, ...plan.blockedEmbedded];
-    const reasons = blockers.map((b) => `${b.path}: ${b.reasons.join("; ")}`).join("\n");
-    throw new TagIndexEditorError(`Cannot duplicate tag: no tags were planned for addition. Reasons:
-${reasons}`);
-  }
-  const report = applyInjectionWithReport(
-    buffer,
-    header,
-    tagIndex,
-    container,
-    plan,
-    { allowEmbeddedRelocation: true }
-  );
-  const rootLocalIndex = containerTags.findIndex((t) => t.originalIndex === sourceTagEntryIndex);
-  const newTagId = plan.resolvedTagIdByLocalIndex.get(rootLocalIndex) ?? computeNewTagId(tagIndex.entries.length);
-  const newTagIndex = tagIndex.entries.length;
-  return {
-    buffer: report.buffer,
-    newTagIndex,
-    newTagId,
-    path: cleanPath
   };
 }
 
@@ -43988,7 +45048,7 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
 }
 
 // ../core/src/render/bitmap-codec.ts
-var zlib = __toESM(require("zlib"));
+var zlib2 = __toESM(require("zlib"));
 var BITMAP_TYPE_NAMES2 = [
   "2D Textures",
   "3D Textures",
@@ -44095,7 +45155,7 @@ function inspectBitmapTag(buffer, header, tagIndex, bitmapTagId, externalBitmaps
       const mipmapCount = srcBuf.readUInt16LE(row2 + 20);
       const pixelDataOffset = srcBuf.readUInt32LE(row2 + 24);
       const pixelDataSize = srcBuf.readUInt32LE(row2 + 28);
-      const imgExternal = (flags & 256) !== 0 || header.engine === 7 || isExternal;
+      const imgExternal = header.engine !== 5 && ((flags & 256) !== 0 || header.engine === 7 || isExternal);
       images.push({
         index: i,
         width,
@@ -44166,7 +45226,7 @@ function encodeRgbaToPng(rgba, width, height) {
       rawScanlines[rowOffset + 1 + x] = rgba[srcRow + x];
     }
   }
-  const deflated = zlib.deflateSync(rawScanlines, { level: 6 });
+  const deflated = zlib2.deflateSync(rawScanlines, { level: 6 });
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
@@ -44209,7 +45269,7 @@ function decodePngToRgba(pngBuffer) {
   if (width <= 0 || height <= 0) {
     throw new Error("PNG has invalid dimensions.");
   }
-  const inflated = zlib.inflateSync(Buffer.concat(idatChunks));
+  const inflated = zlib2.inflateSync(Buffer.concat(idatChunks));
   const bpp = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 0 ? 1 : 4;
   const scanlineLen = 1 + width * bpp;
   const rgba = new Uint8Array(width * height * 4);
@@ -45179,7 +46239,7 @@ function inspectSoundTag(mapBuffer, header, tagIndex, soundTagId, externalSounds
               const sampleSize = srcBuf.readUInt32LE(mOffset + 64);
               const sampleExt = srcBuf.readUInt32LE(mOffset + 68);
               const sampleOffset = srcBuf.readUInt32LE(mOffset + 72);
-              const permExternal = (sampleExt & 1) !== 0 || isExternal;
+              const permExternal = header.engine !== 5 && ((sampleExt & 1) !== 0 || isExternal);
               let durationSeconds = 0;
               if (format === 1 /* XboxADPCM */) {
                 const samplesPerChannel = Math.floor(sampleSize / (36 * channelCount)) * 64;
@@ -47656,674 +48716,6 @@ function buildCustomObjectContainer(options) {
   };
 }
 
-// ../core/src/map/deprotect.ts
-var OBJECT_TYPE_MAP = {
-  0: "biped",
-  1: "vehicle",
-  2: "weapon",
-  3: "equipment",
-  4: "garbage",
-  5: "projectile",
-  6: "scenery",
-  7: "device_machine",
-  8: "device_control",
-  9: "device_light_fixture",
-  10: "placeholder",
-  11: "sound_scenery"
-};
-var SHADER_TYPE_MAP = {
-  3: "shader_environment",
-  4: "shader_model",
-  5: "shader_transparent_generic",
-  6: "shader_transparent_chicago",
-  7: "shader_transparent_chicago_extended",
-  8: "shader_transparent_water",
-  9: "shader_transparent_glass",
-  10: "shader_transparent_meter",
-  11: "shader_transparent_plasma"
-};
-var SCRIPT_TAG_REF_NODE_TYPE_CLASSES = {
-  24: "sound",
-  25: "effect",
-  26: "damage_effect",
-  27: "sound_looping",
-  28: "model_animations",
-  29: "actor_variant",
-  30: "damage_effect",
-  31: "object"
-};
-function isProtectedPathName(path3) {
-  const trimmed = path3.trim().toLowerCase();
-  if (!trimmed) return true;
-  if (trimmed.includes("protected") || trimmed.includes("zteam") || trimmed.includes("hek+") || trimmed.includes(" obfuscated")) {
-    return true;
-  }
-  for (let i = 0; i < path3.length; i++) {
-    const code = path3.charCodeAt(i);
-    if (code < 32 || code > 126) return true;
-  }
-  return false;
-}
-function resolveClassHierarchyFourCCs(className) {
-  const info = lookupTagClassByName(className);
-  if (!info) {
-    throw new Error(`Unknown tag class name "${className}"`);
-  }
-  const primaryFourCC = fourCCFromString(info.groupId);
-  let secondaryFourCC = TAG_CLASS_NONE;
-  let tertiaryFourCC = TAG_CLASS_NONE;
-  if (info.parent) {
-    const parentInfo = lookupTagClassByName(info.parent);
-    if (parentInfo) {
-      secondaryFourCC = fourCCFromString(parentInfo.groupId);
-      if (parentInfo.parent) {
-        const grandParentInfo = lookupTagClassByName(parentInfo.parent);
-        if (grandParentInfo) {
-          tertiaryFourCC = fourCCFromString(grandParentInfo.groupId);
-        }
-      }
-    }
-  }
-  return { primaryFourCC, secondaryFourCC, tertiaryFourCC };
-}
-function looksLikeBitmapTag(buffer, header, baseMemoryAddress, rootOffset) {
-  if (!isRangeInBuffer(rootOffset, 108, buffer.length)) return false;
-  const count2 = buffer.readUInt32LE(rootOffset + 96);
-  const ptr = buffer.readUInt32LE(rootOffset + 100);
-  if (count2 === 0 || count2 > 2048) return false;
-  const dataOffset = resolvePointer(ptr, header.tagDataOffset, baseMemoryAddress);
-  if (!isRangeInBuffer(dataOffset, 48, buffer.length)) return false;
-  return buffer.readUInt32LE(dataOffset) === 1651078253;
-}
-function inferConcreteClassFromStruct(buffer, header, baseMemoryAddress, tagDataPointer, candidateClass) {
-  const rootOffset = resolveTagDataPointer(tagDataPointer, header, baseMemoryAddress);
-  if (candidateClass === "object" || candidateClass === "unit" || candidateClass === "item" || candidateClass === "device" || OBJECT_TYPE_MAP[0] === candidateClass || Object.values(OBJECT_TYPE_MAP).includes(candidateClass)) {
-    if (isRangeInBuffer(rootOffset, 2, buffer.length)) {
-      const objType = buffer.readInt16LE(rootOffset);
-      if (objType in OBJECT_TYPE_MAP) {
-        return OBJECT_TYPE_MAP[objType];
-      }
-    }
-  }
-  if (candidateClass === "shader" || candidateClass.startsWith("shader_")) {
-    if (isRangeInBuffer(rootOffset + 36, 2, buffer.length)) {
-      const shdrType = buffer.readInt16LE(rootOffset + 36);
-      if (shdrType in SHADER_TYPE_MAP) {
-        return SHADER_TYPE_MAP[shdrType];
-      }
-    }
-  }
-  if (candidateClass === "bitmap" || looksLikeBitmapTag(buffer, header, baseMemoryAddress, rootOffset)) {
-    if (looksLikeBitmapTag(buffer, header, baseMemoryAddress, rootOffset)) {
-      return "bitmap";
-    }
-  }
-  return candidateClass;
-}
-function writeTagClassToEntry(buffer, header, tagIndex, tagIdx, className) {
-  const entry = tagIndex.entries[tagIdx];
-  if (!entry) return false;
-  const { primaryFourCC, secondaryFourCC, tertiaryFourCC } = resolveClassHierarchyFourCCs(className);
-  const changed = entry.primaryClassName !== className || entry.primaryClassFourCC !== primaryFourCC || (entry.secondaryClassFourCC ?? TAG_CLASS_NONE) !== secondaryFourCC || (entry.tertiaryClassFourCC ?? TAG_CLASS_NONE) !== tertiaryFourCC;
-  const entryOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE + tagIdx * TAG_ENTRY_SIZE;
-  if (isRangeInBuffer(entryOffset, TAG_ENTRY_SIZE, buffer.length)) {
-    buffer.writeUInt32LE(primaryFourCC >>> 0, entryOffset + 0);
-    buffer.writeUInt32LE(secondaryFourCC >>> 0, entryOffset + 4);
-    buffer.writeUInt32LE(tertiaryFourCC >>> 0, entryOffset + 8);
-  }
-  entry.primaryClassFourCC = primaryFourCC;
-  entry.secondaryClassFourCC = secondaryFourCC === TAG_CLASS_NONE ? null : secondaryFourCC;
-  entry.tertiaryClassFourCC = tertiaryFourCC === TAG_CLASS_NONE ? null : tertiaryFourCC;
-  entry.primaryClassName = className;
-  return changed;
-}
-function repairProtectedTagClasses(buffer, header, tagIndex) {
-  let classesRepaired = 0;
-  const log = [];
-  const queue = [];
-  const visited = /* @__PURE__ */ new Set();
-  const assignClass = (idx, rawClassName, reason) => {
-    const entry = tagIndex.entries[idx];
-    if (!entry) return;
-    const concrete = entry.isExternal ? rawClassName : inferConcreteClassFromStruct(buffer, header, tagIndex.baseMemoryAddress, entry.tagDataPointerOrResourceIndex, rawClassName);
-    if (!lookupTagClassByName(concrete)) return;
-    if (writeTagClassToEntry(buffer, header, tagIndex, idx, concrete)) {
-      classesRepaired++;
-      log.push(`Repaired tag #${idx} ("${entry.path}") class -> ${concrete} (${reason})`);
-    }
-    if (!visited.has(idx)) {
-      queue.push(idx);
-    }
-  };
-  const scnrIndex = tagIndex.scenarioTagId & 65535;
-  if (tagIndex.entries[scnrIndex]) {
-    assignClass(scnrIndex, "scenario", "scenarioTagId root");
-  } else if (tagIndex.entries[0]) {
-    assignClass(0, "scenario", "index 0 fallback root");
-  }
-  for (const entry of tagIndex.entries) {
-    const lowerPath = entry.path.toLowerCase();
-    if (lowerPath === "globals\\globals" && entry.primaryClassName !== "globals") {
-      assignClass(entry.index, "globals", "globals\\globals path");
-    } else if (!entry.isExternal && entry.primaryClassName === null) {
-      const rootOff = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
-      if (looksLikeBitmapTag(buffer, header, tagIndex.baseMemoryAddress, rootOff)) {
-        assignClass(entry.index, "bitmap", 'BitmapData "bitm" signature');
-      }
-    } else if (entry.primaryClassName) {
-      const concrete = entry.isExternal ? entry.primaryClassName : inferConcreteClassFromStruct(
-        buffer,
-        header,
-        tagIndex.baseMemoryAddress,
-        entry.tagDataPointerOrResourceIndex,
-        entry.primaryClassName
-      );
-      if (concrete !== entry.primaryClassName && lookupTagClassByName(concrete)) {
-        assignClass(entry.index, concrete, `polymorphic ${entry.primaryClassName} discriminator`);
-      } else {
-        queue.push(entry.index);
-      }
-    }
-  }
-  const walkStruct2 = (structDef, baseAbs, depth) => {
-    if (depth > 8) return;
-    if (!isRangeInBuffer(baseAbs, structDef.totalSize, buffer.length)) return;
-    for (const f of structDef.fields) {
-      const absOffset = baseAbs + f.offset;
-      if (f.def.type === "TagDependency") {
-        if (!isRangeInBuffer(absOffset, 16, buffer.length)) continue;
-        const depFourCC = buffer.readUInt32LE(absOffset);
-        const tagId = buffer.readUInt32LE(absOffset + 12);
-        if (tagId === NULL_TAG_ID || tagId === 0) continue;
-        const targetIdx = tagId & 65535;
-        const targetEntry = tagIndex.entries[targetIdx];
-        if (!targetEntry || targetEntry.tagId !== tagId >>> 0) continue;
-        let inferredClass = targetEntry.primaryClassName;
-        if (!inferredClass) {
-          const fromDepFourCC = lookupTagClass(depFourCC);
-          if (fromDepFourCC) {
-            inferredClass = fromDepFourCC.name;
-          } else if (f.def.classes && f.def.classes.length > 0 && f.def.classes[0] !== "*") {
-            const firstAllowed = f.def.classes[0];
-            const byCode = firstAllowed.length === 4 ? lookupTagClass(fourCCFromString(firstAllowed)) : null;
-            const byName = lookupTagClassByName(firstAllowed);
-            inferredClass = byCode?.name ?? byName?.name ?? null;
-          }
-        }
-        if (inferredClass) {
-          assignClass(targetIdx, inferredClass, `dependency "${f.name}"`);
-          const concreteEntry = tagIndex.entries[targetIdx];
-          if (concreteEntry.primaryClassName) {
-            const info = lookupTagClassByName(concreteEntry.primaryClassName);
-            if (info) {
-              const expectedFourCC = fourCCFromString(info.groupId);
-              if (depFourCC !== expectedFourCC) {
-                buffer.writeUInt32LE(expectedFourCC >>> 0, absOffset);
-              }
-            }
-          }
-        }
-      } else if (f.def.type === "TagReflexive" && f.def.struct) {
-        if (!isRangeInBuffer(absOffset, 12, buffer.length)) continue;
-        const decoded = decodeValueField(buffer, absOffset, f.def);
-        const ref = decoded.value;
-        if (ref.count <= 0 || ref.count > 8192) continue;
-        let childStruct;
-        try {
-          childStruct = resolveStruct(f.def.struct);
-        } catch {
-          continue;
-        }
-        const childBase = resolvePointer(ref.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
-        if (!isRangeInBuffer(childBase, ref.count * childStruct.totalSize, buffer.length)) continue;
-        for (let i = 0; i < ref.count; i++) {
-          walkStruct2(childStruct, childBase + i * childStruct.totalSize, depth + 1);
-        }
-      }
-    }
-  };
-  while (queue.length > 0) {
-    const idx = queue.shift();
-    if (visited.has(idx)) continue;
-    visited.add(idx);
-    const entry = tagIndex.entries[idx];
-    if (!entry || entry.isExternal || !entry.primaryClassName) continue;
-    let structDef;
-    try {
-      structDef = getGroupDefinition(entry.primaryClassName);
-    } catch {
-      continue;
-    }
-    const rootOffset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
-    walkStruct2(structDef, rootOffset, 0);
-  }
-  return { classesRepaired, log };
-}
-function scrapeScenarioScriptTagPaths(buffer, header, tagIndex) {
-  const recovered = /* @__PURE__ */ new Map();
-  const scnrIdx = tagIndex.scenarioTagId & 65535;
-  const scnrEntry = tagIndex.entries[scnrIdx];
-  if (!scnrEntry || scnrEntry.isExternal) return recovered;
-  const scenarioStruct = getGroupStructName("scenario");
-  if (!scenarioStruct) return recovered;
-  const scnrOffset = resolveTagDataPointer(scnrEntry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
-  if (!isRangeInBuffer(scnrOffset, resolveStruct(scenarioStruct).totalSize, buffer.length)) return recovered;
-  const decoded = decodeStruct(buffer, scnrOffset, scenarioStruct);
-  const syntaxField = decoded.get("script syntax data");
-  const stringsField = decoded.get("script string data");
-  if (syntaxField?.kind !== "tagDataOffset" || stringsField?.kind !== "tagDataOffset") return recovered;
-  if (syntaxField.value.size < DATA_ARRAY_HEADER_SIZE || stringsField.value.size <= 0) return recovered;
-  const syntaxOffset = resolvePointer(syntaxField.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
-  const stringsOffset = resolvePointer(stringsField.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
-  if (!isRangeInBuffer(syntaxOffset, DATA_ARRAY_HEADER_SIZE, buffer.length) || !isRangeInBuffer(stringsOffset, stringsField.value.size, buffer.length)) {
-    return recovered;
-  }
-  const maxNodes = buffer.readInt16LE(syntaxOffset + DATA_ARRAY_MAXIMUM_COUNT);
-  const elemSize = buffer.readInt16LE(syntaxOffset + DATA_ARRAY_ELEMENT_SIZE);
-  const countNodes = buffer.readInt16LE(syntaxOffset + DATA_ARRAY_COUNT);
-  if (elemSize !== SCRIPT_NODE_SIZE || maxNodes <= 0) return recovered;
-  const nodesToScan = Math.min(Math.max(countNodes, 0), maxNodes);
-  for (let i = 0; i < nodesToScan; i++) {
-    const nodeAt = syntaxOffset + DATA_ARRAY_HEADER_SIZE + i * SCRIPT_NODE_SIZE;
-    if (!isRangeInBuffer(nodeAt, SCRIPT_NODE_SIZE, buffer.length)) break;
-    const datumSalt = buffer.readUInt16LE(nodeAt + 0);
-    if (datumSalt === 0) continue;
-    const nodeType = buffer.readInt16LE(nodeAt + 4);
-    const nodeFlags = buffer.readUInt16LE(nodeAt + 6);
-    if (nodeType >= 24 && nodeType <= 31 && nodeFlags === 6) {
-      const stringOff = buffer.readUInt32LE(nodeAt + 16);
-      const tagId = buffer.readUInt32LE(nodeAt + 12);
-      if (tagId === NULL_TAG_ID || tagId === 0) continue;
-      const tagIdx = tagId & 65535;
-      if (tagIdx >= tagIndex.entries.length) continue;
-      if (stringOff < stringsField.value.size) {
-        const strVal = readCString(buffer, stringsOffset + stringOff);
-        const cleaned = strVal.trim().replace(/\//g, "\\");
-        if (cleaned.length > 0 && !isProtectedPathName(cleaned) && cleaned.toLowerCase() !== "none") {
-          recovered.set(tagIdx, { path: cleaned, nodeType });
-        }
-      }
-    }
-  }
-  return recovered;
-}
-function repairTruncatedBitmapMipmaps(buffer, header, tagIndex) {
-  let bitmapsRepaired = 0;
-  const log = [];
-  const bitmapSize = resolveStruct("BitmapData").totalSize;
-  const groupSize = resolveStruct("Bitmap").totalSize;
-  for (const e of tagIndex.entries) {
-    if (e.primaryClassName !== "bitmap" || e.isExternal) continue;
-    const root = resolveTagDataPointer(e.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
-    if (!isRangeInBuffer(root, groupSize, buffer.length)) continue;
-    const list = decodeStruct(buffer, root, "Bitmap").get("bitmap data");
-    if (list?.kind !== "reflexive") continue;
-    for (let i = 0; i < list.value.count; i++) {
-      const at = resolveTagDataPointer(list.value.pointerLow + i * bitmapSize >>> 0, header, tagIndex.baseMemoryAddress);
-      if (!isRangeInBuffer(at, bitmapSize, buffer.length)) break;
-      const signature = buffer.readUInt32LE(at);
-      const width = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.width);
-      const height = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.height);
-      const depth = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.depth);
-      const type = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.type);
-      const format = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.format);
-      const flags = buffer.readUInt16LE(at + BITMAP_DATA_OFFSETS.flags) & ~256;
-      const mipmapCount = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.mipmapCount);
-      const pixelsSize = buffer.readInt32LE(at + BITMAP_DATA_OFFSETS.pixelsSize);
-      if (signature !== 1651078253 || width <= 0 || height <= 0 || depth <= 0 || mipmapCount <= 0) continue;
-      const needed = requiredPixelDataSize({
-        signature,
-        width,
-        height,
-        depth,
-        type,
-        format,
-        flags,
-        mipmapCount,
-        pixelsSize
-      });
-      if (pixelsSize < needed) {
-        let curWidth = width;
-        let curHeight = height;
-        let curDepth = depth;
-        let clampedMipmaps = mipmapCount;
-        let fits = false;
-        for (let m = mipmapCount; m >= 0; m--) {
-          const tryNeeded = requiredPixelDataSize({
-            signature,
-            width: curWidth,
-            height: curHeight,
-            depth: curDepth,
-            type,
-            format,
-            flags,
-            mipmapCount: m,
-            pixelsSize
-          });
-          if (pixelsSize >= tryNeeded) {
-            clampedMipmaps = m;
-            fits = true;
-            break;
-          }
-        }
-        if (!fits) {
-          while ((curWidth > 1 || curHeight > 1) && !fits) {
-            curWidth = Math.max(1, curWidth >> 1);
-            curHeight = Math.max(1, curHeight >> 1);
-            const maxMip = Math.max(0, 31 - Math.clz32(Math.max(curWidth, curHeight, curDepth)));
-            for (let m = Math.min(mipmapCount, maxMip); m >= 0; m--) {
-              const tryNeeded = requiredPixelDataSize({
-                signature,
-                width: curWidth,
-                height: curHeight,
-                depth: curDepth,
-                type,
-                format,
-                flags,
-                mipmapCount: m,
-                pixelsSize
-              });
-              if (pixelsSize >= tryNeeded) {
-                clampedMipmaps = m;
-                fits = true;
-                break;
-              }
-            }
-          }
-        }
-        buffer.writeInt16LE(curWidth, at + BITMAP_DATA_OFFSETS.width);
-        buffer.writeInt16LE(curHeight, at + BITMAP_DATA_OFFSETS.height);
-        buffer.writeInt16LE(clampedMipmaps, at + BITMAP_DATA_OFFSETS.mipmapCount);
-        bitmapsRepaired++;
-        log.push(
-          `Clamped truncated bitmap #${e.index} "${e.path}" bitmap ${i}: ${width}x${height} (${mipmapCount} mips) -> ${curWidth}x${curHeight} (${clampedMipmaps} mips, ${pixelsSize} bytes available)`
-        );
-      }
-    }
-  }
-  return { bitmapsRepaired, log };
-}
-function repairCorruptedModelPartStrips(buffer, header, tagIndex) {
-  let modelPartsRepaired = 0;
-  let stripIndicesClamped = 0;
-  const log = [];
-  const geometrySize = resolveStruct("GBXModelGeometry").totalSize;
-  const base = tagIndex.baseMemoryAddress;
-  const modelDataAt = tagIndex.modelDataFileOffset;
-  const indexDataOffset = tagIndex.vertexSize;
-  for (const entry of tagIndex.entries) {
-    if (entry.isExternal || entry.primaryClassName !== "gbxmodel") continue;
-    const modelAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, base);
-    if (!isRangeInBuffer(modelAt, resolveStruct("GBXModel").totalSize, buffer.length)) continue;
-    const model = decodeStruct(buffer, modelAt, "GBXModel");
-    const geometries = model.get("geometries");
-    if (!geometries || geometries.kind !== "reflexive" || geometries.value.count <= 0) continue;
-    const geometriesAt = resolvePointer(geometries.value.pointerLow, header.tagDataOffset, base);
-    for (let g = 0; g < geometries.value.count; g++) {
-      const gAt = geometriesAt + g * geometrySize;
-      if (!isRangeInBuffer(gAt, geometrySize, buffer.length)) break;
-      const geometry = decodeStruct(buffer, gAt, "GBXModelGeometry");
-      const parts = geometry.get("parts");
-      if (!parts || parts.kind !== "reflexive" || parts.value.count <= 0) continue;
-      const partsAt = resolvePointer(parts.value.pointerLow, header.tagDataOffset, base);
-      for (let p = 0; p < parts.value.count; p++) {
-        const at = partsAt + p * 132;
-        if (!isRangeInBuffer(at, 132, buffer.length)) break;
-        const triangleCount = buffer.readInt32LE(at + 72);
-        const stripOffset = buffer.readUInt32LE(at + 76);
-        const vertexCount = buffer.readInt32LE(at + 88);
-        const stripIndexCount = triangleCount + 2;
-        if (vertexCount <= 0 || triangleCount < 1) continue;
-        const stripAt = modelDataAt + indexDataOffset + stripOffset;
-        if (!isRangeInBuffer(stripAt, stripIndexCount * 2, buffer.length)) continue;
-        let clampedInPart = 0;
-        let lastValidVertex = Math.max(0, vertexCount - 1);
-        for (let k = 0; k < stripIndexCount; k++) {
-          const val = buffer.readUInt16LE(stripAt + k * 2);
-          if (val < vertexCount) {
-            lastValidVertex = val;
-            break;
-          }
-        }
-        for (let k = 0; k < stripIndexCount; k++) {
-          const val = buffer.readUInt16LE(stripAt + k * 2);
-          if (val >= vertexCount) {
-            buffer.writeUInt16LE(lastValidVertex, stripAt + k * 2);
-            clampedInPart++;
-            stripIndicesClamped++;
-          } else {
-            lastValidVertex = val;
-          }
-        }
-        if (clampedInPart > 0) {
-          modelPartsRepaired++;
-          log.push(
-            `Clamped ${clampedInPart} out-of-range strip indices on #${entry.index} "${entry.path}" geometry ${g} part ${p} (vertexCount=${vertexCount})`
-          );
-        }
-      }
-    }
-  }
-  return { modelPartsRepaired, stripIndicesClamped, log };
-}
-function inspectMapProtectionAndIntegrity(buffer, header, tagIndex) {
-  let protectedClassCount = 0;
-  let protectedNameCount = 0;
-  let duplicateNameCount = 0;
-  const seenKey = /* @__PURE__ */ new Set();
-  const details = [];
-  for (const e of tagIndex.entries) {
-    if (!e.primaryClassName) {
-      protectedClassCount++;
-    } else if (!e.isExternal && (e.primaryClassName === "object" || e.primaryClassName === "shader")) {
-      protectedClassCount++;
-    }
-    if (isProtectedPathName(e.path)) {
-      protectedNameCount++;
-    }
-    const key = `${e.primaryClassName ?? fourCCToString(e.primaryClassFourCC)}:${e.path.toLowerCase()}`;
-    if (seenKey.has(key)) {
-      duplicateNameCount++;
-    } else {
-      seenKey.add(key);
-    }
-  }
-  const scriptMap = scrapeScenarioScriptTagPaths(buffer, header, tagIndex);
-  let scriptRecoverableNamesCount = 0;
-  for (const [idx, info] of scriptMap.entries()) {
-    const entry = tagIndex.entries[idx];
-    if (entry && (isProtectedPathName(entry.path) || entry.path.toLowerCase() !== info.path.toLowerCase())) {
-      scriptRecoverableNamesCount++;
-    }
-  }
-  const bmpReport = checkDrawableBitmaps(buffer, header, tagIndex, { ignoreExternalBit: true });
-  const modelReport = checkModelParts(buffer, header, tagIndex);
-  if (protectedClassCount > 0) details.push(`${protectedClassCount} tag(s) have obfuscated or base polymorphic classes.`);
-  if (protectedNameCount > 0) details.push(`${protectedNameCount} tag(s) have protected/corrupted path strings (e.g. "<protected>").`);
-  if (duplicateNameCount > 0) details.push(`${duplicateNameCount} tag(s) share duplicate (class, path) names.`);
-  if (scriptRecoverableNamesCount > 0) details.push(`${scriptRecoverableNamesCount} tag path(s) can be recovered from compiled HaloScript syntax nodes.`);
-  if (bmpReport.problems.length > 0) details.push(`${bmpReport.problems.length} bitmap(s) have drawable/mipmap truncation issues.`);
-  if (modelReport.problems.length > 0) details.push(`${modelReport.problems.length} model part(s) have out-of-range strip index or geometry issues.`);
-  return {
-    totalTags: tagIndex.entries.length,
-    protectedClassCount,
-    protectedNameCount,
-    duplicateNameCount,
-    scriptRecoverableNamesCount,
-    truncatedBitmapCount: bmpReport.problems.length,
-    corruptedModelPartCount: modelReport.problems.length,
-    headerCrc32: header.crc32 >>> 0,
-    tagChecksum: tagIndex.tagChecksum >>> 0,
-    details
-  };
-}
-function defaultFolderPrefixForClass(className, scenarioName) {
-  switch (className) {
-    case "scenario":
-    case "scenario_structure_bsp":
-      return `levels\\${scenarioName}\\${scenarioName}`;
-    case "globals":
-      return "globals\\globals";
-    case "biped":
-      return "characters\\biped";
-    case "vehicle":
-      return "vehicles\\vehicle";
-    case "weapon":
-      return "weapons\\weapon";
-    case "equipment":
-      return "powerups\\equipment";
-    case "projectile":
-      return "weapons\\projectile";
-    case "scenery":
-      return "scenery\\scenery";
-    case "sound":
-      return "sound\\sfx\\sound";
-    case "sound_looping":
-      return "sound\\looping\\sound_looping";
-    case "bitmap":
-      return "bitmaps\\bitmap";
-    case "gbxmodel":
-      return "models\\model";
-    case "model_collision_geometry":
-      return "models\\collision";
-    case "model_animations":
-      return "models\\animations";
-    case "ui_widget_definition":
-    case "ui_widget_collection":
-      return "ui\\shell\\widget";
-    default:
-      if (className?.startsWith("shader")) return `shaders\\${className}`;
-      return `repaired\\${className ?? "tag"}`;
-  }
-}
-function deprotectAndRepairMap(buffer, header, tagIndex, options = {}) {
-  const {
-    repairClasses = true,
-    scrapeScriptPaths = true,
-    heuristicRename = true,
-    repairBitmaps = true,
-    repairModelStrips = true
-  } = options;
-  let workBuffer = Buffer.from(buffer);
-  let workHeader = { ...header };
-  let workTagIndex = {
-    ...tagIndex,
-    entries: tagIndex.entries.map((e) => ({ ...e }))
-  };
-  const log = [];
-  let classesRepaired = 0;
-  let scriptPathsRecovered = 0;
-  let heuristicPathsRenamed = 0;
-  let bitmapsRepaired = 0;
-  let modelPartsRepaired = 0;
-  let stripIndicesClamped = 0;
-  if (repairClasses) {
-    const res1 = repairProtectedTagClasses(workBuffer, workHeader, workTagIndex);
-    classesRepaired = res1.classesRepaired;
-    log.push(...res1.log);
-  }
-  if (scrapeScriptPaths) {
-    const recovered = scrapeScenarioScriptTagPaths(workBuffer, workHeader, workTagIndex);
-    for (const [idx, info] of recovered.entries()) {
-      const entry = workTagIndex.entries[idx];
-      if (!entry) continue;
-      if (!entry.primaryClassName && info.nodeType in SCRIPT_TAG_REF_NODE_TYPE_CLASSES) {
-        const nodeClass = SCRIPT_TAG_REF_NODE_TYPE_CLASSES[info.nodeType];
-        const concrete = entry.isExternal ? nodeClass : inferConcreteClassFromStruct(workBuffer, workHeader, workTagIndex.baseMemoryAddress, entry.tagDataPointerOrResourceIndex, nodeClass);
-        if (writeTagClassToEntry(workBuffer, workHeader, workTagIndex, idx, concrete)) {
-          classesRepaired++;
-        }
-      }
-      if (isProtectedPathName(entry.path)) {
-        try {
-          const ren = renameTagInMap(workBuffer, workHeader, workTagIndex, idx, info.path);
-          workBuffer = ren.buffer;
-          workHeader = parseCacheFileHeader(workBuffer);
-          scriptPathsRecovered++;
-          log.push(`Recovered tag #${idx} path from HaloScript -> "${info.path}"`);
-        } catch {
-          try {
-            const fallbackPath = `${info.path}_${idx}`;
-            const ren = renameTagInMap(workBuffer, workHeader, workTagIndex, idx, fallbackPath);
-            workBuffer = ren.buffer;
-            workHeader = parseCacheFileHeader(workBuffer);
-            scriptPathsRecovered++;
-            log.push(`Recovered tag #${idx} path from HaloScript -> "${fallbackPath}"`);
-          } catch {
-          }
-        }
-      }
-    }
-  }
-  if (heuristicRename) {
-    const scnrName = workHeader.scenarioName || "map";
-    const seenKeys = /* @__PURE__ */ new Set();
-    for (const entry of workTagIndex.entries) {
-      if (!isProtectedPathName(entry.path)) {
-        const key = `${entry.primaryClassName ?? entry.primaryClassFourCC}:${entry.path.toLowerCase()}`;
-        if (!seenKeys.has(key)) {
-          seenKeys.add(key);
-        }
-      }
-    }
-    const usedKeys = /* @__PURE__ */ new Set();
-    for (let i = 0; i < workTagIndex.entries.length; i++) {
-      const entry = workTagIndex.entries[i];
-      const classKey = entry.primaryClassName ?? fourCCToString(entry.primaryClassFourCC);
-      const currentKey = `${classKey}:${entry.path.toLowerCase()}`;
-      const needsRename = isProtectedPathName(entry.path) || usedKeys.has(currentKey);
-      if (!needsRename) {
-        usedKeys.add(currentKey);
-        continue;
-      }
-      let basePrefix = defaultFolderPrefixForClass(entry.primaryClassName, scnrName);
-      let candidate = entry.primaryClassName === "scenario" || entry.primaryClassName === "globals" ? basePrefix : `${basePrefix}_${i}`;
-      let suffix = 1;
-      while (usedKeys.has(`${classKey}:${candidate.toLowerCase()}`) || seenKeys.has(`${classKey}:${candidate.toLowerCase()}`)) {
-        candidate = `${basePrefix}_${i}_${suffix++}`;
-      }
-      try {
-        const ren = renameTagInMap(workBuffer, workHeader, workTagIndex, i, candidate);
-        workBuffer = ren.buffer;
-        workHeader = parseCacheFileHeader(workBuffer);
-        usedKeys.add(`${classKey}:${candidate.toLowerCase()}`);
-        seenKeys.add(`${classKey}:${candidate.toLowerCase()}`);
-        heuristicPathsRenamed++;
-        log.push(`Renamed protected/duplicate tag #${i} (${classKey}) -> "${candidate}"`);
-      } catch {
-      }
-    }
-  }
-  if (repairBitmaps) {
-    const bmpRes = repairTruncatedBitmapMipmaps(workBuffer, workHeader, workTagIndex);
-    bitmapsRepaired = bmpRes.bitmapsRepaired;
-    log.push(...bmpRes.log);
-  }
-  if (repairModelStrips) {
-    const modRes = repairCorruptedModelPartStrips(workBuffer, workHeader, workTagIndex);
-    modelPartsRepaired = modRes.modelPartsRepaired;
-    stripIndicesClamped = modRes.stripIndicesClamped;
-    log.push(...modRes.log);
-  }
-  try {
-    workHeader = parseCacheFileHeader(workBuffer);
-    workTagIndex = parseTagIndex(workBuffer, workHeader);
-  } catch {
-  }
-  return {
-    buffer: workBuffer,
-    header: workHeader,
-    tagIndex: workTagIndex,
-    classesRepaired,
-    scriptPathsRecovered,
-    heuristicPathsRenamed,
-    bitmapsRepaired,
-    modelPartsRepaired,
-    stripIndicesClamped,
-    log
-  };
-}
-
 // ../core/src/map/write-map.ts
 var import_crypto2 = require("crypto");
 var baseName = (p) => p.split(/[\\/]/).pop() ?? p;
@@ -48601,7 +48993,9 @@ function summarizeOpenMap(map) {
   const engine = map.header.engine;
   let mapEdition = "ce";
   const fpLower = (map.filePath || "").toLowerCase();
-  if (engine === 13 /* MCC_CEA */ || fpLower.includes("mcc")) {
+  if (engine === 5 /* XBOX */) {
+    mapEdition = "xbox";
+  } else if (engine === 13 /* MCC_CEA */ || fpLower.includes("mcc")) {
     mapEdition = "mcc";
   } else if (fpLower.includes("halomd")) {
     mapEdition = "halomd";
@@ -48655,7 +49049,7 @@ function reparse(filePath, buffer, modified, diskStat) {
 }
 async function runInspect(task) {
   progress(task.requestId, "Reading file", 10);
-  const buffer = fs2.readFileSync(task.filePath);
+  const buffer = ensureXboxMapDecompressed(fs2.readFileSync(task.filePath));
   const diskStat = diskStatOf(task.filePath);
   progress(task.requestId, "Parsing header and tag index", 50);
   currentInject = null;
@@ -49204,7 +49598,92 @@ function runStageTagTestMap(task) {
     if (!fs2.existsSync(targetDir)) {
       fs2.mkdirSync(targetDir, { recursive: true });
     }
-    const bufferCopy = Buffer.from(currentMap.buffer);
+    let bufferCopy = Buffer.from(currentMap.buffer);
+    if (currentMap.header.engine !== 609 /* CUSTOM_EDITION */) {
+      progress(task.requestId, "Converting non-CE map to Custom Edition for OpenCE", 40);
+      const mapDir = path2.dirname(currentMap.filePath || "");
+      const candidateRoots = [
+        process.cwd(),
+        path2.resolve(process.cwd(), ".."),
+        path2.resolve(__dirname, ".."),
+        path2.resolve(__dirname, "../.."),
+        "C:\\Users\\LeviB\\Projects\\OpenCE-Mantle"
+      ];
+      let bitmapsPath = task.bitmapsPath;
+      let soundsPath = task.soundsPath;
+      if (!bitmapsPath || !fs2.existsSync(bitmapsPath)) {
+        const localBmp = mapDir ? path2.join(mapDir, "bitmaps.map") : "";
+        if (localBmp && fs2.existsSync(localBmp)) {
+          bitmapsPath = localBmp;
+        } else {
+          for (const root of candidateRoots) {
+            const md = path2.join(root, "sample_maps/HaloMD/bitmaps.map");
+            const pc = path2.join(root, "sample_maps/PC/bitmaps.map");
+            if (fs2.existsSync(md)) {
+              bitmapsPath = md;
+              break;
+            }
+            if (fs2.existsSync(pc)) {
+              bitmapsPath = pc;
+              break;
+            }
+          }
+        }
+      }
+      if (!soundsPath || !fs2.existsSync(soundsPath)) {
+        const localSnd = mapDir ? path2.join(mapDir, "sounds.map") : "";
+        if (localSnd && fs2.existsSync(localSnd)) {
+          soundsPath = localSnd;
+        } else if (bitmapsPath && fs2.existsSync(path2.join(path2.dirname(bitmapsPath), "sounds.map"))) {
+          soundsPath = path2.join(path2.dirname(bitmapsPath), "sounds.map");
+        } else {
+          for (const root of candidateRoots) {
+            const md = path2.join(root, "sample_maps/HaloMD/sounds.map");
+            const pc = path2.join(root, "sample_maps/PC/sounds.map");
+            if (fs2.existsSync(md)) {
+              soundsPath = md;
+              break;
+            }
+            if (fs2.existsSync(pc)) {
+              soundsPath = pc;
+              break;
+            }
+          }
+        }
+      }
+      const resources = openConversionResources({ bitmaps: bitmapsPath, sounds: soundsPath });
+      try {
+        const layout = classifyMapLayout(bufferCopy);
+        const convert = layout.kind === "demo" ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+        const converted = convert(bufferCopy, {
+          acknowledgeScripts: true,
+          repairs: {
+            rebuildDecompressedFileSize: true,
+            truncateFileToHeaderSize: true,
+            stripTrailingBytes: true,
+            extendModelDataSize: true,
+            clampTagDataSize: true,
+            clampScenarioBspSizes: true,
+            clampTagArrayCount: true,
+            alignTagData4: true,
+            zeroMissingExternalData: true,
+            clampOutOfRangeDependencies: true,
+            dropUnrebasableTags: true,
+            stripCorruptedSoundPermutations: true,
+            stripInvalidBsp2dReferences: true,
+            clampTruncatedBitmaps: true,
+            repairCorruptedModelVertices: true
+          },
+          resources: resources.files
+        });
+        bufferCopy = Buffer.from(converted.buffer);
+      } finally {
+        resources.close();
+      }
+    } else {
+      repairTruncatedBitmapMipmaps(bufferCopy, currentMap.header, currentMap.tagIndex);
+      repairCorruptedModelPartStrips(bufferCopy, currentMap.header, currentMap.tagIndex);
+    }
     progress(task.requestId, "Writing staged map", 60);
     const finalized = writeFinalizedMap2(bufferCopy, target, "Staging for OpenCE Tag Test");
     progress(task.requestId, "Done", 100);
@@ -49973,7 +50452,7 @@ function runDuplicateTag(task) {
 }
 async function runGetSourceBspMesh(task) {
   try {
-    const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
+    const sourceBuffer = ensureXboxMapDecompressed(await fs2.promises.readFile(task.sourceFilePath));
     const inspected = inspectCustomEditionMap(sourceBuffer);
     if (inspected.status !== "ok") {
       return sendError(task.requestId, "INVALID_MAP", "Failed to inspect source map.");
@@ -49987,7 +50466,7 @@ async function runGetSourceBspMesh(task) {
 async function runBspSwapPreflight(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
-    const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
+    const sourceBuffer = ensureXboxMapDecompressed(await fs2.promises.readFile(task.sourceFilePath));
     const result = bspSwapPreflight(sourceBuffer, currentMap.buffer, task.sourceBspIndex, task.targetBspIndex, task.sourceBspIndices);
     sendResult(task.requestId, result);
   } catch (err) {
@@ -49999,7 +50478,7 @@ async function runPerformBspSwap(task) {
   try {
     const resources = openConversionResources(task.resourceMapPaths ?? {});
     try {
-      const sourceBuffer = await fs2.promises.readFile(task.sourceFilePath);
+      const sourceBuffer = ensureXboxMapDecompressed(await fs2.promises.readFile(task.sourceFilePath));
       const optionsWithResources = {
         ...task.options,
         resourceFiles: resources.files

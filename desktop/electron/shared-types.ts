@@ -284,7 +284,7 @@ export type ResourceMapStatus =
 
 export type ResourceMapPickResult = { ok: true; status: ResourceMapStatus } | { ok: false; code: 'CANCELLED' } | { ok: false; code: string; message: string };
 
-export type HaloBitmapVersion = 'halomd' | 'ce' | 'pc' | 'demo' | 'mcc';
+export type HaloBitmapVersion = 'halomd' | 'ce' | 'pc' | 'demo' | 'mcc' | 'xbox';
 
 export interface BitmapIdentificationEntry {
   index: number;

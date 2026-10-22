@@ -21,8 +21,7 @@ describe('inspectCustomEditionMap', () => {
   });
 
   it('returns status "ok" for a retail (version 7) map', () => {
-    const buffer = buildFakeMap({ tags: [{ primaryClass: 'scnr', tagId: 0, path: 'a' }] });
-    buffer.writeUInt32LE(CacheFileEngine.RETAIL, 0x4);
+    const buffer = buildFakeMap({ engine: CacheFileEngine.RETAIL, tags: [{ primaryClass: 'scnr', tagId: 0, path: 'a' }] });
     const result = inspectCustomEditionMap(buffer);
     expect(result.status).toBe('ok');
   });
@@ -37,13 +36,13 @@ describe('inspectCustomEditionMap', () => {
     }
   });
 
-  it('returns status "unsupported" with a friendly message for an Xbox map', () => {
-    const buffer = buildFakeMap({ tags: [{ primaryClass: 'scnr', tagId: 0, path: 'a' }] });
-    buffer.writeUInt32LE(CacheFileEngine.XBOX, 0x4);
+  it('returns status "ok" for an Xbox (version 5) map', () => {
+    const buffer = buildFakeMap({ engine: CacheFileEngine.XBOX, tags: [{ primaryClass: 'scnr', tagId: 0, path: 'a' }] });
     const result = inspectCustomEditionMap(buffer);
-    expect(result.status).toBe('unsupported');
-    if (result.status === 'unsupported') {
-      expect(result.message).toMatch(/Xbox/);
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.header.engine).toBe(CacheFileEngine.XBOX);
+      expect(result.tagIndex.entries).toHaveLength(1);
     }
   });
 });

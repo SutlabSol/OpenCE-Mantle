@@ -59,6 +59,78 @@ export interface BitmapImageDescriptor {
 }
 
 /**
+ * Unswizzles a Morton (Z-order) swizzled 2D pixel buffer into linear row-major order.
+ * Used for Xbox (`flags & 0x08`) non-DXT textures.
+ */
+export function unswizzleMorton2D(
+  src: Buffer | Uint8Array,
+  srcOffset: number,
+  width: number,
+  height: number,
+  bytesPerPixel: number,
+): Buffer {
+  const totalBytes = width * height * bytesPerPixel;
+  const out = Buffer.alloc(totalBytes);
+  if (width <= 1 || height <= 1) {
+    Buffer.from(src.buffer, src.byteOffset + srcOffset, Math.min(totalBytes, src.length - srcOffset)).copy(out, 0);
+    return out;
+  }
+
+  // Build X and Y bit masks following Halo/NV2A Morton curve interleaving
+  let maskX = 0;
+  let maskY = 0;
+  let bit = 1;
+  let step = 1;
+  while (step < width || step < height) {
+    if (step < width) {
+      maskX |= bit;
+      bit <<= 1;
+    }
+    if (step < height) {
+      maskY |= bit;
+      bit <<= 1;
+    }
+    step <<= 1;
+  }
+
+  const spreadBits = (val: number, mask: number): number => {
+    let result = 0;
+    let v = val;
+    let b = 1;
+    while (b <= mask && b > 0) {
+      if (mask & b) {
+        if (v & 1) result |= b;
+        v >>>= 1;
+      }
+      b <<= 1;
+    }
+    return result;
+  };
+
+  const xIndices = new Uint32Array(width);
+  for (let x = 0; x < width; x++) {
+    xIndices[x] = spreadBits(x, maskX);
+  }
+  const yIndices = new Uint32Array(height);
+  for (let y = 0; y < height; y++) {
+    yIndices[y] = spreadBits(y, maskY);
+  }
+
+  let dstIdx = 0;
+  for (let y = 0; y < height; y++) {
+    const ySwiz = yIndices[y];
+    for (let x = 0; x < width; x++) {
+      const swizPixel = (ySwiz | xIndices[x]) * bytesPerPixel;
+      const sOff = srcOffset + swizPixel;
+      for (let b = 0; b < bytesPerPixel; b++) {
+        out[dstIdx++] = src[sOff + b] ?? 0;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Resolves the base diffuse texture bitmap tag from a shader tag using SparkEdit's universal heuristic.
  * Scans the shader's raw metadata buffer for the first valid 'bitm' dependency reference.
  */
@@ -193,7 +265,7 @@ export function readBitmapImageDescriptor(
   const pixelsOffset = buffer.readUInt32LE(rowStart + 0x18);
   const pixelsSize = buffer.readUInt32LE(rowStart + 0x1c);
 
-  const isExternal = (flags & 0x100) !== 0 || header.engine === 7;
+  const isExternal = header.engine !== 5 && ((flags & 0x100) !== 0 || header.engine === 7);
 
   return {
     width,
@@ -460,19 +532,39 @@ export function decodeBitmapTagImage(
     );
   }
 
-  const { width, height, format, pixelsOffset } = desc;
+  const { width, height, format, flags } = desc;
+  const isSwizzled =
+    (flags & 0x08) !== 0 &&
+    format !== BitmapFormat.DXT1 &&
+    format !== BitmapFormat.DXT3 &&
+    format !== BitmapFormat.DXT5;
+
+  const bytesPerPixel =
+    format === BitmapFormat.X8R8G8B8 || format === BitmapFormat.A8R8G8B8
+      ? 4
+      : format === BitmapFormat.R5G6B5 ||
+          format === BitmapFormat.A1R5G5B5 ||
+          format === BitmapFormat.A4R4G4B4 ||
+          format === BitmapFormat.A8Y8
+        ? 2
+        : 1;
+
+  const pixelSrc: Buffer = isSwizzled
+    ? unswizzleMorton2D(srcBuffer, desc.pixelsOffset, width, height, bytesPerPixel)
+    : srcBuffer;
+  const pixelsOffset = isSwizzled ? 0 : desc.pixelsOffset;
 
   switch (format) {
     case BitmapFormat.DXT1: {
-      const rgbaData = decodeDxt1(srcBuffer, pixelsOffset, width, height);
+      const rgbaData = decodeDxt1(srcBuffer, desc.pixelsOffset, width, height);
       return { width, height, format, rgbaData };
     }
     case BitmapFormat.DXT3: {
-      const rgbaData = decodeDxt3(srcBuffer, pixelsOffset, width, height);
+      const rgbaData = decodeDxt3(srcBuffer, desc.pixelsOffset, width, height);
       return { width, height, format, rgbaData };
     }
     case BitmapFormat.DXT5: {
-      const rgbaData = decodeDxt5(srcBuffer, pixelsOffset, width, height);
+      const rgbaData = decodeDxt5(srcBuffer, desc.pixelsOffset, width, height);
       return { width, height, format, rgbaData };
     }
     case BitmapFormat.X8R8G8B8:
@@ -481,10 +573,10 @@ export function decodeBitmapTagImage(
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const b = srcBuffer[src + 0];
-        const g = srcBuffer[src + 1];
-        const r = srcBuffer[src + 2];
-        const a = format === BitmapFormat.X8R8G8B8 ? 255 : srcBuffer[src + 3];
+        const b = pixelSrc[src + 0];
+        const g = pixelSrc[src + 1];
+        const r = pixelSrc[src + 2];
+        const a = format === BitmapFormat.X8R8G8B8 ? 255 : pixelSrc[src + 3];
         src += 4;
         rgbaData[dst + 0] = r;
         rgbaData[dst + 1] = g;
@@ -499,7 +591,7 @@ export function decodeBitmapTagImage(
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const val = srcBuffer.readUInt16LE(src);
+        const val = pixelSrc.readUInt16LE(src);
         src += 2;
         const [r, g, b] = unpackRgb565(val);
         rgbaData[dst + 0] = r;
@@ -515,7 +607,7 @@ export function decodeBitmapTagImage(
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const val = srcBuffer.readUInt16LE(src);
+        const val = pixelSrc.readUInt16LE(src);
         src += 2;
         const a = (val & 0x8000) ? 255 : 0;
         const r = Math.round(((val >> 10) & 0x1f) * 255 / 31);
@@ -534,7 +626,7 @@ export function decodeBitmapTagImage(
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const val = srcBuffer.readUInt16LE(src);
+        const val = pixelSrc.readUInt16LE(src);
         src += 2;
         const a = ((val >> 12) & 0x0f) * 17;
         const r = ((val >> 8) & 0x0f) * 17;
@@ -553,7 +645,7 @@ export function decodeBitmapTagImage(
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const a = srcBuffer[src++];
+        const a = pixelSrc[src++];
         rgbaData[dst + 0] = 255;
         rgbaData[dst + 1] = 255;
         rgbaData[dst + 2] = 255;
@@ -562,12 +654,13 @@ export function decodeBitmapTagImage(
       }
       return { width, height, format, rgbaData };
     }
-    case BitmapFormat.Y8: {
+    case BitmapFormat.Y8:
+    case BitmapFormat.P8: {
       const rgbaData = new Uint8Array(width * height * 4);
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const y = srcBuffer[src++];
+        const y = pixelSrc[src++];
         rgbaData[dst + 0] = y;
         rgbaData[dst + 1] = y;
         rgbaData[dst + 2] = y;
@@ -581,8 +674,22 @@ export function decodeBitmapTagImage(
       let src = pixelsOffset;
       let dst = 0;
       for (let i = 0; i < width * height; i++) {
-        const y = srcBuffer[src + 0];
-        const a = srcBuffer[src + 1];
+        const val = pixelSrc[src++];
+        rgbaData[dst + 0] = val;
+        rgbaData[dst + 1] = val;
+        rgbaData[dst + 2] = val;
+        rgbaData[dst + 3] = val;
+        dst += 4;
+      }
+      return { width, height, format, rgbaData };
+    }
+    case BitmapFormat.A8Y8: {
+      const rgbaData = new Uint8Array(width * height * 4);
+      let src = pixelsOffset;
+      let dst = 0;
+      for (let i = 0; i < width * height; i++) {
+        const y = pixelSrc[src + 0];
+        const a = pixelSrc[src + 1];
         src += 2;
         rgbaData[dst + 0] = y;
         rgbaData[dst + 1] = y;

@@ -6,6 +6,7 @@ import {
   inspectCustomEditionMap,
   compressCustomEditionMap,
   decompressCustomEditionMap,
+  ensureXboxMapDecompressed,
   estimateTagFootprints,
   walkDependencies,
   extractTagSet,
@@ -305,7 +306,9 @@ export function summarizeOpenMap(map: LoadedMap): OpenMapSummary {
   const engine = map.header.engine;
   let mapEdition: HaloBitmapVersion = 'ce';
   const fpLower = (map.filePath || '').toLowerCase();
-  if (engine === CacheFileEngine.MCC_CEA || fpLower.includes('mcc')) {
+  if (engine === CacheFileEngine.XBOX) {
+    mapEdition = 'xbox';
+  } else if (engine === CacheFileEngine.MCC_CEA || fpLower.includes('mcc')) {
     mapEdition = 'mcc';
   } else if (fpLower.includes('halomd')) {
     mapEdition = 'halomd';
@@ -364,7 +367,7 @@ function reparse(filePath: string, buffer: Buffer, modified: boolean, diskStat: 
 
 export async function runInspect(task: { requestId: string; filePath: string }) {
   progress(task.requestId, 'Reading file', 10);
-  const buffer = fs.readFileSync(task.filePath);
+  const buffer = ensureXboxMapDecompressed(fs.readFileSync(task.filePath));
   const diskStat = diskStatOf(task.filePath);
   progress(task.requestId, 'Parsing header and tag index', 50);
   currentInject = null;
@@ -2056,7 +2059,7 @@ export async function runGetSourceBspMesh(task: {
   bspIndex?: number;
 }) {
   try {
-    const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
+    const sourceBuffer = ensureXboxMapDecompressed(await fs.promises.readFile(task.sourceFilePath));
     const inspected = inspectCustomEditionMap(sourceBuffer);
     if (inspected.status !== 'ok') {
       return sendError(task.requestId, 'INVALID_MAP', 'Failed to inspect source map.');
@@ -2078,7 +2081,7 @@ export async function runBspSwapPreflight(task: {
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
-    const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
+    const sourceBuffer = ensureXboxMapDecompressed(await fs.promises.readFile(task.sourceFilePath));
     const result = bspSwapPreflight(sourceBuffer, currentMap.buffer, task.sourceBspIndex, task.targetBspIndex, task.sourceBspIndices);
     sendResult(task.requestId, result);
   } catch (err) {
@@ -2097,7 +2100,7 @@ export async function runPerformBspSwap(task: {
   try {
     const resources = openConversionResources(task.resourceMapPaths ?? {});
     try {
-      const sourceBuffer = await fs.promises.readFile(task.sourceFilePath);
+      const sourceBuffer = ensureXboxMapDecompressed(await fs.promises.readFile(task.sourceFilePath));
       const optionsWithResources: BspSwapOptions = {
         ...task.options,
         resourceFiles: resources.files,

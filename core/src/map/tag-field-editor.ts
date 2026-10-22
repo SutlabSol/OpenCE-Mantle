@@ -457,7 +457,8 @@ export function writeTagFieldValue(
       throw new TagFieldEditorError(`Target tag ID 0x${targetTagId.toString(16)} not found in this map.`);
     }
 
-    const tagArrayFileOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
+    const tagHeaderSize = header.engine === 5 ? 0x24 : TAG_DATA_HEADER_PC_SIZE;
+    const tagArrayFileOffset = header.tagDataOffset + tagHeaderSize;
     const pathPointer = buffer.readUInt32LE(tagArrayFileOffset + targetEntry.index * TAG_ENTRY_SIZE + 0x10);
 
     encodeValueField(buffer, absOffset, {

@@ -440,7 +440,8 @@ export function ensurePaletteEntry(
   }
 
   // Not in palette yet -> append new palette entry
-  const tagEntryOff = header.tagDataOffset + 0x28 + (tagId & 0xffff) * 32;
+  const tagHeaderSize = header.engine === 5 ? 0x24 : 0x28;
+  const tagEntryOff = header.tagDataOffset + tagHeaderSize + (tagId & 0xffff) * 32;
   const pathPointer = tagEntryOff + 0x14 <= buffer.length ? buffer.readUInt32LE(tagEntryOff + 0x10) : 0;
   const entryBytes = Buffer.alloc(structSize, 0);
   entryBytes.writeUInt32LE(classFourCC, 0);

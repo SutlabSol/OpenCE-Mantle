@@ -543,7 +543,7 @@ export function inspectSoundTag(
               const sampleExt = srcBuf.readUInt32LE(mOffset + 0x44);
               const sampleOffset = srcBuf.readUInt32LE(mOffset + 0x48);
 
-              const permExternal = (sampleExt & 1) !== 0 || isExternal;
+              const permExternal = header.engine !== 5 && ((sampleExt & 1) !== 0 || isExternal);
 
               let durationSeconds = 0;
               if (format === SoundFormat.XboxADPCM) {

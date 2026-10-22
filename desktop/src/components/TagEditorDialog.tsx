@@ -188,7 +188,7 @@ export default function TagEditorDialog({
             </button>
           )}
 
-          {tag.primaryClassName === 'gbxmodel' && (
+          {(tag.primaryClassName === 'gbxmodel' || tag.primaryClassName === 'model') && (
             <div style={{ display: 'flex', gap: 4 }}>
               <button
                 data-testid="tag-editor-export-model-glb"

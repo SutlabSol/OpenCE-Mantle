@@ -79,7 +79,7 @@ export function parseCacheFileHeader(buffer: Buffer): CacheFileHeader {
   if (
     engine !== CacheFileEngine.CUSTOM_EDITION &&
     engine !== CacheFileEngine.RETAIL &&
-    engine !== CacheFileEngine.MCC_CEA
+    engine !== CacheFileEngine.MCC_CEA && engine !== CacheFileEngine.XBOX
   ) {
     throw new UnsupportedMapVersionError(engine);
   }

@@ -462,7 +462,7 @@ export default function TagBrowser({
               Sound Audition & Injector...
             </button>
           )}
-          {contextMenuTag?.primaryClassName === 'gbxmodel' && (
+          {(contextMenuTag?.primaryClassName === 'gbxmodel' || contextMenuTag?.primaryClassName === 'model') && (
             <>
               <div
                 style={{ position: 'relative' }}

@@ -60,7 +60,7 @@ describe('parseCacheFileHeader', () => {
   it('throws UnsupportedMapVersionError for an Xbox map, with a friendly message', () => {
     const buffer = buildFakeMap({ tags: [{ primaryClass: 'scnr', tagId: 0, path: 'a' }] });
     buffer.writeUInt32LE(CacheFileEngine.XBOX, 0x4);
-    expect(() => parseCacheFileHeader(buffer)).toThrow(/Xbox/);
+    expect(parseCacheFileHeader(buffer).engine).toBe(CacheFileEngine.XBOX);
   });
 
   it('detects a Chimera-compressed Custom Edition map without throwing', () => {

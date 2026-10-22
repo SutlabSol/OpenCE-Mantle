@@ -11,7 +11,7 @@ export default function MapInfoPanel({ header }: { header: MapHeaderSummary }) {
     ['Scenario', header.scenarioName],
     ['Build', header.buildString],
     ['Map Type', MAP_TYPE_LABEL[header.mapType] ?? `Unknown (${header.mapType})`],
-    ['Header Version', '609 (Custom Edition)'],
+    ['Header Version', header.engine === 5 ? '5 (Xbox)' : '609 (Custom Edition)'],
     ['Status', 'Decompressed'],
     ['File Size', formatBytes(header.fileSizeOnDisk)],
     ['Decompressed Size', formatBytes(header.decompressedFileSize)],

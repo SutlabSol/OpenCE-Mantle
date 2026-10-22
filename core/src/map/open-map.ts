@@ -1,8 +1,9 @@
 import { isChimeraCompressedCustomEdition, parseCacheFileHeader } from './header';
+import { ensureXboxMapDecompressed } from './compression';
 import { parseTagIndex } from './tag-index';
 import type { CacheFileHeader } from './header';
 import type { TagIndex } from './tag-index';
-import { CompressedMapError, UnsupportedMapVersionError } from './errors';
+import { UnsupportedMapVersionError } from './errors';
 
 export type MapInspection =
   | { status: 'ok'; header: CacheFileHeader; tagIndex: TagIndex }
@@ -21,8 +22,9 @@ export function inspectCustomEditionMap(buffer: Buffer): MapInspection {
   }
 
   try {
-    const header = parseCacheFileHeader(buffer);
-    const tagIndex = parseTagIndex(buffer, header);
+    const decompressedBuffer = ensureXboxMapDecompressed(buffer);
+    const header = parseCacheFileHeader(decompressedBuffer);
+    const tagIndex = parseTagIndex(decompressedBuffer, header);
     return { status: 'ok', header, tagIndex };
   } catch (error) {
     if (error instanceof UnsupportedMapVersionError) {

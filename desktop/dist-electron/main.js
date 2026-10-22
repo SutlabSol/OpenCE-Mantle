@@ -31,6 +31,9 @@ var CE_BASE_MEMORY_ADDRESS = 1078198272;
 var CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 var MCC_BASE_MEMORY_ADDRESS = 1342177280;
 var MCC_TAG_ARRAY_ADDRESS = MCC_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
+var TAG_DATA_HEADER_XBOX_SIZE = 36;
+var XBOX_BASE_MEMORY_ADDRESS = 2151309312;
+var XBOX_TAG_ARRAY_ADDRESS = XBOX_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_XBOX_SIZE;
 var CE_TAG_SPACE_SIZE = 23 * 1024 * 1024;
 
 // ../core/src/map/errors.ts
@@ -152,6 +155,9 @@ var CLASS_BY_NAME = new Map(TAG_CLASSES.map((c) => [c.name, c]));
 
 // ../core/src/map/tag-index.ts
 function inferBaseMemoryAddressForClassifier(tagArrayAddress) {
+  if (tagArrayAddress === XBOX_TAG_ARRAY_ADDRESS) {
+    return XBOX_BASE_MEMORY_ADDRESS;
+  }
   return tagArrayAddress - TAG_DATA_HEADER_PC_SIZE >>> 0;
 }
 
@@ -34933,8 +34939,14 @@ if ($wshell.AppActivate('Halo')) {
       const stagedMapPath = path4.join(openCeDir, "custom_maps", `${mapSlot}.map`);
       this.currentMapName = mapSlot;
       this.emitLog("stdout", `[TagTest] Staging in-memory map to ${mapSlot}.map...`);
+      const settings = getSettings();
       const stageResult = await sendWorkerRequest(
-        { type: "stageTagTestMap", targetPath: stagedMapPath },
+        {
+          type: "stageTagTestMap",
+          targetPath: stagedMapPath,
+          bitmapsPath: settings.resourceMaps.bitmaps ?? void 0,
+          soundsPath: settings.resourceMaps.sounds ?? void 0
+        },
         (level, msg) => this.emitLog("stdout", `[Worker] ${msg}`)
       ).promise;
       if (!stageResult || !stageResult.ok) {
@@ -35106,8 +35118,14 @@ map_name custom_maps\\${mapSlot}\r
       const nextSlot = this.stagedMapIndex === 0 ? "_opence_tag_test_a" : "_opence_tag_test_b";
       const targetPath = path4.join(this.activeOpenCeDir, "custom_maps", `${nextSlot}.map`);
       this.emitLog("stdout", `[TagTest] Hot-reloading map to ${nextSlot}.map...`);
+      const settings = getSettings();
       const stageResult = await sendWorkerRequest(
-        { type: "stageTagTestMap", targetPath },
+        {
+          type: "stageTagTestMap",
+          targetPath,
+          bitmapsPath: settings.resourceMaps.bitmaps ?? void 0,
+          soundsPath: settings.resourceMaps.sounds ?? void 0
+        },
         (level, msg) => this.emitLog("stdout", `[Worker] ${msg}`)
       ).promise;
       if (!stageResult || !stageResult.ok) {

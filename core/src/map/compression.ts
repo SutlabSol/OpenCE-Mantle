@@ -1,3 +1,4 @@
+import * as zlib from 'zlib';
 import { compress as zstdCompress, decompress as zstdDecompress } from '@mongodb-js/zstd';
 import {
   CACHE_FILE_HEADER_SIZE,
@@ -7,34 +8,10 @@ import {
 import { hasValidMagic, isChimeraCompressedCustomEdition, parseCacheFileHeader } from './header';
 import { CorruptMapError, NotCompressedMapError, UnsupportedMapVersionError } from './errors';
 
-/**
- * Milestone 2: decompress/recompress.
- *
- * ALGORITHM SOURCE (format reference only, GPL-3.0-only, not copied as code):
- *   Chimera (SnowyMouse/chimera) `src/chimera/halo_data/map.hpp` (CacheFileEngine enum,
- *   confirms CACHE_FILE_CUSTOM_EDITION_COMPRESSED = 0x861A0261 = 0x861A0000 | 0x261) and
- *   `src/chimera/map_loading/compression.cpp` (zstd streaming decompression, header stays
- *   2048 bytes, everything after it is a zstd frame).
- *   https://github.com/SnowyMouse/chimera/blob/master/src/chimera/halo_data/map.hpp
- *   https://github.com/SnowyMouse/chimera/blob/master/src/chimera/map_loading/compression.cpp
- *
- * STATED DEVIATION FROM THE REFERENCE (per project instructions: state assumptions rather
- * than silently guess): Chimera's own `decompress_header()` zeroes the header's `file_size`
- * field in the decompressed output (it does not reconstruct the true decompressed size at
- * that point in its low-memory streaming code path). We instead copy the ENTIRE 2048-byte
- * header through verbatim in both directions and only ever patch the 4-byte `engine` field.
- * This guarantees a perfect byte-identical round trip (decompress(compress(x)) === x) and
- * keeps `decompressedFileSize`/`crc32`/etc. accurate, which cannot break Chimera's own
- * loader (it does not depend on that field being zero). No real Chimera-compressed sample
- * map was available to diff against; this was validated via self round-trip on the user's
- * real bloodgulch.map (see /app/core/tests/compression.test.ts).
- */
-
 const CUSTOM_EDITION_COMPRESSED_ENGINE = (CacheFileEngine.CUSTOM_EDITION | CHIMERA_COMPRESSED_ENGINE_MASK) >>> 0;
 
 /** Compresses a decompressed Custom Edition map using zstd (level 19, matching Chimera's chimera-compress tool). */
 export async function compressCustomEditionMap(buffer: Buffer, level = 19): Promise<Buffer> {
-  // Validates magic + engine === CUSTOM_EDITION (609); throws a friendly error otherwise.
   const header = parseCacheFileHeader(buffer);
   if (header.engine !== CacheFileEngine.CUSTOM_EDITION) {
     throw new UnsupportedMapVersionError(header.engine);
@@ -72,4 +49,41 @@ export async function decompressCustomEditionMap(buffer: Buffer): Promise<Buffer
   decompressedBody.copy(output, CACHE_FILE_HEADER_SIZE);
 
   return output;
+}
+
+/**
+ * Transparently decompresses an Xbox (`engine === 5`) cache file if its body is zlib-compressed.
+ * On disk, Xbox `.map` files have a standard 2048-byte header followed by a zlib-deflated body.
+ * Returns the original buffer unchanged if it is not an Xbox map or is already decompressed.
+ */
+export function ensureXboxMapDecompressed(buffer: Buffer): Buffer {
+  if (!hasValidMagic(buffer)) return buffer;
+  const engine = buffer.readUInt32LE(0x4);
+  if (engine !== CacheFileEngine.XBOX) return buffer;
+
+  const decompressedFileSize = buffer.readUInt32LE(0x8);
+  const tagDataOffset = buffer.readUInt32LE(0x10);
+  if (
+    buffer.length >= decompressedFileSize &&
+    tagDataOffset + 0x24 <= buffer.length &&
+    buffer.readUInt32LE(tagDataOffset) === 0x803a6024
+  ) {
+    return buffer;
+  }
+
+  // Only inflate if the body after the 2048-byte header starts with a valid zlib header (CMF = 0x78)
+  if (buffer.length <= CACHE_FILE_HEADER_SIZE || buffer[CACHE_FILE_HEADER_SIZE] !== 0x78) {
+    return buffer;
+  }
+
+  try {
+    const inflated = zlib.inflateSync(buffer.subarray(CACHE_FILE_HEADER_SIZE));
+    const totalSize = Math.max(decompressedFileSize, CACHE_FILE_HEADER_SIZE + inflated.length);
+    const out = Buffer.alloc(totalSize, 0xca);
+    buffer.copy(out, 0, 0, CACHE_FILE_HEADER_SIZE);
+    inflated.copy(out, CACHE_FILE_HEADER_SIZE);
+    return out;
+  } catch {
+    return buffer;
+  }
 }

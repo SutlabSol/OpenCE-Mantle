@@ -29,9 +29,10 @@ const TAG_DATA_OFFSET = HEADER_SIZE; // tag data section starts right after the 
 
 /** Builds a complete, byte-accurate synthetic Custom Edition .map buffer for tests. */
 export function buildFakeMap(options: FixtureOptions): Buffer {
-  const defaultBase = options.engine === CacheFileEngine.MCC_CEA ? 0x50000000 : CE_BASE_MEMORY_ADDRESS;
+  const isXbox = options.engine === CacheFileEngine.XBOX;
+  const defaultBase = options.engine === CacheFileEngine.MCC_CEA ? 0x50000000 : isXbox ? 0x803a6000 : CE_BASE_MEMORY_ADDRESS;
   const baseMemoryAddress = options.baseMemoryAddress ?? defaultBase;
-  const tagArrayFileOffset = TAG_DATA_OFFSET + TAG_DATA_HEADER_PC_SIZE;
+  const tagArrayFileOffset = TAG_DATA_OFFSET + (isXbox ? 0x24 : TAG_DATA_HEADER_PC_SIZE);
   const tagArrayAddress = baseMemoryAddress + (tagArrayFileOffset - TAG_DATA_OFFSET);
 
   const pointerFor = (fileOffset: number) => baseMemoryAddress + (fileOffset - TAG_DATA_OFFSET);
@@ -79,7 +80,7 @@ export function buildFakeMap(options: FixtureOptions): Buffer {
   buffer.writeUInt32LE(0, TAG_DATA_OFFSET + 0x18); // modelPartCountAgain
   buffer.writeUInt32LE(32, TAG_DATA_OFFSET + 0x1c); // vertexSize
   buffer.writeUInt32LE(0, TAG_DATA_OFFSET + 0x20); // modelDataSize
-  buffer.writeUInt32LE(CacheFileLiteral.TAGS, TAG_DATA_OFFSET + 0x24);
+  buffer.writeUInt32LE(CacheFileLiteral.TAGS, TAG_DATA_OFFSET + (isXbox ? 0x20 : 0x24));
 
   // --- Tag array ---
   options.tags.forEach((tag, i) => {

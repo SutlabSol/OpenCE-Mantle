@@ -88,6 +88,16 @@ export const MCC_BASE_MEMORY_ADDRESS = 0x50000000;
 /** The tag array pointer in an MCC map (follows the 0x28 byte tag data header). */
 export const MCC_TAG_ARRAY_ADDRESS = MCC_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 
+/** Size of `CacheFileTagDataHeaderXbox` (`0x24` = 36 bytes). */
+export const TAG_DATA_HEADER_XBOX_SIZE = 0x24;
+
+/**
+ * Virtual address Xbox Halo: Combat Evolved (`engine = 5`) loads tag data at (`0x803A6000`).
+ * The tag array immediately follows the 0x24-byte Xbox tag data header at `0x803A6024`.
+ */
+export const XBOX_BASE_MEMORY_ADDRESS = 0x803a6000;
+export const XBOX_TAG_ARRAY_ADDRESS = XBOX_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_XBOX_SIZE;
+
 /**
  * Tag space: tag data and the loaded BSP share this much memory from the base (the BSP is loaded
  * at base + tag space - bsp size), so tag data size + the largest BSP must fit. 23 MiB on PC/CE

@@ -6,25 +6,28 @@ import {
   MCC_BASE_MEMORY_ADDRESS,
   MCC_TAG_ARRAY_ADDRESS,
   TAG_DATA_HEADER_PC_SIZE,
+  TAG_DATA_HEADER_XBOX_SIZE,
   TAG_ENTRY_SIZE,
+  XBOX_BASE_MEMORY_ADDRESS,
+  XBOX_TAG_ARRAY_ADDRESS,
 } from '../constants/cache-file';
 import { readCString } from '../binary/strings';
 import { CorruptMapError, UnexpectedTagArrayAddressError } from './errors';
 import type { CacheFileHeader } from './header';
 
 /**
- * Parsed form of `CacheFileTagDataHeaderPC` (invader/hek/map.hpp), 0x28 bytes, located at
- * file offset `header.tagDataOffset`:
+ * Parsed form of `CacheFileTagDataHeaderPC` (invader/hek/map.hpp), 0x28 bytes (or 0x24 bytes on Xbox),
+ * located at file offset `header.tagDataOffset`:
  *   0x00 tagArrayAddress    uint32 (pointer, virtual address of tag array)
  *   0x04 scenarioTagId      uint32
  *   0x08 tagFileChecksums   uint32
  *   0x0C tagCount           uint32
  *   0x10 modelPartCount     uint32
- *   0x14 modelDataFileOffset uint32
- *   0x18 modelPartCountAgain uint32
- *   0x1C vertexSize         uint32
- *   0x20 modelDataSize      uint32
- *   0x24 tagsLiteral        uint32 "tags"
+ *   0x14 modelDataFileOffset uint32 (on Xbox: vertexPartsPointer)
+ *   0x18 modelPartCountAgain uint32 (on Xbox: indexPartsCount)
+ *   0x1C vertexSize         uint32 (on Xbox: indexPartsPointer)
+ *   0x20 modelDataSize      uint32 (on Xbox: "tags" literal)
+ *   0x24 tagsLiteral        uint32 "tags" (PC/CE/MCC only)
  */
 export interface TagIndexEntry {
   /** Index within the tag array (0-based). */
@@ -50,7 +53,7 @@ export interface TagIndex {
   modelDataFileOffset: number;
   vertexSize: number;
   modelDataSize: number;
-  /** Virtual base address of the tag data: always `CE_BASE_MEMORY_ADDRESS` for a CE map (fixed, not inferred). */
+  /** Virtual base address of the tag data. */
   baseMemoryAddress: number;
   entries: TagIndexEntry[];
 }
@@ -64,26 +67,25 @@ export function resolveTagDataPointer(pointer: number, header: CacheFileHeader, 
 
 /**
  * Base address a reader would GUESS from a tag array pointer, assuming the array follows the tag
- * data header. For the Demo/HaloMD converter's classifier only (to tell layouts apart, e.g.
- * 0x40440000 vs the true demo's 0x4BF10000). Never use it to read a CE map: the engine's base is
- * fixed, and a map whose array pointer was moved resolves to garbage in the game even though
- * this guess makes it look fine to us (PRD 2026-10-11 "ADD tag-array growth").
+ * data header. For the Demo/HaloMD converter's classifier only.
  */
 export function inferBaseMemoryAddressForClassifier(tagArrayAddress: number): number {
+  if (tagArrayAddress === XBOX_TAG_ARRAY_ADDRESS) {
+    return XBOX_BASE_MEMORY_ADDRESS;
+  }
   return (tagArrayAddress - TAG_DATA_HEADER_PC_SIZE) >>> 0;
 }
 
 /**
  * Parses the tag index (tag data header + tag array + tag path strings) for a decompressed
- * Custom Edition map. The base is the fixed `CE_BASE_MEMORY_ADDRESS`, and the tag array must be
- * where Tool puts it, right after the `CacheFileTagDataHeaderPC` (array pointer
- * `CE_TAG_ARRAY_ADDRESS`). Any other array pointer is rejected with
- * `UnexpectedTagArrayAddressError`: earlier builds of this tool wrote such maps with ADD, and the
- * engine can't load them.
+ * Custom Edition, PC Retail, MCC CEA, or Xbox map.
  */
 export function parseTagIndex(buffer: Buffer, header: CacheFileHeader): TagIndex {
   const tagDataHeaderOffset = header.tagDataOffset;
-  if (tagDataHeaderOffset + TAG_DATA_HEADER_PC_SIZE > buffer.length) {
+  const isXbox = header.engine === CacheFileEngine.XBOX;
+  const tagHeaderSize = isXbox ? TAG_DATA_HEADER_XBOX_SIZE : TAG_DATA_HEADER_PC_SIZE;
+
+  if (tagDataHeaderOffset + tagHeaderSize > buffer.length) {
     throw new CorruptMapError('Tag data offset from the header is out of bounds of the file.');
   }
 
@@ -94,13 +96,23 @@ export function parseTagIndex(buffer: Buffer, header: CacheFileHeader): TagIndex
   const modelPartCount = buffer.readUInt32LE(tagDataHeaderOffset + 0x10);
   const modelDataFileOffset = buffer.readUInt32LE(tagDataHeaderOffset + 0x14);
   const vertexSize = buffer.readUInt32LE(tagDataHeaderOffset + 0x1c);
-  const modelDataSize = buffer.readUInt32LE(tagDataHeaderOffset + 0x20);
+  const modelDataSize = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 0x20);
 
-  const isMcc = header.engine === CacheFileEngine.MCC_CEA || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS;
-  const expectedTagArrayAddress = isMcc ? MCC_TAG_ARRAY_ADDRESS : CE_TAG_ARRAY_ADDRESS;
-  if (tagArrayAddress !== expectedTagArrayAddress) throw new UnexpectedTagArrayAddressError(tagArrayAddress, expectedTagArrayAddress);
-  const tagArrayFileOffset = tagDataHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
-  const baseMemoryAddress = isMcc ? MCC_BASE_MEMORY_ADDRESS : CE_BASE_MEMORY_ADDRESS;
+  const isMcc = !isXbox && (header.engine === CacheFileEngine.MCC_CEA || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS);
+  const expectedTagArrayAddress = isXbox
+    ? XBOX_TAG_ARRAY_ADDRESS
+    : isMcc
+      ? MCC_TAG_ARRAY_ADDRESS
+      : CE_TAG_ARRAY_ADDRESS;
+  if (tagArrayAddress !== expectedTagArrayAddress) {
+    throw new UnexpectedTagArrayAddressError(tagArrayAddress, expectedTagArrayAddress);
+  }
+  const tagArrayFileOffset = tagDataHeaderOffset + tagHeaderSize;
+  const baseMemoryAddress = isXbox
+    ? XBOX_BASE_MEMORY_ADDRESS
+    : isMcc
+      ? MCC_BASE_MEMORY_ADDRESS
+      : CE_BASE_MEMORY_ADDRESS;
 
   if (tagArrayFileOffset + tagCount * TAG_ENTRY_SIZE > buffer.length) {
     throw new CorruptMapError('Tag count from the tag index is out of bounds of the file (map may be corrupt).');
@@ -115,7 +127,7 @@ export function parseTagIndex(buffer: Buffer, header: CacheFileHeader): TagIndex
     const tagId = buffer.readUInt32LE(entryOffset + 0x0c);
     const tagPathPointer = buffer.readUInt32LE(entryOffset + 0x10);
     const tagDataPointerOrResourceIndex = buffer.readUInt32LE(entryOffset + 0x14);
-    const isExternal = buffer.readUInt32LE(entryOffset + 0x18) === 1;
+    const isExternal = !isXbox && buffer.readUInt32LE(entryOffset + 0x18) === 1;
 
     const pathFileOffset = resolveTagDataPointer(tagPathPointer, header, baseMemoryAddress);
     if (pathFileOffset < 0 || pathFileOffset >= buffer.length) {

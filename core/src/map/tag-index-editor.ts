@@ -50,7 +50,8 @@ export function renameTagInMap(
     throw new TagIndexEditorError(`A tag with path "${cleanPath}" and class "${entry.primaryClassName}" already exists.`);
   }
 
-  const tagArrayFileOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
+  const tagHeaderSize = header.engine === 5 ? 0x24 : TAG_DATA_HEADER_PC_SIZE;
+  const tagArrayFileOffset = header.tagDataOffset + tagHeaderSize;
   const entryOffset = tagArrayFileOffset + tagEntryIndex * TAG_ENTRY_SIZE;
   const pathPointer = buffer.readUInt32LE(entryOffset + 0x10);
   const pathFileOffset = resolveTagDataPointer(pathPointer, header, tagIndex.baseMemoryAddress);

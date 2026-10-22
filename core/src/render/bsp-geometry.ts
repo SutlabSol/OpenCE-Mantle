@@ -5,6 +5,30 @@ import { decodeStruct, resolveStruct } from '../map/definitions/engine';
 import { locateStructureBsp } from '../map/definitions/validate-tag';
 
 /**
+ * Unpacks an Xbox 11-11-10 bit compressed unit vector (`uint32`) into `[nx, ny, nz]`.
+ * Layout: bits 0..10 = signed 11-bit X, bits 11..21 = signed 11-bit Y, bits 22..31 = signed 10-bit Z.
+ */
+export function unpackCompressedUnitVector32(packed: number): [number, number, number] {
+  let ix = packed & 0x7ff;
+  if (ix & 0x400) ix -= 0x800;
+  let iy = (packed >>> 11) & 0x7ff;
+  if (iy & 0x400) iy -= 0x800;
+  let iz = (packed >>> 22) & 0x3ff;
+  if (iz & 0x200) iz -= 0x400;
+
+  let nx = ix / 1023.0;
+  let ny = iy / 1023.0;
+  let nz = iz / 511.0;
+  const len = Math.hypot(nx, ny, nz);
+  if (len > 1e-6) {
+    nx /= len;
+    ny /= len;
+    nz /= len;
+  }
+  return [nx, ny, nz];
+}
+
+/**
  * A renderable submesh within the Structure BSP, corresponding to a single Material
  * entry in a BSP lightmap plate.
  */
@@ -40,7 +64,7 @@ export interface BspSubmesh {
 }
 
 /**
- * Parsed Structure BSP 3D render mesh for Halo PC / Custom Edition.
+ * Parsed Structure BSP 3D render mesh for Halo PC / Custom Edition / Xbox.
  */
 export interface BspRenderMesh {
   /** Scenario BSP index (0 for primary BSP). */
@@ -64,7 +88,7 @@ export interface BspRenderMesh {
 }
 
 /**
- * Extracts the 3D render geometry for a scenario Structure BSP from a Halo PC / CE map buffer.
+ * Extracts the 3D render geometry for a scenario Structure BSP from a Halo PC / CE / Xbox map buffer.
  *
  * @param buffer The complete map file buffer.
  * @param header The parsed CacheFileHeader.
@@ -200,10 +224,12 @@ export function extractBspRenderMesh(
       const surfStartField = decodedMat.get('surfaces') as { kind: 'basic'; value: number } | undefined;
       const surfCountField = decodedMat.get('surface count') as { kind: 'basic'; value: number } | undefined;
       const vertCountField = decodedMat.get('rendered vertices count') as { kind: 'basic'; value: number } | undefined;
+      const lmVertCountField = decodedMat.get('lightmap vertices count') as { kind: 'basic'; value: number } | undefined;
 
       const surfaceIndexStart = surfStartField?.value ?? 0;
       const surfaceCount = surfCountField?.value ?? 0;
       const vertexCount = vertCountField?.value ?? 0;
+      const lmVertexCount = lmVertCountField?.value ?? 0;
 
       if (vertexCount === 0 || surfaceCount === 0) {
         continue;
@@ -211,9 +237,25 @@ export function extractBspRenderMesh(
 
       const uncompressedData = decodedMat.get('uncompressed vertices');
       const vertPtr = uncompressedData && uncompressedData.kind === 'tagDataOffset' ? uncompressedData.value.pointerLow : 0;
+      const rvIdxPtrField = decodedMat.get('rendered vertices index pointer') as { kind: 'basic'; value: number } | undefined;
+      const lmvIdxPtrField = decodedMat.get('lightmap vertices index pointer') as { kind: 'basic'; value: number } | undefined;
+      const rvIdxPtr = rvIdxPtrField?.value ?? 0;
+      const lmvIdxPtr = lmvIdxPtrField?.value ?? 0;
+
+      const isXboxCompressedBsp = vertPtr === 0 && rvIdxPtr !== 0 && header.engine === 5;
+
       let vertOffset: number;
-      let lmVertOffset: number;
-      if (vertPtr !== 0) {
+      let lmVertOffset = 0;
+      if (isXboxCompressedBsp) {
+        const rvRefOff = bspLocation.fileOffsetAnchor + (rvIdxPtr - bspLocation.baseMemoryAddress);
+        const actualVertPtr = buffer.readUInt32LE(rvRefOff + 4);
+        vertOffset = bspLocation.fileOffsetAnchor + (actualVertPtr - bspLocation.baseMemoryAddress);
+        if (lmVertexCount > 0 && lmvIdxPtr !== 0) {
+          const lmvRefOff = bspLocation.fileOffsetAnchor + (lmvIdxPtr - bspLocation.baseMemoryAddress);
+          const actualLmVertPtr = buffer.readUInt32LE(lmvRefOff + 4);
+          lmVertOffset = bspLocation.fileOffsetAnchor + (actualLmVertPtr - bspLocation.baseMemoryAddress);
+        }
+      } else if (vertPtr !== 0) {
         vertOffset = bspLocation.fileOffsetAnchor + (vertPtr - bspLocation.baseMemoryAddress);
         lmVertOffset = vertOffset + vertexCount * 56;
       } else {
@@ -228,43 +270,84 @@ export function extractBspRenderMesh(
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
-      for (let v = 0; v < vertexCount; v++) {
-        const vOff = vertOffset + v * 56;
-        const x = buffer.readFloatLE(vOff + 0);
-        const y = buffer.readFloatLE(vOff + 4);
-        const z = buffer.readFloatLE(vOff + 8);
-        const nx = buffer.readFloatLE(vOff + 12);
-        const ny = buffer.readFloatLE(vOff + 16);
-        const nz = buffer.readFloatLE(vOff + 20);
-        const u = buffer.readFloatLE(vOff + 48);
-        const vCoord = buffer.readFloatLE(vOff + 52);
+      if (isXboxCompressedBsp) {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = vertOffset + v * 32;
+          const x = buffer.readFloatLE(vOff + 0);
+          const y = buffer.readFloatLE(vOff + 4);
+          const z = buffer.readFloatLE(vOff + 8);
+          const [nx, ny, nz] = unpackCompressedUnitVector32(buffer.readUInt32LE(vOff + 12));
+          const u = buffer.readFloatLE(vOff + 24);
+          const vCoord = buffer.readFloatLE(vOff + 28);
 
-        const outIdx = v * 8;
-        vertices[outIdx + 0] = x;
-        vertices[outIdx + 1] = y;
-        vertices[outIdx + 2] = z;
-        vertices[outIdx + 3] = nx;
-        vertices[outIdx + 4] = ny;
-        vertices[outIdx + 5] = nz;
-        vertices[outIdx + 6] = u;
-        vertices[outIdx + 7] = vCoord;
+          const outIdx = v * 8;
+          vertices[outIdx + 0] = x;
+          vertices[outIdx + 1] = y;
+          vertices[outIdx + 2] = z;
+          vertices[outIdx + 3] = nx;
+          vertices[outIdx + 4] = ny;
+          vertices[outIdx + 5] = nz;
+          vertices[outIdx + 6] = u;
+          vertices[outIdx + 7] = vCoord;
 
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-        if (z < minZ) minZ = z;
-        if (z > maxZ) maxZ = z;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
+      } else {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = vertOffset + v * 56;
+          const x = buffer.readFloatLE(vOff + 0);
+          const y = buffer.readFloatLE(vOff + 4);
+          const z = buffer.readFloatLE(vOff + 8);
+          const nx = buffer.readFloatLE(vOff + 12);
+          const ny = buffer.readFloatLE(vOff + 16);
+          const nz = buffer.readFloatLE(vOff + 20);
+          const u = buffer.readFloatLE(vOff + 48);
+          const vCoord = buffer.readFloatLE(vOff + 52);
+
+          const outIdx = v * 8;
+          vertices[outIdx + 0] = x;
+          vertices[outIdx + 1] = y;
+          vertices[outIdx + 2] = z;
+          vertices[outIdx + 3] = nx;
+          vertices[outIdx + 4] = ny;
+          vertices[outIdx + 5] = nz;
+          vertices[outIdx + 6] = u;
+          vertices[outIdx + 7] = vCoord;
+
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
       }
 
-      // Read lightmap UVs (secondary stream immediately follows vertexCount * 56)
+      // Read lightmap UVs
       const lightmapUvs = new Float32Array(vertexCount * 2);
-      for (let v = 0; v < vertexCount; v++) {
-        const lmvOff = lmVertOffset + v * 20;
-        const lu = buffer.readFloatLE(lmvOff + 12);
-        const lv = buffer.readFloatLE(lmvOff + 16);
-        lightmapUvs[v * 2 + 0] = lu;
-        lightmapUvs[v * 2 + 1] = lv;
+      if (isXboxCompressedBsp) {
+        if (lmVertOffset > 0 && lmVertexCount >= vertexCount) {
+          for (let v = 0; v < vertexCount; v++) {
+            const lmvOff = lmVertOffset + v * 8;
+            const lu = buffer.readInt16LE(lmvOff + 4) / 32767.0;
+            const lv = buffer.readInt16LE(lmvOff + 6) / 32767.0;
+            lightmapUvs[v * 2 + 0] = lu;
+            lightmapUvs[v * 2 + 1] = lv;
+          }
+        }
+      } else {
+        for (let v = 0; v < vertexCount; v++) {
+          const lmvOff = lmVertOffset + v * 20;
+          const lu = buffer.readFloatLE(lmvOff + 12);
+          const lv = buffer.readFloatLE(lmvOff + 16);
+          lightmapUvs[v * 2 + 0] = lu;
+          lightmapUvs[v * 2 + 1] = lv;
+        }
       }
 
       // Read triangle indices (3 x uint16 per surface)

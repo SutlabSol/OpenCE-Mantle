@@ -1,17 +1,16 @@
 /**
- * Render-level model geometry extraction (Step 8.2): turns one `gbxmodel` tag into renderable
- * data - interleaved vertices, indexed triangle lists, per-part bounding boxes. Struct fields
- * are decoded with the tag-definition engine, then raw vertex + triangle index bytes are read
- * from the model data region (vertexOffset relative to modelDataFileOffset, triangle offsets
- * relative to the end of the map's vertex data). Only the verified-in-real-data cases are
- * decoded: vertex type 4 (uncompressed, 68-byte stride) and triangle buffer type 1
- * (triangle strip, with 0xFFFF primitive-restart sentinels).
+ * Render-level model geometry extraction (Step 8.2): turns one `gbxmodel` (`mod2`) or Xbox `model` (`mode`)
+ * tag into renderable data - interleaved vertices, indexed triangle lists, per-part bounding boxes.
+ * Struct fields are decoded with the tag-definition engine, then raw vertex + triangle index bytes are read
+ * from the model data region (or indirect Xbox reflexives when `header.engine === 5`).
  */
+import { CacheFileEngine } from '../constants/cache-file';
 import type { CacheFileHeader } from '../map/header';
 import type { TagIndex } from '../map/tag-index';
 import { resolveTagDataPointer } from '../map/tag-index';
 import { decodeStruct, resolveStruct, resolvePointer } from '../map/definitions/engine';
 import type { DecodedFieldValue } from '../map/definitions/engine';
+import { unpackCompressedUnitVector32 } from './bsp-geometry';
 
 /**
  * A renderable submesh: one geometry part of the model, with local-space vertices and an
@@ -46,7 +45,9 @@ export interface ModelRenderGeometry {
 }
 
 const VERTEX_TYPE_UNCOMPRESSED = 4;
+const VERTEX_TYPE_COMPRESSED = 5;
 const UNCOMPRESSED_VERTEX_SIZE = 68;
+const COMPRESSED_VERTEX_SIZE = 32;
 const TRIANGLE_BUFFER_TYPE_STRIP = 1;
 const PRIMITIVE_RESTART_INDEX = 0xffff;
 const LOD_FIELD_NAMES = ['super low', 'low', 'medium', 'high', 'super high'];
@@ -102,10 +103,8 @@ function decodeTriangleStrip(
   return new Uint16Array(out);
 }
 
-
-
 /**
- * Extracts the 3D render geometry of one model tag (a `gbxmodel`) at the requested LOD.
+ * Extracts the 3D render geometry of one model tag (`gbxmodel`/`mod2` or Xbox `model`/`mode`) at the requested LOD.
  *
  * @param lod 0 = super low .. 4 = super high (default). Chosen via the model's first region's
  *   first permutation; falls back to geometry 0 when the model has no regions/permutations.
@@ -122,12 +121,21 @@ export function extractModelRenderGeometry(
     throw new Error(`Model tag (ID: 0x${modelTagId.toString(16)}) not found in tag index.`);
   }
 
+  const isXboxModel =
+    header.engine === CacheFileEngine.XBOX ||
+    entry.primaryClassFourCC === 0x6d6f6465 ||
+    entry.primaryClassName === 'model';
+
+  const rootStructName = isXboxModel ? 'Model' : 'GBXModel';
+  const geomStructName = isXboxModel ? 'ModelGeometry' : 'GBXModelGeometry';
+  const partStructName = isXboxModel ? 'ModelGeometryPart' : 'GBXModelGeometryPart';
+
   const modelFileOffset = resolveTagDataPointer(
     entry.tagDataPointerOrResourceIndex,
     header,
     tagIndex.baseMemoryAddress,
   );
-  const model = decodeStruct(buffer, modelFileOffset, 'GBXModel');
+  const model = decodeStruct(buffer, modelFileOffset, rootStructName);
 
   // Base-map UV scaling lives on the model header.
   const uScaleRaw = numeric(model.get('base map u scale'));
@@ -139,8 +147,8 @@ export function extractModelRenderGeometry(
   if (!geoms || geoms.kind !== 'reflexive' || geoms.value.count === 0) {
     throw new Error(`Model "${entry.path}" has no geometries.`);
   }
-  const geomSize = resolveStruct('GBXModelGeometry').totalSize;
-  const partSize = resolveStruct('GBXModelGeometryPart').totalSize;
+  const geomSize = resolveStruct(geomStructName).totalSize;
+  const partSize = resolveStruct(partStructName).totalSize;
 
   // --- Pick geometry indices for the requested LOD across all model regions. ---
   const chosenGeomIndices = new Set<number>();
@@ -177,7 +185,7 @@ export function extractModelRenderGeometry(
 
   const geomsFileOffset = resolvePointer(geoms.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
 
-  // Model data region: vertices at modelDataFileOffset, triangle index words begin at
+  // Model data region for PC/CE/MCC: vertices at modelDataFileOffset, triangle index words begin at
   // modelDataFileOffset + vertexSize (end of the map's total vertex data).
   const vertexBase = tagIndex.modelDataFileOffset;
   const indexBase = vertexBase + tagIndex.vertexSize;
@@ -204,67 +212,116 @@ export function extractModelRenderGeometry(
   let partIndexCounter = 0;
 
   for (const geomIndex of chosenGeomIndices) {
-    const geom = decodeStruct(buffer, geomsFileOffset + geomIndex * geomSize, 'GBXModelGeometry');
+    const geom = decodeStruct(buffer, geomsFileOffset + geomIndex * geomSize, geomStructName);
     const parts = geom.get('parts');
     if (!parts || parts.kind !== 'reflexive' || parts.value.count === 0) continue;
     const partsFileOffset = resolvePointer(parts.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
 
     for (let p = 0; p < parts.value.count; p++) {
-      const part = decodeStruct(buffer, partsFileOffset + p * partSize, 'GBXModelGeometryPart');
+      const part = decodeStruct(buffer, partsFileOffset + p * partSize, partStructName);
 
       const vertexType = numeric(part.get('vertex type')) ?? -1;
       const vertexCount = numeric(part.get('vertex count')) ?? 0;
       const vertexOffset = numeric(part.get('vertex offset')) ?? 0;
       const triangleBufferType = numeric(part.get('triangle buffer type')) ?? -1;
-      // "triangle count" is the number of TRIANGLES - it is the stop condition for the
-      // unstrip loop ("triangle offset"+word count in the raw buffer can exceed it).
       const triangleCount = numeric(part.get('triangle count')) ?? 0;
       const triangleOffset = numeric(part.get('triangle offset')) ?? 0;
       const shaderIndex = numeric(part.get('shader index')) ?? 0;
 
-      // Skip parts with no verified decoder (mirrors scanGbxmodelGeometryBoundaries):
-      // compressed vertices / non-strip buffers need separate, unverified logic.
       if (vertexCount === 0 || triangleCount === 0) continue;
-      if (vertexType !== VERTEX_TYPE_UNCOMPRESSED || triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
+      if (triangleBufferType !== TRIANGLE_BUFFER_TYPE_STRIP) continue;
 
-      const partVertOffset = vertexBase + vertexOffset;
-      const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
-      if (partVertEnd > header.tagDataOffset) continue; // refuse to read outside the model data region
+      let partVertOffset = 0;
+      let partStripOffset = 0;
+      const isCompressedVert = vertexType === VERTEX_TYPE_COMPRESSED || isXboxModel;
 
-      const partStripOffset = indexBase + triangleOffset;
+      if (isXboxModel) {
+        // On Xbox, `vertex offset` (+0x64) is a virtual pointer to a 12-byte indirect reflexive in tag data,
+        // where +4 holds the virtual pointer to the 32-byte compressed vertices.
+        // And `triangle offset` (+0x4C) is the direct virtual pointer to the uint16 triangle strip indices.
+        const vertIndirectOff = resolvePointer(vertexOffset, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        if (vertIndirectOff < 0 || vertIndirectOff + 12 > buffer.length) continue;
+        const vertVirtualPtr = buffer.readUInt32LE(vertIndirectOff + 4);
+        partVertOffset = resolvePointer(vertVirtualPtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        partStripOffset = resolvePointer(triangleOffset, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        if (
+          partVertOffset < 0 ||
+          partVertOffset + vertexCount * COMPRESSED_VERTEX_SIZE > buffer.length ||
+          partStripOffset < 0 ||
+          partStripOffset >= buffer.length
+        ) {
+          continue;
+        }
+      } else {
+        if (vertexType !== VERTEX_TYPE_UNCOMPRESSED) continue;
+        partVertOffset = vertexBase + vertexOffset;
+        const partVertEnd = partVertOffset + vertexCount * UNCOMPRESSED_VERTEX_SIZE;
+        if (partVertEnd > header.tagDataOffset) continue;
+        partStripOffset = indexBase + triangleOffset;
+      }
+
       const vertices = new Float32Array(vertexCount * 8);
 
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
 
-      for (let v = 0; v < vertexCount; v++) {
-        const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
-        const x = buffer.readFloatLE(vOff + 0x00);
-        const y = buffer.readFloatLE(vOff + 0x04);
-        const z = buffer.readFloatLE(vOff + 0x08);
-        const nx = buffer.readFloatLE(vOff + 0x0c);
-        const ny = buffer.readFloatLE(vOff + 0x10);
-        const nz = buffer.readFloatLE(vOff + 0x14);
-        // Texture coords follow position(12)+normal(12)+binormal(12)+tangent(12) = 0x30.
-        const u = buffer.readFloatLE(vOff + 0x30) * uScale;
-        const vCoord = buffer.readFloatLE(vOff + 0x34) * vScale;
+      if (isCompressedVert) {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = partVertOffset + v * COMPRESSED_VERTEX_SIZE;
+          const x = buffer.readFloatLE(vOff + 0x00);
+          const y = buffer.readFloatLE(vOff + 0x04);
+          const z = buffer.readFloatLE(vOff + 0x08);
+          const [nx, ny, nz] = unpackCompressedUnitVector32(buffer.readUInt32LE(vOff + 0x0c));
+          const u = (buffer.readInt16LE(vOff + 0x18) / 32767.0) * uScale;
+          const vCoord = (buffer.readInt16LE(vOff + 0x1a) / 32767.0) * vScale;
 
-        const o = v * 8;
-        vertices[o + 0] = x;
-        vertices[o + 1] = y;
-        vertices[o + 2] = z;
-        vertices[o + 3] = nx;
-        vertices[o + 4] = ny;
-        vertices[o + 5] = nz;
-        vertices[o + 6] = u;
-        vertices[o + 7] = vCoord;
+          const o = v * 8;
+          vertices[o + 0] = x;
+          vertices[o + 1] = y;
+          vertices[o + 2] = z;
+          vertices[o + 3] = nx;
+          vertices[o + 4] = ny;
+          vertices[o + 5] = nz;
+          vertices[o + 6] = u;
+          vertices[o + 7] = vCoord;
 
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-        if (z < minZ) minZ = z;
-        if (z > maxZ) maxZ = z;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
+      } else {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = partVertOffset + v * UNCOMPRESSED_VERTEX_SIZE;
+          const x = buffer.readFloatLE(vOff + 0x00);
+          const y = buffer.readFloatLE(vOff + 0x04);
+          const z = buffer.readFloatLE(vOff + 0x08);
+          const nx = buffer.readFloatLE(vOff + 0x0c);
+          const ny = buffer.readFloatLE(vOff + 0x10);
+          const nz = buffer.readFloatLE(vOff + 0x14);
+          // Texture coords follow position(12)+normal(12)+binormal(12)+tangent(12) = 0x30.
+          const u = buffer.readFloatLE(vOff + 0x30) * uScale;
+          const vCoord = buffer.readFloatLE(vOff + 0x34) * vScale;
+
+          const o = v * 8;
+          vertices[o + 0] = x;
+          vertices[o + 1] = y;
+          vertices[o + 2] = z;
+          vertices[o + 3] = nx;
+          vertices[o + 4] = ny;
+          vertices[o + 5] = nz;
+          vertices[o + 6] = u;
+          vertices[o + 7] = vCoord;
+
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
       }
 
       // Unstrip, then drop degenerate triangles (equal-vertex-index triples).
@@ -309,4 +366,3 @@ export function extractModelRenderGeometry(
     submeshes,
   };
 }
-

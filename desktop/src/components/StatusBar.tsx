@@ -34,6 +34,11 @@ export default function StatusBar({ mapState }: { mapState: LoadMapResult | null
       )}
       {ok && (
         <>
+          {mapState.header.engine === 5 && (
+            <span data-testid="status-bar-edition" style={{ color: '#4ade80', fontWeight: 700 }}>
+              XBOX (v5)
+            </span>
+          )}
           <span data-testid="status-bar-compression">{'Decompressed'}</span>
           <span data-testid="status-bar-crc32">CRC32: 0x{mapState.header.crc32.toString(16).padStart(8, '0').toUpperCase()}</span>
           <span data-testid="status-bar-tag-count">{mapState.header.tagCount.toLocaleString()} tags</span>

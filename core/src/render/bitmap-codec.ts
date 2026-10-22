@@ -185,7 +185,7 @@ export function inspectBitmapTag(
       const pixelDataOffset = srcBuf.readUInt32LE(row + 0x18);
       const pixelDataSize = srcBuf.readUInt32LE(row + 0x1c);
 
-      const imgExternal = (flags & 0x100) !== 0 || header.engine === 7 || isExternal;
+      const imgExternal = header.engine !== 5 && ((flags & 0x100) !== 0 || header.engine === 7 || isExternal);
 
       images.push({
         index: i,
