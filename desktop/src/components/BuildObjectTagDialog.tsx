@@ -124,41 +124,45 @@ export default function BuildObjectTagDialog({
     setAnalyzing(true);
     setErrorMsg(null);
 
-    Promise.all([
-      window.opence.analyzeCollisionObj(objFilePath, {
-        scale,
-        flipYz,
-        centerOrigin,
-        forceAutoUv,
-      }),
-      window.opence.exportUvTemplate({
-        objFilePath,
-        size: 384,
-        scale,
-        flipYz,
-        centerOrigin,
-        forceAutoUv,
-        previewOnly: true,
-      }),
-    ])
-      .then(([analysisRes, uvRes]) => {
+    const runAnalysis = async () => {
+      try {
+        const analysisPromise = window.opence.analyzeCollisionObj(objFilePath, {
+          scale,
+          flipYz,
+          centerOrigin,
+          forceAutoUv,
+        });
+        const uvPromise =
+          typeof window.opence.exportUvTemplate === 'function'
+            ? window.opence.exportUvTemplate({
+                objFilePath,
+                size: 384,
+                scale,
+                flipYz,
+                centerOrigin,
+                forceAutoUv,
+                previewOnly: true,
+              })
+            : Promise.resolve({ ok: false } as any);
+
+        const [analysisRes, uvRes] = await Promise.all([analysisPromise, uvPromise]);
         if (cancelled) return;
-        if (analysisRes.ok && analysisRes.summary) {
+        if (analysisRes?.ok && analysisRes.summary) {
           setMeshSummary(analysisRes.summary);
-        } else if (analysisRes.error) {
+        } else if (analysisRes?.error) {
           setErrorMsg(analysisRes.error);
         }
-        if (uvRes.ok && uvRes.previewDataUrl) {
+        if (uvRes?.ok && uvRes.previewDataUrl) {
           setUvPreviewUrl(uvRes.previewDataUrl);
           setUvUsedAuto(Boolean(uvRes.usedAutoUv));
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         if (!cancelled) setErrorMsg(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setAnalyzing(false);
-      });
+      }
+    };
+    void runAnalysis();
 
     return () => {
       cancelled = true;
@@ -656,10 +660,10 @@ export default function BuildObjectTagDialog({
                 }}
               >
                 <div>
-                  <strong>{meshSummary.vertexCount.toLocaleString()}</strong> vertices •{' '}
-                  <strong>{meshSummary.triangleCount.toLocaleString()}</strong> triangles •{' '}
+                  <strong>{(meshSummary.vertexCount ?? 0).toLocaleString()}</strong> vertices •{' '}
+                  <strong>{(meshSummary.triangleCount ?? 0).toLocaleString()}</strong> triangles •{' '}
                   {meshSummary.hasUvCoordinates && !forceAutoUv ? (
-                    <span>Using OBJ UV coordinates ({meshSummary.uvCoordCount.toLocaleString()} vt)</span>
+                    <span>Using OBJ UV coordinates ({(meshSummary.uvCoordCount ?? 0).toLocaleString()} vt)</span>
                   ) : (
                     <span style={{ color: '#fde68a' }}>
                       Auto-Unwrapped via Built-In 6-Face Box UV Atlas
@@ -667,8 +671,18 @@ export default function BuildObjectTagDialog({
                   )}
                 </div>
                 <div style={{ fontFamily: 'monospace', fontSize: 11, color: '#d1fae5' }}>
-                  Size: {meshSummary.bounds.size[0].toFixed(2)} × {meshSummary.bounds.size[1].toFixed(2)} ×{' '}
-                  {meshSummary.bounds.size[2].toFixed(2)} u (r={meshSummary.bounds.radius.toFixed(2)})
+                  Size: {Number(meshSummary.bounds?.size?.[0] ?? 0).toFixed(2)} ×{' '}
+                  {Number(meshSummary.bounds?.size?.[1] ?? 0).toFixed(2)} ×{' '}
+                  {Number(meshSummary.bounds?.size?.[2] ?? 0).toFixed(2)} u (r=
+                  {Number(
+                    meshSummary.bounds?.radius ??
+                      Math.hypot(
+                        meshSummary.bounds?.size?.[0] ?? 0,
+                        meshSummary.bounds?.size?.[1] ?? 0,
+                        meshSummary.bounds?.size?.[2] ?? 0,
+                      ) * 0.5,
+                  ).toFixed(2)}
+                  )
                 </div>
               </div>
             )}

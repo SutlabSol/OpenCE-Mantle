@@ -91,7 +91,6 @@ import {
   decodeDxt1,
   decodeDxt3,
   decodeDxt5,
-  decodeUncompressed,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -2073,7 +2072,15 @@ export function runBuildCustomObjectTag(task: {
         if (fourCC === 'DXT1') rgba = decodeDxt1(payload, 0, width, height);
         else if (fourCC === 'DXT3') rgba = decodeDxt3(payload, 0, width, height);
         else if (fourCC === 'DXT5') rgba = decodeDxt5(payload, 0, width, height);
-        else rgba = decodeUncompressed(payload, 0, width, height, BitmapFormat.A8R8G8B8);
+        else {
+          rgba = new Uint8Array(width * height * 4);
+          for (let i = 0; i + 3 < payload.length && i + 3 < rgba.length; i += 4) {
+            rgba[i + 0] = payload[i + 2];
+            rgba[i + 1] = payload[i + 1];
+            rgba[i + 2] = payload[i + 0];
+            rgba[i + 3] = payload[i + 3];
+          }
+        }
         textureRgba = { rgba, width, height };
       } else {
         textureRgba = decodePngToRgba(texBuf);

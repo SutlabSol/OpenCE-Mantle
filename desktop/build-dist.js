@@ -15,6 +15,10 @@ function findRceditX64() {
 }
 
 async function main() {
+  console.log('Compiling renderer (Vite) and Electron main/preload/worker bundles...');
+  const { execSync } = require('child_process');
+  execSync('npm run build', { cwd: __dirname, stdio: 'inherit' });
+
   console.log('Building portable Windows application (OpenCE Mantle) with electron-builder...');
   const iconIco = path.resolve(__dirname, 'build', 'icon.ico');
   const rcedit = findRceditX64();

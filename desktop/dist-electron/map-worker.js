@@ -42,6 +42,7 @@ __export(map_worker_exports, {
   runApplyInject: () => runApplyInject,
   runBatchExtract: () => runBatchExtract,
   runBspSwapPreflight: () => runBspSwapPreflight,
+  runBuildCustomObjectTag: () => runBuildCustomObjectTag,
   runConvertMap: () => runConvertMap,
   runConvertPreflight: () => runConvertPreflight,
   runDeleteScenarioPlacement: () => runDeleteScenarioPlacement,
@@ -35774,6 +35775,75 @@ function ceCrcRegions(buffer, header, tagIndex) {
 }
 
 // ../core/src/map/tag-injector.ts
+function hydrateExternalRawDataInContainer(container, resourceFiles) {
+  if (!resourceFiles?.bitmaps && !resourceFiles?.sounds) return;
+  for (const t of container.tags) {
+    if (t.group !== "bitmap" && t.group !== "sound") continue;
+    const dataBuf = Buffer.from(t.data, "base64");
+    let mutated = false;
+    if (t.group === "bitmap" && resourceFiles.bitmaps && dataBuf.length >= 108) {
+      const bCount = dataBuf.readInt32LE(96);
+      const arrOff = dataBuf.readUInt32LE(100);
+      if (bCount <= 0 || bCount > 256) continue;
+      if (arrOff <= 0 || arrOff + bCount * 48 > dataBuf.length) continue;
+      if (!t.embeddedRawDataAssets) t.embeddedRawDataAssets = [];
+      if (!t.embeddedRawDataPatches) t.embeddedRawDataPatches = [];
+      const existingPatchOffsets = new Set(t.embeddedRawDataPatches.map((p) => p.patchOffset));
+      for (let i = 0; i < bCount; i++) {
+        const elemOff = arrOff + i * 48;
+        const patchOff = elemOff + 24;
+        if (existingPatchOffsets.has(patchOff)) continue;
+        const flags = dataBuf.readUInt16LE(elemOff + 14);
+        if ((flags & 256) === 0) continue;
+        const pixOff = dataBuf.readUInt32LE(patchOff);
+        const pixSize = dataBuf.readUInt32LE(elemOff + 28);
+        if (pixSize <= 0 || pixOff + pixSize > resourceFiles.bitmaps.size) continue;
+        const rawData = Buffer.from(resourceFiles.bitmaps.read(pixOff, pixSize));
+        const assetIndex = t.embeddedRawDataAssets.length;
+        t.embeddedRawDataAssets.push({ kind: "bitmap", data: rawData.toString("base64") });
+        t.embeddedRawDataPatches.push({ assetIndex, patchOffset: patchOff, patchWidth: 4 });
+        dataBuf.writeUInt16LE(flags & ~256, elemOff + 14);
+        existingPatchOffsets.add(patchOff);
+        mutated = true;
+      }
+    } else if (t.group === "sound" && resourceFiles.sounds && dataBuf.length >= 164) {
+      const prCount = dataBuf.readInt32LE(152);
+      const prArrOff = dataBuf.readUInt32LE(156);
+      if (prCount <= 0 || prCount > 64) continue;
+      if (prArrOff <= 0 || prArrOff + prCount * 72 > dataBuf.length) continue;
+      if (!t.embeddedRawDataAssets) t.embeddedRawDataAssets = [];
+      if (!t.embeddedRawDataPatches) t.embeddedRawDataPatches = [];
+      const existingPatchOffsets = new Set(t.embeddedRawDataPatches.map((p) => p.patchOffset));
+      for (let p = 0; p < prCount; p++) {
+        const prOff = prArrOff + p * 72;
+        const permCount = dataBuf.readInt32LE(prOff + 56);
+        const permArrOff = dataBuf.readUInt32LE(prOff + 60);
+        if (permCount <= 0 || permCount > 256) continue;
+        if (permArrOff <= 0 || permArrOff + permCount * 124 > dataBuf.length) continue;
+        for (let m = 0; m < permCount; m++) {
+          const permOff = permArrOff + m * 124;
+          const patchOff = permOff + 72;
+          if (existingPatchOffsets.has(patchOff)) continue;
+          const extFlag = dataBuf.readUInt32LE(permOff + 68);
+          if ((extFlag & 1) === 0) continue;
+          const sampleSize = dataBuf.readUInt32LE(permOff + 64);
+          const sampleOff = dataBuf.readUInt32LE(patchOff);
+          if (sampleSize <= 0 || sampleOff + sampleSize > resourceFiles.sounds.size) continue;
+          const rawData = Buffer.from(resourceFiles.sounds.read(sampleOff, sampleSize));
+          const assetIndex = t.embeddedRawDataAssets.length;
+          t.embeddedRawDataAssets.push({ kind: "sound", data: rawData.toString("base64") });
+          t.embeddedRawDataPatches.push({ assetIndex, patchOffset: patchOff, patchWidth: 4 });
+          dataBuf.writeUInt32LE((extFlag & ~1) >>> 0, permOff + 68);
+          existingPatchOffsets.add(patchOff);
+          mutated = true;
+        }
+      }
+    }
+    if (mutated) {
+      t.data = dataBuf.toString("base64");
+    }
+  }
+}
 var NULL_TAG_ID5 = 4294967295;
 function normalizeTagPath(path3) {
   return path3.toLowerCase().replace(/\//g, "\\");
@@ -35805,7 +35875,13 @@ function embeddedWarningMessages(container) {
 }
 function embeddedCapturedCounts(container) {
   const byOriginal = /* @__PURE__ */ new Map();
-  for (const t of container.tags) byOriginal.set(t.originalIndex, t.embeddedRawDataPatches?.length ?? 0);
+  for (const t of container.tags) {
+    const count2 = (t.embeddedRawDataPatches ?? []).filter((p) => {
+      const kind = t.embeddedRawDataAssets?.[p.assetIndex]?.kind;
+      return kind === "bitmap" || kind === "sound";
+    }).length;
+    byOriginal.set(t.originalIndex, count2);
+  }
   return byOriginal;
 }
 function planInjection(mode, target, container, resourceMapConfig = {}, options = {}) {
@@ -36277,7 +36353,11 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
   }
   if (!options.allowEmbeddedRelocation) {
     for (const t of writeTags) {
-      if (t.embeddedRawDataPatches && t.embeddedRawDataPatches.length > 0) {
+      const hasBitmapOrSoundPatch = (t.embeddedRawDataPatches ?? []).some((p) => {
+        const kind = t.embeddedRawDataAssets?.[p.assetIndex]?.kind;
+        return kind === "bitmap" || kind === "sound";
+      });
+      if (hasBitmapOrSoundPatch) {
         throw new Error(`Internal error: "${t.path}" reached applyInjection() with embedded raw data to relocate, but allowEmbeddedRelocation is false - planInjection() should have blocked it.`);
       }
     }
@@ -36335,14 +36415,17 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
   const { structOffsets, pathOffsets, pathBuffers, newFileLength } = layoutAppend(oldFileLength, subHeaderOffset, delta, shiftBeforeTagData, dataBuffers, plan.toAdd.map((t) => t.path));
   const out = Buffer.alloc(newFileLength);
   targetBuffer.copy(out, 0, 0, insertPos);
-  const assetAbsoluteOffsets = writeTags.map(() => []);
+  const assetAbsoluteOffsets = writeTags.map(() => /* @__PURE__ */ new Map());
   if (insertSize > 0) {
     let cursor = insertPos;
     for (let i = 0; i < writeTags.length; i++) {
-      for (const asset of (writeTags[i].embeddedRawDataAssets ?? []).filter((a) => a.kind === "bitmap" || a.kind === "sound")) {
+      const assets = writeTags[i].embeddedRawDataAssets ?? [];
+      for (let assetIdx = 0; assetIdx < assets.length; assetIdx++) {
+        const asset = assets[assetIdx];
+        if (asset.kind !== "bitmap" && asset.kind !== "sound") continue;
         const bytes = Buffer.from(asset.data, "base64");
         bytes.copy(out, cursor);
-        assetAbsoluteOffsets[i].push(cursor);
+        assetAbsoluteOffsets[i].set(assetIdx, cursor);
         cursor += bytes.length;
       }
     }
@@ -36417,7 +36500,10 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
   }
   for (let i = 0; i < writeTags.length; i++) {
     for (const patch of writeTags[i].embeddedRawDataPatches ?? []) {
-      out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + laidOut[i].mapOffset(patch.patchOffset));
+      const newAbsOffset = assetAbsoluteOffsets[i].get(patch.assetIndex);
+      if (newAbsOffset !== void 0) {
+        out.writeUInt32LE(newAbsOffset, structOffsets[i] + laidOut[i].mapOffset(patch.patchOffset));
+      }
     }
   }
   for (let i = 0; i < writeTags.length; i++) {
@@ -42753,10 +42839,13 @@ function shiftExistingRawDataOffsets(buffer, tagDataOffset, tagIndex, cutoffOffs
               const permSize = resolveStruct("SoundPermutation").totalSize;
               for (let m = 0; m < permRefl.value.count; m++) {
                 const mOffset = permArrOffset + m * permSize;
-                if (mOffset + 20 <= buffer.length) {
-                  const curSampleOff = buffer.readUInt32LE(mOffset + 12);
-                  if (curSampleOff >= cutoffOffset && curSampleOff !== 4294967295) {
-                    buffer.writeUInt32LE(curSampleOff + delta, mOffset + 12);
+                if (mOffset + 76 <= buffer.length) {
+                  const sampleExt = buffer.readUInt32LE(mOffset + 68);
+                  if ((sampleExt & 1) === 0) {
+                    const curSampleOff = buffer.readUInt32LE(mOffset + 72);
+                    if (curSampleOff >= cutoffOffset && curSampleOff !== 4294967295) {
+                      buffer.writeUInt32LE(curSampleOff + delta, mOffset + 72);
+                    }
                   }
                 }
               }
@@ -42771,159 +42860,124 @@ function shiftExistingRawDataOffsets(buffer, tagDataOffset, tagIndex, cutoffOffs
 function resolvePointer3(pointer, tagDataOffset, baseMemoryAddress) {
   return tagDataOffset + (pointer - baseMemoryAddress);
 }
-function appendDataBlock(buffer, header, tagIndex, data) {
-  if (data.length === 0) {
-    return { buffer, header, virtualAddress: 0, fileOffset: 0 };
-  }
-  const alignedPad = (4 - buffer.length % 4) % 4;
-  const padBuffer = alignedPad > 0 ? Buffer.alloc(alignedPad, 0) : Buffer.alloc(0);
-  const fileOffset = buffer.length + padBuffer.length;
-  const virtualAddress = tagIndex.baseMemoryAddress + (fileOffset - header.tagDataOffset);
-  const newBuffer = Buffer.concat([buffer, padBuffer, data]);
-  const newHeader = {
-    ...header,
-    tagDataSize: newBuffer.length - header.tagDataOffset,
-    decompressedFileSize: newBuffer.length
-  };
-  newBuffer.writeUInt32LE(newBuffer.length, 8);
-  newBuffer.writeUInt32LE(newHeader.tagDataSize, 20);
-  return { buffer: newBuffer, header: newHeader, virtualAddress, fileOffset };
-}
-function cloneEncounterWithChildReflexives(encSourceBytes, sourceBuffer, srcHdr, srcTagIndex, currentOut, currentHdr, currentTagIndex, donorToTargetActorPal, dstBspIdx, bspClusterCount = 65535) {
-  let curOut = currentOut;
-  let curHdr = currentHdr;
-  const encCopy = Buffer.alloc(176);
-  encSourceBytes.copy(encCopy);
-  const origEncFlags = encCopy.readUInt32LE(32);
-  encCopy.writeUInt32LE((origEncFlags & ~29 | 66) >>> 0, 32);
-  encCopy.writeInt16LE(dstBspIdx, 42);
-  encCopy.writeInt16LE(dstBspIdx, 126);
-  const sqCount = encSourceBytes.readUInt32LE(128);
-  const sqPtr = encSourceBytes.readUInt32LE(132);
-  if (sqCount > 0 && sqPtr !== 0) {
-    const sqSrcBase = resolvePointer3(sqPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-    const clonedSquads = [];
-    for (let s = 0; s < sqCount; s++) {
-      const sqSrcOff = sqSrcBase + s * 232;
-      const sqBytes = Buffer.alloc(232);
-      sourceBuffer.copy(sqBytes, 0, sqSrcOff, sqSrcOff + 232);
-      const donorActorType = sqBytes.readInt16LE(32);
-      if (donorActorType >= 0 && donorToTargetActorPal.has(donorActorType)) {
-        sqBytes.writeInt16LE(donorToTargetActorPal.get(donorActorType), 32);
-      } else {
-        sqBytes.writeInt16LE(-1, 32);
+function internalizeBrokenExternalBitmaps(buffer, resourceFiles) {
+  if (!resourceFiles?.bitmaps && !resourceFiles?.sounds) return buffer;
+  const inspected = inspectCustomEditionMap(buffer);
+  if (inspected.status !== "ok") return buffer;
+  const { header, tagIndex } = inspected;
+  const tagDataOffset = header.tagDataOffset;
+  const base = tagIndex.baseMemoryAddress;
+  const chunks = [];
+  const chunkOffsets = [];
+  const dedupe = /* @__PURE__ */ new Map();
+  const patches = [];
+  let totalInserted = 0;
+  for (const entry of tagIndex.entries) {
+    if (entry.isExternal) continue;
+    const tagRel = entry.tagDataPointerOrResourceIndex - base;
+    const tagFileOffset = tagDataOffset + tagRel;
+    if (tagFileOffset < tagDataOffset || tagFileOffset + 64 > buffer.length) continue;
+    if (entry.primaryClassName === "bitmap" && resourceFiles.bitmaps) {
+      const bCount = buffer.readInt32LE(tagFileOffset + 96);
+      const bPtr = buffer.readUInt32LE(tagFileOffset + 100);
+      if (bCount <= 0 || bCount > 256) continue;
+      const arrRel = bPtr - base;
+      const arrOffset = tagDataOffset + arrRel;
+      if (arrOffset < tagDataOffset || arrOffset + bCount * 48 > buffer.length) continue;
+      for (let i = 0; i < bCount; i++) {
+        const elemRel = arrRel + i * 48;
+        const elemOff = tagDataOffset + elemRel;
+        const flags = buffer.readUInt16LE(elemOff + 14);
+        if ((flags & 256) === 0) continue;
+        const pixOff = buffer.readUInt32LE(elemOff + 24);
+        const pixSize = buffer.readUInt32LE(elemOff + 28);
+        if (pixSize <= 0 || pixOff + pixSize > resourceFiles.bitmaps.size) continue;
+        const key = `bitm:${pixOff}:${pixSize}`;
+        let chunkIdx = dedupe.get(key);
+        if (chunkIdx === void 0) {
+          const raw = Buffer.from(resourceFiles.bitmaps.read(pixOff, pixSize));
+          const alignedLen = raw.length + 3 & ~3;
+          const padded = alignedLen === raw.length ? raw : Buffer.concat([raw, Buffer.alloc(alignedLen - raw.length)]);
+          chunkIdx = chunks.length;
+          chunkOffsets.push(tagDataOffset + totalInserted);
+          chunks.push(padded);
+          totalInserted += padded.length;
+          dedupe.set(key, chunkIdx);
+        }
+        patches.push({
+          tagDataRelativeOffset: elemRel + 24,
+          flagTagDataRelativeOffset: elemRel + 14,
+          flagWidth: 2,
+          flagMask: 256,
+          chunkIndex: chunkIdx
+        });
       }
-      const moveCount = sourceBuffer.readUInt32LE(sqSrcOff + 196);
-      const movePtr = sourceBuffer.readUInt32LE(sqSrcOff + 200);
-      if (moveCount > 0 && movePtr !== 0) {
-        const moveSrcOff = resolvePointer3(movePtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-        const moveData = Buffer.alloc(moveCount * 80);
-        sourceBuffer.copy(moveData, 0, moveSrcOff, moveSrcOff + moveData.length);
-        for (let m = 0; m < moveCount; m++) {
-          const mBase = m * 80;
-          moveData.writeInt16LE(-1, mBase + 28);
-          const mCluster = moveData.readInt16LE(mBase + 40);
-          if (mCluster < 0 || mCluster >= bspClusterCount) {
-            moveData.writeInt16LE(0, mBase + 40);
+    } else if (entry.primaryClassName === "sound" && resourceFiles.sounds) {
+      const prCount = buffer.readInt32LE(tagFileOffset + 152);
+      const prPtr = buffer.readUInt32LE(tagFileOffset + 156);
+      if (prCount <= 0 || prCount > 64) continue;
+      const prArrRel = prPtr - base;
+      const prArrOff = tagDataOffset + prArrRel;
+      if (prArrOff < tagDataOffset || prArrOff + prCount * 72 > buffer.length) continue;
+      for (let p = 0; p < prCount; p++) {
+        const prOff = prArrOff + p * 72;
+        const permCount = buffer.readInt32LE(prOff + 56);
+        const permPtr = buffer.readUInt32LE(prOff + 60);
+        if (permCount <= 0 || permCount > 256) continue;
+        const permArrRel = permPtr - base;
+        const permArrOff = tagDataOffset + permArrRel;
+        if (permArrOff < tagDataOffset || permArrOff + permCount * 124 > buffer.length) continue;
+        for (let m = 0; m < permCount; m++) {
+          const permRel = permArrRel + m * 124;
+          const permOff = tagDataOffset + permRel;
+          const extFlag = buffer.readUInt32LE(permOff + 68);
+          if ((extFlag & 1) === 0) continue;
+          const sampleSize = buffer.readUInt32LE(permOff + 64);
+          const sampleOff = buffer.readUInt32LE(permOff + 72);
+          if (sampleSize <= 0 || sampleOff + sampleSize > resourceFiles.sounds.size) continue;
+          const key = `snd!:${sampleOff}:${sampleSize}`;
+          let chunkIdx = dedupe.get(key);
+          if (chunkIdx === void 0) {
+            const raw = Buffer.from(resourceFiles.sounds.read(sampleOff, sampleSize));
+            const alignedLen = raw.length + 3 & ~3;
+            const padded = alignedLen === raw.length ? raw : Buffer.concat([raw, Buffer.alloc(alignedLen - raw.length)]);
+            chunkIdx = chunks.length;
+            chunkOffsets.push(tagDataOffset + totalInserted);
+            chunks.push(padded);
+            totalInserted += padded.length;
+            dedupe.set(key, chunkIdx);
           }
+          patches.push({
+            tagDataRelativeOffset: permRel + 72,
+            flagTagDataRelativeOffset: permRel + 68,
+            flagWidth: 4,
+            flagMask: 1,
+            chunkIndex: chunkIdx
+          });
         }
-        const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, moveData);
-        curOut = appRes.buffer;
-        curHdr = appRes.header;
-        sqBytes.writeUInt32LE(moveCount, 196);
-        sqBytes.writeUInt32LE(appRes.virtualAddress, 200);
-      } else {
-        sqBytes.writeUInt32LE(0, 196);
-        sqBytes.writeUInt32LE(0, 200);
-      }
-      const locCount = sourceBuffer.readUInt32LE(sqSrcOff + 208);
-      const locPtr = sourceBuffer.readUInt32LE(sqSrcOff + 212);
-      if (locCount > 0 && locPtr !== 0) {
-        const locSrcOff = resolvePointer3(locPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-        const locData = Buffer.alloc(locCount * 28);
-        sourceBuffer.copy(locData, 0, locSrcOff, locSrcOff + locData.length);
-        for (let l = 0; l < locCount; l++) {
-          const lBase = l * 28;
-          const lCluster = locData.readInt16LE(lBase + 16);
-          if (lCluster < 0 || lCluster >= bspClusterCount) {
-            locData.writeInt16LE(0, lBase + 16);
-          }
-          const lActorType = locData.readInt16LE(lBase + 24);
-          if (lActorType >= 0 && donorToTargetActorPal.has(lActorType)) {
-            locData.writeInt16LE(donorToTargetActorPal.get(lActorType), lBase + 24);
-          } else {
-            locData.writeInt16LE(-1, lBase + 24);
-          }
-          locData.writeInt16LE(-1, lBase + 26);
-        }
-        const appRes = appendDataBlock(curOut, curHdr, currentTagIndex, locData);
-        curOut = appRes.buffer;
-        curHdr = appRes.header;
-        sqBytes.writeUInt32LE(locCount, 208);
-        sqBytes.writeUInt32LE(appRes.virtualAddress, 212);
-        const normalCount = sqBytes.readInt16LE(124);
-        const insaneCount = sqBytes.readInt16LE(126);
-        if (normalCount <= 0) {
-          sqBytes.writeInt16LE(Math.max(1, insaneCount > 0 ? insaneCount : locCount), 124);
-        }
-        if (insaneCount <= 0) {
-          sqBytes.writeInt16LE(Math.max(1, normalCount > 0 ? normalCount : locCount), 126);
-        }
-      } else {
-        sqBytes.writeUInt32LE(0, 208);
-        sqBytes.writeUInt32LE(0, 212);
-      }
-      clonedSquads.push(sqBytes);
-    }
-    const allSquadsData = Buffer.concat(clonedSquads);
-    const sqAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, allSquadsData);
-    curOut = sqAppRes.buffer;
-    curHdr = sqAppRes.header;
-    encCopy.writeUInt32LE(sqCount, 128);
-    encCopy.writeUInt32LE(sqAppRes.virtualAddress, 132);
-  } else {
-    encCopy.writeUInt32LE(0, 128);
-    encCopy.writeUInt32LE(0, 132);
-  }
-  const plCount = encSourceBytes.readUInt32LE(140);
-  const plPtr = encSourceBytes.readUInt32LE(144);
-  if (plCount > 0 && plPtr !== 0) {
-    const plSrcBase = resolvePointer3(plPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-    const plData = Buffer.alloc(plCount * 172);
-    sourceBuffer.copy(plData, 0, plSrcBase, plSrcBase + plData.length);
-    const plAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, plData);
-    curOut = plAppRes.buffer;
-    curHdr = plAppRes.header;
-    encCopy.writeUInt32LE(plCount, 140);
-    encCopy.writeUInt32LE(plAppRes.virtualAddress, 144);
-  } else {
-    encCopy.writeUInt32LE(0, 140);
-    encCopy.writeUInt32LE(0, 144);
-  }
-  const fpCount = encSourceBytes.readUInt32LE(152);
-  const fpPtr = encSourceBytes.readUInt32LE(156);
-  if (fpCount > 0 && fpPtr !== 0) {
-    const fpSrcBase = resolvePointer3(fpPtr, srcHdr.tagDataOffset, srcTagIndex.baseMemoryAddress);
-    const fpData = Buffer.alloc(fpCount * 24);
-    sourceBuffer.copy(fpData, 0, fpSrcBase, fpSrcBase + fpData.length);
-    for (let f = 0; f < fpCount; f++) {
-      const fCluster = fpData.readInt16LE(f * 24 + 14);
-      if (fCluster < 0 || fCluster >= bspClusterCount) {
-        fpData.writeInt16LE(0, f * 24 + 14);
       }
     }
-    const fpAppRes = appendDataBlock(curOut, curHdr, currentTagIndex, fpData);
-    curOut = fpAppRes.buffer;
-    curHdr = fpAppRes.header;
-    encCopy.writeUInt32LE(fpCount, 152);
-    encCopy.writeUInt32LE(fpAppRes.virtualAddress, 156);
-  } else {
-    encCopy.writeUInt32LE(0, 152);
-    encCopy.writeUInt32LE(0, 156);
   }
-  encCopy.writeUInt32LE(0, 164);
-  encCopy.writeUInt32LE(0, 168);
-  return { buffer: curOut, header: curHdr, encounterBytes: encCopy };
+  if (patches.length === 0) return buffer;
+  const newTagDataOffset = tagDataOffset + totalInserted;
+  const out = Buffer.concat([
+    buffer.subarray(0, tagDataOffset),
+    ...chunks,
+    buffer.subarray(tagDataOffset)
+  ]);
+  out.writeUInt32LE(out.length, 8);
+  out.writeUInt32LE(newTagDataOffset, 16);
+  for (const patch of patches) {
+    const newFileOff = chunkOffsets[patch.chunkIndex];
+    out.writeUInt32LE(newFileOff >>> 0, newTagDataOffset + patch.tagDataRelativeOffset);
+    const flagOff = newTagDataOffset + patch.flagTagDataRelativeOffset;
+    if (patch.flagWidth === 2) {
+      out.writeUInt16LE(out.readUInt16LE(flagOff) & ~patch.flagMask, flagOff);
+    } else {
+      out.writeUInt32LE((out.readUInt32LE(flagOff) & ~patch.flagMask) >>> 0, flagOff);
+    }
+  }
+  return out;
 }
 function performBspSwap(sourceBuffer, targetBuffer, options) {
   const sourceInspected = inspectCustomEditionMap(sourceBuffer);
@@ -43040,9 +43094,6 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
   let importedScenery = 0;
   let importedVehicles = 0;
   let importedMachines = 0;
-  let importedEncounters = 0;
-  let importedTriggers = 0;
-  let importedScripts = 0;
   const tagIdMap = /* @__PURE__ */ new Map();
   const bspDeps = [];
   if (sourceInspected.status === "ok") {
@@ -43067,9 +43118,17 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
     const shouldHarvestShaders = options.harvestShaders !== false;
     const shouldImportObjects = Boolean(options.importSceneryAndMachines);
     const shouldImportVehicles = Boolean(options.importVehicles);
-    const shouldImportAiAndScripts = Boolean(options.importAiAndScripts);
-    if (shouldHarvestShaders && bspDeps.length > 0 || shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
-      const srcTagIndex = sourceInspected.tagIndex;
+    const srcTagIndex = sourceInspected.tagIndex;
+    let srcScnrOffset = 0;
+    const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 65535];
+    if (srcScnrEntry) {
+      srcScnrOffset = resolveTagDataPointer(
+        srcScnrEntry.tagDataPointerOrResourceIndex,
+        sourceInspected.header,
+        srcTagIndex.baseMemoryAddress
+      );
+    }
+    if (shouldHarvestShaders && bspDeps.length > 0 || shouldImportObjects || shouldImportVehicles || Boolean(options.clearExistingPlacements) || Boolean(options.clearPlayerSpawns)) {
       const rootIndicesSet = /* @__PURE__ */ new Set();
       if (shouldHarvestShaders) {
         for (const dep of bspDeps) {
@@ -43091,20 +43150,7 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       let srcMachinePalOffset = 0;
       let srcPlacedMachinesCount = 0;
       let srcPlacedMachinesOffset = 0;
-      let srcActorPalCount = 0;
-      let srcActorPalOffset = 0;
-      let srcRefCount = 0;
-      let srcRefOffset = 0;
-      let srcScnrOffset = 0;
-      const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 65535];
-      if (srcScnrEntry) {
-        srcScnrOffset = resolveTagDataPointer(
-          srcScnrEntry.tagDataPointerOrResourceIndex,
-          sourceInspected.header,
-          srcTagIndex.baseMemoryAddress
-        );
-      }
-      if (shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
+      if (shouldImportObjects || shouldImportVehicles) {
         if (srcScnrOffset > 0) {
           if (shouldImportObjects) {
             const scenPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 540);
@@ -43160,30 +43206,6 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
               srcPlacedMachinesOffset = sourceInspected.header.tagDataOffset + (machRefl.pointerLow - srcTagIndex.baseMemoryAddress);
             }
           }
-          if (shouldImportAiAndScripts) {
-            const actorPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1056);
-            srcActorPalCount = actorPalRefl.count;
-            if (actorPalRefl.count > 0) {
-              srcActorPalOffset = sourceInspected.header.tagDataOffset + (actorPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-              for (let i = 0; i < actorPalRefl.count; i++) {
-                const tagId = sourceBuffer.readUInt32LE(srcActorPalOffset + i * 16 + 12);
-                if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
-                  rootIndicesSet.add(tagId & 65535);
-                }
-              }
-            }
-            const refRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1204);
-            srcRefCount = refRefl.count;
-            if (refRefl.count > 0) {
-              srcRefOffset = sourceInspected.header.tagDataOffset + (refRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-              for (let i = 0; i < refRefl.count; i++) {
-                const tagId = sourceBuffer.readUInt32LE(srcRefOffset + i * 40 + 36);
-                if (tagId !== 4294967295 && (tagId & 65535) < srcTagIndex.entries.length) {
-                  rootIndicesSet.add(tagId & 65535);
-                }
-              }
-            }
-          }
         }
       }
       const rootIndices = Array.from(rootIndicesSet);
@@ -43211,6 +43233,7 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                 plan,
                 { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true }
               );
+              out = internalizeBrokenExternalBitmaps(out, options.resourceFiles);
               const afterInject = inspectCustomEditionMap(out);
               if (afterInject.status === "ok") {
                 reinspected = afterInject;
@@ -43226,496 +43249,343 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
                   tagIdMap.set(cTag.originalIndex, targetTagId);
                 }
               }
-              if (options.clearExistingPlacements) {
-                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
-                if (targetScnrEntry) {
-                  const curScnrOff = resolveTagDataPointer(
-                    targetScnrEntry.tagDataPointerOrResourceIndex,
-                    reinspected.header,
-                    reinspected.tagIndex.baseMemoryAddress
-                  );
-                  const clearOffsets = [528, 552, 576, 600, 624, 660, 684, 708, 732, 888, 900, 936];
-                  if (!shouldImportAiAndScripts) {
-                    clearOffsets.push(864, 1068);
+            }
+          }
+        } catch {
+        }
+      }
+      if (options.clearExistingPlacements) {
+        const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+        if (targetScnrEntry) {
+          const curScnrOff = resolveTagDataPointer(
+            targetScnrEntry.tagDataPointerOrResourceIndex,
+            reinspected.header,
+            reinspected.tagIndex.baseMemoryAddress
+          );
+          const clearOffsets = [528, 552, 576, 600, 624, 660, 684, 708, 732, 864, 888, 900, 936, 1068];
+          for (const off of clearOffsets) {
+            out.writeUInt32LE(0, curScnrOff + off);
+            out.writeUInt32LE(0, curScnrOff + off + 4);
+          }
+        }
+      }
+      if (options.clearPlayerSpawns) {
+        const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+        if (targetScnrEntry) {
+          const curScnrOff = resolveTagDataPointer(
+            targetScnrEntry.tagDataPointerOrResourceIndex,
+            reinspected.header,
+            reinspected.tagIndex.baseMemoryAddress
+          );
+          const spawnClearOffsets = [840, 852, 912];
+          for (const off of spawnClearOffsets) {
+            out.writeUInt32LE(0, curScnrOff + off);
+            out.writeUInt32LE(0, curScnrOff + off + 4);
+          }
+        }
+      }
+      const targetScnrEntryForSpawns = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+      if (targetScnrEntryForSpawns) {
+        let curScnrOff = resolveTagDataPointer(
+          targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
+          reinspected.header,
+          reinspected.tagIndex.baseMemoryAddress
+        );
+        const curSpawnsCount = out.readUInt32LE(curScnrOff + 852);
+        if (options.clearPlayerSpawns || curSpawnsCount === 0) {
+          const importedSpawns = [];
+          const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+          if (srcScnrOffset > 0) {
+            const donorPslRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 852);
+            if (donorPslRefl.count > 0) {
+              const donorPslOffset = resolvePointer3(
+                donorPslRefl.pointerLow,
+                sourceInspected.header.tagDataOffset,
+                srcTagIndex.baseMemoryAddress
+              );
+              for (let i = 0; i < donorPslRefl.count; i++) {
+                const sOff = donorPslOffset + i * 52;
+                const donorBspIdx = sourceBuffer.readInt16LE(sOff + 18);
+                const matchesBsp = srcIndices.includes(donorBspIdx) || sourceBsps.length <= 1;
+                if (matchesBsp) {
+                  const spawnBuf = Buffer.alloc(52);
+                  sourceBuffer.copy(spawnBuf, 0, sOff, sOff + 52);
+                  spawnBuf.writeInt16LE(dstIdx, 18);
+                  if (spawnBuf.readInt16LE(20) === 0) {
+                    spawnBuf.writeInt16LE(12, 20);
                   }
-                  for (const off of clearOffsets) {
-                    out.writeUInt32LE(0, curScnrOff + off);
-                    out.writeUInt32LE(0, curScnrOff + off + 4);
-                  }
-                }
-              }
-              if (options.clearPlayerSpawns) {
-                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
-                if (targetScnrEntry) {
-                  const curScnrOff = resolveTagDataPointer(
-                    targetScnrEntry.tagDataPointerOrResourceIndex,
-                    reinspected.header,
-                    reinspected.tagIndex.baseMemoryAddress
-                  );
-                  const spawnClearOffsets = [840, 852, 912];
-                  for (const off of spawnClearOffsets) {
-                    out.writeUInt32LE(0, curScnrOff + off);
-                    out.writeUInt32LE(0, curScnrOff + off + 4);
-                  }
-                }
-              }
-              const targetScnrEntryForSpawns = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
-              if (targetScnrEntryForSpawns) {
-                let curScnrOff = resolveTagDataPointer(
-                  targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
-                  reinspected.header,
-                  reinspected.tagIndex.baseMemoryAddress
-                );
-                const curSpawnsCount = out.readUInt32LE(curScnrOff + 852);
-                if (options.clearPlayerSpawns || curSpawnsCount === 0) {
-                  const importedSpawns = [];
-                  const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
-                  if (srcScnrOffset > 0) {
-                    const donorPslRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 852);
-                    if (donorPslRefl.count > 0) {
-                      const donorPslOffset = resolvePointer3(
-                        donorPslRefl.pointerLow,
-                        sourceInspected.header.tagDataOffset,
-                        srcTagIndex.baseMemoryAddress
-                      );
-                      for (let i = 0; i < donorPslRefl.count; i++) {
-                        const sOff = donorPslOffset + i * 52;
-                        const donorBspIdx = sourceBuffer.readInt16LE(sOff + 18);
-                        const matchesBsp = srcIndices.includes(donorBspIdx) || sourceBsps.length <= 1;
-                        if (matchesBsp) {
-                          const spawnBuf = Buffer.alloc(52);
-                          sourceBuffer.copy(spawnBuf, 0, sOff, sOff + 52);
-                          spawnBuf.writeInt16LE(dstIdx, 18);
-                          importedSpawns.push(spawnBuf);
-                        }
-                      }
-                    }
-                  }
-                  if (importedSpawns.length === 0) {
-                    const fallback = Buffer.alloc(52);
-                    const midX = (minX + maxX) / 2;
-                    const midY = (minY + maxY) / 2;
-                    const groundZ = minZ + 1;
-                    fallback.writeFloatLE(midX, 0);
-                    fallback.writeFloatLE(midY, 4);
-                    fallback.writeFloatLE(groundZ, 8);
-                    fallback.writeFloatLE(0, 12);
-                    fallback.writeInt16LE(0, 16);
-                    fallback.writeInt16LE(dstIdx, 18);
-                    importedSpawns.push(fallback);
-                  }
-                  if (importedSpawns.length > 0) {
-                    const appendRes = appendReflexiveElements(
-                      out,
-                      reinspected.header,
-                      reinspected.tagIndex,
-                      curScnrOff + 852,
-                      Buffer.concat(importedSpawns),
-                      importedSpawns.length
-                    );
-                    out = appendRes.buffer;
-                    reinspected.header = appendRes.header;
-                    curScnrOff = resolveTagDataPointer(
-                      targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
-                      reinspected.header,
-                      reinspected.tagIndex.baseMemoryAddress
-                    );
-                    const netgameFlagsCount = out.readUInt32LE(curScnrOff + 876);
-                    if (netgameFlagsCount === 0) {
-                      const importedFlags = [];
-                      for (const sp of importedSpawns) {
-                        const flag = Buffer.alloc(148);
-                        sp.copy(flag, 0, 0, 12);
-                        sp.copy(flag, 12, 12, 16);
-                        flag.writeInt16LE(0, 16);
-                        flag.writeInt16LE(0, 18);
-                        importedFlags.push(flag);
-                      }
-                      if (importedFlags.length > 0) {
-                        const flagRes = appendReflexiveElements(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          curScnrOff + 876,
-                          Buffer.concat(importedFlags),
-                          importedFlags.length
-                        );
-                        out = flagRes.buffer;
-                        reinspected.header = flagRes.header;
-                      }
-                    }
-                  }
-                }
-              }
-              if (shouldImportObjects || shouldImportVehicles || shouldImportAiAndScripts) {
-                const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
-                if (targetScnrEntry) {
-                  const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
-                  if (shouldImportObjects && srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
-                    const donorToTargetScenPal = /* @__PURE__ */ new Map();
-                    for (let i = 0; i < srcSceneryPalCount; i++) {
-                      const entryOff = srcSceneryPalOffset + i * 48;
-                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
-                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
-                      if (targetTagId !== void 0 && targetTagId !== 4294967295) {
-                        const palRes = ensurePaletteEntry(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          "scenery palette",
-                          "ScenarioSceneryPalette",
-                          targetTagId,
-                          1935893870
-                          // 'scen'
-                        );
-                        out = palRes.buffer;
-                        reinspected.header = palRes.header;
-                        donorToTargetScenPal.set(i, palRes.paletteIndex);
-                      }
-                    }
-                    const validPlaced = [];
-                    for (let i = 0; i < srcPlacedSceneryCount; i++) {
-                      const sOff = srcPlacedSceneryOffset + i * 72;
-                      const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
-                      const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
-                      if (targetPalIdx !== void 0) {
-                        if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(sOff + 8);
-                          const posY = sourceBuffer.readFloatLE(sOff + 12);
-                          const posZ = sourceBuffer.readFloatLE(sOff + 16);
-                          const margin = 20;
-                          if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
-                            continue;
-                          }
-                        }
-                        const sBytes = Buffer.alloc(72);
-                        sourceBuffer.copy(sBytes, 0, sOff, sOff + 72);
-                        sBytes.writeInt16LE(targetPalIdx, 0);
-                        sBytes.writeInt16LE(-1, 2);
-                        validPlaced.push(sBytes);
-                      }
-                    }
-                    if (validPlaced.length > 0) {
-                      const curScnrOff = resolveTagDataPointer(
-                        targetScnrEntry.tagDataPointerOrResourceIndex,
-                        reinspected.header,
-                        reinspected.tagIndex.baseMemoryAddress
-                      );
-                      const appendRes = appendReflexiveElements(
-                        out,
-                        reinspected.header,
-                        reinspected.tagIndex,
-                        curScnrOff + 528,
-                        Buffer.concat(validPlaced),
-                        validPlaced.length
-                      );
-                      out = appendRes.buffer;
-                      reinspected.header = appendRes.header;
-                      importedScenery = validPlaced.length;
-                    }
-                  }
-                  if (shouldImportVehicles && srcVehiclePalCount > 0 && srcPlacedVehiclesCount > 0) {
-                    const donorToTargetVehPal = /* @__PURE__ */ new Map();
-                    for (let i = 0; i < srcVehiclePalCount; i++) {
-                      const entryOff = srcVehiclePalOffset + i * 48;
-                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
-                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
-                      if (targetTagId !== void 0 && targetTagId !== 4294967295) {
-                        const palRes = ensurePaletteEntry(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          "vehicle palette",
-                          "ScenarioVehiclePalette",
-                          targetTagId,
-                          1986357353
-                          // 'vehi'
-                        );
-                        out = palRes.buffer;
-                        reinspected.header = palRes.header;
-                        donorToTargetVehPal.set(i, palRes.paletteIndex);
-                      }
-                    }
-                    const validVehPlaced = [];
-                    for (let i = 0; i < srcPlacedVehiclesCount; i++) {
-                      const vOff = srcPlacedVehiclesOffset + i * 120;
-                      const donorPalIdx = sourceBuffer.readInt16LE(vOff + 0);
-                      const targetPalIdx = donorToTargetVehPal.get(donorPalIdx);
-                      if (targetPalIdx !== void 0) {
-                        if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(vOff + 8);
-                          const posY = sourceBuffer.readFloatLE(vOff + 12);
-                          const posZ = sourceBuffer.readFloatLE(vOff + 16);
-                          const margin = 20;
-                          if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
-                            continue;
-                          }
-                        }
-                        const vBytes = Buffer.alloc(120);
-                        sourceBuffer.copy(vBytes, 0, vOff, vOff + 120);
-                        vBytes.writeInt16LE(targetPalIdx, 0);
-                        vBytes.writeInt16LE(-1, 2);
-                        vBytes.writeUInt16LE(0, 4);
-                        vBytes.writeUInt16LE(3855, 90);
-                        validVehPlaced.push(vBytes);
-                      }
-                    }
-                    if (validVehPlaced.length > 0) {
-                      const curScnrOff = resolveTagDataPointer(
-                        targetScnrEntry.tagDataPointerOrResourceIndex,
-                        reinspected.header,
-                        reinspected.tagIndex.baseMemoryAddress
-                      );
-                      const appendRes = appendReflexiveElements(
-                        out,
-                        reinspected.header,
-                        reinspected.tagIndex,
-                        curScnrOff + 576,
-                        Buffer.concat(validVehPlaced),
-                        validVehPlaced.length
-                      );
-                      out = appendRes.buffer;
-                      reinspected.header = appendRes.header;
-                      importedVehicles = validVehPlaced.length;
-                    }
-                  }
-                  if (shouldImportObjects && srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
-                    const donorToTargetMachPal = /* @__PURE__ */ new Map();
-                    for (let i = 0; i < srcMachinePalCount; i++) {
-                      const entryOff = srcMachinePalOffset + i * 48;
-                      const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
-                      const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
-                      if (targetTagId !== void 0 && targetTagId !== 4294967295) {
-                        const palRes = ensurePaletteEntry(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          "machine palette",
-                          "ScenarioMachinePalette",
-                          targetTagId,
-                          1835098984
-                          // 'mach'
-                        );
-                        out = palRes.buffer;
-                        reinspected.header = palRes.header;
-                        donorToTargetMachPal.set(i, palRes.paletteIndex);
-                      }
-                    }
-                    const validMachPlaced = [];
-                    const makeAutomatic = options.makeDoorsAutomatic !== false;
-                    for (let i = 0; i < srcPlacedMachinesCount; i++) {
-                      const mOff = srcPlacedMachinesOffset + i * 64;
-                      const donorPalIdx = sourceBuffer.readInt16LE(mOff + 0);
-                      const targetPalIdx = donorToTargetMachPal.get(donorPalIdx);
-                      if (targetPalIdx !== void 0) {
-                        if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(mOff + 8);
-                          const posY = sourceBuffer.readFloatLE(mOff + 12);
-                          const posZ = sourceBuffer.readFloatLE(mOff + 16);
-                          const margin = 20;
-                          if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
-                            continue;
-                          }
-                        }
-                        const mBytes = Buffer.alloc(64);
-                        sourceBuffer.copy(mBytes, 0, mOff, mOff + 64);
-                        mBytes.writeInt16LE(targetPalIdx, 0);
-                        mBytes.writeInt16LE(-1, 2);
-                        mBytes.writeInt16LE(-1, 40);
-                        mBytes.writeInt16LE(-1, 42);
-                        if (makeAutomatic) {
-                          let devFlags = mBytes.readUInt32LE(44);
-                          devFlags &= ~1;
-                          mBytes.writeUInt32LE(devFlags, 44);
-                          let machFlags = mBytes.readUInt32LE(48);
-                          machFlags &= ~1;
-                          mBytes.writeUInt32LE(machFlags, 48);
-                        }
-                        validMachPlaced.push(mBytes);
-                      }
-                    }
-                    if (validMachPlaced.length > 0) {
-                      const curScnrOff = resolveTagDataPointer(
-                        targetScnrEntry.tagDataPointerOrResourceIndex,
-                        reinspected.header,
-                        reinspected.tagIndex.baseMemoryAddress
-                      );
-                      const appendRes = appendReflexiveElements(
-                        out,
-                        reinspected.header,
-                        reinspected.tagIndex,
-                        curScnrOff + 660,
-                        Buffer.concat(validMachPlaced),
-                        validMachPlaced.length
-                      );
-                      out = appendRes.buffer;
-                      reinspected.header = appendRes.header;
-                      importedMachines = validMachPlaced.length;
-                    }
-                  }
-                  if (shouldImportAiAndScripts) {
-                    const donorToTargetActorPal = /* @__PURE__ */ new Map();
-                    if (srcActorPalCount > 0) {
-                      for (let i = 0; i < srcActorPalCount; i++) {
-                        const entryOff = srcActorPalOffset + i * 16;
-                        const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
-                        const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
-                        if (targetTagId !== void 0 && targetTagId !== 4294967295) {
-                          const palRes = ensurePaletteEntry(
-                            out,
-                            reinspected.header,
-                            reinspected.tagIndex,
-                            "actor palette",
-                            "ScenarioActorPalette",
-                            targetTagId,
-                            1633907830
-                            // 'actv'
-                          );
-                          out = palRes.buffer;
-                          reinspected.header = palRes.header;
-                          donorToTargetActorPal.set(i, palRes.paletteIndex);
-                        }
-                      }
-                    }
-                    const curScnrOff = resolveTagDataPointer(
-                      targetScnrEntry.tagDataPointerOrResourceIndex,
-                      reinspected.header,
-                      reinspected.tagIndex.baseMemoryAddress
-                    );
-                    const trigRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 864);
-                    if (trigRefl.count > 0) {
-                      const trigBase = sourceInspected.header.tagDataOffset + (trigRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-                      const validTrigs = [];
-                      const [minX2, minY2, minZ2, maxX2, maxY2, maxZ2] = srcWorldBounds;
-                      const margin = 25;
-                      for (let i = 0; i < trigRefl.count; i++) {
-                        const tOff = trigBase + i * 96;
-                        if (options.filterObjectsToBspBounds) {
-                          const posX = sourceBuffer.readFloatLE(tOff + 72);
-                          const posY = sourceBuffer.readFloatLE(tOff + 76);
-                          const posZ = sourceBuffer.readFloatLE(tOff + 80);
-                          if (posX < minX2 - margin || posX > maxX2 + margin || posY < minY2 - margin || posY > maxY2 + margin || posZ < minZ2 - margin || posZ > maxZ2 + margin) {
-                            continue;
-                          }
-                        }
-                        const tBytes = Buffer.alloc(96);
-                        sourceBuffer.copy(tBytes, 0, tOff, tOff + 96);
-                        validTrigs.push(tBytes);
-                      }
-                      if (validTrigs.length > 0) {
-                        const appendRes = appendReflexiveElements(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          curScnrOff + 864,
-                          Buffer.concat(validTrigs),
-                          validTrigs.length
-                        );
-                        out = appendRes.buffer;
-                        reinspected.header = appendRes.header;
-                        importedTriggers = validTrigs.length;
-                      }
-                    }
-                    const encRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 1068);
-                    if (encRefl.count > 0) {
-                      const encBase = sourceInspected.header.tagDataOffset + (encRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-                      const clonedEncBuffers = [];
-                      let bspClusterCount = 65535;
-                      const bspMetaPtr = out.readUInt32LE(dstBsp.bspStart + 0);
-                      const bspRootOff = dstBsp.bspStart + (bspMetaPtr - srcBspAddress);
-                      if (bspRootOff >= dstBsp.bspStart && bspRootOff + 320 <= dstBsp.bspStart + srcBspSize) {
-                        const cCount = out.readUInt32LE(bspRootOff + 308);
-                        if (cCount > 0 && cCount < 65535) bspClusterCount = cCount;
-                      }
-                      for (let i = 0; i < encRefl.count; i++) {
-                        const encOff = encBase + i * 176;
-                        const encFlags = sourceBuffer.readUInt32LE(encOff + 32);
-                        const hasManualBsp = (encFlags & 64) !== 0;
-                        const precompBsp = sourceBuffer.readInt16LE(encOff + 126);
-                        const manualBsp = sourceBuffer.readInt16LE(encOff + 42);
-                        const effectiveBsp = precompBsp >= 0 ? precompBsp : hasManualBsp ? manualBsp : -1;
-                        if (srcIndices.length === 1 && effectiveBsp !== -1 && effectiveBsp !== srcIdx) {
-                          continue;
-                        }
-                        const encBytes = sourceBuffer.subarray(encOff, encOff + 176);
-                        const cloneRes = cloneEncounterWithChildReflexives(
-                          encBytes,
-                          sourceBuffer,
-                          sourceInspected.header,
-                          srcTagIndex,
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          donorToTargetActorPal,
-                          dstIdx,
-                          bspClusterCount
-                        );
-                        out = cloneRes.buffer;
-                        reinspected.header = cloneRes.header;
-                        clonedEncBuffers.push(cloneRes.encounterBytes);
-                      }
-                      if (clonedEncBuffers.length > 0) {
-                        const allEncBytes = Buffer.concat(clonedEncBuffers);
-                        const appendRes = appendReflexiveElements(
-                          out,
-                          reinspected.header,
-                          reinspected.tagIndex,
-                          curScnrOff + 1068,
-                          allEncBytes,
-                          clonedEncBuffers.length
-                        );
-                        out = appendRes.buffer;
-                        reinspected.header = appendRes.header;
-                        importedEncounters = clonedEncBuffers.length;
-                      }
-                    }
-                    if (options.clearPlayerSpawns) {
-                      const srcSpawnsRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 852);
-                      if (srcSpawnsRefl.count > 0) {
-                        const spSize = resolveStruct("ScenarioPlayerStartingLocation").totalSize;
-                        const spBase = resolvePointer3(srcSpawnsRefl.pointerLow, sourceInspected.header.tagDataOffset, srcTagIndex.baseMemoryAddress);
-                        const validSpawns = [];
-                        const [minX2, minY2, minZ2, maxX2, maxY2, maxZ2] = srcWorldBounds;
-                        const margin = 20;
-                        for (let i = 0; i < srcSpawnsRefl.count; i++) {
-                          const spOff = spBase + i * spSize;
-                          const posX = sourceBuffer.readFloatLE(spOff + 0);
-                          const posY = sourceBuffer.readFloatLE(spOff + 4);
-                          const posZ = sourceBuffer.readFloatLE(spOff + 8);
-                          if (!options.filterObjectsToBspBounds || posX >= minX2 - margin && posX <= maxX2 + margin && posY >= minY2 - margin && posY <= maxY2 + margin && posZ >= minZ2 - margin && posZ <= maxZ2 + margin) {
-                            const spBytes = Buffer.alloc(spSize);
-                            sourceBuffer.copy(spBytes, 0, spOff, spOff + spSize);
-                            spBytes.writeInt16LE(dstIdx, 18);
-                            if (spBytes.readInt16LE(20) === 0) {
-                              spBytes.writeInt16LE(12, 20);
-                            }
-                            validSpawns.push(spBytes);
-                          }
-                        }
-                        if (validSpawns.length > 0) {
-                          const appendRes = appendReflexiveElements(
-                            out,
-                            reinspected.header,
-                            reinspected.tagIndex,
-                            curScnrOff + 852,
-                            Buffer.concat(validSpawns),
-                            validSpawns.length
-                          );
-                          out = appendRes.buffer;
-                          reinspected.header = appendRes.header;
-                        }
-                      }
-                    }
-                  }
-                  const finalRe = inspectCustomEditionMap(out);
-                  if (finalRe.status === "ok") {
-                    reinspected = finalRe;
-                  }
+                  importedSpawns.push(spawnBuf);
                 }
               }
             }
           }
-        } catch {
+          if (importedSpawns.length === 0) {
+            const fallback = Buffer.alloc(52);
+            const midX = (minX + maxX) / 2;
+            const midY = (minY + maxY) / 2;
+            const groundZ = minZ + 1;
+            fallback.writeFloatLE(midX, 0);
+            fallback.writeFloatLE(midY, 4);
+            fallback.writeFloatLE(groundZ, 8);
+            fallback.writeFloatLE(0, 12);
+            fallback.writeInt16LE(0, 16);
+            fallback.writeInt16LE(dstIdx, 18);
+            fallback.writeInt16LE(12, 20);
+            importedSpawns.push(fallback);
+          }
+          if (importedSpawns.length > 0) {
+            const appendRes = appendReflexiveElements(
+              out,
+              reinspected.header,
+              reinspected.tagIndex,
+              curScnrOff + 852,
+              Buffer.concat(importedSpawns),
+              importedSpawns.length
+            );
+            out = appendRes.buffer;
+            reinspected.header = appendRes.header;
+            curScnrOff = resolveTagDataPointer(
+              targetScnrEntryForSpawns.tagDataPointerOrResourceIndex,
+              reinspected.header,
+              reinspected.tagIndex.baseMemoryAddress
+            );
+            const netgameFlagsCount = out.readUInt32LE(curScnrOff + 876);
+            if (netgameFlagsCount === 0) {
+              const importedFlags = [];
+              for (const sp of importedSpawns) {
+                const flag = Buffer.alloc(148);
+                sp.copy(flag, 0, 0, 12);
+                sp.copy(flag, 12, 12, 16);
+                flag.writeInt16LE(0, 16);
+                flag.writeInt16LE(0, 18);
+                importedFlags.push(flag);
+              }
+              if (importedFlags.length > 0) {
+                const flagRes = appendReflexiveElements(
+                  out,
+                  reinspected.header,
+                  reinspected.tagIndex,
+                  curScnrOff + 876,
+                  Buffer.concat(importedFlags),
+                  importedFlags.length
+                );
+                out = flagRes.buffer;
+                reinspected.header = flagRes.header;
+              }
+            }
+          }
+        }
+      }
+      if (shouldImportObjects || shouldImportVehicles) {
+        const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 65535];
+        if (targetScnrEntry) {
+          const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+          if (shouldImportObjects && srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
+            const donorToTargetScenPal = /* @__PURE__ */ new Map();
+            for (let i = 0; i < srcSceneryPalCount; i++) {
+              const entryOff = srcSceneryPalOffset + i * 48;
+              const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+              const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
+              if (targetTagId !== void 0 && targetTagId !== 4294967295) {
+                const palRes = ensurePaletteEntry(
+                  out,
+                  reinspected.header,
+                  reinspected.tagIndex,
+                  "scenery palette",
+                  "ScenarioSceneryPalette",
+                  targetTagId,
+                  1935893870
+                  // 'scen'
+                );
+                out = palRes.buffer;
+                reinspected.header = palRes.header;
+                donorToTargetScenPal.set(i, palRes.paletteIndex);
+              }
+            }
+            const validPlaced = [];
+            for (let i = 0; i < srcPlacedSceneryCount; i++) {
+              const sOff = srcPlacedSceneryOffset + i * 72;
+              const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
+              const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
+              if (targetPalIdx !== void 0) {
+                if (options.filterObjectsToBspBounds) {
+                  const posX = sourceBuffer.readFloatLE(sOff + 8);
+                  const posY = sourceBuffer.readFloatLE(sOff + 12);
+                  const posZ = sourceBuffer.readFloatLE(sOff + 16);
+                  const margin = 20;
+                  if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
+                    continue;
+                  }
+                }
+                const sBytes = Buffer.alloc(72);
+                sourceBuffer.copy(sBytes, 0, sOff, sOff + 72);
+                sBytes.writeInt16LE(targetPalIdx, 0);
+                sBytes.writeInt16LE(-1, 2);
+                validPlaced.push(sBytes);
+              }
+            }
+            if (validPlaced.length > 0) {
+              const curScnrOff = resolveTagDataPointer(
+                targetScnrEntry.tagDataPointerOrResourceIndex,
+                reinspected.header,
+                reinspected.tagIndex.baseMemoryAddress
+              );
+              const appendRes = appendReflexiveElements(
+                out,
+                reinspected.header,
+                reinspected.tagIndex,
+                curScnrOff + 528,
+                Buffer.concat(validPlaced),
+                validPlaced.length
+              );
+              out = appendRes.buffer;
+              reinspected.header = appendRes.header;
+              importedScenery = validPlaced.length;
+            }
+          }
+          if (shouldImportVehicles && srcVehiclePalCount > 0 && srcPlacedVehiclesCount > 0) {
+            const donorToTargetVehPal = /* @__PURE__ */ new Map();
+            for (let i = 0; i < srcVehiclePalCount; i++) {
+              const entryOff = srcVehiclePalOffset + i * 48;
+              const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+              const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
+              if (targetTagId !== void 0 && targetTagId !== 4294967295) {
+                const palRes = ensurePaletteEntry(
+                  out,
+                  reinspected.header,
+                  reinspected.tagIndex,
+                  "vehicle palette",
+                  "ScenarioVehiclePalette",
+                  targetTagId,
+                  1986357353
+                  // 'vehi'
+                );
+                out = palRes.buffer;
+                reinspected.header = palRes.header;
+                donorToTargetVehPal.set(i, palRes.paletteIndex);
+              }
+            }
+            const validVehPlaced = [];
+            for (let i = 0; i < srcPlacedVehiclesCount; i++) {
+              const vOff = srcPlacedVehiclesOffset + i * 120;
+              const donorPalIdx = sourceBuffer.readInt16LE(vOff + 0);
+              const targetPalIdx = donorToTargetVehPal.get(donorPalIdx);
+              if (targetPalIdx !== void 0) {
+                if (options.filterObjectsToBspBounds) {
+                  const posX = sourceBuffer.readFloatLE(vOff + 8);
+                  const posY = sourceBuffer.readFloatLE(vOff + 12);
+                  const posZ = sourceBuffer.readFloatLE(vOff + 16);
+                  const margin = 20;
+                  if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
+                    continue;
+                  }
+                }
+                const vBytes = Buffer.alloc(120);
+                sourceBuffer.copy(vBytes, 0, vOff, vOff + 120);
+                vBytes.writeInt16LE(targetPalIdx, 0);
+                vBytes.writeInt16LE(-1, 2);
+                vBytes.writeUInt16LE(0, 4);
+                vBytes.writeUInt16LE(3855, 90);
+                validVehPlaced.push(vBytes);
+              }
+            }
+            if (validVehPlaced.length > 0) {
+              const curScnrOff = resolveTagDataPointer(
+                targetScnrEntry.tagDataPointerOrResourceIndex,
+                reinspected.header,
+                reinspected.tagIndex.baseMemoryAddress
+              );
+              const appendRes = appendReflexiveElements(
+                out,
+                reinspected.header,
+                reinspected.tagIndex,
+                curScnrOff + 576,
+                Buffer.concat(validVehPlaced),
+                validVehPlaced.length
+              );
+              out = appendRes.buffer;
+              reinspected.header = appendRes.header;
+              importedVehicles = validVehPlaced.length;
+            }
+          }
+          if (shouldImportObjects && srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
+            const donorToTargetMachPal = /* @__PURE__ */ new Map();
+            for (let i = 0; i < srcMachinePalCount; i++) {
+              const entryOff = srcMachinePalOffset + i * 48;
+              const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+              const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 65535);
+              if (targetTagId !== void 0 && targetTagId !== 4294967295) {
+                const palRes = ensurePaletteEntry(
+                  out,
+                  reinspected.header,
+                  reinspected.tagIndex,
+                  "machine palette",
+                  "ScenarioMachinePalette",
+                  targetTagId,
+                  1835098984
+                  // 'mach'
+                );
+                out = palRes.buffer;
+                reinspected.header = palRes.header;
+                donorToTargetMachPal.set(i, palRes.paletteIndex);
+              }
+            }
+            const validMachPlaced = [];
+            const makeAutomatic = options.makeDoorsAutomatic !== false;
+            for (let i = 0; i < srcPlacedMachinesCount; i++) {
+              const mOff = srcPlacedMachinesOffset + i * 64;
+              const donorPalIdx = sourceBuffer.readInt16LE(mOff + 0);
+              const targetPalIdx = donorToTargetMachPal.get(donorPalIdx);
+              if (targetPalIdx !== void 0) {
+                if (options.filterObjectsToBspBounds) {
+                  const posX = sourceBuffer.readFloatLE(mOff + 8);
+                  const posY = sourceBuffer.readFloatLE(mOff + 12);
+                  const posZ = sourceBuffer.readFloatLE(mOff + 16);
+                  const margin = 20;
+                  if (posX < minX - margin || posX > maxX + margin || posY < minY - margin || posY > maxY + margin || posZ < minZ - margin || posZ > maxZ + margin) {
+                    continue;
+                  }
+                }
+                const mBytes = Buffer.alloc(64);
+                sourceBuffer.copy(mBytes, 0, mOff, mOff + 64);
+                mBytes.writeInt16LE(targetPalIdx, 0);
+                mBytes.writeInt16LE(-1, 2);
+                mBytes.writeInt16LE(-1, 40);
+                mBytes.writeInt16LE(-1, 42);
+                if (makeAutomatic) {
+                  let devFlags = mBytes.readUInt32LE(44);
+                  devFlags &= ~1;
+                  mBytes.writeUInt32LE(devFlags, 44);
+                  let machFlags = mBytes.readUInt32LE(48);
+                  machFlags &= ~1;
+                  mBytes.writeUInt32LE(machFlags, 48);
+                }
+                validMachPlaced.push(mBytes);
+              }
+            }
+            if (validMachPlaced.length > 0) {
+              const curScnrOff = resolveTagDataPointer(
+                targetScnrEntry.tagDataPointerOrResourceIndex,
+                reinspected.header,
+                reinspected.tagIndex.baseMemoryAddress
+              );
+              const appendRes = appendReflexiveElements(
+                out,
+                reinspected.header,
+                reinspected.tagIndex,
+                curScnrOff + 660,
+                Buffer.concat(validMachPlaced),
+                validMachPlaced.length
+              );
+              out = appendRes.buffer;
+              reinspected.header = appendRes.header;
+              importedMachines = validMachPlaced.length;
+            }
+          }
+          const finalRe = inspectCustomEditionMap(out);
+          if (finalRe.status === "ok") {
+            reinspected = finalRe;
+          }
         }
       }
     }
@@ -43844,10 +43714,7 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
       harvestedBitmaps,
       importedScenery,
       importedVehicles,
-      importedMachines,
-      importedEncounters,
-      importedTriggers,
-      importedScripts
+      importedMachines
     }
   };
 }
@@ -44774,6 +44641,79 @@ function encodeXboxAdpcmMono(pcm) {
   }
   return out;
 }
+function encodeXboxAdpcmStereo(pcm) {
+  const numFrames = Math.floor(pcm.length / 2);
+  const numBlocks = Math.ceil(numFrames / 64);
+  const out = new Uint8Array(numBlocks * 72);
+  let frameIdx = 0;
+  for (let b = 0; b < numBlocks; b++) {
+    const leftPcm = new Int16Array(64);
+    const rightPcm = new Int16Array(64);
+    let lastL = 0;
+    let lastR = 0;
+    for (let i = 0; i < 64; i++) {
+      if (frameIdx < numFrames) {
+        lastL = pcm[frameIdx * 2];
+        lastR = pcm[frameIdx * 2 + 1];
+        frameIdx++;
+      }
+      leftPcm[i] = lastL;
+      rightPcm[i] = lastR;
+    }
+    const leftBlock = encodeXboxAdpcmMono(leftPcm);
+    const rightBlock = encodeXboxAdpcmMono(rightPcm);
+    out.set(leftBlock, b * 72);
+    out.set(rightBlock, b * 72 + 36);
+  }
+  return out;
+}
+function conformPcmToSoundTag(pcmSamples, srcChannels, srcSampleRate, dstChannels, dstSampleRate) {
+  const safeSrcCh = Math.max(1, srcChannels);
+  const safeDstCh = dstChannels === 2 ? 2 : 1;
+  const srcFrames = Math.floor(pcmSamples.length / safeSrcCh);
+  if (srcFrames === 0) return new Int16Array(0);
+  let chConverted;
+  if (safeSrcCh === safeDstCh) {
+    chConverted = pcmSamples;
+  } else if (safeDstCh === 1) {
+    chConverted = new Int16Array(srcFrames);
+    for (let f = 0; f < srcFrames; f++) {
+      let sum = 0;
+      for (let c = 0; c < safeSrcCh; c++) {
+        sum += pcmSamples[f * safeSrcCh + c];
+      }
+      chConverted[f] = Math.max(-32768, Math.min(32767, Math.round(sum / safeSrcCh)));
+    }
+  } else {
+    chConverted = new Int16Array(srcFrames * 2);
+    for (let f = 0; f < srcFrames; f++) {
+      const s = pcmSamples[f * safeSrcCh];
+      chConverted[f * 2] = s;
+      chConverted[f * 2 + 1] = s;
+    }
+  }
+  const safeSrcRate = Math.max(1e3, srcSampleRate);
+  const safeDstRate = Math.max(1e3, dstSampleRate);
+  if (safeSrcRate === safeDstRate) {
+    return chConverted;
+  }
+  const dstFrames = Math.max(1, Math.round(srcFrames * safeDstRate / safeSrcRate));
+  const resampled = new Int16Array(dstFrames * safeDstCh);
+  const ratio = (srcFrames - 1) / Math.max(1, dstFrames - 1);
+  for (let df = 0; df < dstFrames; df++) {
+    const srcPos = df * ratio;
+    const idx0 = Math.min(srcFrames - 1, Math.floor(srcPos));
+    const idx1 = Math.min(srcFrames - 1, idx0 + 1);
+    const frac = srcPos - idx0;
+    for (let c = 0; c < safeDstCh; c++) {
+      const s0 = chConverted[idx0 * safeDstCh + c];
+      const s1 = chConverted[idx1 * safeDstCh + c];
+      const val = Math.round(s0 + (s1 - s0) * frac);
+      resampled[df * safeDstCh + c] = Math.max(-32768, Math.min(32767, val));
+    }
+  }
+  return resampled;
+}
 function encodePcmToWav(pcmSamples, sampleRate, channels) {
   const byteRate = sampleRate * channels * 2;
   const blockAlign = channels * 2;
@@ -44801,6 +44741,7 @@ function decodeWavToPcm(wavBuffer) {
     throw new SoundCodecError("Invalid WAV file container.");
   }
   let offset = 12;
+  let audioFormat = 1;
   let sampleRate = 22050;
   let channels = 1;
   let bitsPerSample = 16;
@@ -44810,27 +44751,45 @@ function decodeWavToPcm(wavBuffer) {
     const chunkId = wavBuffer.toString("ascii", offset, offset + 4);
     const chunkSize = wavBuffer.readUInt32LE(offset + 4);
     offset += 8;
-    if (chunkId === "fmt ") {
+    if (chunkId === "fmt " && offset + 16 <= wavBuffer.length) {
+      audioFormat = wavBuffer.readUInt16LE(offset + 0);
       channels = wavBuffer.readUInt16LE(offset + 2);
       sampleRate = wavBuffer.readUInt32LE(offset + 4);
       bitsPerSample = wavBuffer.readUInt16LE(offset + 14);
+      if (audioFormat === 65534 && chunkSize >= 40 && offset + 26 <= wavBuffer.length) {
+        audioFormat = wavBuffer.readUInt16LE(offset + 24);
+      }
     } else if (chunkId === "data") {
       dataOffset = offset;
       dataSize = Math.min(chunkSize, wavBuffer.length - offset);
       break;
     }
-    offset += chunkSize;
+    offset += chunkSize + (chunkSize & 1);
   }
   if (dataOffset === 0) {
     throw new SoundCodecError('No "data" chunk found in WAV.');
   }
-  if (bitsPerSample !== 16) {
-    throw new SoundCodecError(`Only 16-bit WAV supported (file is ${bitsPerSample}-bit).`);
+  const bytesPerSample = Math.floor(bitsPerSample / 8);
+  if (![1, 2, 3, 4].includes(bytesPerSample)) {
+    throw new SoundCodecError(`Unsupported WAV bit depth (${bitsPerSample}-bit).`);
   }
-  const numSamples = Math.floor(dataSize / 2);
+  const numSamples = Math.floor(dataSize / bytesPerSample);
   const pcmSamples = new Int16Array(numSamples);
   for (let i = 0; i < numSamples; i++) {
-    pcmSamples[i] = wavBuffer.readInt16LE(dataOffset + i * 2);
+    const pos = dataOffset + i * bytesPerSample;
+    if (audioFormat === 3 && bytesPerSample === 4) {
+      const f = wavBuffer.readFloatLE(pos);
+      const clamped = Math.max(-1, Math.min(1, Number.isFinite(f) ? f : 0));
+      pcmSamples[i] = Math.round(clamped * 32767);
+    } else if (bytesPerSample === 2) {
+      pcmSamples[i] = wavBuffer.readInt16LE(pos);
+    } else if (bytesPerSample === 3) {
+      pcmSamples[i] = wavBuffer.readInt16LE(pos + 1);
+    } else if (bytesPerSample === 4) {
+      pcmSamples[i] = wavBuffer.readInt16LE(pos + 2);
+    } else if (bytesPerSample === 1) {
+      pcmSamples[i] = wavBuffer[pos] - 128 << 8;
+    }
   }
   return { sampleRate, channels, pcmSamples };
 }
@@ -44893,7 +44852,7 @@ function inspectSoundTag(mapBuffer, header, tagIndex, soundTagId, externalSounds
         const permPtr = srcBuf.readUInt32LE(pOffset + 64);
         const permutations = [];
         if (permCount > 0 && permCount < 256) {
-          const permBase = isExternal ? pOffset + pitchStructSize : header.tagDataOffset + (permPtr - tagIndex.baseMemoryAddress);
+          const permBase = isExternal ? pitchBase + permPtr : header.tagDataOffset + (permPtr - tagIndex.baseMemoryAddress);
           const permStructSize = 124;
           for (let m = 0; m < permCount; m++) {
             const mOffset = permBase + m * permStructSize;
@@ -45041,7 +45000,10 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
         if (isTarget) {
           payloadBytes = Buffer.from(newSamples);
           tagCopy.writeUInt16LE(newFormat, mOffset2 + 40);
+          tagCopy.writeInt16LE(-1, mOffset2 + 42);
+          tagCopy.writeUInt32LE(newFormat === 0 /* PCM16 */ ? payloadBytes.length : 0, mOffset2 + 56);
           tagCopy.writeUInt32LE(payloadBytes.length, mOffset2 + 64);
+          tagCopy.fill(0, mOffset2 + 84, mOffset2 + 124);
         } else {
           const oldSampleOffset = tagCopy.readUInt32LE(mOffset2 + 72);
           const oldSampleSize = tagCopy.readUInt32LE(mOffset2 + 64);
@@ -45049,6 +45011,20 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
             payloadBytes = Buffer.from(externalSoundsBuffer.subarray(oldSampleOffset, oldSampleOffset + oldSampleSize));
           } else {
             payloadBytes = Buffer.alloc(0);
+          }
+          const mouthSize = tagCopy.readUInt32LE(mOffset2 + 84);
+          const mouthRelPtr = tagCopy.readUInt32LE(mOffset2 + 96);
+          if (mouthSize > 0 && mouthRelPtr > 0 && pitchOffsetRel + mouthRelPtr + mouthSize <= tagCopy.length) {
+            tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel + mouthRelPtr, mOffset2 + 96);
+          } else {
+            tagCopy.fill(0, mOffset2 + 84, mOffset2 + 104);
+          }
+          const subSize = tagCopy.readUInt32LE(mOffset2 + 104);
+          const subRelPtr = tagCopy.readUInt32LE(mOffset2 + 116);
+          if (subSize > 0 && subRelPtr > 0 && pitchOffsetRel + subRelPtr + subSize <= tagCopy.length) {
+            tagCopy.writeUInt32LE(tagVirtualAddress + pitchOffsetRel + subRelPtr, mOffset2 + 116);
+          } else {
+            tagCopy.fill(0, mOffset2 + 104, mOffset2 + 124);
           }
         }
         tagCopy.writeUInt32LE(0, mOffset2 + 68);
@@ -45103,11 +45079,14 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
     targetOffset = alignedAppendOffset;
   }
   outputBuffer.writeUInt16LE(newFormat, mOffset + 40);
+  outputBuffer.writeInt16LE(-1, mOffset + 42);
+  outputBuffer.writeUInt32LE(newFormat === 0 /* PCM16 */ ? newSamples.length : 0, mOffset + 56);
   outputBuffer.writeUInt32LE(newSamples.length, mOffset + 64);
   outputBuffer.writeUInt32LE(0, mOffset + 68);
   outputBuffer.writeUInt32LE(targetOffset, mOffset + 72);
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 52);
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 60);
+  outputBuffer.fill(0, mOffset + 84, mOffset + 124);
   if (externalSoundsBuffer && pitchCount > 0 && pitchCount < 32) {
     const extraPayloads = [];
     for (let p = 0; p < pitchCount; p++) {
@@ -45548,6 +45527,1414 @@ function exportBspToGlb(mesh) {
   const label = mesh.bspNames?.[mesh.bspIndex] || `bsp_${mesh.bspIndex}`;
   const name = label.split("\\").pop() || "bsp";
   return buildGlbBinary(name, submeshes);
+}
+
+// ../core/src/render/collision-generator.ts
+function normalizeVec3(x, y, z) {
+  const len = Math.hypot(x, y, z);
+  if (len < 1e-8) return [0, 0, 1];
+  return [x / len, y / len, z / len];
+}
+function computeOrthonormalBasis(nx, ny, nz) {
+  const ref = Math.abs(nz) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+  const tx = ref[1] * nz - ref[2] * ny;
+  const ty = ref[2] * nx - ref[0] * nz;
+  const tz = ref[0] * ny - ref[1] * nx;
+  const tangent = normalizeVec3(tx, ty, tz);
+  const bx = ny * tangent[2] - nz * tangent[1];
+  const by = nz * tangent[0] - nx * tangent[2];
+  const bz = nx * tangent[1] - ny * tangent[0];
+  const binormal = normalizeVec3(bx, by, bz);
+  return { binormal, tangent };
+}
+function projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds) {
+  const [nx, ny, nz] = faceNormal;
+  const ax = Math.abs(nx);
+  const ay = Math.abs(ny);
+  const az = Math.abs(nz);
+  const dx = Math.max(1e-3, maxBounds[0] - minBounds[0]);
+  const dy = Math.max(1e-3, maxBounds[1] - minBounds[1]);
+  const dz = Math.max(1e-3, maxBounds[2] - minBounds[2]);
+  const normX = (pos[0] - minBounds[0]) / dx;
+  const normY = (pos[1] - minBounds[1]) / dy;
+  const normZ = (pos[2] - minBounds[2]) / dz;
+  let cellIndex = 0;
+  let localU = 0.5;
+  let localV = 0.5;
+  if (ax >= ay && ax >= az) {
+    if (nx >= 0) {
+      cellIndex = 0;
+      localU = normY;
+      localV = 1 - normZ;
+    } else {
+      cellIndex = 1;
+      localU = 1 - normY;
+      localV = 1 - normZ;
+    }
+  } else if (ay >= ax && ay >= az) {
+    if (ny >= 0) {
+      cellIndex = 2;
+      localU = 1 - normX;
+      localV = 1 - normZ;
+    } else {
+      cellIndex = 3;
+      localU = normX;
+      localV = 1 - normZ;
+    }
+  } else {
+    if (nz >= 0) {
+      cellIndex = 4;
+      localU = normX;
+      localV = 1 - normY;
+    } else {
+      cellIndex = 5;
+      localU = normX;
+      localV = normY;
+    }
+  }
+  const col = cellIndex % 3;
+  const row2 = Math.floor(cellIndex / 3);
+  const pad = 0.04;
+  const uInCell = pad + Math.max(0, Math.min(1, localU)) * (1 - 2 * pad);
+  const vInCell = pad + Math.max(0, Math.min(1, localV)) * (1 - 2 * pad);
+  return [(col + uInCell) / 3, (row2 + vInCell) / 2];
+}
+function parseObjMesh(objText, options = {}) {
+  const scale = options.scale && Number.isFinite(options.scale) && options.scale > 0 ? options.scale : 1;
+  const flipYz = Boolean(options.flipYz);
+  const centerOrigin = Boolean(options.centerOrigin);
+  const lines = objText.split(/\r?\n/);
+  const rawPositions = [];
+  const rawUvs = [];
+  const rawNormals = [];
+  const rawTriangles = [];
+  let currentGroupId = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const parts = trimmed.split(/\s+/);
+    const prefix = parts[0].toLowerCase();
+    if (prefix === "g" || prefix === "o") {
+      if (rawTriangles.length > 0) currentGroupId++;
+    } else if (prefix === "v") {
+      const rx = (parseFloat(parts[1]) || 0) * scale;
+      const ry = (parseFloat(parts[2]) || 0) * scale;
+      const rz = (parseFloat(parts[3]) || 0) * scale;
+      const pos = flipYz ? [rx, -rz, ry] : [rx, ry, rz];
+      rawPositions.push(pos);
+    } else if (prefix === "vt") {
+      const u = parseFloat(parts[1]) || 0;
+      const v = parseFloat(parts[2]) || 0;
+      rawUvs.push([u, 1 - v]);
+    } else if (prefix === "vn") {
+      const nx = parseFloat(parts[1]) || 0;
+      const ny = parseFloat(parts[2]) || 0;
+      const nz = parseFloat(parts[3]) || 0;
+      const norm = flipYz ? normalizeVec3(nx, -nz, ny) : normalizeVec3(nx, ny, nz);
+      rawNormals.push(norm);
+    } else if (prefix === "f") {
+      const corners = [];
+      for (let i = 1; i < parts.length; i++) {
+        const segs = parts[i].split("/");
+        const vRaw = parseInt(segs[0], 10);
+        if (isNaN(vRaw)) continue;
+        const vIdx = vRaw > 0 ? vRaw - 1 : rawPositions.length + vRaw;
+        let vtIdx = -1;
+        if (segs.length > 1 && segs[1] !== "") {
+          const vtRaw = parseInt(segs[1], 10);
+          if (!isNaN(vtRaw)) vtIdx = vtRaw > 0 ? vtRaw - 1 : rawUvs.length + vtRaw;
+        }
+        let vnIdx = -1;
+        if (segs.length > 2 && segs[2] !== "") {
+          const vnRaw = parseInt(segs[2], 10);
+          if (!isNaN(vnRaw)) vnIdx = vnRaw > 0 ? vnRaw - 1 : rawNormals.length + vnRaw;
+        }
+        if (vIdx >= 0 && vIdx < rawPositions.length) {
+          corners.push({ vIdx, vtIdx, vnIdx });
+        }
+      }
+      for (let i = 1; i < corners.length - 1; i++) {
+        rawTriangles.push({
+          corners: [corners[0], corners[i], corners[i + 1]],
+          groupId: currentGroupId
+        });
+      }
+    }
+  }
+  if (rawPositions.length === 0 || rawTriangles.length === 0) {
+    const emptySummary = {
+      vertexCount: 0,
+      triangleCount: 0,
+      uvCoordCount: 0,
+      normalCount: 0,
+      hasUvCoordinates: false,
+      hasNormals: false,
+      bounds: { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0], radius: 0 },
+      isTooComplex: true,
+      message: "No valid 3D mesh vertices or faces were found in this OBJ file."
+    };
+    return {
+      summary: emptySummary,
+      vertices: [],
+      triangles: [],
+      usedAutoUv: false,
+      groupBounds: []
+    };
+  }
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const [x, y, z] of rawPositions) {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  }
+  if (centerOrigin) {
+    const cx = (minX + maxX) * 0.5;
+    const cy = (minY + maxY) * 0.5;
+    const cz = minZ;
+    for (const p of rawPositions) {
+      p[0] -= cx;
+      p[1] -= cy;
+      p[2] -= cz;
+    }
+    minX -= cx;
+    maxX -= cx;
+    minY -= cy;
+    maxY -= cy;
+    maxZ -= cz;
+    minZ = 0;
+  }
+  const minBounds = [minX, minY, minZ];
+  const maxBounds = [maxX, maxY, maxZ];
+  const sizeBounds = [maxX - minX, maxY - minY, maxZ - minZ];
+  const radius = Math.max(0.1, Math.hypot(sizeBounds[0], sizeBounds[1], sizeBounds[2]) * 0.5);
+  const hasUvCoordinates = rawUvs.length > 0 && rawTriangles.some((t) => t.corners.some((c) => c.vtIdx >= 0 && c.vtIdx < rawUvs.length));
+  const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv);
+  const vertices = [];
+  const triangles = [];
+  const vertexLookup = /* @__PURE__ */ new Map();
+  const groupMinMax = /* @__PURE__ */ new Map();
+  for (const tri of rawTriangles) {
+    const p0 = rawPositions[tri.corners[0].vIdx];
+    const p1 = rawPositions[tri.corners[1].vIdx];
+    const p2 = rawPositions[tri.corners[2].vIdx];
+    let gb = groupMinMax.get(tri.groupId);
+    if (!gb) {
+      gb = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+      groupMinMax.set(tri.groupId, gb);
+    }
+    for (const p of [p0, p1, p2]) {
+      if (p[0] < gb.min[0]) gb.min[0] = p[0];
+      if (p[1] < gb.min[1]) gb.min[1] = p[1];
+      if (p[2] < gb.min[2]) gb.min[2] = p[2];
+      if (p[0] > gb.max[0]) gb.max[0] = p[0];
+      if (p[1] > gb.max[1]) gb.max[1] = p[1];
+      if (p[2] > gb.max[2]) gb.max[2] = p[2];
+    }
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const faceNormal = normalizeVec3(
+      uy * vz - uz * vy,
+      uz * vx - ux * vz,
+      ux * vy - uy * vx
+    );
+    const triOut = [0, 0, 0];
+    for (let k = 0; k < 3; k++) {
+      const corner = tri.corners[k];
+      const pos = rawPositions[corner.vIdx];
+      const norm = corner.vnIdx >= 0 && corner.vnIdx < rawNormals.length ? rawNormals[corner.vnIdx] : faceNormal;
+      const uv = !usedAutoUv && corner.vtIdx >= 0 && corner.vtIdx < rawUvs.length ? rawUvs[corner.vtIdx] : projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds);
+      const key = `${corner.vIdx}:${norm[0].toFixed(4)},${norm[1].toFixed(4)},${norm[2].toFixed(4)}:${uv[0].toFixed(4)},${uv[1].toFixed(4)}`;
+      let compiledIdx = vertexLookup.get(key);
+      if (compiledIdx === void 0 && vertices.length < 65534) {
+        const { binormal, tangent } = computeOrthonormalBasis(norm[0], norm[1], norm[2]);
+        compiledIdx = vertices.length;
+        vertices.push({
+          position: [pos[0], pos[1], pos[2]],
+          normal: norm,
+          binormal,
+          tangent,
+          uv,
+          node0Index: 0,
+          node1Index: -1,
+          node0Weight: 1,
+          node1Weight: 0
+        });
+        vertexLookup.set(key, compiledIdx);
+      }
+      triOut[k] = compiledIdx ?? 0;
+    }
+    triangles.push(triOut);
+  }
+  const groupBounds = Array.from(groupMinMax.values()).filter(
+    (g) => Number.isFinite(g.min[0]) && Number.isFinite(g.max[0])
+  );
+  const MAX_SIMPLE_TRIANGLES = 64;
+  const isTooComplex = rawTriangles.length > MAX_SIMPLE_TRIANGLES;
+  const uvStatus = hasUvCoordinates ? `${rawUvs.length} UV coords` : "Auto-unwrapped (6-face Box UV Atlas)";
+  const summary = {
+    vertexCount: rawPositions.length,
+    triangleCount: rawTriangles.length,
+    uvCoordCount: rawUvs.length,
+    normalCount: rawNormals.length,
+    hasUvCoordinates,
+    hasNormals: rawNormals.length > 0,
+    bounds: {
+      min: minBounds,
+      max: maxBounds,
+      size: sizeBounds,
+      radius
+    },
+    isTooComplex,
+    message: `Mesh ready: ${rawPositions.length} vertices, ${rawTriangles.length} triangles (${uvStatus}). Dimensions: ${sizeBounds[0].toFixed(2)} x ${sizeBounds[1].toFixed(2)} x ${sizeBounds[2].toFixed(2)} world units.`
+  };
+  return {
+    summary,
+    vertices,
+    triangles,
+    usedAutoUv,
+    groupBounds
+  };
+}
+function drawLineRgba(rgba, size, x0, y0, x1, y1, r, g, b, a = 255) {
+  let ix0 = Math.max(0, Math.min(size - 1, Math.round(x0)));
+  let iy0 = Math.max(0, Math.min(size - 1, Math.round(y0)));
+  const ix1 = Math.max(0, Math.min(size - 1, Math.round(x1)));
+  const iy1 = Math.max(0, Math.min(size - 1, Math.round(y1)));
+  const dx = Math.abs(ix1 - ix0);
+  const sx = ix0 < ix1 ? 1 : -1;
+  const dy = -Math.abs(iy1 - iy0);
+  const sy = iy0 < iy1 ? 1 : -1;
+  let err = dx + dy;
+  while (true) {
+    const idx = (iy0 * size + ix0) * 4;
+    rgba[idx + 0] = r;
+    rgba[idx + 1] = g;
+    rgba[idx + 2] = b;
+    rgba[idx + 3] = a;
+    if (ix0 === ix1 && iy0 === iy1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      ix0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      iy0 += sy;
+    }
+  }
+}
+function fillTriangleRgba(rgba, size, x0, y0, x1, y1, x2, y2, r, g, b, alpha) {
+  const minX = Math.max(0, Math.floor(Math.min(x0, x1, x2)));
+  const maxX = Math.min(size - 1, Math.ceil(Math.max(x0, x1, x2)));
+  const minY = Math.max(0, Math.floor(Math.min(y0, y1, y2)));
+  const maxY = Math.min(size - 1, Math.ceil(Math.max(y0, y1, y2)));
+  const denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+  if (Math.abs(denom) < 1e-5) return;
+  for (let py = minY; py <= maxY; py++) {
+    for (let px = minX; px <= maxX; px++) {
+      const w0 = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / denom;
+      const w1 = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / denom;
+      const w2 = 1 - w0 - w1;
+      if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+        const idx = (py * size + px) * 4;
+        rgba[idx + 0] = Math.round(rgba[idx + 0] * (1 - alpha) + r * alpha);
+        rgba[idx + 1] = Math.round(rgba[idx + 1] * (1 - alpha) + g * alpha);
+        rgba[idx + 2] = Math.round(rgba[idx + 2] * (1 - alpha) + b * alpha);
+        rgba[idx + 3] = 255;
+      }
+    }
+  }
+}
+function renderObjUvTemplateRgba(objText, size = 1024, options = {}) {
+  const parsed = parseObjMesh(objText, options);
+  const rgba = new Uint8Array(size * size * 4);
+  const cellSize = Math.max(8, Math.floor(size / 32));
+  const faceTintColors = [
+    [60, 32, 32],
+    // +X (reddish)
+    [32, 56, 56],
+    // -X (cyanish)
+    [32, 60, 36],
+    // +Y (greenish)
+    [56, 32, 56],
+    // -Y (magenta)
+    [32, 42, 64],
+    // +Z (blueish top)
+    [58, 52, 30]
+    // -Z (amber bottom)
+  ];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const checker = (Math.floor(x / cellSize) + Math.floor(y / cellSize) & 1) === 0;
+      let r = checker ? 28 : 36;
+      let g = checker ? 29 : 38;
+      let b = checker ? 34 : 44;
+      if (parsed.usedAutoUv) {
+        const col = Math.min(2, Math.floor(x / size * 3));
+        const row2 = Math.min(1, Math.floor(y / size * 2));
+        const tint = faceTintColors[row2 * 3 + col];
+        r = Math.round(r * 0.65 + tint[0] * 0.35);
+        g = Math.round(g * 0.65 + tint[1] * 0.35);
+        b = Math.round(b * 0.65 + tint[2] * 0.35);
+      }
+      const idx = (y * size + x) * 4;
+      rgba[idx + 0] = r;
+      rgba[idx + 1] = g;
+      rgba[idx + 2] = b;
+      rgba[idx + 3] = 255;
+    }
+  }
+  if (parsed.usedAutoUv) {
+    for (let c = 1; c <= 2; c++) {
+      const x = Math.round(c / 3 * size);
+      drawLineRgba(rgba, size, x, 0, x, size - 1, 90, 100, 120, 255);
+    }
+    const midY = Math.round(size / 2);
+    drawLineRgba(rgba, size, 0, midY, size - 1, midY, 90, 100, 120, 255);
+  }
+  for (const [i0, i1, i2] of parsed.triangles) {
+    const v0 = parsed.vertices[i0];
+    const v1 = parsed.vertices[i1];
+    const v2 = parsed.vertices[i2];
+    if (!v0 || !v1 || !v2) continue;
+    const u0 = (v0.uv[0] % 1 + 1) % 1;
+    const w0 = (v0.uv[1] % 1 + 1) % 1;
+    const u1 = (v1.uv[0] % 1 + 1) % 1;
+    const w1 = (v1.uv[1] % 1 + 1) % 1;
+    const u2 = (v2.uv[0] % 1 + 1) % 1;
+    const w2 = (v2.uv[1] % 1 + 1) % 1;
+    fillTriangleRgba(
+      rgba,
+      size,
+      u0 * (size - 1),
+      w0 * (size - 1),
+      u1 * (size - 1),
+      w1 * (size - 1),
+      u2 * (size - 1),
+      w2 * (size - 1),
+      56,
+      189,
+      248,
+      0.16
+    );
+  }
+  for (const [i0, i1, i2] of parsed.triangles) {
+    const v0 = parsed.vertices[i0];
+    const v1 = parsed.vertices[i1];
+    const v2 = parsed.vertices[i2];
+    if (!v0 || !v1 || !v2) continue;
+    const x0 = (v0.uv[0] % 1 + 1) % 1 * (size - 1);
+    const y0 = (v0.uv[1] % 1 + 1) % 1 * (size - 1);
+    const x1 = (v1.uv[0] % 1 + 1) % 1 * (size - 1);
+    const y1 = (v1.uv[1] % 1 + 1) % 1 * (size - 1);
+    const x2 = (v2.uv[0] % 1 + 1) % 1 * (size - 1);
+    const y2 = (v2.uv[1] % 1 + 1) % 1 * (size - 1);
+    drawLineRgba(rgba, size, x0, y0, x1, y1, 56, 189, 248, 255);
+    drawLineRgba(rgba, size, x1, y1, x2, y2, 56, 189, 248, 255);
+    drawLineRgba(rgba, size, x2, y2, x0, y0, 56, 189, 248, 255);
+  }
+  return { rgba, width: size, height: size, usedAutoUv: parsed.usedAutoUv };
+}
+function nearestPowerOfTwo(n, min = 16, max = 2048) {
+  const clamped = Math.max(min, Math.min(max, n));
+  return Math.pow(2, Math.round(Math.log2(clamped)));
+}
+function resizeRgbaToPowerOfTwo(rgba, width, height, maxDim = 1024) {
+  const dstW = nearestPowerOfTwo(width, 16, maxDim);
+  const dstH = nearestPowerOfTwo(height, 16, maxDim);
+  if (dstW === width && dstH === height) {
+    return { rgba, width, height };
+  }
+  const out = new Uint8Array(dstW * dstH * 4);
+  for (let y = 0; y < dstH; y++) {
+    const srcY = Math.min(height - 1, Math.floor(y / dstH * height));
+    for (let x = 0; x < dstW; x++) {
+      const srcX = Math.min(width - 1, Math.floor(x / dstW * width));
+      const srcIdx = (srcY * width + srcX) * 4;
+      const dstIdx = (y * dstW + x) * 4;
+      out[dstIdx + 0] = rgba[srcIdx + 0];
+      out[dstIdx + 1] = rgba[srcIdx + 1];
+      out[dstIdx + 2] = rgba[srcIdx + 2];
+      out[dstIdx + 3] = rgba[srcIdx + 3];
+    }
+  }
+  return { rgba: out, width: dstW, height: dstH };
+}
+function writeTagString(buf, offset, text) {
+  buf.fill(0, offset, offset + 32);
+  const clean = text.slice(0, 31);
+  buf.write(clean, offset, clean.length, "ascii");
+}
+function writeDependencyField(buf, offset, fourccStr, tagId = NULL_TAG_ID) {
+  buf.writeUInt32LE(fourCCFromString(fourccStr), offset + 0);
+  buf.writeUInt32LE(0, offset + 4);
+  buf.writeUInt32LE(0, offset + 8);
+  buf.writeUInt32LE(tagId >>> 0, offset + 12);
+}
+function buildTagDependenciesFromBuffer(data, structName, tagPath, internalRefsByFieldPath, externalOrExistingRefsByFieldPath) {
+  const deps = [];
+  const visit = (curStructName, localOffset, curPath) => {
+    const resolved = resolveStruct(curStructName);
+    const decoded = decodeStruct(data, localOffset, curStructName);
+    for (const field of resolved.fields) {
+      const value = decoded.get(field.name);
+      if (!value || field.def.nonCached) continue;
+      const absFieldOffset = localOffset + field.offset;
+      const path3 = childFieldPath(curPath, field.name);
+      if (value.kind === "dependency") {
+        const internalTarget = internalRefsByFieldPath.get(path3);
+        const existingTarget = externalOrExistingRefsByFieldPath?.get(path3);
+        if (internalTarget) {
+          data.writeUInt32LE(internalTarget.localTagIndex >>> 0, absFieldOffset + 12);
+          deps.push({
+            fieldPath: path3,
+            group: internalTarget.group,
+            path: internalTarget.path,
+            kind: "internal",
+            localTagIndex: internalTarget.localTagIndex,
+            fieldOffset: absFieldOffset
+          });
+        } else if (existingTarget && existingTarget.kind !== "null") {
+          deps.push({
+            ...existingTarget,
+            fieldPath: path3,
+            fieldOffset: absFieldOffset
+          });
+        } else {
+          data.writeUInt32LE(NULL_TAG_ID, absFieldOffset + 12);
+          deps.push({
+            fieldPath: path3,
+            group: "",
+            path: "",
+            kind: "null",
+            fieldOffset: absFieldOffset
+          });
+        }
+      } else if (value.kind === "reflexive" && value.value.count > 0) {
+        const childStruct = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+        if (!childStruct) continue;
+        const childSize = resolveStruct(childStruct).totalSize;
+        const base = value.value.pointerLow;
+        if (!isRangeInBuffer(base, value.value.count * childSize, data.length)) continue;
+        for (let i = 0; i < value.value.count; i++) {
+          visit(childStruct, base + i * childSize, reflexiveElementPath(curPath, field.name, i));
+        }
+      } else if (isRelocatedTagDataField(field, value)) {
+      }
+    }
+  };
+  visit(structName, 0, tagPath);
+  return deps;
+}
+function buildCustomBitmapTag(tagPath, originalIndex, rgbaInput, inputWidth, inputHeight, format = BitmapFormat.A8R8G8B8) {
+  const { rgba, width, height } = resizeRgbaToPowerOfTwo(rgbaInput, inputWidth, inputHeight, 1024);
+  const { pixelData, mipmapCount } = encodeBitmapWithMipmaps(rgba, width, height, format, true);
+  const buf = Buffer.alloc(220, 0);
+  buf.writeUInt16LE(0, 0);
+  buf.writeUInt16LE(format === BitmapFormat.DXT1 ? 1 : format === BitmapFormat.DXT5 ? 3 : 4, 2);
+  buf.writeUInt16LE(1, 4);
+  buf.writeUInt16LE(0, 6);
+  buf.writeUInt32LE(1, 84);
+  buf.writeUInt32LE(108, 88);
+  buf.writeUInt32LE(1, 96);
+  buf.writeUInt32LE(172, 100);
+  writeTagString(buf, 108, "default");
+  buf.writeUInt16LE(0, 108 + 32);
+  buf.writeUInt16LE(1, 108 + 34);
+  const bdOff = 172;
+  buf.write("bitm", bdOff + 0, 4, "ascii");
+  buf.writeUInt32LE(1651078253, bdOff + 0);
+  buf.writeUInt16LE(width, bdOff + 4);
+  buf.writeUInt16LE(height, bdOff + 6);
+  buf.writeUInt16LE(1, bdOff + 8);
+  buf.writeUInt16LE(0, bdOff + 10);
+  buf.writeUInt16LE(format, bdOff + 12);
+  const isCompressed = format === BitmapFormat.DXT1 || format === BitmapFormat.DXT3 || format === BitmapFormat.DXT5;
+  const bdFlags = (isCompressed ? 1 : 0) | 128;
+  buf.writeUInt16LE(bdFlags, bdOff + 14);
+  buf.writeUInt16LE(Math.floor(width / 2), bdOff + 16);
+  buf.writeUInt16LE(Math.floor(height / 2), bdOff + 18);
+  buf.writeUInt16LE(mipmapCount, bdOff + 20);
+  buf.writeUInt16LE(0, bdOff + 22);
+  buf.writeUInt32LE(0, bdOff + 24);
+  buf.writeUInt32LE(pixelData.byteLength, bdOff + 28);
+  buf.writeUInt32LE(NULL_TAG_ID, bdOff + 32);
+  buf.writeUInt32LE(NULL_TAG_ID, bdOff + 36);
+  const embeddedRawDataAssets = [
+    { kind: "bitmap", data: Buffer.from(pixelData) }
+  ];
+  const embeddedRawDataPatches = [
+    { assetIndex: 0, patchOffset: bdOff + 24, patchWidth: 4 }
+  ];
+  return {
+    originalIndex,
+    group: "bitmap",
+    path: tagPath,
+    structName: "Bitmap",
+    secondaryClassFourCC: null,
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies: [],
+    embeddedRawDataAssets,
+    embeddedRawDataPatches,
+    injectionBlockers: []
+  };
+}
+function buildCustomShaderModelTag(tagPath, originalIndex, bitmapPath, bitmapLocalIndex) {
+  const buf = Buffer.alloc(440, 0);
+  writeDependencyField(buf, 164, "bitm", bitmapLocalIndex);
+  writeDependencyField(buf, 188, "bitm", NULL_TAG_ID);
+  writeDependencyField(buf, 220, "bitm", NULL_TAG_ID);
+  writeDependencyField(buf, 356, "bitm", NULL_TAG_ID);
+  buf.writeUInt16LE(4, 36);
+  buf.writeFloatLE(1, 116);
+  buf.writeFloatLE(1, 156);
+  buf.writeFloatLE(1, 160);
+  buf.writeFloatLE(1, 216);
+  buf.writeFloatLE(1, 236);
+  buf.writeFloatLE(1, 256);
+  buf.writeFloatLE(1, 264);
+  buf.writeFloatLE(1, 272);
+  buf.writeFloatLE(1, 280);
+  buf.writeFloatLE(1, 288);
+  buf.writeFloatLE(360, 296);
+  const internalMap = /* @__PURE__ */ new Map();
+  internalMap.set(childFieldPath(tagPath, "base map"), {
+    group: "bitmap",
+    path: bitmapPath,
+    localTagIndex: bitmapLocalIndex
+  });
+  const dependencies = buildTagDependenciesFromBuffer(buf, "ShaderModel", tagPath, internalMap);
+  return {
+    originalIndex,
+    group: "shader_model",
+    path: tagPath,
+    structName: "ShaderModel",
+    secondaryClassFourCC: fourCCFromString("shdr"),
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies,
+    embeddedRawDataAssets: [],
+    embeddedRawDataPatches: [],
+    injectionBlockers: []
+  };
+}
+function extractTemplateRigFromMap(mapBuffer, header, tagIndex, templateObjectTagIndex) {
+  const entry = tagIndex.entries[templateObjectTagIndex];
+  if (!entry || entry.isExternal) return void 0;
+  const objOff = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (objOff + 128 > mapBuffer.length) return void 0;
+  const modelTagId = mapBuffer.readUInt32LE(objOff + 52);
+  const modelEntry = tagIndex.entries[modelTagId & 65535];
+  if (!modelEntry || modelEntry.tagId !== modelTagId || modelEntry.isExternal) return void 0;
+  const gbxOff = resolveTagDataPointer(modelEntry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (gbxOff + 232 > mapBuffer.length) return void 0;
+  const nodeListChecksum = mapBuffer.readInt32LE(gbxOff + 4);
+  const nodeCount = mapBuffer.readUInt32LE(gbxOff + 184);
+  const nodePtr = mapBuffer.readUInt32LE(gbxOff + 188);
+  if (nodeCount === 0 || nodeCount > 64) return void 0;
+  const nodeBase = resolveTagDataPointer(nodePtr, header, tagIndex.baseMemoryAddress);
+  if (nodeBase + nodeCount * 156 > mapBuffer.length) return void 0;
+  const modelNodesBuffer = Buffer.from(mapBuffer.subarray(nodeBase, nodeBase + nodeCount * 156));
+  let markersBuffer = Buffer.alloc(0);
+  let markerCount = 0;
+  const regCount = mapBuffer.readUInt32LE(gbxOff + 196);
+  const regPtr = mapBuffer.readUInt32LE(gbxOff + 200);
+  if (regCount > 0) {
+    const regBase = resolveTagDataPointer(regPtr, header, tagIndex.baseMemoryAddress);
+    if (regBase + 76 <= mapBuffer.length) {
+      const permCount = mapBuffer.readUInt32LE(regBase + 64);
+      const permPtr = mapBuffer.readUInt32LE(regBase + 68);
+      if (permCount > 0) {
+        const permBase = resolveTagDataPointer(permPtr, header, tagIndex.baseMemoryAddress);
+        if (permBase + 88 <= mapBuffer.length) {
+          const mCount = mapBuffer.readUInt32LE(permBase + 76);
+          const mPtr = mapBuffer.readUInt32LE(permBase + 80);
+          if (mCount > 0 && mCount <= 64) {
+            const mBase = resolveTagDataPointer(mPtr, header, tagIndex.baseMemoryAddress);
+            if (mBase + mCount * 80 <= mapBuffer.length) {
+              markerCount = mCount;
+              markersBuffer = Buffer.from(mapBuffer.subarray(mBase, mBase + mCount * 80));
+            }
+          }
+        }
+      }
+    }
+  }
+  const topLevelMarkers = [];
+  const topMarkerCount = mapBuffer.readUInt32LE(gbxOff + 172);
+  const topMarkerPtr = mapBuffer.readUInt32LE(gbxOff + 176);
+  if (topMarkerCount > 0 && topMarkerCount <= 64) {
+    const topMarkerBase = resolveTagDataPointer(topMarkerPtr, header, tagIndex.baseMemoryAddress);
+    if (topMarkerBase + topMarkerCount * 64 <= mapBuffer.length) {
+      for (let m = 0; m < topMarkerCount; m++) {
+        const mOff = topMarkerBase + m * 64;
+        const headerBytes = Buffer.from(mapBuffer.subarray(mOff, mOff + 64));
+        const instCount = mapBuffer.readUInt32LE(mOff + 52);
+        const instPtr = mapBuffer.readUInt32LE(mOff + 56);
+        const instances = [];
+        if (instCount > 0 && instCount <= 32) {
+          const instBase = resolveTagDataPointer(instPtr, header, tagIndex.baseMemoryAddress);
+          if (instBase + instCount * 32 <= mapBuffer.length) {
+            for (let k = 0; k < instCount; k++) {
+              const instBuf = Buffer.from(mapBuffer.subarray(instBase + k * 32, instBase + (k + 1) * 32));
+              instBuf[0] = 0;
+              instBuf[1] = 0;
+              if (instBuf[2] >= nodeCount) instBuf[2] = 0;
+              instances.push(instBuf);
+            }
+          }
+        }
+        topLevelMarkers.push({ headerBytes, instances });
+      }
+    }
+  }
+  let collisionHeaderBuffer;
+  const collTagId = mapBuffer.readUInt32LE(objOff + 124);
+  const collEntry = tagIndex.entries[collTagId & 65535];
+  if (collEntry && collEntry.tagId === collTagId && !collEntry.isExternal) {
+    const collOff = resolveTagDataPointer(collEntry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    if (collOff + 664 <= mapBuffer.length) {
+      collisionHeaderBuffer = Buffer.from(mapBuffer.subarray(collOff, collOff + 664));
+    }
+  }
+  return {
+    nodeListChecksum,
+    modelNodesBuffer,
+    modelNodeCount: nodeCount,
+    markersBuffer,
+    markerCount,
+    topLevelMarkers,
+    collisionHeaderBuffer
+  };
+}
+function stitchTrianglesToStrip(triangles) {
+  const stripIndices = [];
+  for (let i = 0; i < triangles.length; i++) {
+    const [a, b, c] = triangles[i];
+    if (i === 0) {
+      stripIndices.push(a, b, c);
+    } else {
+      const prev = stripIndices[stripIndices.length - 1];
+      stripIndices.push(prev, a);
+      if ((stripIndices.length - 1) % 2 === 1) {
+        stripIndices.push(a);
+      }
+      stripIndices.push(b, c);
+    }
+  }
+  const triangleCount = Math.max(1, stripIndices.length - 2);
+  const paddedLen = stripIndices.length + stripIndices.length % 2;
+  const triangleBufferBytes = Buffer.alloc(paddedLen * 2, 255);
+  for (let i = 0; i < stripIndices.length; i++) {
+    triangleBufferBytes.writeUInt16LE(stripIndices[i] & 65535, i * 2);
+  }
+  return { stripIndices, triangleBufferBytes, triangleCount };
+}
+function encodeUncompressedVertices(vertices) {
+  const buf = Buffer.alloc(vertices.length * 68, 0);
+  for (let i = 0; i < vertices.length; i++) {
+    const v = vertices[i];
+    const off = i * 68;
+    buf.writeFloatLE(v.position[0], off + 0);
+    buf.writeFloatLE(v.position[1], off + 4);
+    buf.writeFloatLE(v.position[2], off + 8);
+    buf.writeFloatLE(v.normal[0], off + 12);
+    buf.writeFloatLE(v.normal[1], off + 16);
+    buf.writeFloatLE(v.normal[2], off + 20);
+    buf.writeFloatLE(v.binormal[0], off + 24);
+    buf.writeFloatLE(v.binormal[1], off + 28);
+    buf.writeFloatLE(v.binormal[2], off + 32);
+    buf.writeFloatLE(v.tangent[0], off + 36);
+    buf.writeFloatLE(v.tangent[1], off + 40);
+    buf.writeFloatLE(v.tangent[2], off + 44);
+    buf.writeFloatLE(v.uv[0], off + 48);
+    buf.writeFloatLE(v.uv[1], off + 52);
+    buf.writeInt16LE(v.node0Index, off + 56);
+    buf.writeInt16LE(v.node1Index, off + 58);
+    buf.writeFloatLE(v.node0Weight, off + 60);
+    buf.writeFloatLE(v.node1Weight, off + 64);
+  }
+  return buf;
+}
+function buildCustomGbxmodelTag(tagPath, originalIndex, mesh, shaderPath, shaderLocalIndex, rig) {
+  const vertexBytes = encodeUncompressedVertices(mesh.vertices);
+  const { triangleBufferBytes, triangleCount } = stitchTrianglesToStrip(mesh.triangles);
+  let nodesBuf;
+  let nodeCount = 1;
+  if (rig && rig.modelNodeCount > 0 && rig.modelNodesBuffer.length === rig.modelNodeCount * 156) {
+    nodeCount = rig.modelNodeCount;
+    nodesBuf = Buffer.from(rig.modelNodesBuffer);
+    for (let i = 0; i < nodeCount; i++) {
+      nodesBuf.writeUInt32LE(0, i * 156 + 144);
+    }
+  } else {
+    nodesBuf = Buffer.alloc(156, 0);
+    writeTagString(nodesBuf, 0, "frame root");
+    nodesBuf.writeInt16LE(-1, 32);
+    nodesBuf.writeInt16LE(-1, 34);
+    nodesBuf.writeInt16LE(-1, 36);
+    nodesBuf.writeFloatLE(0, 40);
+    nodesBuf.writeFloatLE(0, 44);
+    nodesBuf.writeFloatLE(0, 48);
+    nodesBuf.writeFloatLE(0, 52);
+    nodesBuf.writeFloatLE(0, 56);
+    nodesBuf.writeFloatLE(0, 60);
+    nodesBuf.writeFloatLE(1, 64);
+    nodesBuf.writeFloatLE(1, 104);
+    nodesBuf.writeFloatLE(1, 108);
+    nodesBuf.writeFloatLE(1, 120);
+    nodesBuf.writeFloatLE(1, 132);
+  }
+  const markerCount = rig?.markerCount ?? 0;
+  const markersBuf = markerCount > 0 && rig ? Buffer.from(rig.markersBuffer) : Buffer.alloc(0);
+  const topMarkers = rig?.topLevelMarkers ?? [];
+  const topMarkersHeaderSize = topMarkers.length * 64;
+  const topMarkerInstancesCount = topMarkers.reduce((s, m) => s + m.instances.length, 0);
+  const topMarkerInstancesSize = topMarkerInstancesCount * 32;
+  const offTopMarkers = 232;
+  const offTopMarkerInstances = offTopMarkers + topMarkersHeaderSize;
+  const offNodes = offTopMarkerInstances + topMarkerInstancesSize;
+  const offRegions = offNodes + nodesBuf.length;
+  const offPermutations = offRegions + 76;
+  const offMarkers = offPermutations + 88;
+  const offGeometries = offMarkers + markersBuf.length;
+  const offParts = offGeometries + 48;
+  const offShaders = offParts + 132;
+  const totalSize = offShaders + 32;
+  const buf = Buffer.alloc(totalSize, 0);
+  buf.writeUInt32LE(4, 0);
+  buf.writeInt32LE(rig?.nodeListChecksum ?? 0, 4);
+  buf.writeUInt16LE(nodeCount, 28);
+  buf.writeUInt16LE(nodeCount, 30);
+  buf.writeUInt16LE(nodeCount, 32);
+  buf.writeUInt16LE(nodeCount, 34);
+  buf.writeUInt16LE(nodeCount, 36);
+  buf.writeFloatLE(1, 48);
+  buf.writeFloatLE(1, 52);
+  if (topMarkers.length > 0) {
+    buf.writeUInt32LE(topMarkers.length, 172);
+    buf.writeUInt32LE(offTopMarkers, 176);
+    let instCursor = offTopMarkerInstances;
+    for (let m = 0; m < topMarkers.length; m++) {
+      const mHeaderOff = offTopMarkers + m * 64;
+      topMarkers[m].headerBytes.copy(buf, mHeaderOff);
+      const insts = topMarkers[m].instances;
+      if (insts.length > 0) {
+        buf.writeUInt32LE(insts.length, mHeaderOff + 52);
+        buf.writeUInt32LE(instCursor, mHeaderOff + 56);
+        buf.writeUInt32LE(0, mHeaderOff + 60);
+        for (const inst of insts) {
+          inst.copy(buf, instCursor);
+          instCursor += 32;
+        }
+      } else {
+        buf.writeUInt32LE(0, mHeaderOff + 52);
+        buf.writeUInt32LE(0, mHeaderOff + 56);
+        buf.writeUInt32LE(0, mHeaderOff + 60);
+      }
+    }
+  }
+  buf.writeUInt32LE(nodeCount, 184);
+  buf.writeUInt32LE(offNodes, 188);
+  buf.writeUInt32LE(1, 196);
+  buf.writeUInt32LE(offRegions, 200);
+  buf.writeUInt32LE(1, 208);
+  buf.writeUInt32LE(offGeometries, 212);
+  buf.writeUInt32LE(1, 220);
+  buf.writeUInt32LE(offShaders, 224);
+  nodesBuf.copy(buf, offNodes);
+  writeTagString(buf, offRegions, "default");
+  buf.writeUInt32LE(1, offRegions + 64);
+  buf.writeUInt32LE(offPermutations, offRegions + 68);
+  writeTagString(buf, offPermutations, "base");
+  buf.writeInt16LE(0, offPermutations + 64);
+  buf.writeInt16LE(0, offPermutations + 66);
+  buf.writeInt16LE(0, offPermutations + 68);
+  buf.writeInt16LE(0, offPermutations + 70);
+  buf.writeInt16LE(0, offPermutations + 72);
+  if (markerCount > 0) {
+    buf.writeUInt32LE(markerCount, offPermutations + 76);
+    buf.writeUInt32LE(offMarkers, offPermutations + 80);
+    markersBuf.copy(buf, offMarkers);
+  }
+  buf.writeUInt32LE(1, offGeometries + 36);
+  buf.writeUInt32LE(offParts, offGeometries + 40);
+  const cx = (mesh.summary.bounds.min[0] + mesh.summary.bounds.max[0]) * 0.5;
+  const cy = (mesh.summary.bounds.min[1] + mesh.summary.bounds.max[1]) * 0.5;
+  const cz = (mesh.summary.bounds.min[2] + mesh.summary.bounds.max[2]) * 0.5;
+  buf.writeUInt32LE(0, offParts + 0);
+  buf.writeInt16LE(0, offParts + 4);
+  buf.writeUInt8(255, offParts + 6);
+  buf.writeUInt8(255, offParts + 7);
+  buf.writeInt16LE(0, offParts + 8);
+  buf.writeInt16LE(0, offParts + 10);
+  buf.writeFloatLE(1, offParts + 12);
+  buf.writeFloatLE(0, offParts + 16);
+  buf.writeFloatLE(cx, offParts + 20);
+  buf.writeFloatLE(cy, offParts + 24);
+  buf.writeFloatLE(cz, offParts + 28);
+  buf.writeUInt16LE(1, offParts + 68);
+  buf.writeUInt32LE(triangleCount, offParts + 72);
+  buf.writeUInt32LE(0, offParts + 76);
+  buf.writeUInt32LE(0, offParts + 80);
+  buf.writeUInt16LE(4, offParts + 84);
+  buf.writeUInt32LE(mesh.vertices.length, offParts + 88);
+  buf.writeUInt32LE(0, offParts + 100);
+  writeDependencyField(buf, offShaders + 0, "shdr", shaderLocalIndex);
+  const internalMap = /* @__PURE__ */ new Map();
+  internalMap.set(`${reflexiveElementPath(tagPath, "shaders", 0)}.shader`, {
+    group: "shader_model",
+    path: shaderPath,
+    localTagIndex: shaderLocalIndex
+  });
+  const dependencies = buildTagDependenciesFromBuffer(buf, "GBXModel", tagPath, internalMap);
+  const gbxmodelGeometryParts = [
+    {
+      geometryIndex: 0,
+      partIndex: 0,
+      vertexType: 4,
+      vertexCount: mesh.vertices.length,
+      vertexBytes,
+      triangleBufferType: 1,
+      triangleCount,
+      triangleBytes: triangleBufferBytes
+    }
+  ];
+  const embeddedRawDataAssets = [
+    { kind: "gbxmodel-vertex", data: vertexBytes },
+    { kind: "gbxmodel-triangle-strip", data: triangleBufferBytes }
+  ];
+  const embeddedRawDataPatches = [
+    { assetIndex: 0, patchOffset: offParts + 100, patchWidth: 4 },
+    { assetIndex: 1, patchOffset: offParts + 76, patchWidth: 4 }
+  ];
+  return {
+    originalIndex,
+    group: "gbxmodel",
+    path: tagPath,
+    structName: "GBXModel",
+    secondaryClassFourCC: null,
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies,
+    embeddedRawDataAssets,
+    embeddedRawDataPatches,
+    injectionBlockers: [],
+    gbxmodelGeometryParts
+  };
+}
+function writeBoxCollisionBsp(targetBuf, structOff, arraysOff, boundsMin, boundsMax) {
+  const padX = Math.max(0, 0.04 - (boundsMax[0] - boundsMin[0])) * 0.5;
+  const padY = Math.max(0, 0.04 - (boundsMax[1] - boundsMin[1])) * 0.5;
+  const padZ = Math.max(0, 0.04 - (boundsMax[2] - boundsMin[2])) * 0.5;
+  const minX = boundsMin[0] - padX, maxX = boundsMax[0] + padX;
+  const minY = boundsMin[1] - padY, maxY = boundsMax[1] + padY;
+  const minZ = boundsMin[2] - padZ, maxZ = boundsMax[2] + padZ;
+  let cursor = arraysOff;
+  const offBsp3dNodes = cursor;
+  const bsp3dNodes = [
+    [0, 1, 2147483653],
+    [1, 2, 2147483652],
+    [2, 3, 2147483651],
+    [3, 4, 2147483650],
+    [4, 5, 2147483649],
+    [5, 4294967295, 2147483648]
+  ];
+  for (let i = 0; i < 6; i++) {
+    targetBuf.writeInt32LE(bsp3dNodes[i][0], cursor + 0);
+    targetBuf.writeUInt32LE(bsp3dNodes[i][1] >>> 0, cursor + 4);
+    targetBuf.writeUInt32LE(bsp3dNodes[i][2] >>> 0, cursor + 8);
+    cursor += 12;
+  }
+  const offPlanes = cursor;
+  const planes = [
+    [0, 0, -1, -minZ],
+    [0, 0, 1, maxZ],
+    [1, 0, 0, maxX],
+    [-1, 0, 0, -minX],
+    [0, 1, 0, maxY],
+    [0, -1, 0, -minY]
+  ];
+  for (let i = 0; i < 6; i++) {
+    targetBuf.writeFloatLE(planes[i][0], cursor + 0);
+    targetBuf.writeFloatLE(planes[i][1], cursor + 4);
+    targetBuf.writeFloatLE(planes[i][2], cursor + 8);
+    targetBuf.writeFloatLE(planes[i][3], cursor + 12);
+    cursor += 16;
+  }
+  const offLeaves = cursor;
+  for (let i = 0; i < 6; i++) {
+    targetBuf.writeUInt16LE(0, cursor + 0);
+    targetBuf.writeUInt16LE(1, cursor + 2);
+    targetBuf.writeUInt32LE(i, cursor + 4);
+    cursor += 8;
+  }
+  const offBsp2dRefs = cursor;
+  for (let i = 0; i < 6; i++) {
+    const surfIdx = 5 - i;
+    targetBuf.writeUInt32LE(surfIdx, cursor + 0);
+    targetBuf.writeUInt32LE((2147483648 | surfIdx) >>> 0, cursor + 4);
+    cursor += 8;
+  }
+  const offSurfaces = cursor;
+  const surfaceFirstEdges = [0, 2, 0, 6, 4, 1];
+  for (let i = 0; i < 6; i++) {
+    targetBuf.writeUInt32LE(i, cursor + 0);
+    targetBuf.writeUInt32LE(surfaceFirstEdges[i], cursor + 4);
+    targetBuf.writeUInt8(0, cursor + 8);
+    targetBuf.writeInt8(0, cursor + 9);
+    targetBuf.writeInt16LE(0, cursor + 10);
+    cursor += 12;
+  }
+  const offEdges = cursor;
+  const edges = [
+    [1, 2, 1, 8, 0, 2],
+    [2, 0, 6, 10, 0, 5],
+    [4, 5, 3, 9, 1, 5],
+    [5, 3, 4, 10, 1, 2],
+    [3, 6, 5, 8, 1, 4],
+    [6, 4, 2, 11, 1, 3],
+    [0, 7, 7, 9, 0, 3],
+    [7, 1, 0, 11, 0, 4],
+    [1, 3, 3, 7, 2, 4],
+    [0, 4, 5, 1, 3, 5],
+    [5, 2, 0, 2, 2, 5],
+    [6, 7, 6, 4, 3, 4]
+  ];
+  for (let i = 0; i < 12; i++) {
+    for (let k = 0; k < 6; k++) {
+      targetBuf.writeUInt32LE(edges[i][k], cursor + k * 4);
+    }
+    cursor += 24;
+  }
+  const offVertices = cursor;
+  const verts = [
+    [minX, minY, minZ, 6],
+    [maxX, maxY, minZ, 0],
+    [maxX, minY, minZ, 1],
+    [maxX, maxY, maxZ, 4],
+    [minX, minY, maxZ, 2],
+    [maxX, minY, maxZ, 3],
+    [minX, maxY, maxZ, 5],
+    [minX, maxY, minZ, 7]
+  ];
+  for (let i = 0; i < 8; i++) {
+    targetBuf.writeFloatLE(verts[i][0], cursor + 0);
+    targetBuf.writeFloatLE(verts[i][1], cursor + 4);
+    targetBuf.writeFloatLE(verts[i][2], cursor + 8);
+    targetBuf.writeUInt32LE(verts[i][3], cursor + 12);
+    cursor += 16;
+  }
+  targetBuf.writeUInt32LE(6, structOff + 0);
+  targetBuf.writeUInt32LE(offBsp3dNodes, structOff + 4);
+  targetBuf.writeUInt32LE(6, structOff + 12);
+  targetBuf.writeUInt32LE(offPlanes, structOff + 16);
+  targetBuf.writeUInt32LE(6, structOff + 24);
+  targetBuf.writeUInt32LE(offLeaves, structOff + 28);
+  targetBuf.writeUInt32LE(6, structOff + 36);
+  targetBuf.writeUInt32LE(offBsp2dRefs, structOff + 40);
+  targetBuf.writeUInt32LE(0, structOff + 48);
+  targetBuf.writeUInt32LE(0, structOff + 52);
+  targetBuf.writeUInt32LE(6, structOff + 60);
+  targetBuf.writeUInt32LE(offSurfaces, structOff + 64);
+  targetBuf.writeUInt32LE(12, structOff + 72);
+  targetBuf.writeUInt32LE(offEdges, structOff + 76);
+  targetBuf.writeUInt32LE(8, structOff + 84);
+  targetBuf.writeUInt32LE(offVertices, structOff + 88);
+  return cursor;
+}
+function buildCustomCollisionTag(tagPath, originalIndex, mesh, rig, multiBox = false) {
+  const nodeCount = rig && rig.modelNodeCount > 0 ? rig.modelNodeCount : 1;
+  const boxes = multiBox && mesh.groupBounds.length > 1 && mesh.groupBounds.length <= 8 ? mesh.groupBounds : [{ min: mesh.summary.bounds.min, max: mesh.summary.bounds.max }];
+  const bspCount = boxes.length;
+  const offMaterials = 664;
+  const offRegions = offMaterials + 72;
+  const offPermutations = offRegions + 84;
+  const offSpheres = offPermutations + 32;
+  const offNodes = offSpheres + 32;
+  const offBsps = offNodes + nodeCount * 64;
+  const offBspArrays = offBsps + bspCount * 96;
+  const totalSize = offBspArrays + bspCount * 752;
+  const buf = Buffer.alloc(totalSize, 0);
+  if (rig?.collisionHeaderBuffer && rig.collisionHeaderBuffer.length >= 664) {
+    rig.collisionHeaderBuffer.copy(buf, 0, 0, 556);
+  }
+  writeDependencyField(buf, 16, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 40, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 60, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 76, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 96, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 192, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 208, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 224, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 252, "shdr", NULL_TAG_ID);
+  writeDependencyField(buf, 268, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 284, "snd!", NULL_TAG_ID);
+  buf.writeUInt32LE(1, 556);
+  buf.writeUInt32LE(offMaterials, 560);
+  buf.writeUInt32LE(1, 568);
+  buf.writeUInt32LE(offRegions, 572);
+  buf.writeUInt32LE(0, 580);
+  buf.writeUInt32LE(0, 584);
+  buf.writeFloatLE(mesh.summary.bounds.min[0], 600);
+  buf.writeFloatLE(mesh.summary.bounds.max[0], 604);
+  buf.writeFloatLE(mesh.summary.bounds.min[1], 608);
+  buf.writeFloatLE(mesh.summary.bounds.max[1], 612);
+  buf.writeFloatLE(mesh.summary.bounds.min[2], 616);
+  buf.writeFloatLE(mesh.summary.bounds.max[2], 620);
+  buf.writeUInt32LE(1, 640);
+  buf.writeUInt32LE(offSpheres, 644);
+  buf.writeUInt32LE(nodeCount, 652);
+  buf.writeUInt32LE(offNodes, 656);
+  writeTagString(buf, offMaterials, "metal (solid)");
+  buf.writeUInt32LE(0, offMaterials + 32);
+  buf.writeUInt16LE(9, offMaterials + 36);
+  buf.writeFloatLE(1, offMaterials + 40);
+  buf.writeFloatLE(1, offMaterials + 44);
+  writeTagString(buf, offRegions, "default");
+  writeDependencyField(buf, offRegions + 56, "effe", NULL_TAG_ID);
+  buf.writeUInt32LE(1, offRegions + 72);
+  buf.writeUInt32LE(offPermutations, offRegions + 76);
+  writeTagString(buf, offPermutations, "base");
+  const cx = (mesh.summary.bounds.min[0] + mesh.summary.bounds.max[0]) * 0.5;
+  const cy = (mesh.summary.bounds.min[1] + mesh.summary.bounds.max[1]) * 0.5;
+  const cz = (mesh.summary.bounds.min[2] + mesh.summary.bounds.max[2]) * 0.5;
+  buf.writeInt16LE(0, offSpheres + 0);
+  buf.writeFloatLE(cx, offSpheres + 16);
+  buf.writeFloatLE(cy, offSpheres + 20);
+  buf.writeFloatLE(cz, offSpheres + 24);
+  buf.writeFloatLE(mesh.summary.bounds.radius, offSpheres + 28);
+  for (let i = 0; i < nodeCount; i++) {
+    const nOff = offNodes + i * 64;
+    if (rig && rig.modelNodesBuffer.length >= (i + 1) * 156) {
+      const mOff = i * 156;
+      rig.modelNodesBuffer.copy(buf, nOff, mOff, mOff + 32);
+      const nextSibling = rig.modelNodesBuffer.readInt16LE(mOff + 32);
+      const firstChild = rig.modelNodesBuffer.readInt16LE(mOff + 34);
+      const parent = rig.modelNodesBuffer.readInt16LE(mOff + 36);
+      buf.writeInt16LE(i === 0 ? 0 : -1, nOff + 32);
+      buf.writeInt16LE(parent, nOff + 34);
+      buf.writeInt16LE(nextSibling, nOff + 36);
+      buf.writeInt16LE(firstChild, nOff + 38);
+    } else {
+      writeTagString(buf, nOff, "frame root");
+      buf.writeInt16LE(0, nOff + 32);
+      buf.writeInt16LE(-1, nOff + 34);
+      buf.writeInt16LE(-1, nOff + 36);
+      buf.writeInt16LE(-1, nOff + 38);
+    }
+    if (i === 0) {
+      buf.writeUInt32LE(bspCount, nOff + 52);
+      buf.writeUInt32LE(offBsps, nOff + 56);
+    }
+  }
+  let arrayCursor = offBspArrays;
+  for (let b = 0; b < bspCount; b++) {
+    arrayCursor = writeBoxCollisionBsp(
+      buf,
+      offBsps + b * 96,
+      arrayCursor,
+      boxes[b].min,
+      boxes[b].max
+    );
+  }
+  const dependencies = buildTagDependenciesFromBuffer(
+    buf,
+    "ModelCollisionGeometry",
+    tagPath,
+    /* @__PURE__ */ new Map()
+  );
+  return {
+    originalIndex,
+    group: "model_collision_geometry",
+    path: tagPath,
+    structName: "ModelCollisionGeometry",
+    secondaryClassFourCC: null,
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies,
+    embeddedRawDataAssets: [],
+    embeddedRawDataPatches: [],
+    injectionBlockers: []
+  };
+}
+var OBJECT_GROUP_SPEC = {
+  scenery: {
+    structName: "Scenery",
+    objectTypeEnum: 6,
+    secondaryFourCC: fourCCFromString("obje"),
+    tertiaryFourCC: null
+  },
+  weapon: {
+    structName: "Weapon",
+    objectTypeEnum: 2,
+    secondaryFourCC: fourCCFromString("item"),
+    tertiaryFourCC: fourCCFromString("obje")
+  },
+  vehicle: {
+    structName: "Vehicle",
+    objectTypeEnum: 1,
+    secondaryFourCC: fourCCFromString("unit"),
+    tertiaryFourCC: fourCCFromString("obje")
+  },
+  equipment: {
+    structName: "Equipment",
+    objectTypeEnum: 3,
+    secondaryFourCC: fourCCFromString("item"),
+    tertiaryFourCC: fourCCFromString("obje")
+  }
+};
+function buildCustomRootObjectTag(group, tagPath, originalIndex, mesh, gbxmodelPath, gbxmodelLocalIndex, collisionPath, collisionLocalIndex, templateRootTag, templateDepRemap) {
+  const spec = OBJECT_GROUP_SPEC[group];
+  const resolved = resolveStruct(spec.structName);
+  const cx = (mesh.summary.bounds.min[0] + mesh.summary.bounds.max[0]) * 0.5;
+  const cy = (mesh.summary.bounds.min[1] + mesh.summary.bounds.max[1]) * 0.5;
+  const cz = (mesh.summary.bounds.min[2] + mesh.summary.bounds.max[2]) * 0.5;
+  const radius = mesh.summary.bounds.radius;
+  let buf;
+  if (templateRootTag && templateRootTag.structName === spec.structName && templateRootTag.data.length >= resolved.totalSize) {
+    buf = Buffer.from(templateRootTag.data);
+    buf.writeUInt32LE(0, 368);
+    buf.writeUInt32LE(0, 372);
+    if (spec.structName === "Weapon" && buf.length >= 1264) {
+      buf.writeUInt32LE(0, 1252);
+      buf.writeUInt32LE(0, 1256);
+    }
+  } else {
+    buf = Buffer.alloc(resolved.totalSize, 0);
+    for (const field of resolved.fields) {
+      if (field.def.type === "TagDependency" && !field.def.nonCached) {
+        writeDependencyField(buf, field.offset, "obje", NULL_TAG_ID);
+      }
+    }
+    writeDependencyField(buf, 40, "mod2", gbxmodelLocalIndex);
+    writeDependencyField(buf, 56, "antr", NULL_TAG_ID);
+    writeDependencyField(buf, 112, "coll", collisionLocalIndex);
+    writeDependencyField(buf, 128, "phys", NULL_TAG_ID);
+    writeDependencyField(buf, 144, "shdr", NULL_TAG_ID);
+    writeDependencyField(buf, 160, "effe", NULL_TAG_ID);
+    buf.writeInt16LE(spec.objectTypeEnum, 0);
+    buf.writeFloatLE(1, 28);
+  }
+  buf.writeInt16LE(spec.objectTypeEnum, 0);
+  buf.writeFloatLE(radius, 4);
+  buf.writeFloatLE(cx, 8);
+  buf.writeFloatLE(cy, 12);
+  buf.writeFloatLE(cz, 16);
+  buf.writeFloatLE(radius, 260);
+  writeDependencyField(buf, 40, "mod2", gbxmodelLocalIndex);
+  writeDependencyField(buf, 112, "coll", collisionLocalIndex);
+  const internalMap = /* @__PURE__ */ new Map();
+  internalMap.set(childFieldPath(tagPath, "model"), {
+    group: "gbxmodel",
+    path: gbxmodelPath,
+    localTagIndex: gbxmodelLocalIndex
+  });
+  internalMap.set(childFieldPath(tagPath, "collision model"), {
+    group: "model_collision_geometry",
+    path: collisionPath,
+    localTagIndex: collisionLocalIndex
+  });
+  const dependencies = buildTagDependenciesFromBuffer(
+    buf,
+    spec.structName,
+    tagPath,
+    internalMap,
+    templateDepRemap
+  );
+  return {
+    originalIndex,
+    group,
+    path: tagPath,
+    structName: spec.structName,
+    secondaryClassFourCC: spec.secondaryFourCC,
+    tertiaryClassFourCC: spec.tertiaryFourCC,
+    data: buf,
+    dependencies,
+    embeddedRawDataAssets: [],
+    embeddedRawDataPatches: [],
+    injectionBlockers: []
+  };
+}
+function buildCustomObjectContainer(options) {
+  const cleanPath = options.tagPath.trim().replace(/\//g, "\\").replace(/^\\+|\\+$/g, "").replace(/\.(scenery|weapon|vehicle|equipment|scen|weap|vehi|eqip)$/i, "") || `${options.tagGroup}\\custom\\custom_object`;
+  const leafName = cleanPath.split("\\").pop() || "custom_object";
+  const parentDir = cleanPath.includes("\\") ? cleanPath.slice(0, cleanPath.lastIndexOf("\\")) : cleanPath;
+  const bitmapPath = `${parentDir}\\bitmaps\\${leafName}`;
+  const shaderPath = `${parentDir}\\shaders\\${leafName}`;
+  const gbxmodelPath = cleanPath;
+  const collisionPath = cleanPath;
+  const rootPath = cleanPath;
+  const renderMesh = parseObjMesh(options.objText, options.meshOptions);
+  if (renderMesh.vertices.length === 0 || renderMesh.triangles.length === 0) {
+    throw new Error(renderMesh.summary.message || "OBJ file contains no valid vertices or triangles.");
+  }
+  const collisionMesh = options.collisionObjText ? parseObjMesh(options.collisionObjText, options.meshOptions) : renderMesh;
+  const texture = options.textureRgba ?? renderObjUvTemplateRgba(options.objText, 512, options.meshOptions);
+  const carriedTags = [];
+  let templateRootTag;
+  const oldLocalToNewLocal = /* @__PURE__ */ new Map();
+  if (options.templateExtractedSet && options.templateExtractedSet.tags.length > 0) {
+    const rootOrig = options.templateExtractedSet.rootOriginalIndices[0];
+    for (let i = 0; i < options.templateExtractedSet.tags.length; i++) {
+      const t = options.templateExtractedSet.tags[i];
+      if (t.originalIndex === rootOrig && t.group === options.tagGroup) {
+        templateRootTag = t;
+        continue;
+      }
+      const newLocalIdx = carriedTags.length;
+      oldLocalToNewLocal.set(i, newLocalIdx);
+      carriedTags.push({
+        ...t,
+        data: Buffer.from(t.data),
+        dependencies: t.dependencies.map((d) => ({ ...d }))
+      });
+    }
+    for (const ct of carriedTags) {
+      for (const dep of ct.dependencies) {
+        if (dep.kind === "internal" && dep.localTagIndex !== void 0) {
+          const mapped = oldLocalToNewLocal.get(dep.localTagIndex);
+          if (mapped !== void 0) {
+            dep.localTagIndex = mapped;
+          }
+        }
+      }
+    }
+  }
+  const baseIdx = carriedTags.length;
+  const bitmapLocalIdx = baseIdx + 0;
+  const shaderLocalIdx = baseIdx + 1;
+  const gbxmodelLocalIdx = baseIdx + 2;
+  const collisionLocalIdx = baseIdx + 3;
+  const rootLocalIdx = baseIdx + 4;
+  const maxOrig = carriedTags.reduce((m, t) => Math.max(m, t.originalIndex), 5e4);
+  const bitmapOrigIdx = maxOrig + 1;
+  const shaderOrigIdx = maxOrig + 2;
+  const gbxmodelOrigIdx = maxOrig + 3;
+  const collisionOrigIdx = maxOrig + 4;
+  const rootOrigIdx = maxOrig + 5;
+  const bitmapTag = buildCustomBitmapTag(
+    bitmapPath,
+    bitmapOrigIdx,
+    texture.rgba,
+    texture.width,
+    texture.height,
+    options.bitmapFormat ?? BitmapFormat.A8R8G8B8
+  );
+  const shaderTag = buildCustomShaderModelTag(
+    shaderPath,
+    shaderOrigIdx,
+    bitmapPath,
+    bitmapLocalIdx
+  );
+  const gbxmodelTag = buildCustomGbxmodelTag(
+    gbxmodelPath,
+    gbxmodelOrigIdx,
+    renderMesh,
+    shaderPath,
+    shaderLocalIdx,
+    options.templateRig
+  );
+  const collisionTag = buildCustomCollisionTag(
+    collisionPath,
+    collisionOrigIdx,
+    collisionMesh.triangles.length > 0 ? collisionMesh : renderMesh,
+    options.templateRig,
+    Boolean(options.multiBoxCollision)
+  );
+  const templateDepRemap = /* @__PURE__ */ new Map();
+  if (templateRootTag) {
+    const oldPrefix = `${templateRootTag.path}.`;
+    for (const dep of templateRootTag.dependencies) {
+      if (!dep.fieldPath.startsWith(oldPrefix)) continue;
+      const suffix = dep.fieldPath.slice(oldPrefix.length);
+      if (suffix === "model" || suffix === "collision model") continue;
+      const newFieldPath = `${rootPath}.${suffix}`;
+      if (dep.kind === "internal" && dep.localTagIndex !== void 0) {
+        const mappedLocal = oldLocalToNewLocal.get(dep.localTagIndex);
+        if (mappedLocal !== void 0) {
+          templateDepRemap.set(newFieldPath, {
+            ...dep,
+            fieldPath: newFieldPath,
+            localTagIndex: mappedLocal
+          });
+        }
+      } else if (dep.kind === "external") {
+        templateDepRemap.set(newFieldPath, {
+          ...dep,
+          fieldPath: newFieldPath
+        });
+      }
+    }
+  }
+  const rootObjectTag = buildCustomRootObjectTag(
+    options.tagGroup,
+    rootPath,
+    rootOrigIdx,
+    renderMesh,
+    gbxmodelPath,
+    gbxmodelLocalIdx,
+    collisionPath,
+    collisionLocalIdx,
+    templateRootTag,
+    templateDepRemap
+  );
+  const allTags = [
+    ...carriedTags,
+    bitmapTag,
+    shaderTag,
+    gbxmodelTag,
+    collisionTag,
+    rootObjectTag
+  ];
+  const warnings = [
+    ...options.templateExtractedSet?.warnings ?? [],
+    {
+      originalIndex: bitmapOrigIdx,
+      path: bitmapPath,
+      group: "bitmap",
+      kind: "embeddedRawData",
+      message: `Embedded custom bitmap pixel data (${bitmapTag.embeddedRawDataAssets[0]?.data.length ?? 0} bytes).`
+    }
+  ];
+  const tagSet = {
+    rootOriginalIndices: [rootOrigIdx],
+    tags: allTags,
+    notExtracted: [],
+    warnings
+  };
+  const displayName = options.itemName?.trim() || leafName.replace(/[_-]+/g, " ");
+  const containerBuffer = serializeContainer(
+    tagSet,
+    options.sourceMapName || "custom_object_builder",
+    {},
+    {
+      itemName: displayName,
+      displayName,
+      itemNames: { [rootOrigIdx]: displayName }
+    }
+  );
+  const container = deserializeContainer(containerBuffer);
+  return {
+    container,
+    containerBuffer,
+    meshSummary: renderMesh.summary,
+    usedAutoUv: renderMesh.usedAutoUv,
+    rootTagPath: rootPath,
+    rootTagGroup: options.tagGroup,
+    generatedTagPaths: [
+      { group: "bitmap", path: bitmapPath },
+      { group: "shader_model", path: shaderPath },
+      { group: "gbxmodel", path: gbxmodelPath },
+      { group: "model_collision_geometry", path: collisionPath },
+      { group: options.tagGroup, path: rootPath }
+    ]
+  };
 }
 
 // ../core/src/map/write-map.ts
@@ -46320,6 +47707,15 @@ function runPlanInject(task) {
     progress(task.requestId, "Reading container file", 10);
     const containerBuffer = fs2.readFileSync(task.containerPath);
     const container = deserializeContainer(containerBuffer);
+    const hydrateRes = openConversionResources({
+      bitmaps: task.fallbackPcResourcePaths?.bitmaps ?? task.resourceMapPaths?.bitmaps,
+      sounds: task.fallbackPcResourcePaths?.sounds ?? task.resourceMapPaths?.sounds
+    });
+    try {
+      hydrateExternalRawDataInContainer(container, hydrateRes.files);
+    } finally {
+      hydrateRes.close();
+    }
     progress(task.requestId, "Checking configured resource maps", 40);
     const resourceMapConfig = {};
     for (const kind of ["bitmaps", "sounds", "loc"]) {
@@ -46888,13 +48284,27 @@ function runReplaceSound(task) {
     const wavFileBuf = fs2.readFileSync(task.inputPath);
     const decodedWav = decodeWavToPcm(wavFileBuf);
     const externalSounds = getSoundsBuffer(task.soundsPath);
+    const tagSummary = inspectSoundTag(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      externalSounds
+    );
+    const conformedPcm = conformPcmToSoundTag(
+      decodedWav.pcmSamples,
+      decodedWav.channels,
+      decodedWav.sampleRate,
+      tagSummary.channelCount,
+      tagSummary.sampleRate
+    );
     let chosenFormat = task.targetFormat ?? 1 /* XboxADPCM */;
     let newSamples;
     if (chosenFormat === 1 /* XboxADPCM */) {
-      newSamples = encodeXboxAdpcmMono(decodedWav.pcmSamples);
+      newSamples = tagSummary.channelCount === 2 ? encodeXboxAdpcmStereo(conformedPcm) : encodeXboxAdpcmMono(conformedPcm);
     } else {
       chosenFormat = 0 /* PCM16 */;
-      newSamples = new Uint8Array(decodedWav.pcmSamples.buffer, decodedWav.pcmSamples.byteOffset, decodedWav.pcmSamples.byteLength);
+      newSamples = new Uint8Array(conformedPcm.buffer, conformedPcm.byteOffset, conformedPcm.byteLength);
     }
     const updatedBuffer = replaceSoundPermutationData(
       currentMap.buffer,
@@ -47223,6 +48633,151 @@ async function runPerformBspSwap(task) {
     handleTaskError(task.requestId, err);
   }
 }
+function runBuildCustomObjectTag(task) {
+  const req = task.request;
+  const needsInject = req.outputMode === "inject" || req.outputMode === "both";
+  if (needsInject && !currentMap) {
+    return sendError(task.requestId, "NO_MAP_LOADED", "No map is open to inject into.");
+  }
+  const resources = openConversionResources({
+    bitmaps: task.resourceMapPaths?.bitmaps,
+    sounds: task.resourceMapPaths?.sounds
+  });
+  try {
+    progress(task.requestId, "Reading 3D mesh (.obj)...", 10);
+    if (!fs2.existsSync(req.objFilePath)) {
+      return sendError(task.requestId, "FILE_NOT_FOUND", `3D model file not found: ${req.objFilePath}`);
+    }
+    const objText = fs2.readFileSync(req.objFilePath, "utf8");
+    let collisionObjText;
+    if (req.collisionObjFilePath && fs2.existsSync(req.collisionObjFilePath)) {
+      collisionObjText = fs2.readFileSync(req.collisionObjFilePath, "utf8");
+    }
+    let textureRgba;
+    if (req.textureFilePath && fs2.existsSync(req.textureFilePath)) {
+      progress(task.requestId, "Decoding UV texture...", 25);
+      const texBuf = fs2.readFileSync(req.textureFilePath);
+      if (texBuf.length > 128 && texBuf.readUInt32LE(0) === 542327876) {
+        const height = texBuf.readUInt32LE(12);
+        const width = texBuf.readUInt32LE(16);
+        const fourCC = texBuf.toString("ascii", 84, 88);
+        const payload = texBuf.subarray(128);
+        let rgba;
+        if (fourCC === "DXT1") rgba = decodeDxt1(payload, 0, width, height);
+        else if (fourCC === "DXT3") rgba = decodeDxt3(payload, 0, width, height);
+        else if (fourCC === "DXT5") rgba = decodeDxt5(payload, 0, width, height);
+        else {
+          rgba = new Uint8Array(width * height * 4);
+          for (let i = 0; i + 3 < payload.length && i + 3 < rgba.length; i += 4) {
+            rgba[i + 0] = payload[i + 2];
+            rgba[i + 1] = payload[i + 1];
+            rgba[i + 2] = payload[i + 0];
+            rgba[i + 3] = payload[i + 3];
+          }
+        }
+        textureRgba = { rgba, width, height };
+      } else {
+        textureRgba = decodePngToRgba(texBuf);
+      }
+    }
+    let templateExtractedSet;
+    let templateRig;
+    if (req.templateTagIndex !== void 0 && req.templateTagIndex >= 0 && currentMap) {
+      progress(task.requestId, "Reading base template tag from open map...", 45);
+      templateExtractedSet = extractTagSet(
+        currentMap.buffer,
+        currentMap.header,
+        currentMap.tagIndex,
+        [req.templateTagIndex],
+        {
+          resourceFiles: resources.files,
+          captureGbxmodelRawData: true
+        }
+      );
+      templateRig = extractTemplateRigFromMap(
+        currentMap.buffer,
+        currentMap.header,
+        currentMap.tagIndex,
+        req.templateTagIndex
+      );
+    }
+    progress(task.requestId, "Compiling GBXModel, 3D Collision BSP, Shader & Bitmap...", 65);
+    const built = buildCustomObjectContainer({
+      tagGroup: req.tagGroup,
+      tagPath: req.tagPath,
+      itemName: req.itemName,
+      objText,
+      collisionObjText,
+      meshOptions: {
+        scale: req.scale,
+        flipYz: req.flipYz,
+        centerOrigin: req.centerOrigin,
+        forceAutoUv: req.forceAutoUv
+      },
+      textureRgba,
+      multiBoxCollision: req.multiBoxCollision,
+      templateExtractedSet,
+      templateRig,
+      sourceMapName: currentMap ? path2.basename(currentMap.filePath, ".map") : "custom_object_builder"
+    });
+    if ((req.outputMode === "ocetags" || req.outputMode === "both") && req.outputOceTagsPath) {
+      progress(task.requestId, "Saving .ocetags file...", 80);
+      const dir = path2.dirname(req.outputOceTagsPath);
+      if (!fs2.existsSync(dir)) fs2.mkdirSync(dir, { recursive: true });
+      fs2.writeFileSync(req.outputOceTagsPath, built.containerBuffer);
+    }
+    let injectedIntoMap = false;
+    if (needsInject && currentMap) {
+      progress(task.requestId, "Injecting compiled object tags into open map...", 90);
+      const planResult = planAddInjection(
+        currentMap,
+        built.container,
+        {},
+        { allowEmbeddedRelocation: true }
+      );
+      if (planResult.kind === "refused") {
+        return sendError(task.requestId, "INJECT_REFUSED", planResult.reason);
+      }
+      if (planResult.blockedOther.length > 0 || planResult.blockedEmbedded.length > 0) {
+        const reasons = [...planResult.blockedOther, ...planResult.blockedEmbedded].flatMap((b) => b.reasons).join("; ");
+        return sendError(task.requestId, "INJECT_BLOCKED", `Tag injection blocked: ${reasons}`);
+      }
+      const nextBuffer = applyAddInjection(
+        currentMap.buffer,
+        currentMap.header,
+        currentMap.tagIndex,
+        built.container,
+        planResult,
+        { allowEmbeddedRelocation: true }
+      );
+      const reInspected = inspectCustomEditionMap(nextBuffer);
+      if (reInspected.status !== "ok") {
+        return sendError(task.requestId, "REINSPECT_FAILED", "Failed to re-inspect map after injecting custom object.");
+      }
+      modelGeometryCache.clear();
+      currentMap.buffer = nextBuffer;
+      currentMap.header = reInspected.header;
+      currentMap.tagIndex = reInspected.tagIndex;
+      currentMap.modified = true;
+      injectedIntoMap = true;
+    }
+    progress(task.requestId, "Done", 100);
+    sendResult(task.requestId, {
+      ok: true,
+      rootTagPath: built.rootTagPath,
+      rootTagGroup: built.rootTagGroup,
+      generatedTagPaths: built.generatedTagPaths,
+      usedAutoUv: built.usedAutoUv,
+      injectedIntoMap,
+      outputOceTagsPath: req.outputOceTagsPath,
+      map: currentMap ? summarizeOpenMap(currentMap) : void 0
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  } finally {
+    resources.close();
+  }
+}
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
     if (task.type === "cancel") {
@@ -47274,6 +48829,7 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "replaceSound") runReplaceSound(task);
     else if (task.type === "exportModel3d") runExportModel3d(task);
     else if (task.type === "exportBsp3d") runExportBsp3d(task);
+    else if (task.type === "buildCustomObjectTag") runBuildCustomObjectTag(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -47298,6 +48854,7 @@ try {
   runApplyInject,
   runBatchExtract,
   runBspSwapPreflight,
+  runBuildCustomObjectTag,
   runConvertMap,
   runConvertPreflight,
   runDeleteScenarioPlacement,
