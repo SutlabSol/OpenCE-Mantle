@@ -413,6 +413,19 @@ export default function App() {
             />
             <CenterWorkspace
               header={mapState.header}
+              onSelectObjectTag={(tagId, objectPath) => {
+                if (mapState?.status !== 'ok') return;
+                const target =
+                  mapState.tags.find((t) => t.tagId === tagId) ??
+                  mapState.tags.find((t) => (t.tagId & 0xffff) === (tagId & 0xffff)) ??
+                  (objectPath
+                    ? mapState.tags.find((t) => t.path.toLowerCase() === objectPath.toLowerCase())
+                    : undefined);
+                if (target) {
+                  setFocusedTag(target);
+                  setSelectedTagIndices(new Set([target.index]));
+                }
+              }}
               onOpenTagEditor={(tagIndexOrPath) => {
                 if (mapState?.status !== 'ok') return;
                 const target =

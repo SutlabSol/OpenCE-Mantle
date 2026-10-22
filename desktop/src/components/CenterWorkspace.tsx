@@ -8,9 +8,11 @@ type Tab = 'overview' | 'viewport' | 'tag-test';
 
 export default function CenterWorkspace({
   header,
+  onSelectObjectTag,
   onOpenTagEditor,
 }: {
   header: MapHeaderSummary;
+  onSelectObjectTag?: (tagId: number, objectPath: string) => void;
   onOpenTagEditor?: (tagIndexOrPath: number | string) => void;
 }) {
   const [tab, setTab] = useState<Tab>('overview');
@@ -70,7 +72,12 @@ export default function CenterWorkspace({
       {tab === 'overview' ? (
         <MapInfoPanel header={header} />
       ) : tab === 'viewport' ? (
-        <ScenarioViewport key={`${header.scenarioName}-${header.crc32}`} header={header} />
+        <ScenarioViewport
+          key={`${header.scenarioName}-${header.crc32}`}
+          header={header}
+          onSelectObjectTag={onSelectObjectTag}
+          onOpenTagEditor={onOpenTagEditor}
+        />
       ) : (
         <TagTestPanel onOpenTagEditor={onOpenTagEditor} />
       )}

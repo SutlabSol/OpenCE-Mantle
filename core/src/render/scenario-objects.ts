@@ -34,6 +34,8 @@ export interface ScenarioObjectPlacement {
   nameIndex: number;
   /** Tag ID of the object tag (vehi, scen, bipd, weap, etc.), or 0xFFFFFFFF if spawn/trigger/camera. */
   objectTagId: number;
+  /** For netgame equipment (itmc), the underlying resolved weapon/equipment tag ID if available. */
+  resolvedItemTagId?: number;
   /** Human-readable path of the object tag, or entity description. */
   objectPath: string;
   /** Tag ID of the 3D model tag (`gbxmodel`/`mod2`), or 0xFFFFFFFF if none. */
@@ -774,6 +776,7 @@ export function extractScenarioPlacements(
       const itemCollDep = item.get('item collection');
       const itmcTagId = itemCollDep && itemCollDep.kind === 'dependency' ? itemCollDep.value.tagId : 0xffffffff;
       const itmcEntry = itmcTagId !== 0xffffffff ? tagIndex.entries[itmcTagId & 0xffff] : undefined;
+      const resolvedItemTagId = resolveItemCollectionItemTagId(buffer, header, tagIndex, itmcTagId);
       const modelTagId = resolveItemCollectionModelTagId(buffer, header, tagIndex, itmcTagId);
 
       const isWeapon = itmcTagId !== 0xffffffff && getItemCollectionCategory(buffer, header, tagIndex, itmcTagId) === 'weapon';
@@ -790,6 +793,7 @@ export function extractScenarioPlacements(
         paletteIndex: palIdx >= 0 ? palIdx : 0,
         nameIndex: -1,
         objectTagId: itmcTagId,
+        resolvedItemTagId: resolvedItemTagId !== 0xffffffff ? resolvedItemTagId : undefined,
         objectPath: itmcEntry ? itmcEntry.path : 'Netgame Equipment',
         modelTagId,
         position: pos,

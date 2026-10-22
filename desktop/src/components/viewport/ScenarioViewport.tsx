@@ -29,6 +29,8 @@ export interface VisibleLayers {
 export interface ScenarioViewportProps {
   header: MapHeaderSummary;
   bspIndex?: number;
+  onSelectObjectTag?: (tagId: number, objectPath: string) => void;
+  onOpenTagEditor?: (tagIndexOrPath: number | string) => void;
 }
 
 function isWebGLAvailable(): boolean {
@@ -132,7 +134,7 @@ class LocalBoxHelper extends THREE.LineSegments {
   }
 }
 
-export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewportProps) {
+export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectTag, onOpenTagEditor }: ScenarioViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -340,6 +342,20 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     if (!selectedObjectId || !scenarioData) return null;
     return scenarioData.objects.find((o) => o.id === selectedObjectId) || null;
   }, [selectedObjectId, scenarioData]);
+
+  // Synchronize 3D viewport object selection with the main Tag Browser & Properties/Swapper/References Palette
+  useEffect(() => {
+    if (!selectedPlacement || !onSelectObjectTag) return;
+    const targetTagId =
+      selectedPlacement.resolvedItemTagId !== undefined && selectedPlacement.resolvedItemTagId !== 0xffffffff
+        ? selectedPlacement.resolvedItemTagId
+        : selectedPlacement.objectTagId !== 0xffffffff
+          ? selectedPlacement.objectTagId
+          : scenarioData?.scenarioTagId ?? 0xffffffff;
+    if (targetTagId !== 0xffffffff) {
+      onSelectObjectTag(targetTagId, selectedPlacement.objectPath);
+    }
+  }, [selectedPlacement, scenarioData?.scenarioTagId, onSelectObjectTag]);
 
   // Frame scene (center camera on world bounds)
   const frameScene = useCallback((bounds?: [number, number, number, number, number, number]) => {
