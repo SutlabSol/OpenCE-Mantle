@@ -282,7 +282,13 @@ function embeddedWarningMessages(container: OceContainer): Map<number, string[]>
 /** local container index -> how many embedded bitmap/sound patches this container actually captured for that tag (0 for v1/v2 containers, or a v3 capture that failed validation - see `tag-extractor.ts`). */
 function embeddedCapturedCounts(container: OceContainer): Map<number, number> {
   const byOriginal = new Map<number, number>();
-  for (const t of container.tags) byOriginal.set(t.originalIndex, t.embeddedRawDataPatches?.length ?? 0);
+  for (const t of container.tags) {
+    const count = (t.embeddedRawDataPatches ?? []).filter((p) => {
+      const kind = t.embeddedRawDataAssets?.[p.assetIndex]?.kind;
+      return kind === 'bitmap' || kind === 'sound';
+    }).length;
+    byOriginal.set(t.originalIndex, count);
+  }
   return byOriginal;
 }
 
@@ -952,7 +958,11 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   }
   if (!options.allowEmbeddedRelocation) {
     for (const t of writeTags) {
-      if (t.embeddedRawDataPatches && t.embeddedRawDataPatches.length > 0) {
+      const hasBitmapOrSoundPatch = (t.embeddedRawDataPatches ?? []).some((p) => {
+        const kind = t.embeddedRawDataAssets?.[p.assetIndex]?.kind;
+        return kind === 'bitmap' || kind === 'sound';
+      });
+      if (hasBitmapOrSoundPatch) {
         throw new Error(`Internal error: "${t.path}" reached applyInjection() with embedded raw data to relocate, but allowEmbeddedRelocation is false - planInjection() should have blocked it.`);
       }
     }
@@ -1035,14 +1045,17 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   targetBuffer.copy(out, 0, 0, insertPos);
 
   // 2. Insert embedded blob if any (before modelDataFileOffset)
-  const assetAbsoluteOffsets: number[][] = writeTags.map(() => []);
+  const assetAbsoluteOffsets: Map<number, number>[] = writeTags.map(() => new Map<number, number>());
   if (insertSize > 0) {
     let cursor = insertPos;
     for (let i = 0; i < writeTags.length; i++) {
-      for (const asset of (writeTags[i].embeddedRawDataAssets ?? []).filter((a) => a.kind === 'bitmap' || a.kind === 'sound')) {
+      const assets = writeTags[i].embeddedRawDataAssets ?? [];
+      for (let assetIdx = 0; assetIdx < assets.length; assetIdx++) {
+        const asset = assets[assetIdx];
+        if (asset.kind !== 'bitmap' && asset.kind !== 'sound') continue;
         const bytes = Buffer.from(asset.data, 'base64');
         bytes.copy(out, cursor);
-        assetAbsoluteOffsets[i].push(cursor);
+        assetAbsoluteOffsets[i].set(assetIdx, cursor);
         cursor += bytes.length;
       }
     }
@@ -1140,7 +1153,10 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   // `embedded-data-fields.ts`). Must run AFTER the struct-data copies above.
   for (let i = 0; i < writeTags.length; i++) {
     for (const patch of writeTags[i].embeddedRawDataPatches ?? []) {
-      out.writeUInt32LE(assetAbsoluteOffsets[i][patch.assetIndex], structOffsets[i] + laidOut[i].mapOffset(patch.patchOffset));
+      const newAbsOffset = assetAbsoluteOffsets[i].get(patch.assetIndex);
+      if (newAbsOffset !== undefined) {
+        out.writeUInt32LE(newAbsOffset, structOffsets[i] + laidOut[i].mapOffset(patch.patchOffset));
+      }
     }
   }
 

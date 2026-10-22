@@ -103,7 +103,11 @@ const api: OpenceApi = {
   pickExport3dPath: (defaultName: string, format: 'obj' | 'glb') =>
     ipcRenderer.invoke('dialog:pickExport3dPath', defaultName, format),
   pickObjFile: () => ipcRenderer.invoke('dialog:pickObjFile'),
-  analyzeCollisionObj: (filePath?: string) => ipcRenderer.invoke('collision:analyzeObj', filePath),
+  analyzeCollisionObj: (filePath?: string, options?: { scale?: number; flipYz?: boolean; centerOrigin?: boolean; forceAutoUv?: boolean }) =>
+    ipcRenderer.invoke('collision:analyzeObj', filePath, options),
+  exportUvTemplate: (options) => ipcRenderer.invoke('objectBuilder:exportUvTemplate', options),
+  pickSaveOceTagsPath: (defaultName: string) => ipcRenderer.invoke('objectBuilder:pickSaveOceTagsPath', defaultName),
+  buildCustomObjectTag: (request) => ipcRenderer.invoke('objectBuilder:build', request),
   pickExportDirectory: () => ipcRenderer.invoke('dialog:pickExportDirectory'),
   exportModel3d: (modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     ipcRenderer.invoke('3d:exportModel', modelTagId, lod, format, outputPath),

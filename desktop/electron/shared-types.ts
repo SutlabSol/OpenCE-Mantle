@@ -585,7 +585,53 @@ export type WorkerRequest =
   | { type: 'replaceSound'; requestId: string; tagIndex: number; pitchRangeIndex: number; permutationIndex: number; inputPath: string; targetFormat?: number; soundsPath?: string }
   | { type: 'exportModel3d'; requestId: string; modelTagId: number; lod?: number; format: 'obj' | 'glb'; outputPath: string }
   | { type: 'exportBsp3d'; requestId: string; bspIndex: number; format: 'obj' | 'glb'; outputPath: string }
+  | {
+      type: 'buildCustomObjectTag';
+      requestId: string;
+      request: BuildCustomObjectRequest;
+      resourceMapPaths?: Partial<Record<ResourceMapKind, string>>;
+    }
   | { type: 'cancel'; requestId: string };
+
+export type CustomObjectTagGroup = 'scenery' | 'weapon' | 'vehicle' | 'equipment';
+
+export interface BuildCustomObjectRequest {
+  tagGroup: CustomObjectTagGroup;
+  tagPath: string;
+  itemName?: string;
+  objFilePath: string;
+  collisionObjFilePath?: string;
+  textureFilePath?: string;
+  scale?: number;
+  flipYz?: boolean;
+  centerOrigin?: boolean;
+  forceAutoUv?: boolean;
+  multiBoxCollision?: boolean;
+  templateTagIndex?: number;
+  outputMode: 'inject' | 'ocetags' | 'both';
+  outputOceTagsPath?: string;
+}
+
+export interface BuildCustomObjectSuccess {
+  ok: true;
+  rootTagPath: string;
+  rootTagGroup: CustomObjectTagGroup;
+  generatedTagPaths: { group: string; path: string }[];
+  usedAutoUv: boolean;
+  injectedIntoMap: boolean;
+  outputOceTagsPath?: string;
+  map?: OpenMapSummary;
+}
+
+export type BuildCustomObjectResult = BuildCustomObjectSuccess | { ok: false; code: string; message: string };
+
+export interface ExportUvTemplateResult {
+  ok: boolean;
+  outputPath?: string;
+  usedAutoUv?: boolean;
+  previewDataUrl?: string;
+  error?: string;
+}
 
 export type GetReferencingTagsResult =
   | { ok: true; referencingTags: ReferencingTagSummary[] }
@@ -863,7 +909,18 @@ export interface OpenceApi {
   exportBsp3d(bspIndex: number, format: 'obj' | 'glb', outputPath: string): Promise<Export3dResult>;
   pickExport3dPath(defaultName: string, format: 'obj' | 'glb'): Promise<{ path: string | null; format?: 'obj' | 'glb' }>;
   pickObjFile(): Promise<{ path: string | null }>;
-  analyzeCollisionObj(filePath?: string): Promise<{ ok: boolean; summary?: any; filePath?: string; error?: string }>;
+  analyzeCollisionObj(filePath?: string, options?: { scale?: number; flipYz?: boolean; centerOrigin?: boolean; forceAutoUv?: boolean }): Promise<{ ok: boolean; summary?: any; filePath?: string; error?: string }>;
+  exportUvTemplate(options: {
+    objFilePath: string;
+    size?: number;
+    scale?: number;
+    flipYz?: boolean;
+    centerOrigin?: boolean;
+    forceAutoUv?: boolean;
+    previewOnly?: boolean;
+  }): Promise<ExportUvTemplateResult>;
+  buildCustomObjectTag(request: BuildCustomObjectRequest): Promise<BuildCustomObjectResult>;
+  pickSaveOceTagsPath(defaultName: string): Promise<{ path: string | null }>;
   pickExportDirectory(): Promise<{ path: string | null }>;
   tagTestSetAlwaysOnTop(flag: boolean): Promise<void>;
   tagTestIsAlwaysOnTop(): Promise<boolean>;

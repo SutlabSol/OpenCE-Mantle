@@ -12,6 +12,7 @@ import {
   OCETAGS_FORMAT_VERSION,
   readResourceTable,
   parseAndAnalyzeObj,
+  renderObjUvTemplatePng,
   type RandomAccessFile,
 } from '../../core/src/index';
 import { getRecentMaps, addRecentMap } from './recent-maps';
@@ -92,6 +93,9 @@ import type {
   GetSoundWavResult,
   ExportSoundResult,
   ReplaceSoundResult,
+  BuildCustomObjectRequest,
+  BuildCustomObjectResult,
+  ExportUvTemplateResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -1476,7 +1480,10 @@ async function pickObjFileFlow(): Promise<{ path: string | null }> {
   return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
 
-async function analyzeCollisionObjFlow(filePath?: string) {
+async function analyzeCollisionObjFlow(
+  filePath?: string,
+  options?: { scale?: number; flipYz?: boolean; centerOrigin?: boolean; forceAutoUv?: boolean },
+) {
   try {
     let p = filePath;
     if (!p) {
@@ -1485,10 +1492,107 @@ async function analyzeCollisionObjFlow(filePath?: string) {
       p = picked.path;
     }
     const text = fs.readFileSync(p, 'utf8');
-    const summary = parseAndAnalyzeObj(text);
+    const summary = parseAndAnalyzeObj(text, options);
     return { ok: true, summary, filePath: p };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function exportUvTemplateFlow(options: {
+  objFilePath: string;
+  size?: number;
+  scale?: number;
+  flipYz?: boolean;
+  centerOrigin?: boolean;
+  forceAutoUv?: boolean;
+  previewOnly?: boolean;
+}): Promise<ExportUvTemplateResult> {
+  try {
+    if (!options.objFilePath || !fs.existsSync(options.objFilePath)) {
+      return { ok: false, error: 'Select a valid .obj model file first.' };
+    }
+    const objText = fs.readFileSync(options.objFilePath, 'utf8');
+    const size = options.size ?? (options.previewOnly ? 512 : 1024);
+    const { pngBuffer, usedAutoUv } = renderObjUvTemplatePng(objText, size, {
+      scale: options.scale,
+      flipYz: options.flipYz,
+      centerOrigin: options.centerOrigin,
+      forceAutoUv: options.forceAutoUv,
+    });
+    const previewDataUrl = `data:image/png;base64,${pngBuffer.toString('base64')}`;
+
+    if (options.previewOnly) {
+      return { ok: true, usedAutoUv, previewDataUrl };
+    }
+
+    if (!mainWindow) return { ok: false, error: 'Application window is not available.' };
+    const baseName = path.basename(options.objFilePath, path.extname(options.objFilePath));
+    const defaultPath = path.join(path.dirname(options.objFilePath), `${baseName}_uv_template.png`);
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save UV Template Image (.png)',
+      defaultPath,
+      filters: [{ name: 'PNG Image (*.png)', extensions: ['png'] }],
+    });
+    if (canceled || !filePath) {
+      return { ok: false, error: 'Cancelled' };
+    }
+    fs.writeFileSync(filePath, pngBuffer);
+    sendLog('info', `Saved UV wireframe template to ${filePath}`);
+    return { ok: true, outputPath: filePath, usedAutoUv, previewDataUrl };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function pickSaveOceTagsPathFlow(defaultName: string): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const settings = getSettings();
+  const baseDir = settings.lastExtractDir ?? (currentMapPath ? path.dirname(currentMapPath) : app.getPath('documents'));
+  const cleanFile = defaultName.endsWith(OCETAGS_EXTENSION) ? defaultName : `${defaultName}${OCETAGS_EXTENSION}`;
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Custom Object Tag Set (.ocetags)',
+    defaultPath: path.join(baseDir, cleanFile),
+    filters: [{ name: 'OpenCE Tag Set (*.ocetags)', extensions: ['ocetags'] }],
+  });
+  if (canceled || !filePath) return { path: null };
+  setLastExtractDir(path.dirname(filePath));
+  return { path: filePath };
+}
+
+async function buildCustomObjectTagFlow(request: BuildCustomObjectRequest): Promise<BuildCustomObjectResult> {
+  const settings = getSettings();
+  const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {};
+  if (currentMapPath) {
+    const resolved = resolveResourceMapsForSource(currentMapPath);
+    Object.assign(resourceMapPaths, resolved.resourceMapPaths);
+  }
+  for (const kind of ['bitmaps', 'sounds', 'loc'] as ResourceMapKind[]) {
+    const p = settings.resourceMaps[kind];
+    if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
+  }
+
+  sendLog('info', `Building custom ${request.tagGroup} tag "${request.tagPath}" from ${path.basename(request.objFilePath)}...`);
+  const { promise } = sendWorkerRequest<BuildCustomObjectResult>(
+    { type: 'buildCustomObjectTag', request, resourceMapPaths },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'buildCustomObjectTag', stage, percent }),
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      if (result.injectedIntoMap && result.map) {
+        setOpenMapState(result.map);
+        sendLog('info', `Built and injected custom ${result.rootTagGroup} tag "${result.rootTagPath}" (${result.generatedTagPaths.length} tags) into the open map. Use File > Save to write changes.`);
+      } else if (result.outputOceTagsPath) {
+        sendLog('info', `Built and saved custom ${result.rootTagGroup} tag "${result.rootTagPath}" to ${result.outputOceTagsPath}.`);
+      }
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to build custom object tag: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
   }
 }
 
@@ -2214,6 +2318,7 @@ function buildMenu() {
         { label: 'Recompress Map', click: () => recompressFlow() },
         { type: 'separator' },
         { label: 'Extract to OpenCE Forge...', click: () => mainWindow?.webContents.send('menu:action', 'extract-to-forge') },
+        { label: 'Build New Object Tag...', click: () => mainWindow?.webContents.send('menu:action', 'build-object-tag') },
         { label: 'Extract Tags...', accelerator: 'CmdOrCtrl+E', click: () => mainWindow?.webContents.send('menu:action', 'extract-tags') },
         { label: 'Extract Whole Map...', click: () => mainWindow?.webContents.send('menu:action', 'extract-whole-map') },
         { label: 'Inject Tags...', click: () => mainWindow?.webContents.send('menu:action', 'inject-tags') },
@@ -2369,7 +2474,20 @@ app.whenReady().then(() => {
   ipcMain.handle('dialog:pickExport3dPath', (_e, defaultName: string, format: 'obj' | 'glb') => pickExport3dPathFlow(defaultName, format));
   ipcMain.handle('dialog:pickExportDirectory', () => pickExportDirectoryFlow());
   ipcMain.handle('dialog:pickObjFile', () => pickObjFileFlow());
-  ipcMain.handle('collision:analyzeObj', (_e, filePath?: string) => analyzeCollisionObjFlow(filePath));
+  ipcMain.handle('collision:analyzeObj', (_e, filePath?: string, options?: { scale?: number; flipYz?: boolean; centerOrigin?: boolean; forceAutoUv?: boolean }) =>
+    analyzeCollisionObjFlow(filePath, options),
+  );
+  ipcMain.handle('objectBuilder:exportUvTemplate', (_e, options: {
+    objFilePath: string;
+    size?: number;
+    scale?: number;
+    flipYz?: boolean;
+    centerOrigin?: boolean;
+    forceAutoUv?: boolean;
+    previewOnly?: boolean;
+  }) => exportUvTemplateFlow(options));
+  ipcMain.handle('objectBuilder:pickSaveOceTagsPath', (_e, defaultName: string) => pickSaveOceTagsPathFlow(defaultName));
+  ipcMain.handle('objectBuilder:build', (_e, request: BuildCustomObjectRequest) => buildCustomObjectTagFlow(request));
   ipcMain.handle('3d:exportModel', (_e, modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     exportModel3dFlow(modelTagId, lod, format, outputPath),
   );

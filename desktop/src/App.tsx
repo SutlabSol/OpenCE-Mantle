@@ -27,6 +27,7 @@ import BatchExtractDialog from './components/BatchExtractDialog';
 import ConfigureResourcesPromptDialog from './components/ConfigureResourcesPromptDialog';
 import BspSwapperDialog from './components/BspSwapperDialog';
 import OpenCeForgeExportDialog from './components/OpenCeForgeExportDialog';
+import BuildObjectTagDialog from './components/BuildObjectTagDialog';
 import type { BatchExtractPreflightResult, HaloBitmapVersion } from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
@@ -44,6 +45,7 @@ export default function App() {
   const [batchExtractPreflight, setBatchExtractPreflight] = useState<BatchExtractPreflightResult | null>(null);
   const [bspSwapperOpen, setBspSwapperOpen] = useState(false);
   const [forgeExportOpen, setForgeExportOpen] = useState(false);
+  const [buildObjectTagOpen, setBuildObjectTagOpen] = useState(false);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
@@ -112,6 +114,7 @@ export default function App() {
       else if (action === 'verify-embedded-data') setVerifyDialogOpen(true);
       else if (action === 'swap-bsp') setBspSwapperOpen(true);
       else if (action === 'extract-to-forge') setForgeExportOpen(true);
+      else if (action === 'build-object-tag') setBuildObjectTagOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
       else if (action === 'convert-map') setConvertSource('pick');
       else if (action.startsWith('identify-bitmaps:')) {
@@ -354,6 +357,7 @@ export default function App() {
             label: 'Tools',
             items: [
               { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
+              { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
               { label: '', separator: true },
@@ -520,6 +524,25 @@ export default function App() {
           allTags={mapState.tags}
           initiallySelectedIndices={Array.from(selectedTagIndices)}
           log={log}
+        />
+      )}
+
+      {buildObjectTagOpen && (
+        <BuildObjectTagDialog
+          open={buildObjectTagOpen}
+          onClose={() => setBuildObjectTagOpen(false)}
+          allTags={mapState?.status === 'ok' ? mapState.tags : []}
+          canInjectIntoOpenMap={mapState?.status === 'ok'}
+          onSelectInjectedTag={(newTagPath, newGroup) => {
+            if (mapState?.status !== 'ok') return;
+            const found = mapState.tags.find(
+              (t) => t.group === newGroup && t.path.toLowerCase() === newTagPath.toLowerCase(),
+            );
+            if (found) {
+              setFocusedTag(found);
+              setSelectedTagIndices(new Set([found.index]));
+            }
+          }}
         />
       )}
 

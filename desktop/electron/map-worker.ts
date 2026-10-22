@@ -86,6 +86,12 @@ import {
   exportBspToObj,
   exportModelToGlb,
   exportBspToGlb,
+  buildCustomObjectContainer,
+  extractTemplateRigFromMap,
+  decodeDxt1,
+  decodeDxt3,
+  decodeDxt5,
+  decodeUncompressed,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -118,6 +124,8 @@ import type {
   BatchExtractManifestFileEntry,
   BatchExtractManifestItem,
   GetTagFieldsResult,
+  BuildCustomObjectRequest,
+  BuildCustomObjectResult,
   UpdateTagFieldResult,
   AddReflexiveChunkResult,
   GetDependencySlotsResult,
@@ -2026,6 +2034,157 @@ export async function runPerformBspSwap(task: {
   }
 }
 
+/** M13.4: Compiles a custom 3D object tag set (.obj + .png/.dds) into an .ocetags file and/or injects it directly into the open map. */
+export function runBuildCustomObjectTag(task: {
+  requestId: string;
+  request: BuildCustomObjectRequest;
+  resourceMapPaths?: Partial<Record<ResourceMapKind, string>>;
+}) {
+  const req = task.request;
+  const needsInject = req.outputMode === 'inject' || req.outputMode === 'both';
+  if (needsInject && !currentMap) {
+    return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open to inject into.');
+  }
+  const resources = openConversionResources({
+    bitmaps: task.resourceMapPaths?.bitmaps,
+    sounds: task.resourceMapPaths?.sounds,
+  });
+  try {
+    progress(task.requestId, 'Reading 3D mesh (.obj)...', 10);
+    if (!fs.existsSync(req.objFilePath)) {
+      return sendError(task.requestId, 'FILE_NOT_FOUND', `3D model file not found: ${req.objFilePath}`);
+    }
+    const objText = fs.readFileSync(req.objFilePath, 'utf8');
+    let collisionObjText: string | undefined;
+    if (req.collisionObjFilePath && fs.existsSync(req.collisionObjFilePath)) {
+      collisionObjText = fs.readFileSync(req.collisionObjFilePath, 'utf8');
+    }
+
+    let textureRgba: { rgba: Uint8Array; width: number; height: number } | undefined;
+    if (req.textureFilePath && fs.existsSync(req.textureFilePath)) {
+      progress(task.requestId, 'Decoding UV texture...', 25);
+      const texBuf = fs.readFileSync(req.textureFilePath);
+      if (texBuf.length > 128 && texBuf.readUInt32LE(0) === 0x20534444) {
+        const height = texBuf.readUInt32LE(12);
+        const width = texBuf.readUInt32LE(16);
+        const fourCC = texBuf.toString('ascii', 84, 88);
+        const payload = texBuf.subarray(128);
+        let rgba: Uint8Array;
+        if (fourCC === 'DXT1') rgba = decodeDxt1(payload, 0, width, height);
+        else if (fourCC === 'DXT3') rgba = decodeDxt3(payload, 0, width, height);
+        else if (fourCC === 'DXT5') rgba = decodeDxt5(payload, 0, width, height);
+        else rgba = decodeUncompressed(payload, 0, width, height, BitmapFormat.A8R8G8B8);
+        textureRgba = { rgba, width, height };
+      } else {
+        textureRgba = decodePngToRgba(texBuf);
+      }
+    }
+
+    let templateExtractedSet: ReturnType<typeof extractTagSet> | undefined;
+    let templateRig: ReturnType<typeof extractTemplateRigFromMap> | undefined;
+    if (req.templateTagIndex !== undefined && req.templateTagIndex >= 0 && currentMap) {
+      progress(task.requestId, 'Reading base template tag from open map...', 45);
+      templateExtractedSet = extractTagSet(
+        currentMap.buffer,
+        currentMap.header,
+        currentMap.tagIndex,
+        [req.templateTagIndex],
+        {
+          resourceFiles: resources.files,
+          captureGbxmodelRawData: true,
+        },
+      );
+      templateRig = extractTemplateRigFromMap(
+        currentMap.buffer,
+        currentMap.header,
+        currentMap.tagIndex,
+        req.templateTagIndex,
+      );
+    }
+
+    progress(task.requestId, 'Compiling GBXModel, 3D Collision BSP, Shader & Bitmap...', 65);
+    const built = buildCustomObjectContainer({
+      tagGroup: req.tagGroup,
+      tagPath: req.tagPath,
+      itemName: req.itemName,
+      objText,
+      collisionObjText,
+      meshOptions: {
+        scale: req.scale,
+        flipYz: req.flipYz,
+        centerOrigin: req.centerOrigin,
+        forceAutoUv: req.forceAutoUv,
+      },
+      textureRgba,
+      multiBoxCollision: req.multiBoxCollision,
+      templateExtractedSet,
+      templateRig,
+      sourceMapName: currentMap ? path.basename(currentMap.filePath, '.map') : 'custom_object_builder',
+    });
+
+    if ((req.outputMode === 'ocetags' || req.outputMode === 'both') && req.outputOceTagsPath) {
+      progress(task.requestId, 'Saving .ocetags file...', 80);
+      const dir = path.dirname(req.outputOceTagsPath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(req.outputOceTagsPath, built.containerBuffer);
+    }
+
+    let injectedIntoMap = false;
+    if (needsInject && currentMap) {
+      progress(task.requestId, 'Injecting compiled object tags into open map...', 90);
+      const planResult = planAddInjection(
+        currentMap,
+        built.container,
+        {},
+        { allowEmbeddedRelocation: true },
+      );
+      if (planResult.kind === 'refused') {
+        return sendError(task.requestId, 'INJECT_REFUSED', planResult.reason);
+      }
+      if (planResult.blockedOther.length > 0 || planResult.blockedEmbedded.length > 0) {
+        const reasons = [...planResult.blockedOther, ...planResult.blockedEmbedded]
+          .flatMap((b) => b.reasons)
+          .join('; ');
+        return sendError(task.requestId, 'INJECT_BLOCKED', `Tag injection blocked: ${reasons}`);
+      }
+      const nextBuffer = applyAddInjection(
+        currentMap.buffer,
+        currentMap.header,
+        currentMap.tagIndex,
+        built.container,
+        planResult,
+        { allowEmbeddedRelocation: true },
+      );
+      const reInspected = inspectCustomEditionMap(nextBuffer);
+      if (reInspected.status !== 'ok') {
+        return sendError(task.requestId, 'REINSPECT_FAILED', 'Failed to re-inspect map after injecting custom object.');
+      }
+      modelGeometryCache.clear();
+      currentMap.buffer = nextBuffer;
+      currentMap.header = reInspected.header;
+      currentMap.tagIndex = reInspected.tagIndex;
+      currentMap.modified = true;
+      injectedIntoMap = true;
+    }
+
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      rootTagPath: built.rootTagPath,
+      rootTagGroup: built.rootTagGroup,
+      generatedTagPaths: built.generatedTagPaths,
+      usedAutoUv: built.usedAutoUv,
+      injectedIntoMap,
+      outputOceTagsPath: req.outputOceTagsPath,
+      map: currentMap ? summarizeOpenMap(currentMap) : undefined,
+    } satisfies BuildCustomObjectResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  } finally {
+    resources.close();
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -2077,6 +2236,7 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'replaceSound') runReplaceSound(task);
     else if (task.type === 'exportModel3d') runExportModel3d(task);
     else if (task.type === 'exportBsp3d') runExportBsp3d(task);
+    else if (task.type === 'buildCustomObjectTag') runBuildCustomObjectTag(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }
