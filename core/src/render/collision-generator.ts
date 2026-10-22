@@ -961,7 +961,11 @@ export function buildCustomBitmapTag(
   buf.writeUInt16LE(0, bdOff + 10); // type = 0 (2D texture)
   buf.writeUInt16LE(format, bdOff + 12);
   const isCompressed = format === BitmapFormat.DXT1 || format === BitmapFormat.DXT3 || format === BitmapFormat.DXT5;
-  const bdFlags = (isCompressed ? 0x0001 : 0x0000) | 0x0080; // power of two dimensions (0x80) | compressed (0x01)
+  // Halo CE bitmap_data.flags (bitmaps.c):
+  //   bit 0 (0x0001): _bitmap_has_power_of_two_dimensions_bit
+  //   bit 1 (0x0002): _bitmap_compressed_bit
+  //   bit 7 (0x0080): _bitmap_cached_bit
+  const bdFlags = 0x0080 | 0x0001 | (isCompressed ? 0x0002 : 0x0000);
   buf.writeUInt16LE(bdFlags, bdOff + 14);
   buf.writeUInt16LE(Math.floor(width / 2), bdOff + 16); // reg point x
   buf.writeUInt16LE(Math.floor(height / 2), bdOff + 18); // reg point y

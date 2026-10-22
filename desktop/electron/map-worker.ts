@@ -88,6 +88,8 @@ import {
   exportBspToGlb,
   buildCustomObjectContainer,
   extractTemplateRigFromMap,
+  resizeRgbaToPowerOfTwo,
+  stripUvWireframeOverlayFromRgba,
   decodeDxt1,
   decodeDxt3,
   decodeDxt5,
@@ -1432,15 +1434,18 @@ export function runReplaceBitmapImage(task: {
       mipmapCount = ddsMips > 1 ? ddsMips - 1 : 0;
       pixels = fileBuf.subarray(128);
     } else {
-      // Decode PNG
+      // Decode PNG, strip any unpainted #38bdf8 UV guide lines, and resize to power-of-two dimensions (<= 1024)
+      // required by Halo CE's Direct3D texture loader
       const decoded = decodePngToRgba(fileBuf);
-      width = decoded.width;
-      height = decoded.height;
+      const cleanedRgba = stripUvWireframeOverlayFromRgba(decoded.rgba, decoded.width, decoded.height);
+      const pot = resizeRgbaToPowerOfTwo(cleanedRgba, decoded.width, decoded.height, 1024);
+      width = pot.width;
+      height = pot.height;
 
       if (chosenFormat === undefined) {
         let hasAlpha = false;
-        for (let i = 3; i < decoded.rgba.length; i += 4) {
-          if (decoded.rgba[i] < 250) {
+        for (let i = 3; i < pot.rgba.length; i += 4) {
+          if (pot.rgba[i] < 250) {
             hasAlpha = true;
             break;
           }
@@ -1449,7 +1454,7 @@ export function runReplaceBitmapImage(task: {
       }
 
       // Generate complete mipmap chain down to 1x1 so vehicle/weapon shaders render at all LOD distances
-      const encoded = encodeBitmapWithMipmaps(decoded.rgba, width, height, chosenFormat, true);
+      const encoded = encodeBitmapWithMipmaps(pot.rgba, width, height, chosenFormat, true);
       pixels = encoded.pixelData;
       mipmapCount = encoded.mipmapCount;
     }

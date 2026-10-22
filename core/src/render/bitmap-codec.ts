@@ -803,6 +803,27 @@ export function replaceBitmapImageData(
     throw new BitmapTextureError(`Bitmap tag (ID 0x${bitmapTagId.toString(16)}) not found.`);
   }
 
+  const isPowerOfTwo =
+    newWidth > 0 &&
+    newHeight > 0 &&
+    (newWidth & (newWidth - 1)) === 0 &&
+    (newHeight & (newHeight - 1)) === 0;
+  const isCompressed =
+    newFormat === BitmapFormat.DXT1 ||
+    newFormat === BitmapFormat.DXT3 ||
+    newFormat === BitmapFormat.DXT5;
+  const isPalettized = newFormat === BitmapFormat.P8;
+
+  const computeBitmapFlags = (oldFlags: number): number => {
+    // Clear external (0x0100), power-of-two (0x0001), compressed (0x0002), palettized (0x0004), swizzled (0x0008)
+    let flags = oldFlags & ~(0x0100 | 0x0001 | 0x0002 | 0x0004 | 0x0008);
+    flags |= 0x0080; // _bitmap_cached_bit
+    if (isPowerOfTwo) flags |= 0x0001; // _bitmap_has_power_of_two_dimensions_bit
+    if (isCompressed) flags |= 0x0002; // _bitmap_compressed_bit
+    if (isPalettized) flags |= 0x0004; // _bitmap_palettized_bit
+    return flags;
+  };
+
   // Branch 1: Tag is currently EXTERNAL (definition lives in bitmaps.map)
   if (entry.isExternal) {
     if (!externalBitmapsBuffer) {
@@ -848,13 +869,14 @@ export function replaceBitmapImageData(
     tagCopy.writeUInt16LE(newWidth, rowOffset + 0x04);
     tagCopy.writeUInt16LE(newHeight, rowOffset + 0x06);
     tagCopy.writeUInt16LE(newFormat, rowOffset + 0x0c);
+    tagCopy.writeUInt16LE(Math.floor(newWidth / 2), rowOffset + 0x10);
+    tagCopy.writeUInt16LE(Math.floor(newHeight / 2), rowOffset + 0x12);
     if (newMipmapCount !== undefined) {
       tagCopy.writeUInt16LE(newMipmapCount, rowOffset + 0x14);
     }
 
-    // Clear external flag (bit 8 = 0x100)
     const oldFlags = tagCopy.readUInt16LE(rowOffset + 0x0e);
-    tagCopy.writeUInt16LE(oldFlags & ~0x100, rowOffset + 0x0e);
+    tagCopy.writeUInt16LE(computeBitmapFlags(oldFlags), rowOffset + 0x0e);
 
     // Set map file offset and byte length
     tagCopy.writeUInt32LE(pixelsStartInMap, rowOffset + 0x18);
@@ -909,41 +931,89 @@ export function replaceBitmapImageData(
 
   let outputBuffer = mapBuffer;
   let targetOffset = oldOffset;
+  let finalTagStart = tagStart;
+  let finalRowStart = rowStart;
 
   // If new pixel payload fits in-place inside the map and wasn't external, overwrite in-place!
   const isImageExternal = (oldFlags & 0x100) !== 0;
   if (!isImageExternal && newPixels.length <= oldSize && oldOffset + newPixels.length <= mapBuffer.length) {
     Buffer.from(newPixels).copy(outputBuffer, oldOffset);
   } else {
-    // Append to end of map buffer (internalize / expand raw data region)
-    const alignedAppendOffset = (mapBuffer.length + 3) & ~3;
-    const newBuf = Buffer.alloc(alignedAppendOffset + newPixels.length);
-    mapBuffer.copy(newBuf, 0);
-    Buffer.from(newPixels).copy(newBuf, alignedAppendOffset);
-    outputBuffer = newBuf;
-    targetOffset = alignedAppendOffset;
+    // Check if the map uses the standard [raw data][model data][tag data] layout:
+    // If so, insert the new pixel bytes at `modelDataFileOffset` (end of raw-data region)
+    // so `tagDataSize` is never inflated with raw pixel bytes and future tag injections succeed.
+    const insertAt = tagIndex.modelDataFileOffset;
+    const modelDataSize = tagIndex.modelDataSize;
+    if (
+      insertAt > 0 &&
+      insertAt + modelDataSize === header.tagDataOffset &&
+      header.tagDataOffset + header.tagDataSize === mapBuffer.length
+    ) {
+      const shift = (newPixels.length + 3) & ~3;
+      const newBuf = Buffer.alloc(mapBuffer.length + shift, 0);
+      mapBuffer.copy(newBuf, 0, 0, insertAt);
+      Buffer.from(newPixels).copy(newBuf, insertAt);
+      mapBuffer.copy(newBuf, insertAt + shift, insertAt);
 
-    const newTagDataSize = outputBuffer.length - header.tagDataOffset;
-    outputBuffer.writeUInt32LE(outputBuffer.length, 0x08);
-    outputBuffer.writeUInt32LE(newTagDataSize, 0x14);
-    header.tagDataSize = newTagDataSize;
-    header.decompressedFileSize = outputBuffer.length;
+      const newTagDataOffset = header.tagDataOffset + shift;
+      const newModelDataFileOffset = insertAt + shift;
+      newBuf.writeUInt32LE(newBuf.length, 0x08); // fileLength
+      newBuf.writeUInt32LE(newTagDataOffset, 0x10); // tagDataOffset
+      newBuf.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 0x14); // modelDataFileOffset
+
+      header.decompressedFileSize = newBuf.length;
+      header.tagDataOffset = newTagDataOffset;
+      tagIndex.modelDataFileOffset = newModelDataFileOffset;
+
+      outputBuffer = newBuf;
+      targetOffset = insertAt;
+      finalTagStart = tagStart + shift;
+      finalRowStart = rowStart + shift;
+    } else {
+      // Fallback for non-standard map layouts: append at end of map buffer
+      const alignedAppendOffset = (mapBuffer.length + 3) & ~3;
+      const newBuf = Buffer.alloc(alignedAppendOffset + newPixels.length);
+      mapBuffer.copy(newBuf, 0);
+      Buffer.from(newPixels).copy(newBuf, alignedAppendOffset);
+      outputBuffer = newBuf;
+      targetOffset = alignedAppendOffset;
+
+      const newTagDataSize = outputBuffer.length - header.tagDataOffset;
+      outputBuffer.writeUInt32LE(outputBuffer.length, 0x08);
+      outputBuffer.writeUInt32LE(newTagDataSize, 0x14);
+      header.tagDataSize = newTagDataSize;
+      header.decompressedFileSize = outputBuffer.length;
+    }
+  }
+
+  // Update root Bitmap encoding format (+0x02) if single-image bitmap
+  if (imgCount === 1) {
+    const rootEncoding =
+      newFormat === BitmapFormat.DXT1
+        ? 1
+        : newFormat === BitmapFormat.DXT3
+          ? 2
+          : newFormat === BitmapFormat.DXT5
+            ? 3
+            : 4;
+    outputBuffer.writeUInt16LE(rootEncoding, finalTagStart + 0x02);
   }
 
   // Update BitmapData struct row (48 bytes)
-  outputBuffer.writeUInt16LE(newWidth, rowStart + 0x04);
-  outputBuffer.writeUInt16LE(newHeight, rowStart + 0x06);
-  outputBuffer.writeUInt16LE(newFormat, rowStart + 0x0c);
+  outputBuffer.writeUInt16LE(newWidth, finalRowStart + 0x04);
+  outputBuffer.writeUInt16LE(newHeight, finalRowStart + 0x06);
+  outputBuffer.writeUInt16LE(newFormat, finalRowStart + 0x0c);
+  outputBuffer.writeUInt16LE(Math.floor(newWidth / 2), finalRowStart + 0x10);
+  outputBuffer.writeUInt16LE(Math.floor(newHeight / 2), finalRowStart + 0x12);
   if (newMipmapCount !== undefined) {
-    outputBuffer.writeUInt16LE(newMipmapCount, rowStart + 0x14);
+    outputBuffer.writeUInt16LE(newMipmapCount, finalRowStart + 0x14);
   }
 
-  // Clear external flag (bit 8 = 0x100) to mark internal
-  const newFlags = oldFlags & ~0x100;
-  outputBuffer.writeUInt16LE(newFlags, rowStart + 0x0e);
+  // Set accurate Halo CE BitmapData flags (power-of-two, compressed/uncompressed, cached, internal)
+  outputBuffer.writeUInt16LE(computeBitmapFlags(oldFlags), finalRowStart + 0x0e);
 
-  outputBuffer.writeUInt32LE(targetOffset, rowStart + 0x18);
-  outputBuffer.writeUInt32LE(newPixels.length, rowStart + 0x1c);
+  outputBuffer.writeUInt32LE(targetOffset, finalRowStart + 0x18);
+  outputBuffer.writeUInt32LE(newPixels.length, finalRowStart + 0x1c);
 
   return outputBuffer;
 }

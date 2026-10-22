@@ -43,6 +43,95 @@ function isWebGLAvailable(): boolean {
   }
 }
 
+/**
+ * Local-space Oriented Bounding Box (OBB) helper that stays aligned with the object's
+ * local coordinate frame as it is rotated, instead of expanding into a global world-axis AABB.
+ */
+class LocalBoxHelper extends THREE.LineSegments {
+  private targetObject: THREE.Object3D;
+
+  constructor(object: THREE.Object3D, color = 0x39ff14) {
+    const indices = new Uint16Array([
+      0, 1, 1, 2, 2, 3, 3, 0,
+      4, 5, 5, 6, 6, 7, 7, 4,
+      0, 4, 1, 5, 2, 6, 3, 7,
+    ]);
+    const positions = new Float32Array(8 * 3);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+    const material = new THREE.LineBasicMaterial({
+      color,
+      toneMapped: false,
+    });
+
+    super(geometry, material);
+    this.targetObject = object;
+    this.type = 'LocalBoxHelper';
+    this.matrixAutoUpdate = false;
+    this.update();
+  }
+
+  update(): void {
+    this.targetObject.updateWorldMatrix(true, true);
+    const invTargetWorld = new THREE.Matrix4().copy(this.targetObject.matrixWorld).invert();
+    const localBox = new THREE.Box3();
+    const childBox = new THREE.Box3();
+    const relMatrix = new THREE.Matrix4();
+
+    this.targetObject.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.geometry) {
+        if (!child.geometry.boundingBox) {
+          child.geometry.computeBoundingBox();
+        }
+        if (child.geometry.boundingBox && !child.geometry.boundingBox.isEmpty()) {
+          childBox.copy(child.geometry.boundingBox);
+          relMatrix.multiplyMatrices(invTargetWorld, child.matrixWorld);
+          childBox.applyMatrix4(relMatrix);
+          localBox.union(childBox);
+        }
+      }
+    });
+
+    if (localBox.isEmpty()) {
+      localBox.min.set(-0.5, -0.5, 0);
+      localBox.max.set(0.5, 0.5, 1.0);
+    }
+
+    const min = localBox.min;
+    const max = localBox.max;
+    const posAttr = this.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const arr = posAttr.array as Float32Array;
+
+    // 8 local-space box corners
+    arr[0] = max.x; arr[1] = max.y; arr[2] = max.z;
+    arr[3] = min.x; arr[4] = max.y; arr[5] = max.z;
+    arr[6] = min.x; arr[7] = min.y; arr[8] = max.z;
+    arr[9] = max.x; arr[10] = min.y; arr[11] = max.z;
+    arr[12] = max.x; arr[13] = max.y; arr[14] = min.z;
+    arr[15] = min.x; arr[16] = max.y; arr[17] = min.z;
+    arr[18] = min.x; arr[19] = min.y; arr[20] = min.z;
+    arr[21] = max.x; arr[22] = min.y; arr[23] = min.z;
+
+    posAttr.needsUpdate = true;
+    this.geometry.computeBoundingSphere();
+
+    // Transform the local box by the object's full world matrix so it rotates with the object
+    this.matrix.copy(this.targetObject.matrixWorld);
+    this.matrixWorld.copy(this.targetObject.matrixWorld);
+  }
+
+  dispose(): void {
+    this.geometry.dispose();
+    if (Array.isArray(this.material)) {
+      this.material.forEach((m) => m.dispose());
+    } else {
+      this.material.dispose();
+    }
+  }
+}
+
 export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -168,11 +257,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
   // Gizmo & selection refs
   const transformControlsRef = useRef<TransformControls | null>(null);
-  const selectionBoxHelperRef = useRef<THREE.BoxHelper | null>(null);
+  const selectionBoxHelperRef = useRef<LocalBoxHelper | null>(null);
   const gizmoCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const partnerBoxHelperRef = useRef<THREE.BoxHelper | null>(null);
-  const kothZoneHelpersRef = useRef<THREE.BoxHelper[]>([]);
-  const multiSelectionHelpersRef = useRef<THREE.BoxHelper[]>([]);
+  const partnerBoxHelperRef = useRef<LocalBoxHelper | null>(null);
+  const kothZoneHelpersRef = useRef<LocalBoxHelper[]>([]);
+  const multiSelectionHelpersRef = useRef<LocalBoxHelper[]>([]);
   const isTransformDraggingRef = useRef<boolean>(false);
   const dragStartPositionsRef = useRef<Map<string, { pos: THREE.Vector3; rot: THREE.Euler }>>(new Map());
   const pointerDownPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -896,7 +985,8 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         objGroup.name = obj.id;
         objGroup.userData = { id: obj.id, kind: obj.kind, placement: obj };
         objGroup.position.set(obj.position[0], obj.position[1], obj.position[2]);
-        objGroup.rotation.set(obj.rotation[2], obj.rotation[1], obj.rotation[0], 'ZYX');
+        // Halo CE matrix4x3_rotation_from_angles(yaw, pitch, roll) equals R_x(roll) * R_y(-pitch) * R_z(yaw) ('XYZ')
+        objGroup.rotation.set(obj.rotation[2], -obj.rotation[1], obj.rotation[0], 'XYZ');
 
         let targetLayer = scenery;
         if (obj.kind === 'vehicle') targetLayer = vehicles;
@@ -1228,6 +1318,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                 });
               }
             }
+            selectionBoxHelperRef.current?.update();
           });
         } else if (obj.kind === 'encounter') {
           // Fallback biped marker for AI encounter when gbxmodel is absent
@@ -1403,7 +1494,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
     if (primaryGroup) {
       tc.attach(primaryGroup);
-      const boxHelper = new THREE.BoxHelper(primaryGroup, 0x39ff14);
+      const boxHelper = new LocalBoxHelper(primaryGroup, 0x39ff14);
       const boxMat = boxHelper.material as THREE.LineBasicMaterial;
       boxMat.depthTest = false;
       boxMat.transparent = true;
@@ -1418,7 +1509,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         if (id === selectedObjectId) continue;
         const group = allGroups.find((g) => g.userData?.id === id);
         if (group) {
-          const mHelper = new THREE.BoxHelper(group, 0x00e5ff);
+          const mHelper = new LocalBoxHelper(group, 0x00e5ff);
           const mMat = mHelper.material as THREE.LineBasicMaterial;
           mMat.depthTest = false;
           mMat.transparent = true;
@@ -1439,7 +1530,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         if (partner) {
           const partnerGroup = allGroups.find((g) => g.userData?.id === partner.id);
           if (partnerGroup) {
-            const pHelper = new THREE.BoxHelper(partnerGroup, 0x00ff88);
+            const pHelper = new LocalBoxHelper(partnerGroup, 0x00ff88);
             const pMat = pHelper.material as THREE.LineBasicMaterial;
             pMat.depthTest = false;
             pMat.transparent = true;
@@ -1460,7 +1551,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         for (const pt of zonePoints) {
           const ptGroup = allGroups.find((g) => g.userData?.id === pt.id);
           if (ptGroup) {
-            const kHelper = new THREE.BoxHelper(ptGroup, 0xffa500);
+            const kHelper = new LocalBoxHelper(ptGroup, 0xffa500);
             const kMat = kHelper.material as THREE.LineBasicMaterial;
             kMat.depthTest = false;
             kMat.transparent = true;
@@ -1645,9 +1736,10 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     };
     layerGroupsRef.current = layerGroups;
 
-    // TransformControls setup
+    // TransformControls setup (use 'local' coordinate space so axes stick to the item as it rotates)
     const transformControls = new TransformControls(camera, renderer.domElement);
     transformControls.size = 0.75;
+    transformControls.setSpace('local');
     transformControls.setMode(gizmoMode);
     const helper = transformControls.getHelper ? transformControls.getHelper() : (transformControls as unknown as THREE.Object3D);
     scene.add(helper);
@@ -1674,7 +1766,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           if (g) {
             dragStartPositionsRef.current.set(id, {
               pos: g.position.clone(),
-              rot: new THREE.Euler().setFromQuaternion(g.quaternion, 'ZYX'),
+              rot: new THREE.Euler().setFromQuaternion(g.quaternion, 'XYZ'),
             });
           }
         }
@@ -1712,8 +1804,8 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             }
           }
           const newPos: [number, number, number] = [grp.position.x, grp.position.y, grp.position.z];
-          const euler = new THREE.Euler().setFromQuaternion(grp.quaternion, 'ZYX');
-          const newRot: [number, number, number] = [euler.z, euler.y, euler.x];
+          const euler = new THREE.Euler().setFromQuaternion(grp.quaternion, 'XYZ');
+          const newRot: [number, number, number] = [euler.z, -euler.y, euler.x];
           await callbacksRef.current.handleUpdatePlacement(id, { position: newPos, rotation: newRot });
         }
       }
@@ -1806,8 +1898,8 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             targetGroup.position.y,
             targetGroup.position.z,
           ];
-          const euler = new THREE.Euler().setFromQuaternion(targetGroup.quaternion, 'ZYX');
-          const newRot: [number, number, number] = [euler.z, euler.y, euler.x];
+          const euler = new THREE.Euler().setFromQuaternion(targetGroup.quaternion, 'XYZ');
+          const newRot: [number, number, number] = [euler.z, -euler.y, euler.x];
           callbacksRef.current.handleUpdatePlacement(selectedObjectIdRef.current, {
             position: newPos,
             rotation: newRot,
@@ -2038,6 +2130,15 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
       if (selectionBoxHelperRef.current) {
         selectionBoxHelperRef.current.update();
+      }
+      if (partnerBoxHelperRef.current) {
+        partnerBoxHelperRef.current.update();
+      }
+      for (const h of kothZoneHelpersRef.current) {
+        h.update();
+      }
+      for (const h of multiSelectionHelpersRef.current) {
+        h.update();
       }
 
       renderer.render(scene, camera);
