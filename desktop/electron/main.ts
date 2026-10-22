@@ -96,6 +96,10 @@ import type {
   BuildCustomObjectRequest,
   BuildCustomObjectResult,
   ExportUvTemplateResult,
+  DeprotectMapOptions,
+  InspectDeprotectResult,
+  DeprotectMapResult,
+  SpoofMapCrc32Result,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -2488,6 +2492,65 @@ app.whenReady().then(() => {
   }) => exportUvTemplateFlow(options));
   ipcMain.handle('objectBuilder:pickSaveOceTagsPath', (_e, defaultName: string) => pickSaveOceTagsPathFlow(defaultName));
   ipcMain.handle('objectBuilder:build', (_e, request: BuildCustomObjectRequest) => buildCustomObjectTagFlow(request));
+  ipcMain.handle('deprotect:inspect', async (): Promise<InspectDeprotectResult> => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, code: 'NO_MAP_LOADED', message: 'No uncompressed map is open.' };
+    }
+    try {
+      const { promise } = sendWorkerRequest<InspectDeprotectResult>({ type: 'inspectDeprotect' }, sendLog);
+      return await promise;
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+    }
+  });
+  ipcMain.handle('deprotect:run', async (_e, options?: DeprotectMapOptions): Promise<DeprotectMapResult> => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, code: 'NO_MAP_LOADED', message: 'No uncompressed map is open.' };
+    }
+    try {
+      const { promise } = sendWorkerRequest<DeprotectMapResult>({ type: 'deprotectMap', options }, sendLog);
+      const res = await promise;
+      if (res.ok) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send('map:updated', res.map);
+        sendLog(
+          'info',
+          `Deprotected map: ${res.classesRepaired} class(es), ${res.scriptPathsRecovered} script path(s), ${res.heuristicPathsRenamed} renamed, ${res.bitmapsRepaired} bitmap(s), ${res.modelPartsRepaired} model part(s) repaired.`,
+        );
+      }
+      return res;
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      sendLog('error', `Deprotect failed: ${e.message}`);
+      return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+    }
+  });
+  ipcMain.handle('deprotect:spoofCrc32', async (_e, targetCrc32: number): Promise<SpoofMapCrc32Result> => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, code: 'NO_MAP_LOADED', message: 'No uncompressed map is open.' };
+    }
+    try {
+      const { promise } = sendWorkerRequest<SpoofMapCrc32Result>(
+        { type: 'spoofMapCrc32', targetCrc32: Number(targetCrc32) >>> 0 },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send('map:updated', res.map);
+        sendLog(
+          'info',
+          `Spoofed map CRC32 to 0x${(res.crc32 >>> 0).toString(16).toUpperCase().padStart(8, '0')} (tagFileChecksums = 0x${(res.compensationWord >>> 0).toString(16).toUpperCase().padStart(8, '0')}).`,
+        );
+      }
+      return res;
+    } catch (err) {
+      const e = err as Error & { code?: string };
+      sendLog('error', `CRC32 spoof failed: ${e.message}`);
+      return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+    }
+  });
   ipcMain.handle('3d:exportModel', (_e, modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     exportModel3dFlow(modelTagId, lod, format, outputPath),
   );

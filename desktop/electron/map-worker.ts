@@ -93,6 +93,9 @@ import {
   decodeDxt1,
   decodeDxt3,
   decodeDxt5,
+  inspectMapProtectionAndIntegrity,
+  deprotectAndRepairMap,
+  spoofCacheCrc32,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -149,6 +152,9 @@ import type {
   DuplicateTagResult,
   HaloBitmapVersion,
   Export3dResult,
+  InspectDeprotectResult,
+  DeprotectMapResult,
+  SpoofMapCrc32Result,
 } from './shared-types';
 import {
   sanitizeMapName,
@@ -1813,6 +1819,9 @@ export function runAddScenarioPlacement(task: {
     );
     currentMap.buffer = res.buffer;
     currentMap.header = res.header;
+    if (res.tagIndex) {
+      currentMap.tagIndex = res.tagIndex;
+    }
     currentMap.modified = true;
     sendResult(task.requestId, {
       ok: true,
@@ -1844,6 +1853,9 @@ export function runSwapScenarioPlacement(task: {
     );
     currentMap.buffer = res.buffer;
     currentMap.header = res.header;
+    if (res.tagIndex) {
+      currentMap.tagIndex = res.tagIndex;
+    }
     currentMap.modified = true;
     sendResult(task.requestId, {
       ok: true,
@@ -2154,7 +2166,7 @@ export function runBuildCustomObjectTag(task: {
             e.path.toLowerCase() === built.rootTagPath.toLowerCase(),
         );
       if (rootAlreadyExists) {
-        built.container.rootTagIndices = [0, 1, 2, 3, 4];
+        built.container.rootOriginalIndices = [0, 1, 2, 3, 4];
       }
       const planResult = rootAlreadyExists
         ? planSwapInjection(
@@ -2225,6 +2237,70 @@ export function runBuildCustomObjectTag(task: {
   }
 }
 
+function runInspectDeprotect(task: Extract<WorkerRequest, { type: 'inspectDeprotect' }>): void {
+  if (!currentMap) {
+    return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is currently open.');
+  }
+  try {
+    const report = inspectMapProtectionAndIntegrity(currentMap.buffer, currentMap.header, currentMap.tagIndex);
+    sendResult(task.requestId, { ok: true, report } satisfies InspectDeprotectResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+function runDeprotectMap(task: Extract<WorkerRequest, { type: 'deprotectMap' }>): void {
+  if (!currentMap) {
+    return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is currently open.');
+  }
+  try {
+    progress(task.requestId, 'Running 3-Stage Map Deprotector & Asset Repairs...', 25);
+    const res = deprotectAndRepairMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.options);
+    modelGeometryCache.clear();
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      classesRepaired: res.classesRepaired,
+      scriptPathsRecovered: res.scriptPathsRecovered,
+      heuristicPathsRenamed: res.heuristicPathsRenamed,
+      bitmapsRepaired: res.bitmapsRepaired,
+      modelPartsRepaired: res.modelPartsRepaired,
+      stripIndicesClamped: res.stripIndicesClamped,
+      log: res.log,
+      map: summarizeOpenMap(currentMap),
+    } satisfies DeprotectMapResult);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+function runSpoofMapCrc32(task: Extract<WorkerRequest, { type: 'spoofMapCrc32' }>): void {
+  if (!currentMap) {
+    return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is currently open.');
+  }
+  try {
+    progress(task.requestId, 'Computing GF(2) CRC32 compensation...', 35);
+    const res = spoofCacheCrc32(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.targetCrc32);
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      compensationWord: res.compensationWord,
+      crc32: res.crc32,
+      map: summarizeOpenMap(currentMap),
+    } satisfies SpoofMapCrc32Result);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -2277,6 +2353,9 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'exportModel3d') runExportModel3d(task);
     else if (task.type === 'exportBsp3d') runExportBsp3d(task);
     else if (task.type === 'buildCustomObjectTag') runBuildCustomObjectTag(task);
+    else if (task.type === 'inspectDeprotect') runInspectDeprotect(task);
+    else if (task.type === 'deprotectMap') runDeprotectMap(task);
+    else if (task.type === 'spoofMapCrc32') runSpoofMapCrc32(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

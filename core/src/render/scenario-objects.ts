@@ -4,10 +4,13 @@
  * and resolves each object's palette reference to its underlying 3D model tag (`gbxmodel`).
  */
 import type { CacheFileHeader } from '../map/header';
+import { parseCacheFileHeader } from '../map/header';
 import type { TagIndex } from '../map/tag-index';
-import { resolveTagDataPointer } from '../map/tag-index';
+import { parseTagIndex, resolveTagDataPointer } from '../map/tag-index';
 import { decodeStruct, resolveStruct, resolvePointer } from '../map/definitions/engine';
 import { decodeReflexive, encodeReflexive } from '../map/definitions/codec';
+import { planAddInjection, applyAddInjection } from '../map/tag-injector';
+import { OCETAGS_MAGIC, OCETAGS_FORMAT_VERSION, type OceContainer } from '../map/container';
 
 export type ScenarioObjectKind =
   | 'vehicle'
@@ -133,7 +136,7 @@ function resolveObjectModelTagId(
  * Resolves the 3D model tag ID referenced by an item collection tag (`itmc`),
  * which is used for multiplayer weapons, powerups, and equipment.
  */
-function resolveItemCollectionModelTagId(
+function resolveItemCollectionItemTagId(
   buffer: Buffer,
   header: CacheFileHeader,
   tagIndex: TagIndex,
@@ -142,7 +145,6 @@ function resolveItemCollectionModelTagId(
   if (itmcTagId === 0xffffffff) return 0xffffffff;
   const entry = tagIndex.entries[itmcTagId & 0xffff];
   if (!entry || entry.isExternal) return 0xffffffff;
-
   try {
     const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
     const itmcStruct = decodeStruct(buffer, offset, 'ItemCollection');
@@ -152,11 +154,24 @@ function resolveItemCollectionModelTagId(
       const permStruct = decodeStruct(buffer, permOffset, 'ItemCollectionPermutation');
       const itemDep = permStruct.get('item');
       if (itemDep && itemDep.kind === 'dependency' && itemDep.value.tagId !== 0xffffffff) {
-        return resolveObjectModelTagId(buffer, header, tagIndex, itemDep.value.tagId);
+        return itemDep.value.tagId;
       }
     }
   } catch {
-    // If decoding fails, return 0xFFFFFFFF gracefully
+    // fallback
+  }
+  return 0xffffffff;
+}
+
+function resolveItemCollectionModelTagId(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  itmcTagId: number,
+): number {
+  const itemTagId = resolveItemCollectionItemTagId(buffer, header, tagIndex, itmcTagId);
+  if (itemTagId !== 0xffffffff) {
+    return resolveObjectModelTagId(buffer, header, tagIndex, itemTagId);
   }
   return 0xffffffff;
 }
@@ -1453,11 +1468,13 @@ export function addScenarioPlacement(
 ): {
   buffer: Buffer;
   header: CacheFileHeader;
+  tagIndex?: TagIndex;
   summary: ScenarioPlacementsSummary;
   newPlacement: ScenarioObjectPlacement;
 } {
   let curBuf = buffer;
   let curHdr = header;
+  let curTagIndex = tagIndex;
 
   const summaryBefore = extractScenarioPlacements(curBuf, curHdr, tagIndex);
 
@@ -1594,19 +1611,97 @@ export function addScenarioPlacement(
   if (!chosen) throw new Error(`No ${kind} available in map palettes.`);
 
   let itmcTagId = chosen.tagId;
-  const entry = tagIndex.entries[chosen.tagId & 0xffff];
+  const entry = curTagIndex.entries[chosen.tagId & 0xffff];
   if (entry && entry.primaryClassName !== 'item_collection') {
-    const matchingItmc = tagIndex.entries.find((e) => {
+    const matchingItmc = curTagIndex.entries.find((e) => {
       if (e.primaryClassName !== 'item_collection' || e.isExternal) return false;
-      const mId = resolveItemCollectionModelTagId(curBuf, curHdr, tagIndex, e.tagId);
-      return mId !== 0xffffffff && mId === chosen.tagId;
+      const itemId = resolveItemCollectionItemTagId(curBuf, curHdr, curTagIndex, e.tagId);
+      return itemId !== 0xffffffff && itemId === chosen.tagId;
     });
     if (matchingItmc) {
       itmcTagId = matchingItmc.tagId;
+    } else if (entry.primaryClassName === 'weapon' || entry.primaryClassName === 'equipment') {
+      // Synthesize a 176-byte ItemCollection (itmc) tag wrapping this standalone weapon/equipment
+      // so Halo CE's multiplayer netgame_equipment spawner can spawn it (e.g. droppable CTF Flag item)
+      try {
+        const shortName = entry.path.split('\\').pop() || 'custom_item';
+        const folder = entry.primaryClassName === 'weapon' ? 'single weapons' : 'powerups';
+        let itmcPath = `item collections\\${folder}\\${shortName}`;
+        let suffix = 1;
+        while (
+          curTagIndex.entries.some(
+            (e) => e.primaryClassName === 'item_collection' && e.path.toLowerCase() === itmcPath.toLowerCase(),
+          )
+        ) {
+          itmcPath = `item collections\\${folder}\\${shortName}_${suffix++}`;
+        }
+
+        const itmcBytes = Buffer.alloc(176, 0);
+        // ItemCollection root (92B): permutations reflexive at +0 (count=1, pointerLow=92), spawn time at +12
+        itmcBytes.writeUInt32LE(1, 0);
+        itmcBytes.writeUInt32LE(92, 4);
+        itmcBytes.writeUInt32LE(0, 8);
+        itmcBytes.writeInt16LE(30, 12);
+        // ItemCollectionPermutation (84B at +92): weight=1.0 at +32, item TagDependency at +36
+        itmcBytes.writeFloatLE(1.0, 92 + 32);
+        itmcBytes.writeUInt32LE(entry.primaryClassName === 'weapon' ? 0x77656170 : 0x65716970, 92 + 36);
+        itmcBytes.writeUInt32LE(0xffffffff, 92 + 48);
+
+        const synthContainer: OceContainer = {
+          magic: OCETAGS_MAGIC,
+          formatVersion: OCETAGS_FORMAT_VERSION,
+          createdAt: new Date().toISOString(),
+          sourceMapName: 'scenario_editor',
+          hasUnresolvedBspReferences: false,
+          resourceMapIdentities: {},
+          externalResourceRefs: [],
+          externalData: 'embedded',
+          rootOriginalIndices: [99999],
+          tags: [
+            {
+              originalIndex: 99999,
+              group: 'item_collection',
+              path: itmcPath,
+              structName: 'ItemCollection',
+              secondaryClassFourCC: null,
+              tertiaryClassFourCC: null,
+              data: itmcBytes.toString('base64'),
+              dependencies: [
+                {
+                  fieldPath: `${itmcPath}.permutations[0].item`,
+                  group: entry.primaryClassName,
+                  path: entry.path,
+                  kind: 'internal',
+                },
+              ],
+              embeddedRawDataAssets: [],
+              embeddedRawDataPatches: [],
+              injectionBlockers: [],
+            },
+          ],
+          notExtracted: [],
+          warnings: [],
+        };
+
+        const plan = planAddInjection({ buffer: curBuf, header: curHdr, tagIndex: curTagIndex }, synthContainer, {});
+        if (plan.kind === 'ok' && plan.blockedOther.length === 0 && plan.blockedEmbedded.length === 0) {
+          curBuf = applyAddInjection(curBuf, curHdr, curTagIndex, synthContainer, plan);
+          curHdr = parseCacheFileHeader(curBuf);
+          curTagIndex = parseTagIndex(curBuf, curHdr);
+          const createdItmc = curTagIndex.entries.find(
+            (e) => e.primaryClassName === 'item_collection' && e.path.toLowerCase() === itmcPath.toLowerCase(),
+          );
+          if (createdItmc) {
+            itmcTagId = createdItmc.tagId;
+          }
+        }
+      } catch {
+        // Fallback if map cannot be injected into
+      }
     }
   }
 
-  const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'equipment');
+  const info = getScenarioReflexiveInfo(curBuf, curHdr, curTagIndex, 'equipment');
   const newItemBytes = Buffer.alloc(info.structSize, 0);
   newItemBytes.writeUInt32LE(1, 0); // flags: 1 = levitate
   newItemBytes.writeInt16LE(12, 4); // type 0 = 12 (all games)
@@ -1618,11 +1713,11 @@ export function addScenarioPlacement(
   newItemBytes.write('itmc', 80, 4, 'ascii');
   newItemBytes.writeUInt32LE(itmcTagId, 92);
 
-  const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
-  const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+  const appended = appendReflexiveElement(curBuf, curHdr, curTagIndex, info.reflexiveFieldOffset, newItemBytes);
+  const summary = extractScenarioPlacements(appended.buffer, appended.header, curTagIndex);
   const newId = `equipment-${info.count}`;
   const newPlacement = summary.objects.find((o) => o.id === newId)!;
-  return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+  return { buffer: appended.buffer, header: appended.header, tagIndex: curTagIndex, summary, newPlacement };
 }
 
 /**
@@ -1680,6 +1775,7 @@ export function swapScenarioPlacement(
 ): {
   buffer: Buffer;
   header: CacheFileHeader;
+  tagIndex?: TagIndex;
   summary: ScenarioPlacementsSummary;
   newPlacement: ScenarioObjectPlacement;
 } {

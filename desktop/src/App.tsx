@@ -28,6 +28,7 @@ import ConfigureResourcesPromptDialog from './components/ConfigureResourcesPromp
 import BspSwapperDialog from './components/BspSwapperDialog';
 import OpenCeForgeExportDialog from './components/OpenCeForgeExportDialog';
 import BuildObjectTagDialog from './components/BuildObjectTagDialog';
+import DeprotectDialog from './components/DeprotectDialog';
 import type { BatchExtractPreflightResult, HaloBitmapVersion } from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
@@ -46,6 +47,7 @@ export default function App() {
   const [bspSwapperOpen, setBspSwapperOpen] = useState(false);
   const [forgeExportOpen, setForgeExportOpen] = useState(false);
   const [buildObjectTagOpen, setBuildObjectTagOpen] = useState(false);
+  const [deprotectDialogOpen, setDeprotectDialogOpen] = useState(false);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
@@ -358,6 +360,7 @@ export default function App() {
             items: [
               { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
               { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
+              { label: 'Deprotect, Integrity & CRC32...', onClick: () => setDeprotectDialogOpen(true), disabled: !canExtract },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
               { label: '', separator: true },
@@ -375,6 +378,7 @@ export default function App() {
         onExtract={() => requestExtract(Array.from(selectedTagIndices))}
         onExtractWholeMap={() => void handleBatchExtract()}
         onInject={() => setInjectDialogOpen(true)}
+        onDeprotect={() => setDeprotectDialogOpen(true)}
         progress={progress}
       />
 
@@ -550,6 +554,15 @@ export default function App() {
               setPropertiesPaletteTab('properties');
             }
           }}
+        />
+      )}
+
+      {deprotectDialogOpen && mapState?.status === 'ok' && (
+        <DeprotectDialog
+          open={deprotectDialogOpen}
+          onClose={() => setDeprotectDialogOpen(false)}
+          onMapUpdated={(updated) => setMapState(updated)}
+          log={log}
         />
       )}
 

@@ -591,7 +591,58 @@ export type WorkerRequest =
       request: BuildCustomObjectRequest;
       resourceMapPaths?: Partial<Record<ResourceMapKind, string>>;
     }
+  | { type: 'inspectDeprotect'; requestId: string }
+  | { type: 'deprotectMap'; requestId: string; options?: DeprotectMapOptions }
+  | { type: 'spoofMapCrc32'; requestId: string; targetCrc32: number }
   | { type: 'cancel'; requestId: string };
+
+export interface DeprotectInspectionSummary {
+  totalTags: number;
+  protectedClassCount: number;
+  protectedNameCount: number;
+  duplicateNameCount: number;
+  scriptRecoverableNamesCount: number;
+  truncatedBitmapCount: number;
+  corruptedModelPartCount: number;
+  headerCrc32: number;
+  tagChecksum: number;
+  details: string[];
+}
+
+export interface DeprotectMapOptions {
+  repairClasses?: boolean;
+  scrapeScriptPaths?: boolean;
+  heuristicRename?: boolean;
+  repairBitmaps?: boolean;
+  repairModelStrips?: boolean;
+}
+
+export type InspectDeprotectResult =
+  | { ok: true; report: DeprotectInspectionSummary }
+  | { ok: false; code: string; message: string };
+
+export type DeprotectMapResult =
+  | {
+      ok: true;
+      classesRepaired: number;
+      scriptPathsRecovered: number;
+      heuristicPathsRenamed: number;
+      bitmapsRepaired: number;
+      modelPartsRepaired: number;
+      stripIndicesClamped: number;
+      log: string[];
+      map: OpenMapSummary;
+    }
+  | { ok: false; code: string; message: string };
+
+export type SpoofMapCrc32Result =
+  | {
+      ok: true;
+      compensationWord: number;
+      crc32: number;
+      map: OpenMapSummary;
+    }
+  | { ok: false; code: string; message: string };
 
 export type CustomObjectTagGroup = 'scenery' | 'weapon' | 'vehicle' | 'equipment';
 
@@ -924,6 +975,10 @@ export interface OpenceApi {
   buildCustomObjectTag(request: BuildCustomObjectRequest): Promise<BuildCustomObjectResult>;
   pickSaveOceTagsPath(defaultName: string): Promise<{ path: string | null }>;
   pickExportDirectory(): Promise<{ path: string | null }>;
+  /** M13.5: MEK Deprotection, Asset Integrity & CRC32 Spoofer */
+  inspectDeprotect?(): Promise<InspectDeprotectResult>;
+  deprotectMap?(options?: DeprotectMapOptions): Promise<DeprotectMapResult>;
+  spoofMapCrc32?(targetCrc32: number): Promise<SpoofMapCrc32Result>;
   tagTestSetAlwaysOnTop(flag: boolean): Promise<void>;
   tagTestIsAlwaysOnTop(): Promise<boolean>;
   tagTestTriggerFlycam(): Promise<{ ok: boolean; message?: string }>;

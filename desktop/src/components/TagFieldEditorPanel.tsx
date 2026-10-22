@@ -139,6 +139,69 @@ export function getFieldUnit(name: string, type: string): { unit?: string; toolt
   return {};
 }
 
+export interface CrossReflexiveOption {
+  index: number;
+  label: string;
+}
+
+/**
+ * Resolves a human-readable cross-reflexive dropdown option list for `Index` / `int16` fields
+ * that reference a sibling `TagReflexive` block in the same tag (mirroring MEK's dynamic block index dropdowns).
+ */
+export function resolveCrossReflexiveOptions(
+  field: TagFieldDescriptor,
+  rootFields: TagFieldDescriptor[],
+): { reflexiveName: string; options: CrossReflexiveOption[] } | null {
+  if (field.kind !== 'number') return null;
+  const lowerName = field.name.toLowerCase();
+  const isIndexType = field.type === 'Index';
+  const isNodeOrShaderIndex =
+    isIndexType ||
+    lowerName === 'shader index' ||
+    lowerName === 'magazine' ||
+    lowerName.endsWith(' node index') ||
+    lowerName === 'parent node' ||
+    lowerName === 'first child node' ||
+    lowerName === 'next sibling node';
+
+  if (!isNodeOrShaderIndex) return null;
+
+  let targetReflexiveName: string | null = null;
+  if (lowerName.includes('shader')) {
+    targetReflexiveName = 'shaders';
+  } else if (lowerName.includes('magazine')) {
+    targetReflexiveName = 'magazines';
+  } else if (lowerName.includes('node')) {
+    targetReflexiveName = 'nodes';
+  } else if (lowerName.includes('marker')) {
+    targetReflexiveName = 'markers';
+  } else if (lowerName.includes('region')) {
+    targetReflexiveName = 'regions';
+  }
+
+  if (!targetReflexiveName) return null;
+  const targetBlock = rootFields.find((rf) => rf.kind === 'reflexive' && rf.name.toLowerCase() === targetReflexiveName);
+  if (!targetBlock || !targetBlock.children || targetBlock.children.length === 0) return null;
+
+  const options: CrossReflexiveOption[] = targetBlock.children.map((el, idx) => {
+    const nameField = el.fields.find((cf) => cf.kind === 'string' && cf.name.toLowerCase().includes('name'));
+    const depField = el.fields.find((cf) => cf.kind === 'dependency' && cf.dependencyTarget);
+    let summary = `${el.structName} #${idx}`;
+    if (nameField && typeof nameField.value === 'string' && nameField.value.trim()) {
+      summary = nameField.value.trim();
+    } else if (depField?.dependencyTarget?.path) {
+      const shortPath = depField.dependencyTarget.path.split('\\').pop() || depField.dependencyTarget.path;
+      summary = `${shortPath} (${depField.dependencyTarget.group})`;
+    }
+    return {
+      index: idx,
+      label: `[${idx}] ${summary}`,
+    };
+  });
+
+  return { reflexiveName: targetBlock.name, options };
+}
+
 export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props) {
   const [fieldsResult, setFieldsResult] = useState<TagFieldsResult | null>(null);
   const [isLoadingFields, setIsLoadingFields] = useState(false);
@@ -335,6 +398,7 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
                     key={field.name}
                     field={field}
                     fieldPath={field.name}
+                    rootFields={fieldsResult?.fields ?? []}
                     allTags={allTags}
                     savingField={savingField}
                     onSave={handleUpdateField}
@@ -361,6 +425,7 @@ interface FieldCardProps {
    * data-testid attributes and for the save path passed to `window.opence.updateTagField`.
    */
   fieldPath: string;
+  rootFields: TagFieldDescriptor[];
   allTags: TagEntrySummary[];
   /** Currently saving field path (or null); a card is "saving" when it matches its own path. */
   savingField: string | null;
@@ -379,6 +444,7 @@ interface FieldCardProps {
 function FieldCard({
   field,
   fieldPath,
+  rootFields,
   allTags,
   savingField,
   onSave,
@@ -397,6 +463,7 @@ function FieldCard({
   const searchQ = search?.trim().toLowerCase() ?? '';
   const [localVal, setLocalVal] = useState<unknown>(field.value);
   const fieldUnitInfo = useMemo(() => getFieldUnit(field.name, field.type), [field.name, field.type]);
+  const crossRefInfo = useMemo(() => resolveCrossReflexiveOptions(field, rootFields), [field, rootFields]);
   const canAddChunk = Boolean(
     onAddChunk && field.reflexiveStruct && (!field.readOnlyReason || field.readOnlyReason.includes('in-place write')),
   );
@@ -589,6 +656,7 @@ function FieldCard({
                                 key={nestedPath}
                                 field={cf}
                                 fieldPath={nestedPath}
+                                rootFields={rootFields}
                                 allTags={allTags}
                                 savingField={savingField}
                                 onSave={onSave}
@@ -622,29 +690,54 @@ function FieldCard({
           {field.readOnlyReason ?? 'Read-only'}
         </div>
       ) : field.kind === 'number' ? (
-        <input
-          data-testid={`field-input-${fieldPath}`}
-          type="number"
-          step="any"
-          value={localVal !== undefined && localVal !== null ? String(localVal) : ''}
-          disabled={isSaving}
-          onChange={(e) => setLocalVal(e.target.value)}
-          onBlur={() => {
-            const num = Number(localVal);
-            if (!Number.isNaN(num) && num !== field.value) {
-              onSave(fieldPath, num);
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+        <div>
+          {crossRefInfo && (
+            <div style={{ marginBottom: 4 }}>
+              <select
+                data-testid={`field-crossref-${fieldPath}`}
+                value={Number(localVal)}
+                disabled={isSaving}
+                onChange={(e) => {
+                  const nextVal = Number(e.target.value);
+                  setLocalVal(nextVal);
+                  onSave(fieldPath, nextVal);
+                }}
+                style={{ ...inputStyle, borderColor: 'rgba(56, 189, 248, 0.35)' }}
+                title={`Select element from "${crossRefInfo.reflexiveName}" reflexive block`}
+              >
+                <option value={-1}>[-1] (None / Null)</option>
+                {crossRefInfo.options.map((opt) => (
+                  <option key={opt.index} value={opt.index}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <input
+            data-testid={`field-input-${fieldPath}`}
+            type="number"
+            step="any"
+            value={localVal !== undefined && localVal !== null ? String(localVal) : ''}
+            disabled={isSaving}
+            onChange={(e) => setLocalVal(e.target.value)}
+            onBlur={() => {
               const num = Number(localVal);
               if (!Number.isNaN(num) && num !== field.value) {
                 onSave(fieldPath, num);
               }
-            }
-          }}
-          style={inputStyle}
-        />
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const num = Number(localVal);
+                if (!Number.isNaN(num) && num !== field.value) {
+                  onSave(fieldPath, num);
+                }
+              }
+            }}
+            style={inputStyle}
+          />
+        </div>
       ) : field.kind === 'bounds' ? (
         <div style={{ display: 'flex', gap: 6 }}>
           <div style={{ flex: 1 }}>
@@ -722,7 +815,7 @@ function FieldCard({
           >
             <span>Value: 0x{Number(localVal || 0).toString(16).toUpperCase()}</span>
             <span style={{ fontSize: 10, color: 'var(--accent-cyan)' }}>
-              {isExpanded ? 'Hide Flags â–²' : 'Edit Flags â–¼'}
+              {isExpanded ? 'Hide Flags ▲' : 'Edit Flags ▼'}
             </span>
           </div>
 

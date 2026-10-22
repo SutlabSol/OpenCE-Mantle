@@ -225,9 +225,24 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   const [outlinerFilter, setOutlinerFilter] = useState<'all' | ScenarioObjectKind>('all');
   const [outlinerSearch, setOutlinerSearch] = useState<string>('');
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
-  const [addKind, setAddKind] = useState<ScenarioObjectKind | 'teleport' | 'teleport_2way' | 'koth' | 'race' | 'oddball'>('vehicle');
+  const [addKind, setAddKind] = useState<
+    | ScenarioObjectKind
+    | 'teleporter'
+    | 'teleport'
+    | 'teleport_2way'
+    | 'koth'
+    | 'race'
+    | 'oddball'
+    | 'ctf_flag'
+    | 'ctf_flag_item'
+  >('vehicle');
+  const [addNetgameSubtype, setAddNetgameSubtype] = useState<
+    'spawn' | 'ctf_flag' | 'ctf_flag_item' | 'koth' | 'oddball' | 'race'
+  >('spawn');
+  const [addTeleporterSubtype, setAddTeleporterSubtype] = useState<'teleport' | 'teleport_2way'>('teleport');
   const [addPaletteIndex, setAddPaletteIndex] = useState<number>(0);
   const [addTeam, setAddTeam] = useState<number>(0);
+  const [viewportContextMenu, setViewportContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   // Swap State
   const [swapKind, setSwapKind] = useState<ScenarioObjectKind>('vehicle');
@@ -526,13 +541,52 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
   const handleAddPlacement = useCallback(
     async (
-      kind: ScenarioObjectKind | 'teleport' | 'teleport_2way' | 'koth' | 'race' | 'oddball',
+      kind:
+        | ScenarioObjectKind
+        | 'teleporter'
+        | 'teleport'
+        | 'teleport_2way'
+        | 'koth'
+        | 'race'
+        | 'oddball'
+        | 'ctf_flag'
+        | 'ctf_flag_item',
       paletteIndex: number,
       position: [number, number, number],
       rotation: [number, number, number] = [0, 0, 0],
       teamIndex?: number,
     ) => {
       try {
+        if (kind === 'ctf_flag') {
+          // CTF Flag Stand (type 0 = CTF Flag, usageId = teamIndex 0 Red or 1 Blue)
+          const res = await window.opence.addScenarioPlacement('netgame_flag', 0, position, rotation, teamIndex ?? 0);
+          if (res && res.ok) {
+            setScenarioData(res.summary);
+            setSelectedObjectId(res.newPlacement.id);
+            setShowAddModal(false);
+          }
+          return;
+        }
+
+        if (kind === 'ctf_flag_item') {
+          // Droppable CTF Flag item (weapon item collection)
+          const weaponsPal = scenarioData?.palettes.weapons || [];
+          const flagIdx = weaponsPal.findIndex(
+            (p) =>
+              p.path.toLowerCase().endsWith('\\flag') ||
+              p.name.toLowerCase() === 'flag' ||
+              p.path.toLowerCase().includes('weapons\\flag'),
+          );
+          const chosenIdx = flagIdx >= 0 ? flagIdx : 0;
+          const res = await window.opence.addScenarioPlacement('weapon', chosenIdx, position, rotation);
+          if (res && res.ok) {
+            setScenarioData(res.summary);
+            setSelectedObjectId(res.newPlacement.id);
+            setShowAddModal(false);
+          }
+          return;
+        }
+
         if (kind === 'teleport_2way') {
           // Two-Way Teleporter: 2 Bi-directional nodes (Node 1 and Node 2), each with an Origin and Destination
           const existing = (scenarioData?.objects || []).filter(
@@ -1846,6 +1900,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
     const onMouseDown = (e: MouseEvent) => {
       const targetGroup = getSelectedGroup();
+      setViewportContextMenu(null);
       if (e.button === 1) {
         // Scroll button / Middle click drag: horizontal move
         if (targetGroup) {
@@ -1868,6 +1923,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
         }
       } else if (e.button === 2) {
+        pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
         if (e.altKey && targetGroup) {
           // Left Alt + right click drag: pitch & yaw rotate (suppress camera fly-look!)
           isAltRightDraggingRef.current = true;
@@ -1972,6 +2028,14 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
     const onContextMenu = (e: MouseEvent) => {
       e.preventDefault();
+      const dx = e.clientX - pointerDownPosRef.current.x;
+      const dy = e.clientY - pointerDownPosRef.current.y;
+      if (Math.hypot(dx, dy) < 6 && !e.altKey) {
+        const rect = container.getBoundingClientRect();
+        const x = Math.min(Math.max(8, e.clientX - rect.left), Math.max(8, rect.width - 200));
+        const y = Math.min(Math.max(8, e.clientY - rect.top), Math.max(8, rect.height - 230));
+        setViewportContextMenu({ x, y });
+      }
     };
 
     const onMouseMove = (e: MouseEvent) => {
@@ -3867,6 +3931,88 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         )}
       </div>
 
+      {/* 3D Viewport Right-Click Context Menu (Shortcut to Add Object Modal) */}
+      {viewportContextMenu && (
+        <div
+          data-testid="viewport-context-menu"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            left: viewportContextMenu.x,
+            top: viewportContextMenu.y,
+            width: 190,
+            background: 'rgba(19, 23, 31, 0.96)',
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            padding: '5px 0',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.65)',
+            zIndex: 28,
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <div
+            style={{
+              padding: '4px 12px 6px',
+              fontSize: 10,
+              fontWeight: 700,
+              color: 'var(--text-dim)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              borderBottom: '1px solid rgba(255,255,255,0.06)',
+              marginBottom: 2,
+            }}
+          >
+            Quick Add Object
+          </div>
+          {(
+            [
+              { kind: 'scenery', label: 'Add Scenery', icon: '🌲' },
+              { kind: 'vehicle', label: 'Add Vehicle', icon: '🚙' },
+              { kind: 'weapon', label: 'Add Weapon', icon: '🔫' },
+              { kind: 'equipment', label: 'Add Equipment', icon: '🧰' },
+              { kind: 'netgame_flag', label: 'Add Netgame Flag', icon: '🚩' },
+              { kind: 'teleporter', label: 'Add Teleporter', icon: '🌀' },
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.kind}
+              data-testid={`viewport-ctx-add-${item.kind}`}
+              onClick={() => {
+                setAddKind(item.kind);
+                setAddPaletteIndex(0);
+                setViewportContextMenu(null);
+                setShowAddModal(true);
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                width: '100%',
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-primary)',
+                padding: '6px 12px',
+                fontSize: 12,
+                textAlign: 'left',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'rgba(0, 229, 255, 0.14)';
+                e.currentTarget.style.color = 'var(--accent-cyan)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.color = 'var(--text-primary)';
+              }}
+            >
+              <span style={{ fontSize: 12, width: 16, textAlign: 'center' }}>{item.icon}</span>
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Add Object Modal Dialog */}
       {showAddModal && (
         <div
@@ -3883,7 +4029,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         >
           <div
             style={{
-              width: 380,
+              width: 390,
               background: 'var(--bg-panel)',
               border: '1px solid var(--border)',
               borderRadius: 6,
@@ -3917,9 +4063,36 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
               <label style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600 }}>Object Category</label>
               <select
                 data-testid="add-modal-kind-select"
-                value={addKind}
+                value={
+                  addKind === 'spawn' ||
+                  addKind === 'ctf_flag' ||
+                  addKind === 'ctf_flag_item' ||
+                  addKind === 'koth' ||
+                  addKind === 'oddball' ||
+                  addKind === 'race'
+                    ? 'netgame_flag'
+                    : addKind === 'teleport' || addKind === 'teleport_2way'
+                      ? 'teleporter'
+                      : addKind
+                }
                 onChange={(e) => {
-                  setAddKind(e.target.value as ScenarioObjectKind);
+                  const val = e.target.value;
+                  if (
+                    val === 'spawn' ||
+                    val === 'ctf_flag' ||
+                    val === 'ctf_flag_item' ||
+                    val === 'koth' ||
+                    val === 'oddball' ||
+                    val === 'race'
+                  ) {
+                    setAddKind('netgame_flag');
+                    setAddNetgameSubtype(val);
+                  } else if (val === 'teleport' || val === 'teleport_2way') {
+                    setAddKind('teleporter');
+                    setAddTeleporterSubtype(val);
+                  } else {
+                    setAddKind(val as ScenarioObjectKind | 'teleporter');
+                  }
                   setAddPaletteIndex(0);
                 }}
                 style={{
@@ -3931,19 +4104,77 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                   fontSize: 12,
                 }}
               >
-                <option value="vehicle">Vehicle</option>
                 <option value="scenery">Scenery</option>
-                <option value="spawn">Player Starting Location (Spawn)</option>
+                <option value="vehicle">Vehicle</option>
                 <option value="weapon">Weapon</option>
                 <option value="equipment">Equipment</option>
+                <option value="netgame_flag">Netgame Flag (Spawns / CTF / KOTH / Oddball / Race)</option>
+                <option value="teleporter">Teleporter (One-Way &amp; Two-Way)</option>
                 <option value="biped">Biped</option>
-                <option value="teleport">One-Way Teleporter (Origin & Destination Pair)</option>
-                <option value="teleport_2way">Two-Way Teleporter (Bi-Directional Pair - Purple)</option>
-                <option value="koth">King of the Hill (KOTH 8-Point Zone)</option>
-                <option value="race">Race Track Checkpoint</option>
-                <option value="oddball">Oddball Skull Spawn</option>
               </select>
             </div>
+
+            {/* Netgame Flag / Objective Subtype (when Netgame Flag category is selected) */}
+            {(addKind === 'netgame_flag' ||
+              addKind === 'spawn' ||
+              addKind === 'ctf_flag' ||
+              addKind === 'ctf_flag_item' ||
+              addKind === 'koth' ||
+              addKind === 'oddball' ||
+              addKind === 'race') && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <label style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600 }}>
+                  Netgame Flag / Objective Type
+                </label>
+                <select
+                  data-testid="add-modal-netgame-select"
+                  value={addNetgameSubtype}
+                  onChange={(e) =>
+                    setAddNetgameSubtype(
+                      e.target.value as 'spawn' | 'ctf_flag' | 'ctf_flag_item' | 'koth' | 'oddball' | 'race',
+                    )
+                  }
+                  style={{
+                    background: 'var(--bg-main)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    padding: '6px 8px',
+                    fontSize: 12,
+                  }}
+                >
+                  <option value="spawn">Player Starting Location (Spawn)</option>
+                  <option value="ctf_flag">CTF Flag Stand (Team Base Flag)</option>
+                  <option value="ctf_flag_item">CTF Flag (Droppable Item)</option>
+                  <option value="koth">King of the Hill (KOTH 8-Point Zone)</option>
+                  <option value="oddball">Oddball Skull Spawn</option>
+                  <option value="race">Race Track Checkpoint</option>
+                </select>
+              </div>
+            )}
+
+            {/* Teleporter Style Subtype (when Teleporter category is selected) */}
+            {(addKind === 'teleporter' || addKind === 'teleport' || addKind === 'teleport_2way') && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <label style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600 }}>Teleporter Style</label>
+                <select
+                  data-testid="add-modal-teleporter-select"
+                  value={addTeleporterSubtype}
+                  onChange={(e) => setAddTeleporterSubtype(e.target.value as 'teleport' | 'teleport_2way')}
+                  style={{
+                    background: 'var(--bg-main)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    padding: '6px 8px',
+                    fontSize: 12,
+                  }}
+                >
+                  <option value="teleport">One-Way Teleporter (Origin &amp; Destination Pair)</option>
+                  <option value="teleport_2way">Two-Way Teleporter (Bi-Directional Pair - Purple)</option>
+                </select>
+              </div>
+            )}
 
             {/* Palette item (if applicable) */}
             {(addKind === 'vehicle' || addKind === 'scenery' || addKind === 'biped' || addKind === 'weapon' || addKind === 'equipment') &&
@@ -3984,8 +4215,10 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                 </div>
               )}
 
-            {/* Team (if spawn) */}
-            {addKind === 'spawn' && (
+            {/* Team (if spawn or CTF flag stand) */}
+            {((addKind === 'netgame_flag' && (addNetgameSubtype === 'spawn' || addNetgameSubtype === 'ctf_flag')) ||
+              addKind === 'spawn' ||
+              addKind === 'ctf_flag') && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <label style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600 }}>Team</label>
                 <select
@@ -4003,7 +4236,9 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                 >
                   <option value={0}>0 - Red Team</option>
                   <option value={1}>1 - Blue Team</option>
-                  <option value={2}>2 - Yellow / FFA / None</option>
+                  {(addNetgameSubtype === 'spawn' || addKind === 'spawn') && (
+                    <option value={2}>2 - Yellow / FFA / None</option>
+                  )}
                 </select>
               </div>
             )}
@@ -4046,7 +4281,13 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                   ];
                   // Keep the exact [0, 0, 0] rotation exported from Blender by default
                   const spawnHaloRot: [number, number, number] = [0, 0, 0];
-                  handleAddPlacement(addKind, addPaletteIndex, spawnHaloPos, spawnHaloRot, addTeam);
+                  const effectiveKind =
+                    addKind === 'netgame_flag'
+                      ? addNetgameSubtype
+                      : addKind === 'teleporter'
+                        ? addTeleporterSubtype
+                        : addKind;
+                  handleAddPlacement(effectiveKind, addPaletteIndex, spawnHaloPos, spawnHaloRot, addTeam);
                 }}
                 style={{
                   background: '#2e7d32',

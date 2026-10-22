@@ -46,3 +46,5 @@ export * from './render/bitmap-codec';
 export * from './render/sound-codec';
 export * from './render/model-exporter';
 export * from './render/collision-generator';
+export * from './map/deprotect';
+export * from './map/tag-postprocess';

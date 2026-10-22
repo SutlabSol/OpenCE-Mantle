@@ -109,6 +109,9 @@ const api: OpenceApi = {
   pickSaveOceTagsPath: (defaultName: string) => ipcRenderer.invoke('objectBuilder:pickSaveOceTagsPath', defaultName),
   buildCustomObjectTag: (request) => ipcRenderer.invoke('objectBuilder:build', request),
   pickExportDirectory: () => ipcRenderer.invoke('dialog:pickExportDirectory'),
+  inspectDeprotect: () => ipcRenderer.invoke('deprotect:inspect'),
+  deprotectMap: (options) => ipcRenderer.invoke('deprotect:run', options),
+  spoofMapCrc32: (targetCrc32: number) => ipcRenderer.invoke('deprotect:spoofCrc32', targetCrc32),
   exportModel3d: (modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     ipcRenderer.invoke('3d:exportModel', modelTagId, lod, format, outputPath),
   exportBsp3d: (bspIndex: number, format: 'obj' | 'glb', outputPath: string) =>

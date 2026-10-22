@@ -2456,6 +2456,64 @@ export function buildCustomRootObjectTag(
   };
 }
 
+/**
+ * Synthesizes a 176-byte `item_collection` (`itmc`) tag (92-byte root + 84-byte permutation)
+ * referencing a `weapon` or `equipment` tag so it can be placed via `ScenarioNetgameEquipment` in multiplayer.
+ */
+export function buildCustomItemCollectionTag(
+  tagPath: string,
+  originalIndex: number,
+  itemGroup: 'weapon' | 'equipment',
+  itemPath: string,
+  itemLocalIndex: number,
+  spawnTimeSeconds = 30,
+): ExtractedTag {
+  const rootSize = 92;
+  const permSize = 84;
+  const buf = Buffer.alloc(rootSize + permSize, 0);
+
+  // ItemCollection root (92 bytes):
+  // +0: permutations reflexive (count = 1, pointerLow = 92)
+  buf.writeUInt32LE(1, 0);
+  buf.writeUInt32LE(rootSize, 4);
+  buf.writeUInt32LE(0, 8);
+  // +12: default spawn time (int16)
+  buf.writeInt16LE(spawnTimeSeconds, 12);
+
+  // ItemCollectionPermutation (84 bytes at offset 92):
+  const permOff = rootSize;
+  // +32: weight (float = 1.0)
+  buf.writeFloatLE(1.0, permOff + 32);
+  // +36: item TagDependency (16 bytes)
+  const itemFourCC = itemGroup === 'weapon' ? 0x77656170 : 0x65716970; // 'weap' or 'eqip'
+  buf.writeUInt32LE(itemFourCC, permOff + 36);
+  buf.writeUInt32LE(0, permOff + 40);
+  buf.writeUInt32LE(0, permOff + 44);
+  buf.writeUInt32LE(0xffffffff, permOff + 48);
+
+  return {
+    originalIndex,
+    group: 'item_collection',
+    path: tagPath,
+    structName: 'ItemCollection',
+    secondaryClassFourCC: null,
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies: [
+      {
+        fieldPath: `${tagPath}.permutations[0].item`,
+        group: itemGroup,
+        path: itemPath,
+        kind: 'internal',
+        localTagIndex: itemLocalIndex,
+      },
+    ],
+    embeddedRawDataAssets: [],
+    embeddedRawDataPatches: [],
+    injectionBlockers: [],
+  };
+}
+
 export interface BuildCustomObjectOptions {
   /** Target object tag class: scenery, weapon, vehicle, or equipment. */
   tagGroup: CustomObjectTagGroup;
@@ -2685,7 +2743,29 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     collisionTag,
     rootObjectTag,
   ];
-  void rootLocalIdx;
+  const rootFinalOutputs = [rootOrigIdx];
+  const generatedTagPaths: { group: string; path: string }[] = [
+    { group: 'bitmap', path: bitmapPath },
+    { group: 'shader_model', path: shaderPath },
+    { group: 'gbxmodel', path: gbxmodelPath },
+    { group: 'model_collision_geometry', path: collisionPath },
+    { group: options.tagGroup, path: rootPath },
+  ];
+
+  if (options.tagGroup === 'weapon' || options.tagGroup === 'equipment') {
+    const itmcOrigIdx = maxOrig + 6;
+    const itmcTag = buildCustomItemCollectionTag(
+      rootPath,
+      itmcOrigIdx,
+      options.tagGroup,
+      rootPath,
+      rootLocalIdx,
+      30,
+    );
+    allTags.push(itmcTag);
+    rootFinalOutputs.push(itmcOrigIdx);
+    generatedTagPaths.push({ group: 'item_collection', path: rootPath });
+  }
 
   const warnings = [
     ...(options.templateExtractedSet?.warnings ?? []),
@@ -2699,7 +2779,7 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
   ];
 
   const tagSet: ExtractedTagSet = {
-    rootOriginalIndices: [rootOrigIdx],
+    rootOriginalIndices: rootFinalOutputs,
     tags: allTags,
     notExtracted: [],
     warnings,
@@ -2725,12 +2805,6 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     usedAutoUv: renderMesh.usedAutoUv,
     rootTagPath: rootPath,
     rootTagGroup: options.tagGroup,
-    generatedTagPaths: [
-      { group: 'bitmap', path: bitmapPath },
-      { group: 'shader_model', path: shaderPath },
-      { group: 'gbxmodel', path: gbxmodelPath },
-      { group: 'model_collision_geometry', path: collisionPath },
-      { group: options.tagGroup, path: rootPath },
-    ],
+    generatedTagPaths,
   };
 }

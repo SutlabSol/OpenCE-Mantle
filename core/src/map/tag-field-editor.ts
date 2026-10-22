@@ -17,6 +17,7 @@ import type { DefinitionValueField } from './definitions/types';
 import type { DecodedReflexive } from './definitions/codec';
 import { TAG_ENTRY_SIZE, TAG_DATA_HEADER_PC_SIZE } from '../constants/cache-file';
 import { NULL_TAG_ID } from '../constants/tag-classes';
+import { postprocessTagFields } from './tag-postprocess';
 
 /** Safety cap on nested TagReflexive recursion depth (guards against corrupt/circular data). */
 export const MAX_REFLEXIVE_DEPTH = 8;
@@ -504,6 +505,7 @@ export function writeTagFieldValue(
     }
     const boundsVal: [number, number] = [Number(newValue[0]), Number(newValue[1])];
     encodeValueField(buffer, absOffset, { kind: 'bounds', type: field.def.type, value: boundsVal });
+    postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, fieldName);
     return { fieldName, newValue: boundsVal, fieldOffset: absOffset };
   }
 
@@ -528,6 +530,7 @@ export function writeTagFieldValue(
     throw new TagFieldEditorError(`Field "${fieldName}" expects a numeric value, got ${JSON.stringify(newValue)}`);
   }
   encodeValueField(buffer, absOffset, { kind: 'basic', type: field.def.type, value: numVal });
+  postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, fieldName);
   return { fieldName, newValue: numVal, fieldOffset: absOffset };
 }
 

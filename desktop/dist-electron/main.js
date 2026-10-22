@@ -37659,6 +37659,65 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("objectBuilder:exportUvTemplate", (_e, options) => exportUvTemplateFlow(options));
   import_electron3.ipcMain.handle("objectBuilder:pickSaveOceTagsPath", (_e, defaultName) => pickSaveOceTagsPathFlow(defaultName));
   import_electron3.ipcMain.handle("objectBuilder:build", (_e, request) => buildCustomObjectTagFlow(request));
+  import_electron3.ipcMain.handle("deprotect:inspect", async () => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, code: "NO_MAP_LOADED", message: "No uncompressed map is open." };
+    }
+    try {
+      const { promise } = sendWorkerRequest({ type: "inspectDeprotect" }, sendLog);
+      return await promise;
+    } catch (err) {
+      const e = err;
+      return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+    }
+  });
+  import_electron3.ipcMain.handle("deprotect:run", async (_e, options) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, code: "NO_MAP_LOADED", message: "No uncompressed map is open." };
+    }
+    try {
+      const { promise } = sendWorkerRequest({ type: "deprotectMap", options }, sendLog);
+      const res = await promise;
+      if (res.ok) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send("map:updated", res.map);
+        sendLog(
+          "info",
+          `Deprotected map: ${res.classesRepaired} class(es), ${res.scriptPathsRecovered} script path(s), ${res.heuristicPathsRenamed} renamed, ${res.bitmapsRepaired} bitmap(s), ${res.modelPartsRepaired} model part(s) repaired.`
+        );
+      }
+      return res;
+    } catch (err) {
+      const e = err;
+      sendLog("error", `Deprotect failed: ${e.message}`);
+      return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+    }
+  });
+  import_electron3.ipcMain.handle("deprotect:spoofCrc32", async (_e, targetCrc32) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, code: "NO_MAP_LOADED", message: "No uncompressed map is open." };
+    }
+    try {
+      const { promise } = sendWorkerRequest(
+        { type: "spoofMapCrc32", targetCrc32: Number(targetCrc32) >>> 0 },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send("map:updated", res.map);
+        sendLog(
+          "info",
+          `Spoofed map CRC32 to 0x${(res.crc32 >>> 0).toString(16).toUpperCase().padStart(8, "0")} (tagFileChecksums = 0x${(res.compensationWord >>> 0).toString(16).toUpperCase().padStart(8, "0")}).`
+        );
+      }
+      return res;
+    } catch (err) {
+      const e = err;
+      sendLog("error", `CRC32 spoof failed: ${e.message}`);
+      return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+    }
+  });
   import_electron3.ipcMain.handle(
     "3d:exportModel",
     (_e, modelTagId, lod, format, outputPath) => exportModel3dFlow(modelTagId, lod, format, outputPath)

@@ -415,9 +415,9 @@ describe('ScenarioViewport', () => {
 
     expect(screen.getByTestId('add-object-modal')).toBeInTheDocument();
 
-    // Select category spawn
+    // Select category netgame_flag (which defaults to spawn)
     const kindSelect = screen.getByTestId('add-modal-kind-select');
-    fireEvent.change(kindSelect, { target: { value: 'spawn' } });
+    fireEvent.change(kindSelect, { target: { value: 'netgame_flag' } });
 
     // Submit
     const submitBtn = screen.getByTestId('add-modal-submit-btn');
@@ -630,7 +630,7 @@ describe('ScenarioViewport', () => {
     fireEvent.click(screen.getByTestId('inspector-select-all-team-spawns'));
   });
 
-  it('includes 1-way and 2-way teleporters, KOTH zone, race, and oddball in Add Object modal categories', async () => {
+  it('includes bundled netgame_flag and teleporter categories and opens right-click context menu', async () => {
     render(<ScenarioViewport header={mockHeader} bspIndex={0} />);
 
     await waitFor(() => {
@@ -645,10 +645,23 @@ describe('ScenarioViewport', () => {
 
     const kindSelect = screen.getByTestId('add-modal-kind-select') as HTMLSelectElement;
     const optionValues = Array.from(kindSelect.options).map((o) => o.value);
-    expect(optionValues).toContain('teleport');
-    expect(optionValues).toContain('teleport_2way');
-    expect(optionValues).toContain('koth');
-    expect(optionValues).toContain('race');
-    expect(optionValues).toContain('oddball');
+    expect(optionValues).toContain('netgame_flag');
+    expect(optionValues).toContain('teleporter');
+
+    fireEvent.change(kindSelect, { target: { value: 'netgame_flag' } });
+    const netgameSelect = screen.getByTestId('add-modal-netgame-select') as HTMLSelectElement;
+    const netgameOptions = Array.from(netgameSelect.options).map((o) => o.value);
+    expect(netgameOptions).toContain('spawn');
+    expect(netgameOptions).toContain('ctf_flag');
+    expect(netgameOptions).toContain('ctf_flag_item');
+    expect(netgameOptions).toContain('koth');
+    expect(netgameOptions).toContain('race');
+    expect(netgameOptions).toContain('oddball');
+
+    fireEvent.change(kindSelect, { target: { value: 'teleporter' } });
+    const teleporterSelect = screen.getByTestId('add-modal-teleporter-select') as HTMLSelectElement;
+    const teleporterOptions = Array.from(teleporterSelect.options).map((o) => o.value);
+    expect(teleporterOptions).toContain('teleport');
+    expect(teleporterOptions).toContain('teleport_2way');
   });
 });
