@@ -290,13 +290,51 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   speedRef.current = cameraSpeed;
 
   const hasInitialFramedRef = useRef<boolean>(false);
+  const isLeftPanDraggingRef = useRef<boolean>(false);
   const isMiddleDraggingRef = useRef<boolean>(false);
-  const isShiftDraggingRef = useRef<boolean>(false);
-  const isAltLeftDraggingRef = useRef<boolean>(false);
-  const isAltRightDraggingRef = useRef<boolean>(false);
+  const isCtrlMiddleOrbitRef = useRef<boolean>(false);
+  const isShiftLeftRotateRef = useRef<boolean>(false);
+  const isShiftRightRotateRef = useRef<boolean>(false);
+  const isShiftMiddleRotateRef = useRef<boolean>(false);
   const dragHasMovedRef = useRef<boolean>(false);
+  const customDragStartRef = useRef<{ pos: [number, number, number]; rot: [number, number, number] } | null>(null);
   const selectedObjectIdRef = useRef<string | null>(selectedObjectId);
   selectedObjectIdRef.current = selectedObjectId;
+
+  // Clipboard & Undo history stack for 3D viewport object editing (Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+Z)
+  const clipboardObjectRef = useRef<{
+    kind: ScenarioObjectKind;
+    paletteIndex: number;
+    position: [number, number, number];
+    rotation: [number, number, number];
+    teamIndex?: number;
+    wasCut?: boolean;
+  } | null>(null);
+
+  type ViewportUndoEntry =
+    | {
+        type: 'transform';
+        items: Array<{
+          id: string;
+          prevPos: [number, number, number];
+          prevRot: [number, number, number];
+        }>;
+      }
+    | {
+        type: 'add';
+        ids: string[];
+      }
+    | {
+        type: 'delete';
+        objects: Array<{
+          kind: ScenarioObjectKind;
+          paletteIndex: number;
+          position: [number, number, number];
+          rotation: [number, number, number];
+          teamIndex?: number;
+        }>;
+      };
+  const undoStackRef = useRef<ViewportUndoEntry[]>([]);
 
   const selectedPlacement = useMemo(() => {
     if (!selectedObjectId || !scenarioData) return null;
@@ -471,6 +509,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       try {
         const res = await window.opence.duplicateScenarioPlacement(placementId);
         if (res && res.ok) {
+          undoStackRef.current.push({ type: 'add', ids: [res.newPlacement.id] });
           setScenarioData(res.summary);
           setSelectedObjectId(res.newPlacement.id);
         }
@@ -482,7 +521,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
   );
 
   const handleDeletePlacement = useCallback(
-    async (placementId: string) => {
+    async (placementId: string, options?: { skipUndo?: boolean }) => {
       try {
         const idsToDelete =
           selectedObjectIdsRef.current.includes(placementId) && selectedObjectIdsRef.current.length > 1
@@ -513,6 +552,22 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           }
         }
 
+        if (!options?.skipUndo && scenarioData) {
+          const deletedObjs = Array.from(expandedIds)
+            .map((id) => scenarioData.objects.find((o) => o.id === id))
+            .filter((o): o is NonNullable<typeof o> => !!o)
+            .map((o) => ({
+              kind: o.kind,
+              paletteIndex: o.paletteIndex,
+              position: [...o.position] as [number, number, number],
+              rotation: [...o.rotation] as [number, number, number],
+              teamIndex: o.teamIndex,
+            }));
+          if (deletedObjs.length > 0) {
+            undoStackRef.current.push({ type: 'delete', objects: deletedObjs });
+          }
+        }
+
         // Sort descending by index so deleting from the array doesn't disrupt earlier element indices
         const sortedIds = Array.from(expandedIds).sort((a, b) => {
           const ai = parseInt(a.split('-')[1], 10);
@@ -539,6 +594,136 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     [scenarioData],
   );
 
+  const handleCopyPlacement = useCallback(() => {
+    const id = selectedObjectIdRef.current;
+    if (!id || !scenarioData) return;
+    const obj = scenarioData.objects.find((o) => o.id === id);
+    if (!obj) return;
+    clipboardObjectRef.current = {
+      kind: obj.kind,
+      paletteIndex: obj.paletteIndex,
+      position: [...obj.position] as [number, number, number],
+      rotation: [...obj.rotation] as [number, number, number],
+      teamIndex: obj.teamIndex,
+      wasCut: false,
+    };
+  }, [scenarioData]);
+
+  const handleCutPlacement = useCallback(async () => {
+    const id = selectedObjectIdRef.current;
+    if (!id || !scenarioData) return;
+    const obj = scenarioData.objects.find((o) => o.id === id);
+    if (!obj) return;
+    clipboardObjectRef.current = {
+      kind: obj.kind,
+      paletteIndex: obj.paletteIndex,
+      position: [...obj.position] as [number, number, number],
+      rotation: [...obj.rotation] as [number, number, number],
+      teamIndex: obj.teamIndex,
+      wasCut: true,
+    };
+    await handleDeletePlacement(id);
+  }, [scenarioData, handleDeletePlacement]);
+
+  const handlePastePlacement = useCallback(async () => {
+    const clip = clipboardObjectRef.current;
+    if (!clip) return;
+    try {
+      const pastePos: [number, number, number] = clip.wasCut
+        ? [...clip.position]
+        : [clip.position[0] + 1.5, clip.position[1] + 1.5, clip.position[2]];
+      const res = await window.opence.addScenarioPlacement(
+        clip.kind,
+        clip.paletteIndex,
+        pastePos,
+        clip.rotation,
+        clip.teamIndex,
+      );
+      if (res && res.ok) {
+        clip.position = pastePos;
+        clip.wasCut = false;
+        undoStackRef.current.push({ type: 'add', ids: [res.newPlacement.id] });
+        setScenarioData(res.summary);
+        setSelectedObjectId(res.newPlacement.id);
+      }
+    } catch (err) {
+      console.error('Failed to paste scenario placement:', err);
+    }
+  }, []);
+
+  const handleUndo = useCallback(async () => {
+    const entry = undoStackRef.current.pop();
+    if (!entry) return;
+    try {
+      if (entry.type === 'transform') {
+        for (const item of entry.items) {
+          const allGroups = [
+            ...(layerGroupsRef.current?.vehicles.children || []),
+            ...(layerGroupsRef.current?.scenery.children || []),
+            ...(layerGroupsRef.current?.spawns.children || []),
+            ...(layerGroupsRef.current?.items.children || []),
+            ...(layerGroupsRef.current?.encounters.children || []),
+            ...(layerGroupsRef.current?.firingPositions.children || []),
+            ...(layerGroupsRef.current?.triggerVolumes.children || []),
+            ...(layerGroupsRef.current?.cutsceneCameras.children || []),
+            ...(layerGroupsRef.current?.netgameFlags.children || []),
+          ];
+          const grp = allGroups.find((g) => g.userData?.id === item.id);
+          if (grp) {
+            grp.position.set(item.prevPos[0], item.prevPos[1], item.prevPos[2]);
+            grp.rotation.set(item.prevRot[2], -item.prevRot[1], item.prevRot[0], 'ZYX');
+          }
+          await handleUpdatePlacement(item.id, {
+            position: item.prevPos,
+            rotation: item.prevRot,
+          });
+        }
+        selectionBoxHelperRef.current?.update();
+      } else if (entry.type === 'add') {
+        const sortedIds = [...entry.ids].sort((a, b) => {
+          const ai = parseInt(a.split('-')[1], 10);
+          const bi = parseInt(b.split('-')[1], 10);
+          return bi - ai;
+        });
+        let finalSummary = scenarioData;
+        for (const id of sortedIds) {
+          const res = await window.opence.deleteScenarioPlacement(id);
+          if (res && res.ok) {
+            finalSummary = res.summary;
+          }
+        }
+        if (finalSummary) {
+          setScenarioData(finalSummary);
+        }
+        setSelectedObjectIds([]);
+      } else if (entry.type === 'delete') {
+        let finalSummary = scenarioData;
+        let lastCreatedId: string | null = null;
+        for (const obj of entry.objects) {
+          const res = await window.opence.addScenarioPlacement(
+            obj.kind,
+            obj.paletteIndex,
+            obj.position,
+            obj.rotation,
+            obj.teamIndex,
+          );
+          if (res && res.ok) {
+            finalSummary = res.summary;
+            lastCreatedId = res.newPlacement.id;
+          }
+        }
+        if (finalSummary) {
+          setScenarioData(finalSummary);
+        }
+        if (lastCreatedId) {
+          setSelectedObjectId(lastCreatedId);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to undo scenario placement action:', err);
+    }
+  }, [scenarioData, handleUpdatePlacement]);
+
   const handleAddPlacement = useCallback(
     async (
       kind:
@@ -561,6 +746,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           // CTF Flag Stand (type 0 = CTF Flag, usageId = teamIndex 0 Red or 1 Blue)
           const res = await window.opence.addScenarioPlacement('netgame_flag', 0, position, rotation, teamIndex ?? 0);
           if (res && res.ok) {
+            undoStackRef.current.push({ type: 'add', ids: [res.newPlacement.id] });
             setScenarioData(res.summary);
             setSelectedObjectId(res.newPlacement.id);
             setShowAddModal(false);
@@ -580,6 +766,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           const chosenIdx = flagIdx >= 0 ? flagIdx : 0;
           const res = await window.opence.addScenarioPlacement('weapon', chosenIdx, position, rotation);
           if (res && res.ok) {
+            undoStackRef.current.push({ type: 'add', ids: [res.newPlacement.id] });
             setScenarioData(res.summary);
             setSelectedObjectId(res.newPlacement.id);
             setShowAddModal(false);
@@ -608,6 +795,10 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           const n2A = await window.opence.addScenarioPlacement('netgame_flag', 7, p2, rotation, idA);
 
           if (n2A && n2A.ok) {
+            const addedIds = [n1A, n1B, n2B, n2A]
+              .filter((r): r is NonNullable<typeof r> & { ok: true } => !!(r && r.ok))
+              .map((r) => r.newPlacement.id);
+            if (addedIds.length > 0) undoStackRef.current.push({ type: 'add', ids: addedIds });
             setScenarioData(n2A.summary);
             if (n1A && n1A.ok) setSelectedObjectId(n1A.newPlacement.id);
             setShowAddModal(false);
@@ -628,11 +819,14 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
             // 2. Place Destination (type 7) offset by 5m
             const destPos: [number, number, number] = [position[0] + 5, position[1], position[2]];
             const resDest = await window.opence.addScenarioPlacement('netgame_flag', 7, destPos, rotation, nextId);
+            const addedIds = [resOrigin.newPlacement.id];
             if (resDest && resDest.ok) {
+              addedIds.push(resDest.newPlacement.id);
               setScenarioData(resDest.summary);
             } else {
               setScenarioData(resOrigin.summary);
             }
+            undoStackRef.current.push({ type: 'add', ids: addedIds });
             setSelectedObjectId(resOrigin.newPlacement.id);
             setShowAddModal(false);
           }
@@ -649,17 +843,22 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           // Spawn 8 points in a 5m diameter circle (radius = 2.5m)
           let lastRes = null;
           let firstId = null;
+          const addedIds: string[] = [];
           for (let k = 0; k < 8; k++) {
             const angle = (k * 2 * Math.PI) / 8;
             const px = position[0] + 2.5 * Math.cos(angle);
             const py = position[1] + 2.5 * Math.sin(angle);
             const pz = position[2];
             lastRes = await window.opence.addScenarioPlacement('netgame_flag', 8, [px, py, pz], rotation, nextHillId);
-            if (k === 0 && lastRes && lastRes.ok) {
-              firstId = lastRes.newPlacement.id;
+            if (lastRes && lastRes.ok) {
+              addedIds.push(lastRes.newPlacement.id);
+              if (k === 0) {
+                firstId = lastRes.newPlacement.id;
+              }
             }
           }
           if (lastRes && lastRes.ok) {
+            if (addedIds.length > 0) undoStackRef.current.push({ type: 'add', ids: addedIds });
             setScenarioData(lastRes.summary);
             if (firstId) setSelectedObjectId(firstId);
             setShowAddModal(false);
@@ -674,6 +873,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           const nextId = existing.length > 0 ? Math.max(...existing.map((o) => o.teamIndex ?? 0)) + 1 : 0;
           const res = await window.opence.addScenarioPlacement('netgame_flag', 3, position, rotation, nextId);
           if (res && res.ok) {
+            undoStackRef.current.push({ type: 'add', ids: [res.newPlacement.id] });
             setScenarioData(res.summary);
             setSelectedObjectId(res.newPlacement.id);
             setShowAddModal(false);
@@ -688,6 +888,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           const nextId = existing.length > 0 ? Math.max(...existing.map((o) => o.teamIndex ?? 0)) + 1 : 0;
           const res = await window.opence.addScenarioPlacement('netgame_flag', 2, position, rotation, nextId);
           if (res && res.ok) {
+            undoStackRef.current.push({ type: 'add', ids: [res.newPlacement.id] });
             setScenarioData(res.summary);
             setSelectedObjectId(res.newPlacement.id);
             setShowAddModal(false);
@@ -703,6 +904,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
           teamIndex,
         );
         if (res && res.ok) {
+          undoStackRef.current.push({ type: 'add', ids: [res.newPlacement.id] });
           setScenarioData(res.summary);
           setSelectedObjectId(res.newPlacement.id);
           setShowAddModal(false);
@@ -841,6 +1043,10 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     handleUpdatePlacement,
     handleDuplicatePlacement,
     handleDeletePlacement,
+    handleCopyPlacement,
+    handleCutPlacement,
+    handlePastePlacement,
+    handleUndo,
     snapSelectedToGround,
     focusOnObject,
     frameScene,
@@ -849,6 +1055,10 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     handleUpdatePlacement,
     handleDuplicatePlacement,
     handleDeletePlacement,
+    handleCopyPlacement,
+    handleCutPlacement,
+    handlePastePlacement,
+    handleUndo,
     snapSelectedToGround,
     focusOnObject,
     frameScene,
@@ -1848,20 +2058,35 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         ...(layerGroupsRef.current?.netgameFlags.children || []),
       ];
 
+      const undoItems: Array<{
+        id: string;
+        prevPos: [number, number, number];
+        prevRot: [number, number, number];
+      }> = [];
+
       for (const id of idsToUpdate) {
         const grp = allGroups.find((g) => g.userData?.id === id);
         if (grp) {
-          if (id !== primaryId && start) {
-            const myStart = dragStartPositionsRef.current.get(id);
-            if (myStart) {
-              grp.position.copy(myStart.pos.clone().add(deltaPos));
-            }
+          const myStart = dragStartPositionsRef.current.get(id);
+          if (myStart) {
+            undoItems.push({
+              id,
+              prevPos: [myStart.pos.x, myStart.pos.y, myStart.pos.z],
+              prevRot: [myStart.rot.z, -myStart.rot.y, myStart.rot.x],
+            });
+          }
+          if (id !== primaryId && start && myStart) {
+            grp.position.copy(myStart.pos.clone().add(deltaPos));
           }
           const newPos: [number, number, number] = [grp.position.x, grp.position.y, grp.position.z];
           const euler = new THREE.Euler().setFromQuaternion(grp.quaternion, 'XYZ');
           const newRot: [number, number, number] = [euler.z, -euler.y, euler.x];
           await callbacksRef.current.handleUpdatePlacement(id, { position: newPos, rotation: newRot });
         }
+      }
+
+      if (undoItems.length > 0) {
+        undoStackRef.current.push({ type: 'transform', items: undoItems });
       }
     });
 
@@ -1898,37 +2123,66 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       return allGroups.find((g) => g.userData?.id === id) || null;
     };
 
+    const recordCustomDragStart = (targetGroup: THREE.Object3D | null) => {
+      if (!targetGroup) {
+        customDragStartRef.current = null;
+        return;
+      }
+      const euler = new THREE.Euler().setFromQuaternion(targetGroup.quaternion, 'XYZ');
+      customDragStartRef.current = {
+        pos: [targetGroup.position.x, targetGroup.position.y, targetGroup.position.z],
+        rot: [euler.z, -euler.y, euler.x],
+      };
+    };
+
     const onMouseDown = (e: MouseEvent) => {
       const targetGroup = getSelectedGroup();
       setViewportContextMenu(null);
+      pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
+
       if (e.button === 1) {
-        // Scroll button / Middle click drag: horizontal move
-        if (targetGroup) {
-          e.preventDefault();
+        // Middle Mouse Button (MMB)
+        e.preventDefault();
+        canvas.focus();
+        if ((e.ctrlKey || e.metaKey) && targetGroup) {
+          // Ctrl + MMB drag: orbit camera around the selected item (keeping it in centre)
+          isCtrlMiddleOrbitRef.current = true;
+          dragHasMovedRef.current = false;
+        } else if (e.shiftKey && targetGroup) {
+          // Shift + MMB drag: orbit/rotate selected item in all directions (true to global coords)
+          isShiftMiddleRotateRef.current = true;
+          dragHasMovedRef.current = false;
+          recordCustomDragStart(targetGroup);
+        } else if (targetGroup) {
+          // MMB drag: drag selected item around
           isMiddleDraggingRef.current = true;
+          dragHasMovedRef.current = false;
+          recordCustomDragStart(targetGroup);
+        }
+      } else if (e.button === 0) {
+        // Left Mouse Button (LMB)
+        if (e.shiftKey && targetGroup) {
+          // Shift + LMB drag: rotate selected item on horizontal plane (yaw around global Z, true to global coords)
+          isShiftLeftRotateRef.current = true;
+          dragHasMovedRef.current = false;
+          recordCustomDragStart(targetGroup);
+          canvas.focus();
+        } else {
+          // LMB drag: pan camera (or single click to select if movement < 6px)
+          isLeftPanDraggingRef.current = true;
           dragHasMovedRef.current = false;
           canvas.focus();
         }
-      } else if (e.button === 0) {
-        if (e.shiftKey && targetGroup) {
-          // Left Shift + left click drag: vertical up/down move
-          isShiftDraggingRef.current = true;
-          dragHasMovedRef.current = false;
-          pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
-        } else if (e.altKey && targetGroup) {
-          // Left Alt + left click drag: yaw rotate
-          isAltLeftDraggingRef.current = true;
-          dragHasMovedRef.current = false;
-        } else {
-          pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
-        }
       } else if (e.button === 2) {
-        pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
-        if (e.altKey && targetGroup) {
-          // Left Alt + right click drag: pitch & yaw rotate (suppress camera fly-look!)
-          isAltRightDraggingRef.current = true;
+        // Right Mouse Button (RMB)
+        if (e.shiftKey && targetGroup) {
+          // Shift + RMB drag: rotate selected item on vertical plane (pitch/roll in global coords)
+          isShiftRightRotateRef.current = true;
           dragHasMovedRef.current = false;
+          recordCustomDragStart(targetGroup);
+          canvas.focus();
         } else {
+          // RMB drag: orbit camera (or right-click without drag for Quick Add Object menu)
           isRightMouseDownRef.current = true;
           canvas.focus();
         }
@@ -1937,18 +2191,31 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
 
     const onMouseUp = (e: MouseEvent) => {
       const targetGroup = getSelectedGroup();
-      const wasCustomDrag =
+      const wasObjectDrag =
         isMiddleDraggingRef.current ||
-        (isShiftDraggingRef.current && dragHasMovedRef.current) ||
-        (isAltLeftDraggingRef.current && dragHasMovedRef.current) ||
-        (isAltRightDraggingRef.current && dragHasMovedRef.current);
+        (isShiftLeftRotateRef.current && dragHasMovedRef.current) ||
+        (isShiftRightRotateRef.current && dragHasMovedRef.current) ||
+        (isShiftMiddleRotateRef.current && dragHasMovedRef.current);
 
-      if (wasCustomDrag) {
+      if (wasObjectDrag) {
         isMiddleDraggingRef.current = false;
-        isShiftDraggingRef.current = false;
-        isAltLeftDraggingRef.current = false;
-        isAltRightDraggingRef.current = false;
+        isShiftLeftRotateRef.current = false;
+        isShiftRightRotateRef.current = false;
+        isShiftMiddleRotateRef.current = false;
         if (dragHasMovedRef.current && targetGroup && selectedObjectIdRef.current) {
+          if (customDragStartRef.current) {
+            undoStackRef.current.push({
+              type: 'transform',
+              items: [
+                {
+                  id: selectedObjectIdRef.current,
+                  prevPos: customDragStartRef.current.pos,
+                  prevRot: customDragStartRef.current.rot,
+                },
+              ],
+            });
+            customDragStartRef.current = null;
+          }
           const newPos: [number, number, number] = [
             targetGroup.position.x,
             targetGroup.position.y,
@@ -1963,64 +2230,72 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         }
       }
 
+      isMiddleDraggingRef.current = false;
+      isCtrlMiddleOrbitRef.current = false;
+      isShiftLeftRotateRef.current = false;
+      isShiftRightRotateRef.current = false;
+      isShiftMiddleRotateRef.current = false;
+
       if (e.button === 2) {
         isRightMouseDownRef.current = false;
-        isAltRightDraggingRef.current = false;
-      } else if (e.button === 0 && !wasCustomDrag) {
-        const dx = e.clientX - pointerDownPosRef.current.x;
-        const dy = e.clientY - pointerDownPosRef.current.y;
-        // If clicking without dragging and not interacting with the gizmo: raycast selection
-        if (Math.hypot(dx, dy) < 6 && !isTransformDraggingRef.current) {
-          const rect = canvas.getBoundingClientRect();
-          const mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-          const mouseY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-          const raycaster = new THREE.Raycaster();
-          raycaster.setFromCamera(new THREE.Vector2(mouseX, mouseY), camera);
+      } else if (e.button === 0) {
+        isLeftPanDraggingRef.current = false;
+        if (!wasObjectDrag) {
+          const dx = e.clientX - pointerDownPosRef.current.x;
+          const dy = e.clientY - pointerDownPosRef.current.y;
+          // If clicking without dragging and not interacting with the gizmo: raycast selection
+          if (Math.hypot(dx, dy) < 6 && !isTransformDraggingRef.current) {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            const mouseY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(mouseX, mouseY), camera);
 
-          if (layerGroupsRef.current) {
-            const interactiveRoots = [
-              ...layerGroupsRef.current.vehicles.children,
-              ...layerGroupsRef.current.scenery.children,
-              ...layerGroupsRef.current.spawns.children,
-              ...layerGroupsRef.current.items.children,
-              ...layerGroupsRef.current.encounters.children,
-              ...layerGroupsRef.current.firingPositions.children,
-              ...layerGroupsRef.current.triggerVolumes.children,
-              ...layerGroupsRef.current.cutsceneCameras.children,
-              ...layerGroupsRef.current.netgameFlags.children,
-            ];
-            const hits = raycaster.intersectObjects(interactiveRoots, true);
-            if (hits.length > 0) {
-              let curr: THREE.Object3D | null = hits[0].object;
-              while (curr && (!curr.userData || !curr.userData.id)) {
-                curr = curr.parent;
-              }
-              if (curr && curr.userData?.id) {
-                const clickedId = curr.userData.id as string;
-                if (e.ctrlKey || e.metaKey) {
-                  // Multi-select with Ctrl: toggle clicked object if of the same entity kind
-                  setSelectedObjectIds((prev) => {
-                    if (prev.length === 0) return [clickedId];
-                    const [prevKind] = prev[0].split('-');
-                    const [clickedKind] = clickedId.split('-');
-                    if (prevKind !== clickedKind) {
-                      return [clickedId]; // Switch category selection
-                    }
-                    if (prev.includes(clickedId)) {
-                      return prev.filter((id) => id !== clickedId);
-                    }
-                    return [...prev, clickedId];
-                  });
-                } else {
-                  setSelectedObjectIds([clickedId]);
+            if (layerGroupsRef.current) {
+              const interactiveRoots = [
+                ...layerGroupsRef.current.vehicles.children,
+                ...layerGroupsRef.current.scenery.children,
+                ...layerGroupsRef.current.spawns.children,
+                ...layerGroupsRef.current.items.children,
+                ...layerGroupsRef.current.encounters.children,
+                ...layerGroupsRef.current.firingPositions.children,
+                ...layerGroupsRef.current.triggerVolumes.children,
+                ...layerGroupsRef.current.cutsceneCameras.children,
+                ...layerGroupsRef.current.netgameFlags.children,
+              ];
+              const hits = raycaster.intersectObjects(interactiveRoots, true);
+              if (hits.length > 0) {
+                let curr: THREE.Object3D | null = hits[0].object;
+                while (curr && (!curr.userData || !curr.userData.id)) {
+                  curr = curr.parent;
                 }
-                return;
+                if (curr && curr.userData?.id) {
+                  const clickedId = curr.userData.id as string;
+                  if (e.ctrlKey || e.metaKey) {
+                    // Multi-select with Ctrl: toggle clicked object if of the same entity kind
+                    setSelectedObjectIds((prev) => {
+                      if (prev.length === 0) return [clickedId];
+                      const [prevKind] = prev[0].split('-');
+                      const [clickedKind] = clickedId.split('-');
+                      if (prevKind !== clickedKind) {
+                        return [clickedId]; // Switch category selection
+                      }
+                      if (prev.includes(clickedId)) {
+                        return prev.filter((id) => id !== clickedId);
+                      }
+                      return [...prev, clickedId];
+                    });
+                  } else {
+                    setSelectedObjectIds([clickedId]);
+                  }
+                  return;
+                }
               }
             }
-          }
-          // Clicked empty background: deselect
-          if (!e.ctrlKey && !e.metaKey) {
-            setSelectedObjectIds([]);
+            // Clicked empty background: deselect
+            if (!e.ctrlKey && !e.metaKey) {
+              setSelectedObjectIds([]);
+            }
           }
         }
       }
@@ -2030,7 +2305,7 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
       e.preventDefault();
       const dx = e.clientX - pointerDownPosRef.current.x;
       const dy = e.clientY - pointerDownPosRef.current.y;
-      if (Math.hypot(dx, dy) < 6 && !e.altKey) {
+      if (Math.hypot(dx, dy) < 6 && !e.shiftKey && !e.altKey) {
         const rect = container.getBoundingClientRect();
         const x = Math.min(Math.max(8, e.clientX - rect.left), Math.max(8, rect.width - 200));
         const y = Math.min(Math.max(8, e.clientY - rect.top), Math.max(8, rect.height - 230));
@@ -2041,6 +2316,47 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
     const onMouseMove = (e: MouseEvent) => {
       const targetGroup = getSelectedGroup();
 
+      // 1. Ctrl + MMB drag: orbit camera around the selected item (keeping it in centre)
+      if (isCtrlMiddleOrbitRef.current && targetGroup) {
+        dragHasMovedRef.current = true;
+        // Convert Halo local coords [hx, hy, hz] to Three.js world coords [hx, hz, -hy]
+        const pivot = new THREE.Vector3(
+          targetGroup.position.x,
+          targetGroup.position.z,
+          -targetGroup.position.y,
+        );
+        const dist = Math.max(2.0, camPosRef.current.distanceTo(pivot));
+        camEulerRef.current.yaw -= e.movementX * 0.004;
+        camEulerRef.current.pitch -= e.movementY * 0.004;
+        const limit = Math.PI / 2 - 0.02;
+        camEulerRef.current.pitch = Math.max(-limit, Math.min(limit, camEulerRef.current.pitch));
+        const { yaw, pitch } = camEulerRef.current;
+        const forward = new THREE.Vector3(
+          -Math.sin(yaw) * Math.cos(pitch),
+          Math.sin(pitch),
+          -Math.cos(yaw) * Math.cos(pitch),
+        );
+        camPosRef.current.copy(pivot).addScaledVector(forward, -dist);
+        return;
+      }
+
+      // 2. Shift + MMB drag: orbit/rotate selected item in all directions (true to global coords)
+      if (isShiftMiddleRotateRef.current && targetGroup) {
+        dragHasMovedRef.current = true;
+        const qGlobalZ = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 0, 1),
+          -e.movementX * 0.015,
+        );
+        const qGlobalY = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 1, 0),
+          e.movementY * 0.015,
+        );
+        targetGroup.quaternion.premultiply(qGlobalZ).premultiply(qGlobalY);
+        selectionBoxHelperRef.current?.update();
+        return;
+      }
+
+      // 3. MMB drag: drag selected item around on horizontal plane
       if (isMiddleDraggingRef.current && targetGroup) {
         dragHasMovedRef.current = true;
         const yaw = camEulerRef.current.yaw;
@@ -2052,30 +2368,56 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         return;
       }
 
-      if (isShiftDraggingRef.current && targetGroup) {
+      // 4. Shift + LMB drag: rotate selected item on horizontal plane (true to global Z axis)
+      if (isShiftLeftRotateRef.current && targetGroup) {
         dragHasMovedRef.current = true;
-        const moveZ = -e.movementY * 0.05;
-        targetGroup.position.z += moveZ;
+        const qGlobalZ = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 0, 1),
+          -e.movementX * 0.015,
+        );
+        targetGroup.quaternion.premultiply(qGlobalZ);
         selectionBoxHelperRef.current?.update();
         return;
       }
 
-      if (isAltLeftDraggingRef.current && targetGroup) {
+      // 5. Shift + RMB drag: rotate selected item on vertical plane (true to global X/Y axes)
+      if (isShiftRightRotateRef.current && targetGroup) {
         dragHasMovedRef.current = true;
-        targetGroup.rotation.z -= e.movementX * 0.02; // yaw
+        const qGlobalY = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 1, 0),
+          e.movementY * 0.015,
+        );
+        const qGlobalX = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(1, 0, 0),
+          e.movementX * 0.015,
+        );
+        targetGroup.quaternion.premultiply(qGlobalY).premultiply(qGlobalX);
         selectionBoxHelperRef.current?.update();
         return;
       }
 
-      if (isAltRightDraggingRef.current && targetGroup) {
-        dragHasMovedRef.current = true;
-        targetGroup.rotation.z -= e.movementX * 0.02; // yaw
-        targetGroup.rotation.y += e.movementY * 0.02; // pitch
-        selectionBoxHelperRef.current?.update();
+      // 6. LMB drag (when not dragging gizmo): pan camera
+      if (isLeftPanDraggingRef.current && !isTransformDraggingRef.current) {
+        const dx = e.clientX - pointerDownPosRef.current.x;
+        const dy = e.clientY - pointerDownPosRef.current.y;
+        if (Math.hypot(dx, dy) >= 4 || dragHasMovedRef.current) {
+          dragHasMovedRef.current = true;
+          const { yaw, pitch } = camEulerRef.current;
+          const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+          const up = new THREE.Vector3(
+            -Math.sin(yaw) * Math.sin(pitch),
+            Math.cos(pitch),
+            -Math.cos(yaw) * Math.sin(pitch),
+          );
+          const panScale = Math.max(0.03, speedRef.current * 0.0012);
+          camPosRef.current.addScaledVector(right, -e.movementX * panScale);
+          camPosRef.current.addScaledVector(up, e.movementY * panScale);
+        }
         return;
       }
 
-      if (isRightMouseDownRef.current && !e.altKey) {
+      // 7. RMB drag: orbit camera
+      if (isRightMouseDownRef.current) {
         camEulerRef.current.yaw -= e.movementX * 0.003;
         camEulerRef.current.pitch -= e.movementY * 0.003;
         const limit = Math.PI / 2 - 0.02;
@@ -2093,6 +2435,18 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         callbacksRef.current.frameScene();
       } else if (e.code === 'KeyG' && !(e.ctrlKey || e.metaKey)) {
         callbacksRef.current.snapSelectedToGround();
+      } else if (e.code === 'KeyC' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        callbacksRef.current.handleCopyPlacement();
+      } else if (e.code === 'KeyX' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        callbacksRef.current.handleCutPlacement();
+      } else if (e.code === 'KeyV' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        callbacksRef.current.handlePastePlacement();
+      } else if (e.code === 'KeyZ' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        callbacksRef.current.handleUndo();
       } else if (e.code === 'KeyD' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         const id = selectedObjectIdRef.current;
@@ -4268,10 +4622,10 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
                   const fwdX = -Math.sin(yaw) * Math.cos(pitch);
                   const fwdY = Math.sin(pitch);
                   const fwdZ = -Math.cos(yaw) * Math.cos(pitch);
-                  // 2 meters in front of the camera in Three.js world space:
-                  const spawnWorldX = camPos.x + fwdX * 2.0;
-                  const spawnWorldY = camPos.y + fwdY * 2.0;
-                  const spawnWorldZ = camPos.z + fwdZ * 2.0;
+                  // 15 meters in front of the camera in Three.js world space:
+                  const spawnWorldX = camPos.x + fwdX * 15.0;
+                  const spawnWorldY = camPos.y + fwdY * 15.0;
+                  const spawnWorldZ = camPos.z + fwdZ * 15.0;
                   // Convert Three.js world coordinates to Halo coordinates:
                   // World X = Halo X, World Y = Halo Z (up), World Z = -Halo Y
                   const spawnHaloPos: [number, number, number] = [
@@ -4400,11 +4754,11 @@ export default function ScenarioViewport({ header, bspIndex = 0 }: ScenarioViewp
         <div>
           {selectedPlacement ? (
             <span style={{ color: 'var(--accent-cyan)' }}>
-              Selected: {selectedPlacement.id} | G: Snap Ground | Ctrl+D: Duplicate | Del: Delete | T: Translate | Y: Rotate | F: Focus
+              Selected: {selectedPlacement.id} | MMB: Drag | Shift+LMB/RMB/MMB: Rotate | Ctrl+MMB: Orbit Item | Ctrl+C/X/V/Z | G: Ground | Del: Delete
             </span>
           ) : (
             <span>
-              Click object to select | RMB + WASD: Fly | Shift: 2.5x Speed | Space/C: Up/Down | R: Frame | Scroll: Speed
+              LMB Drag: Pan | RMB Drag: Orbit | Right-Click: Quick Add | WASD: Fly | R: Frame | Scroll: Speed
             </span>
           )}
         </div>
