@@ -145,12 +145,13 @@ export function normalizeDemoMap(source: Buffer): DemoNormalizationResult {
       isExternal: source.readUInt32LE(at + 0x18) === 1,
     });
   }
+  const copy = Buffer.from(source);
   const tagLayout: TagDataLayout = { tagDataOffset: tdo, tagDataSize: tds, baseMemoryAddress: DEMO_BASE_MEMORY_ADDRESS, tagArrayFileOffset: arrayAt, entries };
   const tolerated: ToleratedPointer[] = [];
   const tolerate = { staleReferencePaths: true, rootsOutsideTagData: true };
   let sites: { kind: DemoPointerKind; at: number; value: number; tagIndex: number }[];
   try {
-    sites = [...collectTagDataPointers(source, tagLayout, { tolerate, tolerated }), ...collectBspSpacePointers(source, tagLayout, { tolerate })];
+    sites = [...collectTagDataPointers(copy, tagLayout, { tolerate, tolerated }), ...collectBspSpacePointers(copy, tagLayout, { tolerate })];
   } catch (err) {
     if (!(err instanceof UnwalkableTagError)) throw err;
     return refuse('demoRebase', `The tag data can't be moved: ${err.message}`, [], [layoutRow]);
@@ -167,7 +168,6 @@ export function normalizeDemoMap(source: Buffer): DemoNormalizationResult {
     );
   }
 
-  const copy = Buffer.from(source);
   const moved = Object.fromEntries([...TAG_DATA_POINTER_KINDS, ...BSP_SPACE_POINTER_KINDS].map((k) => [k, 0])) as Record<DemoPointerKind, number>;
   for (const s of sites) {
     copy.writeUInt32LE((s.value + DEMO_TO_CE_DELTA) >>> 0, s.at);

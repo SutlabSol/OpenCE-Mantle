@@ -403,8 +403,20 @@ function collectBspReferencePaths(
             if (!childStruct) return fail(`${where}.${field.name} has no block definition`);
             const childSize = resolveStruct(childStruct).totalSize;
             const childPointer = value.value.pointerLow >>> 0;
-            if (!inBsp(childPointer, value.value.count * childSize)) fail(`${where}.${field.name} (${value.value.count} blocks) is outside the BSP data`);
-            for (let i = 0; i < value.value.count; i++) walk(childStruct, (childPointer + i * childSize) >>> 0, `${where}.${field.name}[${i}]`);
+            let count = value.value.count;
+            if (count === 0xffffffff && childSize > 0) {
+              const fields = resolveStruct(structName).fields;
+              const fIdx = fields.indexOf(field);
+              const nextField = fIdx >= 0 ? fields[fIdx + 1] : undefined;
+              const nextVal = nextField ? decoded.get(nextField.name) : undefined;
+              const nextPtr = nextVal?.kind === 'reflexive' ? (nextVal.value.pointerLow >>> 0) : 0;
+              if (nextPtr > childPointer && (nextPtr - childPointer) % childSize === 0 && inBsp(childPointer, nextPtr - childPointer)) {
+                count = (nextPtr - childPointer) / childSize;
+                buffer.writeUInt32LE(count, at + field.offset);
+              }
+            }
+            if (!inBsp(childPointer, count * childSize)) fail(`${where}.${field.name} (${count} blocks) is outside the BSP data`);
+            for (let i = 0; i < count; i++) walk(childStruct, (childPointer + i * childSize) >>> 0, `${where}.${field.name}[${i}]`);
           }
         }
       };

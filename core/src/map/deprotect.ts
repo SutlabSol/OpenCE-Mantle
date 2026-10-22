@@ -501,7 +501,7 @@ export function repairTruncatedBitmapMipmaps(
       const mipmapCount = buffer.readInt16LE(at + BITMAP_DATA_OFFSETS.mipmapCount);
       const pixelsSize = buffer.readInt32LE(at + BITMAP_DATA_OFFSETS.pixelsSize);
 
-      if (signature !== 0x6269746d || width <= 0 || height <= 0 || depth <= 0 || mipmapCount <= 0) continue;
+      if (signature !== 0x6269746d || width <= 0 || height <= 0 || depth <= 0 || mipmapCount < 0) continue;
       const needed = requiredPixelDataSize({
         signature,
         width,
@@ -580,10 +580,9 @@ export function repairTruncatedBitmapMipmaps(
 }
 
 /**
- * Stage 4b: Corrupted Model Part Triangle Strip Clamping (`repairCorruptedModelPartStrips`).
+ * Stage 4b: Corrupted Model Part Triangle Strip & Vertex Node Clamping (`repairCorruptedModelPartStrips`).
  * Fixes `gbxmodel` geometry parts whose triangle strip indices exceed `vertexCount - 1`
- * (such as `theisland_3` `#2574`) by clamping out-of-range strip indices to a neighboring valid vertex index
- * (creating a zero-area degenerate triangle rather than crashing OpenCE's vertex buffer verifier).
+ * (such as `theisland_3` `#2574`) or whose vertices reference out-of-range node indices (such as `ParanoiaV2` `#3267`).
  */
 export function repairCorruptedModelPartStrips(
   buffer: Buffer,
@@ -604,6 +603,10 @@ export function repairCorruptedModelPartStrips(
     const modelAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, base);
     if (!isRangeInBuffer(modelAt, resolveStruct('GBXModel').totalSize, buffer.length)) continue;
     const model = decodeStruct(buffer, modelAt, 'GBXModel');
+    const flags = buffer.readUInt32LE(modelAt);
+    const localNodes = (flags & (1 << 1)) !== 0;
+    const nodesBlock = model.get('nodes');
+    const nodeCount = Math.max(1, nodesBlock?.kind === 'reflexive' ? nodesBlock.value.count : 1);
     const geometries = model.get('geometries');
     if (!geometries || geometries.kind !== 'reflexive' || geometries.value.count <= 0) continue;
 
@@ -622,36 +625,88 @@ export function repairCorruptedModelPartStrips(
         const triangleCount = buffer.readInt32LE(at + 0x48);
         const stripOffset = buffer.readUInt32LE(at + 0x4c);
         const vertexCount = buffer.readInt32LE(at + 0x58);
+        const vertexOffset = buffer.readUInt32LE(at + 0x64);
         const stripIndexCount = triangleCount + 2;
         if (vertexCount <= 0 || triangleCount < 1) continue;
 
-        const stripAt = modelDataAt + indexDataOffset + stripOffset;
-        if (!isRangeInBuffer(stripAt, stripIndexCount * 2, buffer.length)) continue;
+        let partRepaired = false;
 
+        // 1. Clamp centroid primary/secondary node indices
+        const primaryNode = buffer.readInt16LE(at + 0x08);
+        const secondaryNode = buffer.readInt16LE(at + 0x0a);
+        if (primaryNode < 0 || primaryNode >= nodeCount) {
+          buffer.writeInt16LE(Math.max(0, Math.min(nodeCount - 1, primaryNode)), at + 0x08);
+          partRepaired = true;
+        }
+        if (secondaryNode < 0 || secondaryNode >= nodeCount) {
+          buffer.writeInt16LE(Math.max(0, Math.min(nodeCount - 1, secondaryNode)), at + 0x0a);
+          partRepaired = true;
+        }
+
+        // 2. Clamp vertex node indices and normal/binormal/tangent components
+        const localCount = buffer[at + 0x6b];
+        const nodeLimit = localNodes && localCount > 0 ? localCount : nodeCount;
+        const vertexBaseAt = modelDataAt + vertexOffset;
+        let nodesClamped = 0;
+        if (isRangeInBuffer(vertexBaseAt, vertexCount * 0x44, buffer.length)) {
+          for (let v = 0; v < vertexCount; v++) {
+            const vAt = vertexBaseAt + v * 0x44;
+            const n0 = buffer.readInt16LE(vAt + 0x38);
+            const n1 = buffer.readInt16LE(vAt + 0x3a);
+            if (n0 < 0 || n0 >= nodeLimit) {
+              buffer.writeInt16LE(Math.max(0, Math.min(nodeLimit - 1, n0)), vAt + 0x38);
+              nodesClamped++;
+              partRepaired = true;
+            }
+            if (n1 < 0 || n1 >= nodeLimit) {
+              buffer.writeInt16LE(Math.max(0, Math.min(nodeLimit - 1, n1)), vAt + 0x3a);
+              nodesClamped++;
+              partRepaired = true;
+            }
+            for (const vecOff of [0x0c, 0x18, 0x24]) {
+              for (let c = 0; c < 3; c++) {
+                const fVal = buffer.readFloatLE(vAt + vecOff + c * 4);
+                if (!Number.isFinite(fVal)) {
+                  buffer.writeFloatLE(c === 0 ? 1 : 0, vAt + vecOff + c * 4);
+                  partRepaired = true;
+                } else if (Math.abs(fVal) > 1.0) {
+                  buffer.writeFloatLE(Math.max(-1.0, Math.min(1.0, fVal)), vAt + vecOff + c * 4);
+                  partRepaired = true;
+                }
+              }
+            }
+          }
+        }
+
+        // 3. Clamp strip indices >= vertexCount
+        const stripAt = modelDataAt + indexDataOffset + stripOffset;
         let clampedInPart = 0;
-        let lastValidVertex = Math.max(0, vertexCount - 1);
-        // Find first valid vertex in strip if any
-        for (let k = 0; k < stripIndexCount; k++) {
-          const val = buffer.readUInt16LE(stripAt + k * 2);
-          if (val < vertexCount) {
-            lastValidVertex = val;
-            break;
+        if (isRangeInBuffer(stripAt, stripIndexCount * 2, buffer.length)) {
+          let lastValidVertex = Math.max(0, vertexCount - 1);
+          for (let k = 0; k < stripIndexCount; k++) {
+            const val = buffer.readUInt16LE(stripAt + k * 2);
+            if (val < vertexCount) {
+              lastValidVertex = val;
+              break;
+            }
+          }
+          for (let k = 0; k < stripIndexCount; k++) {
+            const val = buffer.readUInt16LE(stripAt + k * 2);
+            if (val >= vertexCount) {
+              buffer.writeUInt16LE(lastValidVertex, stripAt + k * 2);
+              clampedInPart++;
+              stripIndicesClamped++;
+              partRepaired = true;
+            } else {
+              lastValidVertex = val;
+            }
           }
         }
-        for (let k = 0; k < stripIndexCount; k++) {
-          const val = buffer.readUInt16LE(stripAt + k * 2);
-          if (val >= vertexCount) {
-            buffer.writeUInt16LE(lastValidVertex, stripAt + k * 2);
-            clampedInPart++;
-            stripIndicesClamped++;
-          } else {
-            lastValidVertex = val;
-          }
-        }
-        if (clampedInPart > 0) {
+
+        if (partRepaired) {
           modelPartsRepaired++;
           log.push(
-            `Clamped ${clampedInPart} out-of-range strip indices on #${entry.index} "${entry.path}" geometry ${g} part ${p} (vertexCount=${vertexCount})`,
+            `Repaired #${entry.index} "${entry.path}" geometry ${g} part ${p} (${clampedInPart} strip indices, ${nodesClamped} vertex nodes clamped; vertexCount=${vertexCount})`,
           );
         }
       }

@@ -2445,7 +2445,12 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       const tag = (document.activeElement?.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
 
-      keysDownRef.current.add(e.code);
+      if (e.code === 'AltLeft') {
+        e.preventDefault();
+      }
+      if (!(e.ctrlKey || e.metaKey)) {
+        keysDownRef.current.add(e.code);
+      }
 
       if (e.code === 'KeyR' && !(e.ctrlKey || e.metaKey)) {
         callbacksRef.current.frameScene();
@@ -2539,12 +2544,15 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
         const up = new THREE.Vector3(0, 1, 0);
 
         const move = new THREE.Vector3();
-        if (keys.has('KeyW')) move.add(forward);
-        if (keys.has('KeyS')) move.sub(forward);
-        if (keys.has('KeyD')) move.add(right);
-        if (keys.has('KeyA')) move.sub(right);
-        if (keys.has('Space')) move.add(up);
-        if (keys.has('KeyC')) move.sub(up);
+        const isCtrlDown = keys.has('ControlLeft') || keys.has('ControlRight') || keys.has('MetaLeft') || keys.has('MetaRight');
+        if (!isCtrlDown) {
+          if (keys.has('KeyW')) move.add(forward);
+          if (keys.has('KeyS')) move.sub(forward);
+          if (keys.has('KeyD')) move.add(right);
+          if (keys.has('KeyA')) move.sub(right);
+          if (keys.has('Space')) move.add(up);
+          if (keys.has('AltLeft')) move.sub(up);
+        }
 
         if (move.lengthSq() > 0) {
           move.normalize();

@@ -60,6 +60,9 @@ export interface TagDataAlignmentPlan {
   insertAt: number;
   bytes: number;
   remainder: number;
+  /** Optional second insertion point for a contiguous tail segment at a different remainder (e.g. MGMWeaponCollab). */
+  tailInsertAt?: number;
+  tailBytes?: number;
   /** Pointers per kind that move. */
   pointersToMove: Record<TagDataPointerKind, number>;
   tolerated: ToleratedPointer[];
@@ -205,14 +208,59 @@ export function planTagDataAlignment(buffer: Buffer, header: CacheFileHeader, ta
   const base = tagIndex.baseMemoryAddress >>> 0;
   const tds = header.tagDataSize;
   const tdo = header.tagDataOffset;
-  // One remainder for every root, block and data block.
+  // One remainder for every root, block and data block, or a clean 2-segment split where appended tail tags have a second remainder.
   const remainders = [0, 1, 2, 3].filter((r) => blocks.byRemainder[r] + roots.byRemainder[r] + dataBlocks.byRemainder[r] > 0);
   if (remainders.length !== 1) {
-    plan.problems.push(`The tag data's roots and blocks start at different remainders mod 4 (${remainders.join(', ')}), so no single shift aligns them; a per-block re-layout is not supported.`);
-    return plan;
+    let tailAligned = false;
+    if (remainders.length === 2 && !remainders.includes(0)) {
+      const skipped = new Set(walked.tolerated.filter((t) => t.kind === 'rootOutsideTagData').map((t) => t.tagIndex));
+      const measuredOffsets: number[] = [];
+      for (const s of walked.sites) {
+        const offset = s.value - base;
+        if (s.kind === 'reflexive') {
+          if (buffer.readInt32LE(s.at - REFLEXIVE_COUNT_BEFORE_POINTER) > 0) measuredOffsets.push(offset);
+        } else if (s.kind === 'tagData') {
+          if (!skipped.has(s.tagIndex)) measuredOffsets.push(offset);
+        } else if (s.kind === 'dataBlock') {
+          if (buffer.readInt32LE(s.at - DATA_SIZE_BEFORE_POINTER) > 0) measuredOffsets.push(offset);
+        }
+      }
+      measuredOffsets.sort((a, b) => a - b);
+      if (measuredOffsets.length >= 2) {
+        const firstRem = ((measuredOffsets[0] % ALIGNMENT) + ALIGNMENT) % ALIGNMENT;
+        let transitions = 0;
+        let tailStart = -1;
+        let tailCount = 0;
+        let prevRem = firstRem;
+        for (const off of measuredOffsets) {
+          const r = ((off % ALIGNMENT) + ALIGNMENT) % ALIGNMENT;
+          if (r !== prevRem) {
+            transitions++;
+            tailStart = off;
+            prevRem = r;
+          }
+          if (transitions === 1) tailCount++;
+        }
+        if (transitions === 1 && tailStart > 0 && tailCount >= 10) {
+          const primaryBytes = (ALIGNMENT - firstRem) % ALIGNMENT;
+          const tailRemAfterPrimary = (prevRem + primaryBytes) % ALIGNMENT;
+          const tailBytes = (ALIGNMENT - tailRemAfterPrimary) % ALIGNMENT;
+          plan.remainder = firstRem;
+          plan.tailInsertAt = tailStart;
+          plan.tailBytes = tailBytes;
+          plan.bytes = primaryBytes + tailBytes;
+          tailAligned = true;
+        }
+      }
+    }
+    if (!tailAligned) {
+      plan.problems.push(`The tag data's roots and blocks start at different remainders mod 4 (${remainders.join(', ')}), so no single shift aligns them; a per-block re-layout is not supported.`);
+      return plan;
+    }
+  } else {
+    plan.remainder = remainders[0];
+    plan.bytes = (ALIGNMENT - plan.remainder) % ALIGNMENT;
   }
-  plan.remainder = remainders[0];
-  plan.bytes = (ALIGNMENT - plan.remainder) % ALIGNMENT;
 
   // The insertion point: the end of the tag path strings (after the tag array). Every path string
   // must lie before it and every other pointer target at or after it.
@@ -263,14 +311,34 @@ export function applyTagDataAlignment(map: Buffer, expected: Pick<TagDataAlignme
   const tdo = map.readUInt32LE(TAG_DATA_TAG_DATA_OFFSET);
   const tds = map.readUInt32LE(TAG_DATA_SIZE_OFFSET);
   if (map.readUInt32LE(TAG_DATA_FILE_SIZE_OFFSET) !== map.length || tdo + tds !== map.length) throw new TagDataAlignmentError('The tag data is not the last block of the file. Nothing was written.');
+
+  const primaryBytes = plan.tailBytes ? plan.bytes - plan.tailBytes : plan.bytes;
   const cut = tdo + plan.insertAt;
-  const out = Buffer.alloc(map.length + plan.bytes); // the inserted bytes start as zero
+  let out = Buffer.alloc(map.length + primaryBytes); // the inserted bytes start as zero
   map.copy(out, 0, 0, cut);
-  map.copy(out, cut + plan.bytes, cut);
+  map.copy(out, cut + primaryBytes, cut);
   const sites = collectTagDataPointers(map, tagDataLayoutOf(header, tagIndex), { tolerate: { staleReferencePaths: true, rootsOutsideTagData: true }, tolerated: [] });
-  const outOffset = (at: number) => (at < cut ? at : at + plan.bytes);
-  const counts = applyPointerShift(sites, { from: (base + plan.insertAt) >>> 0, to: (base + tds) >>> 0, delta: plan.bytes }, (at, value) => out.writeUInt32LE(value, outOffset(at)));
+  const outOffset = (at: number) => (at < cut ? at : at + primaryBytes);
+  const counts = applyPointerShift(sites, { from: (base + plan.insertAt) >>> 0, to: (base + tds) >>> 0, delta: primaryBytes }, (at, value) => out.writeUInt32LE(value, outOffset(at)));
   out.writeUInt32LE(out.length, TAG_DATA_FILE_SIZE_OFFSET);
-  out.writeUInt32LE(tds + plan.bytes, TAG_DATA_SIZE_OFFSET);
+  out.writeUInt32LE(tds + primaryBytes, TAG_DATA_SIZE_OFFSET);
+
+  if (plan.tailInsertAt !== undefined && plan.tailBytes && plan.tailBytes > 0) {
+    const midHeader = parseCacheFileHeader(out);
+    const midTagIndex = parseTagIndexForConversion(out, midHeader);
+    const midTds = out.readUInt32LE(TAG_DATA_SIZE_OFFSET);
+    const tailOffsetInMid = plan.tailInsertAt + primaryBytes;
+    const tailCut = tdo + tailOffsetInMid;
+    const out2 = Buffer.alloc(out.length + plan.tailBytes);
+    out.copy(out2, 0, 0, tailCut);
+    out.copy(out2, tailCut + plan.tailBytes, tailCut);
+    const midSites = collectTagDataPointers(out, tagDataLayoutOf(midHeader, midTagIndex), { tolerate: { staleReferencePaths: true, rootsOutsideTagData: true }, tolerated: [] });
+    const out2Offset = (at: number) => (at < tailCut ? at : at + plan.tailBytes!);
+    applyPointerShift(midSites, { from: (base + tailOffsetInMid) >>> 0, to: (base + midTds) >>> 0, delta: plan.tailBytes }, (at, value) => out2.writeUInt32LE(value, out2Offset(at)));
+    out2.writeUInt32LE(out2.length, TAG_DATA_FILE_SIZE_OFFSET);
+    out2.writeUInt32LE(midTds + plan.tailBytes, TAG_DATA_SIZE_OFFSET);
+    out = out2;
+  }
+
   return { buffer: out, plan, moved: counts.totalRebased };
 }

@@ -96,6 +96,8 @@ import {
   inspectMapProtectionAndIntegrity,
   deprotectAndRepairMap,
   spoofCacheCrc32,
+  repairTruncatedBitmapMipmaps,
+  repairCorruptedModelPartStrips,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -1012,7 +1014,7 @@ export function runSaveMapAs(task: { requestId: string; outputPath: string }) {
 }
 
 /** Stages the current in-memory map to targetPath (e.g. custom_maps/_opence_tag_test.map) without altering the open map state. */
-export function runStageTagTestMap(task: { requestId: string; targetPath: string }) {
+export function runStageTagTestMap(task: { requestId: string; targetPath: string; bitmapsPath?: string; soundsPath?: string }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
     progress(task.requestId, 'Staging map for OpenCE Tag Test', 25);
@@ -1021,7 +1023,82 @@ export function runStageTagTestMap(task: { requestId: string; targetPath: string
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
     }
-    const bufferCopy = Buffer.from(currentMap.buffer);
+    let bufferCopy = Buffer.from(currentMap.buffer);
+
+    if (currentMap.header.engine !== CacheFileEngine.CUSTOM_EDITION) {
+      progress(task.requestId, 'Converting non-CE map to Custom Edition for OpenCE', 40);
+      const mapDir = path.dirname(currentMap.filePath || '');
+      const candidateRoots = [
+        process.cwd(),
+        path.resolve(process.cwd(), '..'),
+        path.resolve(__dirname, '..'),
+        path.resolve(__dirname, '../..'),
+        'C:\\Users\\LeviB\\Projects\\OpenCE-Mantle',
+      ];
+      let bitmapsPath = task.bitmapsPath;
+      let soundsPath = task.soundsPath;
+      if (!bitmapsPath || !fs.existsSync(bitmapsPath)) {
+        const localBmp = mapDir ? path.join(mapDir, 'bitmaps.map') : '';
+        if (localBmp && fs.existsSync(localBmp)) {
+          bitmapsPath = localBmp;
+        } else {
+          for (const root of candidateRoots) {
+            const md = path.join(root, 'sample_maps/HaloMD/bitmaps.map');
+            const pc = path.join(root, 'sample_maps/PC/bitmaps.map');
+            if (fs.existsSync(md)) { bitmapsPath = md; break; }
+            if (fs.existsSync(pc)) { bitmapsPath = pc; break; }
+          }
+        }
+      }
+      if (!soundsPath || !fs.existsSync(soundsPath)) {
+        const localSnd = mapDir ? path.join(mapDir, 'sounds.map') : '';
+        if (localSnd && fs.existsSync(localSnd)) {
+          soundsPath = localSnd;
+        } else if (bitmapsPath && fs.existsSync(path.join(path.dirname(bitmapsPath), 'sounds.map'))) {
+          soundsPath = path.join(path.dirname(bitmapsPath), 'sounds.map');
+        } else {
+          for (const root of candidateRoots) {
+            const md = path.join(root, 'sample_maps/HaloMD/sounds.map');
+            const pc = path.join(root, 'sample_maps/PC/sounds.map');
+            if (fs.existsSync(md)) { soundsPath = md; break; }
+            if (fs.existsSync(pc)) { soundsPath = pc; break; }
+          }
+        }
+      }
+      const resources = openConversionResources({ bitmaps: bitmapsPath, sounds: soundsPath });
+      try {
+        const layout = classifyMapLayout(bufferCopy);
+        const convert = layout.kind === 'demo' ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+        const converted = convert(bufferCopy, {
+          acknowledgeScripts: true,
+          repairs: {
+            rebuildDecompressedFileSize: true,
+            truncateFileToHeaderSize: true,
+            stripTrailingBytes: true,
+            extendModelDataSize: true,
+            clampTagDataSize: true,
+            clampScenarioBspSizes: true,
+            clampTagArrayCount: true,
+            alignTagData4: true,
+            zeroMissingExternalData: true,
+            clampOutOfRangeDependencies: true,
+            dropUnrebasableTags: true,
+            stripCorruptedSoundPermutations: true,
+            stripInvalidBsp2dReferences: true,
+            clampTruncatedBitmaps: true,
+            repairCorruptedModelVertices: true,
+          },
+          resources: resources.files,
+        });
+        bufferCopy = Buffer.from(converted.buffer);
+      } finally {
+        resources.close();
+      }
+    } else {
+      repairTruncatedBitmapMipmaps(bufferCopy, currentMap.header, currentMap.tagIndex);
+      repairCorruptedModelPartStrips(bufferCopy, currentMap.header, currentMap.tagIndex);
+    }
+
     progress(task.requestId, 'Writing staged map', 60);
     const finalized = writeFinalizedMap(bufferCopy, target, 'Staging for OpenCE Tag Test');
     progress(task.requestId, 'Done', 100);

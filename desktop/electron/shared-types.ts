@@ -574,7 +574,7 @@ export type WorkerRequest =
   | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number; sourceBspIndices?: number[] }
   | { type: 'getSourceBspMesh'; requestId: string; sourceFilePath: string; bspIndex?: number }
   | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions; resourceMapPaths?: Partial<Record<ResourceMapKind, string | undefined>> }
-  | { type: 'stageTagTestMap'; requestId: string; targetPath: string }
+  | { type: 'stageTagTestMap'; requestId: string; targetPath: string; bitmapsPath?: string; soundsPath?: string }
   | { type: 'getBitmapInfo'; requestId: string; tagIndex: number; bitmapsPath?: string }
   | { type: 'getBitmapRgba'; requestId: string; tagIndex: number; imageIndex: number; bitmapsPath?: string }
   | { type: 'exportBitmap'; requestId: string; tagIndex: number; imageIndex: number; format: 'png' | 'dds'; outputPath: string; bitmapsPath?: string }

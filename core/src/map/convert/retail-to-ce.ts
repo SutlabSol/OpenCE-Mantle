@@ -25,6 +25,7 @@ import { applyTagDataAlignment, measureBlockAlignment, planTagDataAlignment } fr
 import type { TagDataAlignmentPlan } from './align-tag-data';
 import { applyTagDataRepairs, DATA_ARRAY_COUNT, DATA_ARRAY_ELEMENT_SIZE, DATA_ARRAY_HEADER_SIZE, DATA_ARRAY_MAXIMUM_COUNT, planTagDataRepairs, repairBytesAdded, SCRIPT_NODE_SIZE } from './tag-data-repairs';
 import type { AppliedTagDataRepair, TagDataRepairId, TagDataRepairPlan } from './tag-data-repairs';
+import { repairCorruptedModelPartStrips, repairTruncatedBitmapMipmaps } from '../deprotect';
 
 /**
  * Converter Phase 1: retail-layout maps (cache version 7, standard 2048-byte header, tag data at the
@@ -282,6 +283,14 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
   try {
     const view = Buffer.from(buffer);
     view.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
+    const tdoPre = view.readUInt32LE(0x10);
+    if (tdoPre + 0x24 <= view.length) {
+      const modelOffPre = view.readUInt32LE(tdoPre + 0x14);
+      const modelSizePre = view.readUInt32LE(tdoPre + 0x20);
+      if (modelOffPre > 0 && modelSizePre > 0 && modelOffPre + modelSizePre < tdoPre && tdoPre - (modelOffPre + modelSizePre) >= 1024) {
+        view.writeUInt32LE(tdoPre - modelOffPre, tdoPre + 0x20);
+      }
+    }
     const header = parseCacheFileHeader(view);
     const tagIndex = parseTagIndexForConversion(view, header);
     parsed = { header, tagIndex, view, importPlan: null, repairPlan: null, alignment: null, requiredRepairBytes: 0 };
@@ -371,7 +380,15 @@ function runChecks(buffer: Buffer, full: boolean, resources: ConversionResourceF
     checks.push(check('externalData', 'Bitmap and sound data is inside the map', 'pass', 'No bitmap image or sound permutation keeps its data in a resource file.'));
   } else {
     if (headerOnlyCrc !== null) checks.push(check('regions', regionsLabel, 'pass', 'The new CRC32 is computed after the bitmap and sound data is copied in.'));
-    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + parsed.requiredRepairBytes, report);
+    parsed.importPlan = externalDataChecks(checks, view, scan, counts, resources, buffer.length + parsed.requiredRepairBytes, report, origin);
+  }
+
+  const isProtectedMod =
+    origin !== undefined ||
+    tagIndex.entries.filter((e) => e.path === '<protected>' || e.path.includes('F***')).length > 10;
+  if (isProtectedMod) {
+    repairTruncatedBitmapMipmaps(view, header, tagIndex);
+    repairCorruptedModelPartStrips(view, header, tagIndex);
   }
 
   checks.push(modelPartsCheck(view, header, tagIndex));
@@ -412,6 +429,7 @@ function externalDataChecks(
   resources: ConversionResourceFiles,
   sourceSize: number,
   report: RetailConversionReport,
+  origin?: SourceOrigin,
 ): ExternalImportPlan | null {
   const summary = `${counts.bitmap.count} bitmap image(s) (${fmtBytes(counts.bitmap.bytes)}) and ${counts.sound.count} sound permutation(s) (${fmtBytes(counts.sound.bytes)})`;
   if (scan.blocked.length > 0) {
@@ -456,7 +474,10 @@ function externalDataChecks(
     if (!table) continue;
     const total = kind === 'bitmaps' ? counts.bitmap.count : counts.sound.count;
     const bad = plan.unmatched[kind];
-    const canZeroFill = bad.length > 0 && bad.length <= 5 && bad.every((b) => b.includes('effects\\') || b.includes('particles\\') || b.includes('solid\\bitmaps') || b.includes('panel impact'));
+    const canZeroFill =
+      bad.length > 0 &&
+      ((bad.length <= 5 && bad.every((b) => b.includes('effects\\') || b.includes('particles\\') || b.includes('solid\\bitmaps') || b.includes('panel impact'))) ||
+        (origin !== undefined && bad.length <= 25 && bad.length < total * 0.05));
     if (bad.length > 0 && !canZeroFill) {
       usable = false;
       lines.push(`${table.label}: ${bad.length} of ${total} ranges this map needs are not entries of this file, so it is not the ${kind}.map this map was built with.`, ...bad.slice(0, 20));
@@ -1022,9 +1043,18 @@ function convertRetailLayout(source: Buffer, options: RetailConversionOptions, o
   let out: Buffer;
   let imported: RetailConversionResult['imported'] = null;
   const plan = parsed?.importPlan ?? null;
+  let workingSource = origin ? source : Buffer.from(source);
+  const tdoWork = workingSource.readUInt32LE(0x10);
+  if (tdoWork + 0x24 <= workingSource.length) {
+    const modelOffWork = workingSource.readUInt32LE(tdoWork + 0x14);
+    const modelSizeWork = workingSource.readUInt32LE(tdoWork + 0x20);
+    if (modelOffWork > 0 && modelSizeWork > 0 && modelOffWork + modelSizeWork < tdoWork && tdoWork - (modelOffWork + modelSizeWork) >= 1024) {
+      workingSource.writeUInt32LE(tdoWork - modelOffWork, tdoWork + 0x20);
+    }
+  }
   if (plan) {
     try {
-      const result = importExternalData(source, plan, options.resources ?? {}, { onProgress: options.onProgress, shouldCancel: options.shouldCancel });
+      const result = importExternalData(workingSource, plan, options.resources ?? {}, { onProgress: options.onProgress, shouldCancel: options.shouldCancel });
       out = result.buffer;
       imported = { rangesCopied: result.rangesCopied, bytesAdded: result.bytesAdded, insertAt: result.insertAt, warnings: [...plan.nameMismatches, ...plan.sizeMismatches] };
     } catch (err) {
@@ -1032,8 +1062,7 @@ function convertRetailLayout(source: Buffer, options: RetailConversionOptions, o
       throw err;
     }
   } else {
-    // A Phase 2 copy belongs to the converter already; the user's own buffer is never changed.
-    out = origin ? source : Buffer.from(source);
+    out = workingSource;
   }
   out.writeUInt32LE(CacheFileEngine.CUSTOM_EDITION, VERSION_OFFSET);
   writeFixedString(out, BUILD_STRING_OFFSET, TAG_STRING_SIZE, CE_BUILD_STRING);
@@ -1049,6 +1078,12 @@ function convertRetailLayout(source: Buffer, options: RetailConversionOptions, o
     const applied = applyTagDataRepairs(out, repairPlan, chosen);
     out = applied.buffer;
     repairs = applied.applied;
+  }
+  if (origin !== undefined || (parsed && parsed.tagIndex.entries.filter((e) => e.path === '<protected>' || e.path.includes('F***')).length > 10)) {
+    const outHdr = parseCacheFileHeader(out);
+    const outIdx = parseTagIndexForConversion(out, outHdr);
+    repairTruncatedBitmapMipmaps(out, outHdr, outIdx);
+    repairCorruptedModelPartStrips(out, outHdr, outIdx);
   }
   verifyOutputExtents(out);
   verifyOutputAlignment(out);

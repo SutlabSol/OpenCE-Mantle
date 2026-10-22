@@ -218,8 +218,14 @@ if ($wshell.AppActivate('Halo')) {
       this.currentMapName = mapSlot;
 
       this.emitLog('stdout', `[TagTest] Staging in-memory map to ${mapSlot}.map...`);
+      const settings = getSettings();
       const stageResult = await sendWorkerRequest<StageTagTestMapResult>(
-        { type: 'stageTagTestMap', targetPath: stagedMapPath },
+        {
+          type: 'stageTagTestMap',
+          targetPath: stagedMapPath,
+          bitmapsPath: settings.resourceMaps.bitmaps ?? undefined,
+          soundsPath: settings.resourceMaps.sounds ?? undefined,
+        },
         (level, msg) => this.emitLog('stdout', `[Worker] ${msg}`),
       ).promise;
 
@@ -426,8 +432,14 @@ if ($wshell.AppActivate('Halo')) {
       const targetPath = path.join(this.activeOpenCeDir, 'custom_maps', `${nextSlot}.map`);
 
       this.emitLog('stdout', `[TagTest] Hot-reloading map to ${nextSlot}.map...`);
+      const settings = getSettings();
       const stageResult = await sendWorkerRequest<StageTagTestMapResult>(
-        { type: 'stageTagTestMap', targetPath },
+        {
+          type: 'stageTagTestMap',
+          targetPath,
+          bitmapsPath: settings.resourceMaps.bitmaps ?? undefined,
+          soundsPath: settings.resourceMaps.sounds ?? undefined,
+        },
         (level, msg) => this.emitLog('stdout', `[Worker] ${msg}`),
       ).promise;
 
