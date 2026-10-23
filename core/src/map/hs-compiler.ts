@@ -453,78 +453,240 @@ export function ensureScenarioScriptEntities(
     addedCameraPoints.push(camName);
   }
 
+  current = syncScenarioObjectNamesForScripts(current, new Map());
+
   return { buffer: current, addedObjectNames, addedTriggerVolumes, addedCameraPoints };
 }
 
 /**
  * Synchronizes `ScenarioObjectName` runtime `object type` (+32) and `object index` (+34)
- * from scenario placement blocks and script usage so OpenCE's `hs_parse_object_name`
- * never encounters `runtime_object_type == NONE` (-1) or a mismatched object type mask.
+ * from scenario placement blocks and script usage, and guarantees every `object name` entry `i`
+ * has a valid `0 <= placement_index < placementBlock.count` (+34) and `placementBlock[k].name == i` (+2)
+ * (auto-adding a placement element if the target placement block has 0 or insufficient entries).
+ * This prevents OpenCE's `scenario_check_object_names` from resetting `runtime_object_type` to `NONE` (-1),
+ * which would otherwise trigger `hs_compile.c,#1914: object_name->runtime_object_type!=NONE`.
  */
 function syncScenarioObjectNamesForScripts(
-  buffer: Buffer,
-  scnrAt: number,
-  tagDataOffset: number,
-  baseMemoryAddress: number,
+  view: Buffer,
   inferredObjectTypesByNameIdx: Map<number, number>,
-): void {
+): Buffer {
+  let buffer: Buffer = Buffer.from(view);
+  let header = parseCacheFileHeader(buffer);
+  let tagIndex = parseTagIndex(buffer, header);
+  const scenario = scenarioEntryOf(tagIndex);
+  if (!scenario) return buffer;
+
   const scenarioStruct = getGroupStructName('scenario')!;
-  const decoded = decodeStruct(buffer, scnrAt, scenarioStruct);
-  const objNamesRef = decoded.get('object names');
-  if (objNamesRef?.kind !== 'reflexive' || objNamesRef.value.count <= 0) return;
+  const scnrDef = resolveStruct(scenarioStruct);
 
-  const objNamesBase = resolvePointer(objNamesRef.value.pointerLow, tagDataOffset, baseMemoryAddress);
-  if (!isRangeInBuffer(objNamesBase, objNamesRef.value.count * 36, buffer.length)) return;
-
-  const placementBlocks: Array<{ block: string; objType: number }> = [
-    { block: 'bipeds', objType: 0 },
-    { block: 'vehicles', objType: 1 },
-    { block: 'weapons', objType: 2 },
-    { block: 'equipment', objType: 3 },
-    { block: 'scenery', objType: 6 },
-    { block: 'machines', objType: 7 },
-    { block: 'controls', objType: 8 },
-    { block: 'light fixtures', objType: 9 },
-    { block: 'sound scenery', objType: 11 },
+  const placementBlocks: Array<{ block: string; palette: string; objType: number }> = [
+    { block: 'bipeds', palette: 'biped palette', objType: 0 },
+    { block: 'vehicles', palette: 'vehicle palette', objType: 1 },
+    { block: 'weapons', palette: 'weapon palette', objType: 2 },
+    { block: 'equipment', palette: 'equipment palette', objType: 3 },
+    { block: 'scenery', palette: 'scenery palette', objType: 6 },
+    { block: 'machines', palette: 'machine palette', objType: 7 },
+    { block: 'controls', palette: 'control palette', objType: 8 },
+    { block: 'light fixtures', palette: 'light fixture palette', objType: 9 },
+    { block: 'sound scenery', palette: 'sound scenery palette', objType: 11 },
   ];
 
-  const scnrDef = resolveStruct(scenarioStruct);
+  const scnrAt0 = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(scnrAt0, scnrDef.totalSize, buffer.length)) return buffer;
+  const decoded0 = decodeStruct(buffer, scnrAt0, scenarioStruct);
+  const objNamesRef0 = decoded0.get('object names');
+  if (objNamesRef0?.kind !== 'reflexive' || objNamesRef0.value.count <= 0) return buffer;
+
+  const objNamesCount = objNamesRef0.value.count;
+  const objNamesBase0 = resolvePointer(objNamesRef0.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(objNamesBase0, objNamesCount * 36, buffer.length)) return buffer;
+
+  // Step 1: Sync any existing placement[k].name -> object_names[nameIdx]
   for (const { block, objType } of placementBlocks) {
-    const ref = decoded.get(block);
+    const ref = decoded0.get(block);
     const fieldDef = scnrDef.fields.find((f) => f.name === block);
     if (ref?.kind !== 'reflexive' || ref.value.count <= 0 || !fieldDef?.def.struct) continue;
     const childStruct = resolveStruct(fieldDef.def.struct);
     const nameField = childStruct.fields.find((f) => f.name === 'name');
     if (!nameField) continue;
-    const blockBase = resolvePointer(ref.value.pointerLow, tagDataOffset, baseMemoryAddress);
+    const blockBase = resolvePointer(ref.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
     if (!isRangeInBuffer(blockBase, ref.value.count * childStruct.totalSize, buffer.length)) continue;
-    for (let i = 0; i < ref.value.count; i++) {
-      const nameIdx = buffer.readInt16LE(blockBase + i * childStruct.totalSize + nameField.offset);
-      if (nameIdx >= 0 && nameIdx < objNamesRef.value.count) {
-        const entryOff = objNamesBase + nameIdx * 36;
+    for (let k = 0; k < ref.value.count; k++) {
+      const nameIdx = buffer.readInt16LE(blockBase + k * childStruct.totalSize + nameField.offset);
+      if (nameIdx >= 0 && nameIdx < objNamesCount) {
+        const entryOff = objNamesBase0 + nameIdx * 36;
         buffer.writeInt16LE(objType, entryOff + 32);
-        buffer.writeInt16LE(i, entryOff + 34);
+        buffer.writeInt16LE(k, entryOff + 34);
       }
     }
   }
 
-  for (let i = 0; i < objNamesRef.value.count; i++) {
-    const entryOff = objNamesBase + i * 36;
+  // Step 2: Determine desired object_type for every object_names[i]
+  const targetTypes = new Array<number>(objNamesCount).fill(1);
+  const objNameStrings = new Array<string>(objNamesCount).fill('');
+  for (let i = 0; i < objNamesCount; i++) {
+    const entryOff = objNamesBase0 + i * 36;
+    const zeroIdx = buffer.indexOf(0, entryOff);
+    const end = zeroIdx >= entryOff && zeroIdx < entryOff + 32 ? zeroIdx : entryOff + 32;
+    const nameStr = buffer.toString('latin1', entryOff, end).trim();
+    objNameStrings[i] = nameStr;
+
     const curType = buffer.readInt16LE(entryOff + 32);
     const inferred = inferredObjectTypesByNameIdx.get(i);
+    let t = curType >= 0 ? curType : /door|gate|shutter|switch|lift|elevator/i.test(nameStr) ? 7 : 1;
     if (inferred !== undefined) {
-      // Ensure the stored object_type satisfies the script's required hs_object_type_masks
-      if (inferred === 7 && (curType < 7 || curType > 9)) {
-        buffer.writeInt16LE(7, entryOff + 32);
-      } else if (inferred === 1 && curType !== 1 && curType !== 0) {
-        buffer.writeInt16LE(1, entryOff + 32);
-      } else if (curType < 0) {
-        buffer.writeInt16LE(inferred, entryOff + 32);
+      if (inferred === 7 && (t < 7 || t > 9)) t = 7;
+      else if (inferred === 1 && t !== 1 && t !== 0) t = 1;
+      else if (t < 0) t = inferred;
+    }
+    if (!placementBlocks.some((pb) => pb.objType === t)) t = 1;
+    targetTypes[i] = t;
+  }
+
+  // Step 3: Ensure each target placement block has enough elements to give every object_names[i] a unique placement index
+  const neededByType = new Map<number, number>();
+  for (const t of targetTypes) {
+    neededByType.set(t, (neededByType.get(t) ?? 0) + 1);
+  }
+  for (const [t, neededCount] of neededByType.entries()) {
+    const pb = placementBlocks.find((p) => p.objType === t) ?? placementBlocks[1]!;
+    let scnrAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    let dec = decodeStruct(buffer, scnrAt, scenarioStruct);
+    let ref = dec.get(pb.block);
+    let curCount = ref?.kind === 'reflexive' ? ref.value.count : 0;
+    while (curCount < neededCount) {
+      const addRes = addReflexiveChunk(buffer, header, tagIndex, scenario.index, pb.block, curCount > 0 ? 0 : -1);
+      buffer = addRes.buffer;
+      header = addRes.header;
+      tagIndex = addRes.tagIndex;
+      if (curCount === 0) {
+        // Initialize type = -1 (0xFFFF) and name = -1 (0xFFFF) on freshly created placement chunk
+        buffer.writeInt16LE(-1, addRes.newElementOffset + 0);
+        buffer.writeInt16LE(-1, addRes.newElementOffset + 2);
+      } else {
+        buffer.writeInt16LE(-1, addRes.newElementOffset + 2);
       }
-    } else if (curType < 0) {
-      buffer.writeInt16LE(1, entryOff + 32);
+      curCount = addRes.newCount;
+      scnrAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+      dec = decodeStruct(buffer, scnrAt, scenarioStruct);
+      ref = dec.get(pb.block);
     }
   }
+
+  // Step 4: Bind every object_names[i] to a valid, unique placement k in its target placement block
+  const scnrAtFinal = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  const decodedFinal = decodeStruct(buffer, scnrAtFinal, scenarioStruct);
+  const objNamesRefFinal = decodedFinal.get('object names');
+  if (objNamesRefFinal?.kind !== 'reflexive') return buffer;
+  const objNamesBaseFinal = resolvePointer(
+    objNamesRefFinal.value.pointerLow,
+    header.tagDataOffset,
+    tagIndex.baseMemoryAddress,
+  );
+
+  const usedByBlock = new Map<string, Set<number>>();
+  for (const pb of placementBlocks) usedByBlock.set(pb.block, new Set());
+
+  for (let i = 0; i < objNamesCount; i++) {
+    const t = targetTypes[i]!;
+    const pb = placementBlocks.find((p) => p.objType === t) ?? placementBlocks[1]!;
+    const used = usedByBlock.get(pb.block)!;
+    const ref = decodedFinal.get(pb.block);
+    const fieldDef = scnrDef.fields.find((f) => f.name === pb.block);
+    if (ref?.kind !== 'reflexive' || ref.value.count <= 0 || !fieldDef?.def.struct) continue;
+    const childStruct = resolveStruct(fieldDef.def.struct);
+    const nameField = childStruct.fields.find((f) => f.name === 'name');
+    const typeField = childStruct.fields.find((f) => f.name === 'type');
+    if (!nameField) continue;
+
+    const blockBase = resolvePointer(ref.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(blockBase, ref.value.count * childStruct.totalSize, buffer.length)) continue;
+
+    // Resolve palette paths if available to prefer matching vehicle/biped types (e.g. pelican for pelican_drop)
+    const palettePaths: string[] = [];
+    const palRef = decodedFinal.get(pb.palette);
+    if (palRef?.kind === 'reflexive' && palRef.value.count > 0) {
+      const palBase = resolvePointer(palRef.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      for (let pIdx = 0; pIdx < palRef.value.count; pIdx++) {
+        const tidOff = palBase + pIdx * 48 + 12;
+        if (tidOff + 4 <= buffer.length) {
+          const tid = buffer.readUInt32LE(tidOff);
+          const ent = tagIndex.entries.find((e) => e.tagId === tid);
+          palettePaths.push(ent?.path.toLowerCase() ?? '');
+        }
+      }
+    }
+
+    const entryOff = objNamesBaseFinal + i * 36;
+    const curPlacement = buffer.readInt16LE(entryOff + 34);
+    const lowerObjName = objNameStrings[i]!.toLowerCase();
+
+    let chosenK = -1;
+    // 1. Keep current placement if valid, unused, and already points to i
+    if (curPlacement >= 0 && curPlacement < ref.value.count && !used.has(curPlacement)) {
+      const existingNameIdx = buffer.readInt16LE(blockBase + curPlacement * childStruct.totalSize + nameField.offset);
+      if (existingNameIdx === i) {
+        chosenK = curPlacement;
+      }
+    }
+    // 2. Check if any placement already has .name === i
+    if (chosenK < 0) {
+      for (let k = 0; k < ref.value.count; k++) {
+        if (used.has(k)) continue;
+        const nIdx = buffer.readInt16LE(blockBase + k * childStruct.totalSize + nameField.offset);
+        if (nIdx === i) {
+          chosenK = k;
+          break;
+        }
+      }
+    }
+    // 3. Prefer an unnamed placement whose palette tag path matches keywords in objName
+    if (chosenK < 0 && typeField && palettePaths.length > 0) {
+      const keywords = ['pelican', 'dropship', 'warthog', 'hog', 'banshee', 'ghost', 'scorpion', 'boulder', 'marine', 'elite', 'grunt'];
+      const matchedKeyword = keywords.find((kw) => lowerObjName.includes(kw));
+      if (matchedKeyword) {
+        const searchKw = matchedKeyword === 'hog' ? 'warthog' : matchedKeyword;
+        for (let k = 0; k < ref.value.count; k++) {
+          if (used.has(k)) continue;
+          const elemOff = blockBase + k * childStruct.totalSize;
+          const nIdx = buffer.readInt16LE(elemOff + nameField.offset);
+          const palIdx = buffer.readInt16LE(elemOff + typeField.offset);
+          if (nIdx < 0 && palIdx >= 0 && (palettePaths[palIdx] ?? '').includes(searchKw)) {
+            chosenK = k;
+            break;
+          }
+        }
+      }
+    }
+    // 4. First unnamed placement
+    if (chosenK < 0) {
+      for (let k = 0; k < ref.value.count; k++) {
+        if (used.has(k)) continue;
+        const nIdx = buffer.readInt16LE(blockBase + k * childStruct.totalSize + nameField.offset);
+        if (nIdx < 0) {
+          chosenK = k;
+          break;
+        }
+      }
+    }
+    // 5. Fallback to first unused placement
+    if (chosenK < 0) {
+      for (let k = 0; k < ref.value.count; k++) {
+        if (!used.has(k)) {
+          chosenK = k;
+          break;
+        }
+      }
+    }
+    if (chosenK < 0) chosenK = 0;
+
+    used.add(chosenK);
+    buffer.writeInt16LE(i, blockBase + chosenK * childStruct.totalSize + nameField.offset);
+    buffer.writeInt16LE(pb.objType, entryOff + 32);
+    buffer.writeInt16LE(chosenK, entryOff + 34);
+  }
+
+  return buffer;
 }
 
 /**
@@ -545,7 +707,67 @@ export function compileHaloScriptIntoScenario(view: Buffer, hscSource: string): 
   }
 
   const { expressions } = parseHaloScriptSExpressions(hscSource);
-  const currentDecompiled = decompileScenarioScripts(view);
+
+  // Collect declared globals and script names first so we don't mistake them for scenario entities
+  const declaredIdentNames = new Set<string>(['true', 'false', 'none', 'players', 'player', 'human', 'covenant', 'flood', 'sentinel', 'default']);
+  for (const expr of expressions) {
+    if (expr.kind !== 'list') continue;
+    const head = expr.items[0];
+    if (head?.kind === 'atom' && head.text === 'global' && expr.items[2]?.kind === 'atom') {
+      declaredIdentNames.add(expr.items[2].text);
+    } else if (head?.kind === 'atom' && head.text === 'script') {
+      const secondAtom = expr.items[2];
+      const hasExplicitReturn =
+        secondAtom?.kind === 'atom' && VALUE_TYPE_BY_NAME[secondAtom.text] !== undefined && expr.items.length >= 5;
+      const sNameAtom = hasExplicitReturn ? expr.items[3] : secondAtom;
+      if (sNameAtom?.kind === 'atom') declaredIdentNames.add(sNameAtom.text);
+    }
+  }
+
+  // Automatically discover any object names, trigger volumes, and camera points referenced in the script
+  const autoObjectNames = new Set<string>();
+  const autoTriggerVolumes = new Set<string>();
+  const autoCameraPoints = new Set<string>();
+  const collectRequiredEntities = (expr: SExpr): void => {
+    if (expr.kind !== 'list' || expr.items.length === 0) return;
+    const head = expr.items[0]!;
+    const fnName = head.kind === 'atom' ? head.text : '';
+    const builtin = BUILTIN_FUNCTIONS[fnName];
+    for (let a = 1; a < expr.items.length; a++) {
+      const arg = expr.items[a]!;
+      const argIdx = a - 1;
+      if (arg.kind === 'atom' && !arg.quoted && !/^-?\d+(\.\d+)?$/.test(arg.text) && !declaredIdentNames.has(arg.text)) {
+        if (fnName === 'unit') {
+          autoObjectNames.add(arg.text);
+        } else if (builtin && argIdx < builtin.params.length) {
+          const pType = builtin.params[argIdx]!;
+          if (pType === 23 || (pType >= 37 && pType <= 48)) {
+            autoObjectNames.add(arg.text);
+          } else if (pType === 11) {
+            autoTriggerVolumes.add(arg.text);
+          } else if (pType === 13) {
+            autoCameraPoints.add(arg.text);
+          }
+        }
+      } else if (arg.kind === 'list') {
+        collectRequiredEntities(arg);
+      }
+    }
+  };
+  for (const expr of expressions) {
+    collectRequiredEntities(expr);
+  }
+
+  let workingView = view;
+  if (autoObjectNames.size > 0 || autoTriggerVolumes.size > 0 || autoCameraPoints.size > 0) {
+    workingView = ensureScenarioScriptEntities(workingView, {
+      objectNames: Array.from(autoObjectNames),
+      triggerVolumes: Array.from(autoTriggerVolumes),
+      cameraPoints: Array.from(autoCameraPoints),
+    }).buffer;
+  }
+
+  const currentDecompiled = decompileScenarioScripts(workingView);
   const entities = currentDecompiled.scenarioEntities;
   const inferredObjectTypesByNameIdx = new Map<number, number>();
 
@@ -945,18 +1167,21 @@ export function compileHaloScriptIntoScenario(view: Buffer, hscSource: string): 
     s.rootNodeHandle = compileExpr(wrappedBody, s.returnType);
   }
 
+  // Synchronize ScenarioObjectName runtime types and placement indices before appending compiled script tables
+  workingView = syncScenarioObjectNamesForScripts(workingView, inferredObjectTypesByNameIdx);
+
   // Serialize compiled tables into the scenario tag at the end of the map buffer
-  const header = parseCacheFileHeader(view);
-  const tagIndex = parseTagIndex(view, header);
+  const header = parseCacheFileHeader(workingView);
+  const tagIndex = parseTagIndex(workingView, header);
   const scenario = scenarioEntryOf(tagIndex);
   const scenarioStruct = getGroupStructName('scenario')!;
   if (!scenario) {
-    return { buffer: view, compiledScripts: 0, compiledGlobals: 0, syntaxNodesUsed: 0, diagnostics };
+    return { buffer: workingView, compiledScripts: 0, compiledGlobals: 0, syntaxNodesUsed: 0, diagnostics };
   }
 
   const scnrAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
-  if (!isRangeInBuffer(scnrAt, resolveStruct(scenarioStruct).totalSize, view.length)) {
-    return { buffer: view, compiledScripts: 0, compiledGlobals: 0, syntaxNodesUsed: 0, diagnostics };
+  if (!isRangeInBuffer(scnrAt, resolveStruct(scenarioStruct).totalSize, workingView.length)) {
+    return { buffer: workingView, compiledScripts: 0, compiledGlobals: 0, syntaxNodesUsed: 0, diagnostics };
   }
 
   // Build globals block (92 bytes * globals.length)
@@ -1013,9 +1238,9 @@ export function compileHaloScriptIntoScenario(view: Buffer, hscSource: string): 
   }
 
   // Align relative to header.tagDataOffset so memory pointers are 4-byte aligned
-  const padBytes = (4 - ((view.length - header.tagDataOffset) % 4)) % 4;
+  const padBytes = (4 - ((workingView.length - header.tagDataOffset) % 4)) % 4;
   const padBuf = Buffer.alloc(padBytes, 0);
-  const appendStart = view.length + padBytes;
+  const appendStart = workingView.length + padBytes;
 
   const globalsFileOffset = appendStart;
   const scriptsFileOffset = globalsFileOffset + globalsBlock.length;
@@ -1026,22 +1251,13 @@ export function compileHaloScriptIntoScenario(view: Buffer, hscSource: string): 
     (tagIndex.baseMemoryAddress + (fileOffset - header.tagDataOffset)) >>> 0;
 
   const outBuffer = Buffer.concat([
-    view,
+    workingView,
     padBuf,
     globalsBlock,
     scriptsBlock,
     stringDataBlock,
     syntaxBlock,
   ]);
-
-  // Synchronize ScenarioObjectName runtime types so hs_parse_object_name succeeds on load
-  syncScenarioObjectNamesForScripts(
-    outBuffer,
-    scnrAt,
-    header.tagDataOffset,
-    tagIndex.baseMemoryAddress,
-    inferredObjectTypesByNameIdx,
-  );
 
   // Update exact Scenario header offsets (verified in definitions/groups/scenario.json):
   // script syntax data @ 0x474 (1140), script string data @ 0x488 (1160), scripts @ 0x49c (1180), globals @ 0x4a8 (1192)

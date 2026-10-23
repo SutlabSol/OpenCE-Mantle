@@ -59,7 +59,9 @@ export interface ObjParseOptions {
   forceAutoUv?: boolean;
   /** UV unwrap algorithm to use when auto-unwrapping ('box' | 'per_triangle' | 'smart'). */
   uvUnwrapMode?: CustomObjectUvUnwrapMode;
-  /** Target maximum face budget for automatic QEM collision decimation (default: 800). */
+  /** Collision mode ('exact' = 1:1 triangle copy, 'auto' = weld/coplanar merge/QEM decimate, 'box' = 6-plane box). */
+  collisionMode?: CustomObjectCollisionMode;
+  /** Target maximum face budget for automatic QEM collision decimation (default: 4096). */
   targetCollisionFaces?: number;
 }
 
@@ -783,10 +785,15 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
   };
 
   // Pre-compute collision preview stats (welded vertices, coplanar-merged surfaces, planes, BSP nodes)
-  if (rawPositions.length >= 3 && rawFaces.length > 0 && rawFaces.length <= 15000) {
+  if (
+    options.collisionMode !== 'box' &&
+    rawPositions.length >= 3 &&
+    rawFaces.length > 0 &&
+    rawFaces.length <= 32760
+  ) {
     const previewBsp = compileMeshCollisionBspData(parsedMesh, Math.max(1, finalMaterialSlots.length), {
-      mode: 'auto',
-      targetFaces: options.targetCollisionFaces ?? 800,
+      mode: options.collisionMode ?? 'exact',
+      targetFaces: options.targetCollisionFaces ?? 4096,
     });
     if (previewBsp) {
       summary.collisionPreview = previewBsp.stats;
@@ -2760,10 +2767,11 @@ export function compileMeshCollisionBspData(
   }
 
   const inputTriangleCount = mesh.rawFaces.length;
+  // In 'exact' mode, preserve a true 1:1 copy of every triangle in the .OBJ file up to Halo CE's int16 limit (32,760 faces).
   const maxFaceBudget =
     mode === 'exact'
-      ? Math.max(256, Math.min(4096, options?.targetFaces ?? 2048))
-      : Math.max(64, Math.min(2048, options?.targetFaces ?? 800));
+      ? 32760
+      : Math.max(64, Math.min(32760, options?.targetFaces ?? 4096));
 
   // Stage 1A: Weld UV/normal-split seams by 3D position
   const welded = weldCollisionPositions(mesh.rawPositions, mesh.rawFaces, 1e-4);
@@ -2856,8 +2864,12 @@ export function compileMeshCollisionBspData(
     return null;
   }
 
-  // Stage 1C: Coplanar Convex Polygon Merging (Limited Dissolve up to 8 edges)
-  const mergedPolys = mergeCoplanarConvexPolygons(positions, initialPolys, planeBySurfaceDesignator);
+  // Stage 1C: Coplanar Convex Polygon Merging (Limited Dissolve up to 8 edges) in 'auto' mode,
+  // or keep a true 1:1 triangle-for-triangle copy of the .OBJ faces in 'exact' mode!
+  const mergedPolys =
+    mode === 'exact'
+      ? initialPolys
+      : mergeCoplanarConvexPolygons(positions, initialPolys, planeBySurfaceDesignator);
 
   // Map each merged polygon's directed plane into `planes` (using `0x80000000 | planeIdx` if opposite to an existing plane)
   const dirPlaneToDesignator = new Int32Array(planeBySurfaceDesignator.length);
@@ -3024,7 +3036,7 @@ export function compileMeshCollisionBspData(
   const defaultBackLeaf = isConcave ? 0x80000000 : 0xffffffff;
 
   const buildTree = (polys: ClipPoly[], usedPlanes: Set<number>, depth: number): number => {
-    if (polys.length === 0 || depth >= 52 || bsp3dNodes.length >= 8192) {
+    if (polys.length === 0 || depth >= 64 || bsp3dNodes.length >= 32760) {
       return defaultBackLeaf;
     }
 
@@ -3811,13 +3823,23 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
   const rootPath = cleanPath;
 
   // 1. Parse 3D render mesh (and optional collision mesh)
-  const renderMesh = parseObjMesh(options.objText, options.meshOptions);
+  const effectiveCollMode: CustomObjectCollisionMode =
+    options.collisionMode ?? (options.multiBoxCollision === false ? 'box' : 'exact');
+  const renderMesh = parseObjMesh(options.objText, {
+    ...options.meshOptions,
+    collisionMode: effectiveCollMode,
+    targetCollisionFaces: options.targetCollisionFaces ?? options.meshOptions?.targetCollisionFaces,
+  });
   if (renderMesh.vertices.length === 0 || renderMesh.triangles.length === 0) {
     throw new Error(renderMesh.summary.message || 'OBJ file contains no valid vertices or triangles.');
   }
 
   const collisionMesh = options.collisionObjText
-    ? parseObjMesh(options.collisionObjText, options.meshOptions)
+    ? parseObjMesh(options.collisionObjText, {
+        ...options.meshOptions,
+        collisionMode: effectiveCollMode,
+        targetCollisionFaces: options.targetCollisionFaces ?? options.meshOptions?.targetCollisionFaces,
+      })
     : renderMesh;
 
   // 2. Prepare texture RGBA:

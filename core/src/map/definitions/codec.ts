@@ -144,7 +144,7 @@ export function encodeBasicUnit(buffer: Buffer, offset: number, type: string, va
       return;
     case 'uint16':
     case 'Index':
-      buffer.writeUInt16LE(value as number, offset);
+      buffer.writeUInt16LE(((value as number) < 0 ? 0xffff : (value as number)) & 0xffff, offset);
       return;
     case 'int32':
       buffer.writeInt32LE(value as number, offset);

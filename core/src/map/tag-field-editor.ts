@@ -597,6 +597,16 @@ export function addReflexiveChunk(
     buffer.copy(out, newElementOffset, oldChildBase + cloneFromIndex * elementSize, oldChildBase + (cloneFromIndex + 1) * elementSize);
   } else {
     out.fill(0, newElementOffset, newElementOffset + elementSize);
+    for (const cf of childStruct.fields) {
+      if (cf.def.type === 'TagDependency') {
+        out.writeUInt32LE(NULL_TAG_ID, newElementOffset + cf.offset + 0);
+        out.writeUInt32LE(0, newElementOffset + cf.offset + 4);
+        out.writeUInt32LE(0, newElementOffset + cf.offset + 8);
+        out.writeUInt32LE(NULL_TAG_ID, newElementOffset + cf.offset + 12);
+      } else if (cf.def.type === 'Index' && cf.name === 'name') {
+        out.writeUInt16LE(0xffff, newElementOffset + cf.offset);
+      }
+    }
   }
 
   // Update reflexive header

@@ -1,12 +1,12 @@
-import { parseCacheFileHeader } from './header';
-import { parseTagIndex, resolveTagDataPointer } from './tag-index';
-import { isRangeInBuffer, resolvePointer } from './definitions/engine';
+import { parseCacheFileHeader, type CacheFileHeader } from './header';
+import { parseTagIndex, resolveTagDataPointer, type TagIndex } from './tag-index';
+import { getGroupStructName, isRangeInBuffer, resolvePointer, resolveStruct } from './definitions/engine';
 import { extractBspRenderMesh } from '../render/bsp-geometry';
 import { exportBspToObj } from '../render/model-exporter';
 import { buildCustomObjectContainer } from '../render/collision-generator';
 import { applyInjectionWithReport, planAddInjection } from './tag-injector';
 import { TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE } from '../constants/cache-file';
-import { fourCCFromString } from '../constants/tag-classes';
+import { fourCCFromString, NULL_TAG_ID } from '../constants/tag-classes';
 import { duplicateTagInMap } from './tag-index-editor';
 
 export interface CollisionWireframeData {
@@ -251,6 +251,7 @@ export function convertCollisionToGbxmodelInMap(
 
 /**
  * Converts a `scenario_structure_bsp` (`sbsp`) tag into a `gbxmodel` (`mod2`) + `scenery` (`scen`) tag in-memory.
+ * `bspTagIndex` may be either a `0..N-1` index into `scenario.structure_bsps` or the tag index of a `scenario_structure_bsp` tag.
  */
 export function convertSbspToSceneryInMap(
   view: Buffer,
@@ -259,7 +260,17 @@ export function convertSbspToSceneryInMap(
 ): TagClassConversionResult {
   const header = parseCacheFileHeader(view);
   const tagIndex = parseTagIndex(view, header);
-  const bspGeom = extractBspRenderMesh(view, header, tagIndex, bspTagIndex);
+
+  let resolvedBspIdx = bspTagIndex ?? 0;
+  if (bspTagIndex !== undefined && bspTagIndex >= 0) {
+    const sbspEntries = tagIndex.entries.filter((e) => e.primaryClassName === 'scenario_structure_bsp');
+    if (bspTagIndex >= sbspEntries.length) {
+      const matchIdx = sbspEntries.findIndex((e) => e.index === bspTagIndex);
+      resolvedBspIdx = matchIdx >= 0 ? matchIdx : 0;
+    }
+  }
+
+  const bspGeom = extractBspRenderMesh(view, header, tagIndex, resolvedBspIdx);
   if (bspGeom.submeshes.length === 0) {
     throw new Error('Selected BSP contains no renderable lightmap surfaces.');
   }
@@ -413,8 +424,15 @@ export function convertObjectTagClassInMap(
         // Copy node_list_checksum (+4) and detail node counts (+28..+38)
         outBuf.writeInt32LE(outBuf.readInt32LE(donorModelAt + 4), newModelAt + 4);
         donorCopyRange(outBuf, donorModelAt + 28, newModelAt + 28, 10);
-        // Copy top-level markers reflexive (+172..+184) and nodes reflexive (+184..+196)
+        // Copy top-level markers reflexive (+172..+184) and nodes reflexive (+184..+196), then deep-clone them
+        // so their reflexive arrays never overlap the donor gbxmodel's memory range.
         donorCopyRange(outBuf, donorModelAt + 172, newModelAt + 172, 24);
+        outBuf = deepCloneReflexiveAtOffset(outBuf, curHeader, curTagIndex, newModelAt + 172, 'GBXModelMarker');
+        curHeader = parseCacheFileHeader(outBuf);
+        curTagIndex = parseTagIndex(outBuf, curHeader);
+        outBuf = deepCloneReflexiveAtOffset(outBuf, curHeader, curTagIndex, newModelAt + 184, 'GBXModelNode');
+        curHeader = parseCacheFileHeader(outBuf);
+        curTagIndex = parseTagIndex(outBuf, curHeader);
 
         // Clone region[0] + permutation[0] so permutation[0].markers (+76..+88) includes donor's seat/weapon markers
         const srcRegCount = outBuf.readUInt32LE(newModelAt + 196);
@@ -458,6 +476,16 @@ export function convertObjectTagClassInMap(
                 const delta = pad1.length + clonedRegs.length + clonedPerms.length;
                 outBuf.writeUInt32LE(outBuf.length >>> 0, 0x08);
                 outBuf.writeUInt32LE((curHeader.tagDataSize + delta) >>> 0, 0x14);
+                curHeader = parseCacheFileHeader(outBuf);
+                curTagIndex = parseTagIndex(outBuf, curHeader);
+
+                outBuf = deepCloneReflexiveAtOffset(
+                  outBuf,
+                  curHeader,
+                  curTagIndex,
+                  newPermsOffset + 76,
+                  'GBXModelRegionPermutationMarker',
+                );
                 curHeader = parseCacheFileHeader(outBuf);
                 curTagIndex = parseTagIndex(outBuf, curHeader);
               }
@@ -558,6 +586,7 @@ export function convertObjectTagClassInMap(
   const alignedEnd = (outBuf.length + 3) & ~3;
   const pad = Buffer.alloc(alignedEnd - outBuf.length, 0);
   const newStructBuf = Buffer.alloc(spec.structSize, 0);
+  const targetStructName = getGroupStructName(targetGroup);
 
   if (preferredDonor) {
     const donorAt = resolveTagDataPointer(
@@ -599,6 +628,11 @@ export function convertObjectTagClassInMap(
     }
   }
 
+  // Ensure every unset TagDependency in the new struct has a valid FourCC and NULL_TAG_ID (0xFFFFFFFF)
+  if (targetStructName) {
+    sanitizeStructDependencies(newStructBuf, 0, targetStructName);
+  }
+
   // Write the new object_type enum at offset +0x00 of the Object struct
   newStructBuf.writeInt16LE(spec.objectTypeEnum, 0);
   // Clear predicted_resources reflexive at +368 so stale resource indices aren't kept
@@ -621,6 +655,16 @@ export function convertObjectTagClassInMap(
   const newDataPtr = (curTagIndex.baseMemoryAddress + (alignedEnd - curHeader.tagDataOffset)) >>> 0;
   outBuf.writeUInt32LE(newDataPtr, entryOffset + 0x14);
 
+  curHeader = parseCacheFileHeader(outBuf);
+  curTagIndex = parseTagIndex(outBuf, curHeader);
+
+  // Deep-clone all TagReflexive blocks on the converted tag (e.g. powered_seats, weapons, seats,
+  // camera_tracks, new_hud_interfaces, attachments, widgets, functions, change_colors) so none of them
+  // overlap the donor tag's memory addresses in OpenCE's cache validator!
+  if (targetStructName) {
+    outBuf = deepCloneStructReflexives(outBuf, curHeader, curTagIndex, alignedEnd, targetStructName);
+  }
+
   const donorNote = preferredDonor
     ? ` Inherited ${targetGroup} seats, physics, and rig markers from "${preferredDonor.path}".`
     : '';
@@ -636,5 +680,132 @@ export function convertObjectTagClassInMap(
 
 function donorCopyRange(buf: Buffer, srcOff: number, dstOff: number, length: number): void {
   buf.copy(buf, dstOff, srcOff, srcOff + length);
+}
+
+/**
+ * Ensures any zero-initialized `TagDependency` field in `buf` at `baseOffset` has a valid FourCC
+ * and `tagId = NULL_TAG_ID` (`0xFFFFFFFF`) so OpenCE never rejects `00000000` dependencies.
+ */
+function sanitizeStructDependencies(buf: Buffer, baseOffset: number, structName: string): void {
+  const resolved = resolveStruct(structName);
+  for (const f of resolved.fields) {
+    if (f.def.type !== 'TagDependency') continue;
+    const off = baseOffset + f.offset;
+    if (off + 16 > buf.length) continue;
+    const fourcc = buf.readUInt32LE(off);
+    const tagId = buf.readUInt32LE(off + 12);
+    if (fourcc === 0 || tagId === 0) {
+      const defaultClassName = f.def.classes?.[0];
+      let defaultFourCC = NULL_TAG_ID;
+      if (defaultClassName) {
+        try {
+          const grpStruct = getGroupStructName(defaultClassName);
+          if (grpStruct) {
+            const grpDef = resolveStruct(grpStruct);
+            if (grpDef.tagClass && grpDef.tagClass.length === 4) {
+              defaultFourCC = fourCCFromString(grpDef.tagClass);
+            }
+          }
+        } catch {
+          defaultFourCC = NULL_TAG_ID;
+        }
+      }
+      buf.writeUInt32LE(fourcc !== 0 ? fourcc : defaultFourCC, off + 0);
+      buf.writeUInt32LE(0, off + 4);
+      buf.writeUInt32LE(0, off + 8);
+      buf.writeUInt32LE(NULL_TAG_ID, off + 12);
+    }
+  }
+}
+
+/**
+ * Deep-clones a single `TagReflexive` header at `refHeaderAbsOffset` (`count` at +0, `ptr` at +4)
+ * whose elements are of type `childStructName` into fresh 4-byte-aligned memory at the end of `buf`,
+ * and recursively deep-clones any nested `TagReflexive` fields inside each child element.
+ */
+export function deepCloneReflexiveAtOffset(
+  buf: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  refHeaderAbsOffset: number,
+  childStructName: string,
+): Buffer {
+  if (!isRangeInBuffer(refHeaderAbsOffset, 12, buf.length)) return buf;
+  const count = buf.readUInt32LE(refHeaderAbsOffset);
+  const oldPtr = buf.readUInt32LE(refHeaderAbsOffset + 4);
+  if (count === 0 || oldPtr === 0) {
+    buf.writeUInt32LE(0, refHeaderAbsOffset);
+    buf.writeUInt32LE(0, refHeaderAbsOffset + 4);
+    buf.writeUInt32LE(0, refHeaderAbsOffset + 8);
+    return buf;
+  }
+
+  let childStruct;
+  try {
+    childStruct = resolveStruct(childStructName);
+  } catch {
+    return buf;
+  }
+  const elemSize = childStruct.totalSize;
+  const totalBytes = count * elemSize;
+  const oldArrayAt = resolvePointer(oldPtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(oldArrayAt, totalBytes, buf.length)) return buf;
+
+  const alignedStart = (buf.length + 3) & ~3;
+  const pad = Buffer.alloc(alignedStart - buf.length, 0);
+  const clonedSlice = Buffer.from(buf.subarray(oldArrayAt, oldArrayAt + totalBytes));
+  const newPtr = (tagIndex.baseMemoryAddress + (alignedStart - header.tagDataOffset)) >>> 0;
+
+  let out: Buffer = Buffer.concat([buf, pad, clonedSlice]);
+  const delta = pad.length + clonedSlice.length;
+  out.writeUInt32LE(newPtr, refHeaderAbsOffset + 4);
+  out.writeUInt32LE(0, refHeaderAbsOffset + 8);
+  out.writeUInt32LE(out.length >>> 0, 0x08);
+  out.writeUInt32LE((header.tagDataSize + delta) >>> 0, 0x14);
+
+  let curHeader = parseCacheFileHeader(out);
+  let curTagIndex = parseTagIndex(out, curHeader);
+
+  for (let i = 0; i < count; i++) {
+    const elemAbs = alignedStart + i * elemSize;
+    sanitizeStructDependencies(out, elemAbs, childStructName);
+    out = deepCloneStructReflexives(out, curHeader, curTagIndex, elemAbs, childStructName);
+    curHeader = parseCacheFileHeader(out);
+    curTagIndex = parseTagIndex(out, curHeader);
+  }
+
+  return out;
+}
+
+/**
+ * Deep-clones all `TagReflexive` fields inside the struct at `structAbsOffset` (`structName`)
+ * into fresh 4-byte-aligned memory at the end of `buf` so no reflexive blocks overlap another tag.
+ */
+export function deepCloneStructReflexives(
+  buf: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  structAbsOffset: number,
+  structName: string,
+): Buffer {
+  let resolved;
+  try {
+    resolved = resolveStruct(structName);
+  } catch {
+    return buf;
+  }
+
+  let out = buf;
+  let curHeader = header;
+  let curTagIndex = tagIndex;
+
+  for (const f of resolved.fields) {
+    if (f.def.type !== 'TagReflexive' || !f.def.struct) continue;
+    out = deepCloneReflexiveAtOffset(out, curHeader, curTagIndex, structAbsOffset + f.offset, f.def.struct);
+    curHeader = parseCacheFileHeader(out);
+    curTagIndex = parseTagIndex(out, curHeader);
+  }
+
+  return out;
 }
 

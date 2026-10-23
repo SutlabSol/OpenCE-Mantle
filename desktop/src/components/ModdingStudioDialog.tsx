@@ -54,7 +54,7 @@ export default function ModdingStudioDialog({
 
   const [selectedCollIdx, setSelectedCollIdx] = useState<number>(() => collTags[0]?.index ?? -1);
   const [collTargetPath, setCollTargetPath] = useState<string>('');
-  const [selectedBspIdx, setSelectedBspIdx] = useState<number>(() => bspTags[0]?.index ?? 0);
+  const [selectedBspIdx, setSelectedBspIdx] = useState<number>(0);
   const [bspTargetPath, setBspTargetPath] = useState<string>('');
   const [selectedObjIdx, setSelectedObjIdx] = useState<number>(() => objectTags[0]?.index ?? -1);
   const [targetObjClass, setTargetObjClass] = useState<string>('scenery');

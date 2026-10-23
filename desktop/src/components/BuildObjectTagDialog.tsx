@@ -136,8 +136,8 @@ export default function BuildObjectTagDialog({
   const [forceAutoUv, setForceAutoUv] = useState<boolean>(false);
   const [uvUnwrapMode, setUvUnwrapMode] = useState<'box' | 'per_triangle' | 'smart'>('box');
   const [multiBoxCollision, setMultiBoxCollision] = useState<boolean>(true);
-  const [collisionMode, setCollisionMode] = useState<'auto' | 'exact' | 'box'>('auto');
-  const [targetCollisionFaces, setTargetCollisionFaces] = useState<number>(800);
+  const [collisionMode, setCollisionMode] = useState<'auto' | 'exact' | 'box'>('exact');
+  const [targetCollisionFaces, setTargetCollisionFaces] = useState<number>(4096);
   const [materialType, setMaterialType] = useState<number>(7); // 7 = metal thick (for Scenery)
   const [slotMaterialTypes, setSlotMaterialTypes] = useState<number[]>([7]);
 
@@ -201,7 +201,9 @@ export default function BuildObjectTagDialog({
           centerOrigin,
           forceAutoUv: forceAutoUv || uvUnwrapMode !== 'box',
           uvUnwrapMode,
-        });
+          collisionMode,
+          targetCollisionFaces,
+        } as any);
         const uvPromise =
           typeof window.opence.exportUvTemplate === 'function'
             ? window.opence.exportUvTemplate({
@@ -242,7 +244,7 @@ export default function BuildObjectTagDialog({
     return () => {
       cancelled = true;
     };
-  }, [objFilePath, scale, flipYz, centerOrigin, forceAutoUv, uvUnwrapMode]);
+  }, [objFilePath, scale, flipYz, centerOrigin, forceAutoUv, uvUnwrapMode, collisionMode, targetCollisionFaces]);
 
   if (!open) return null;
 
@@ -717,11 +719,11 @@ export default function BuildObjectTagDialog({
                     fontSize: 12,
                   }}
                 >
-                  <option value="auto">
-                    Auto (1:1 Exact + Blender Weld / Coplanar Merge / QEM Decimate)
-                  </option>
                   <option value="exact">
-                    1:1 Exact Mesh (Every Polygon up to 2,048 Faces)
+                    1:1 Exact .OBJ Copy (Every Triangle — Up to 32,760 Faces)
+                  </option>
+                  <option value="auto">
+                    Auto Optimize (Weld / Coplanar Merge / QEM Decimate)
                   </option>
                   <option value="box">
                     Simple 6-Plane Bounding Box
@@ -733,14 +735,14 @@ export default function BuildObjectTagDialog({
                     <input
                       type="number"
                       min={64}
-                      max={2048}
-                      step={64}
+                      max={32760}
+                      step={256}
                       value={targetCollisionFaces}
                       onChange={(e) =>
-                        setTargetCollisionFaces(Math.max(64, Math.min(2048, parseInt(e.target.value, 10) || 800)))
+                        setTargetCollisionFaces(Math.max(64, Math.min(32760, parseInt(e.target.value, 10) || 4096)))
                       }
                       style={{
-                        width: 64,
+                        width: 72,
                         padding: '3px 6px',
                         backgroundColor: '#18181b',
                         border: '1px solid #3f3f46',

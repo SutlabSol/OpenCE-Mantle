@@ -229,9 +229,9 @@ export function resolveCrossReflexiveOptions(
 
   if (!targetReflexiveName) return null;
   const targetBlock = rootFields.find((rf) => rf.kind === 'reflexive' && rf.name.toLowerCase() === targetReflexiveName);
-  if (!targetBlock || !targetBlock.children || targetBlock.children.length === 0) return null;
+  if (!targetBlock) return null;
 
-  const options: CrossReflexiveOption[] = targetBlock.children.map((el, idx) => {
+  const options: CrossReflexiveOption[] = (targetBlock.children ?? []).map((el, idx) => {
     const nameField = el.fields.find((cf) => cf.kind === 'string' && cf.name.toLowerCase().includes('name'));
     const depField = el.fields.find((cf) => cf.kind === 'dependency' && cf.dependencyTarget);
     let summary = `${el.structName} #${idx}`;
@@ -349,6 +349,32 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
       setStatusMessage(`Failed to ${actionName.toLowerCase()} in "${fieldPath}": ${e.message}`);
     } finally {
       setAddingChunkPath(null);
+    }
+  };
+
+  const handleCreateAndAssignObjectName = async (targetFieldPath: string, newObjName: string) => {
+    const clean = newObjName.trim();
+    if (!focusedTag || !clean || !window.opence.addReflexiveChunk) return;
+    setSavingField(targetFieldPath);
+    setStatusMessage(null);
+    try {
+      const addRes = await window.opence.addReflexiveChunk(focusedTag.index, 'object names', -1);
+      if (!addRes.ok) {
+        setStatusMessage(`Failed to add object name: ${addRes.message}`);
+        return;
+      }
+      const newIdx = addRes.newElementIndex;
+      await window.opence.updateTagField(focusedTag.index, `object names[${newIdx}].name`, clean);
+      await window.opence.updateTagField(focusedTag.index, targetFieldPath, newIdx);
+      const refresh = await window.opence.getTagFields(focusedTag.index);
+      if (refresh.ok) {
+        setFieldsResult(refresh.data);
+      }
+      setStatusMessage(`Created object name "[${newIdx}] ${clean}" and assigned to "${targetFieldPath}" (Ctrl+S to save).`);
+    } catch (err) {
+      setStatusMessage(`Failed to create object name: ${(err as Error).message}`);
+    } finally {
+      setSavingField(null);
     }
   };
 
@@ -514,6 +540,7 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
                     savingField={savingField}
                     onSave={handleUpdateField}
                     onAddChunk={handleAddChunk}
+                    onCreateObjectName={handleCreateAndAssignObjectName}
                     onCopyElementJson={handleCopyReflexiveElementJson}
                     onPasteElementJson={handlePasteReflexiveElementJson}
                     addingChunkPath={addingChunkPath}
@@ -546,6 +573,7 @@ interface FieldCardProps {
   /** Save a value at the given (possibly nested) field path; passed through to root as-is. */
   onSave: (fieldPath: string, val: unknown) => void;
   onAddChunk?: (fieldPath: string, cloneFromIndex?: number) => void;
+  onCreateObjectName?: (targetFieldPath: string, newObjName: string) => void;
   onCopyElementJson?: (elementPath: string, elementFields: TagFieldDescriptor[]) => void;
   onPasteElementJson?: (elementPath: string, elementFields: TagFieldDescriptor[]) => void;
   addingChunkPath?: string | null;
@@ -566,6 +594,7 @@ function FieldCard({
   savingField,
   onSave,
   onAddChunk,
+  onCreateObjectName,
   onCopyElementJson,
   onPasteElementJson,
   addingChunkPath,
@@ -581,6 +610,7 @@ function FieldCard({
   const isAddingChunk = addingChunkPath === fieldPath;
   const searchQ = search?.trim().toLowerCase() ?? '';
   const [localVal, setLocalVal] = useState<unknown>(field.value);
+  const [newObjNameDraft, setNewObjNameDraft] = useState<string>('');
   const fieldUnitInfo = useMemo(() => getFieldUnit(field.name, field.type), [field.name, field.type]);
   const fieldExplanation = useMemo(
     () => getFieldExplanation(field.name, tagClassName),
@@ -840,6 +870,7 @@ function FieldCard({
                                 savingField={savingField}
                                 onSave={onSave}
                                 onAddChunk={onAddChunk}
+                                onCreateObjectName={onCreateObjectName}
                                 onCopyElementJson={onCopyElementJson}
                                 onPasteElementJson={onPasteElementJson}
                                 addingChunkPath={addingChunkPath}
@@ -872,52 +903,102 @@ function FieldCard({
         </div>
       ) : field.kind === 'number' ? (
         <div>
-          {crossRefInfo && (
-            <div style={{ marginBottom: 4 }}>
+          {crossRefInfo ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <select
                 data-testid={`field-crossref-${fieldPath}`}
-                value={Number(localVal)}
+                value={
+                  Number(localVal) === 65535 || Number(localVal) < 0 || Number.isNaN(Number(localVal))
+                    ? -1
+                    : Number(localVal)
+                }
                 disabled={isSaving}
                 onChange={(e) => {
                   const nextVal = Number(e.target.value);
                   setLocalVal(nextVal);
                   onSave(fieldPath, nextVal);
                 }}
-                style={{ ...inputStyle, borderColor: 'rgba(56, 189, 248, 0.35)' }}
+                style={{ ...inputStyle, borderColor: 'rgba(56, 189, 248, 0.45)', cursor: 'pointer' }}
                 title={`Select element from "${crossRefInfo.reflexiveName}" reflexive block`}
               >
-                <option value={-1}>[-1] (None / Null)</option>
+                <option value={-1}>
+                  {crossRefInfo.options.length === 0
+                    ? `[-1] (None / Unnamed — "${crossRefInfo.reflexiveName}" has 0 entries)`
+                    : '[-1] (None / Unnamed)'}
+                </option>
                 {crossRefInfo.options.map((opt) => (
                   <option key={opt.index} value={opt.index}>
                     {opt.label}
                   </option>
                 ))}
               </select>
+              {crossRefInfo.reflexiveName.toLowerCase() === 'object names' && onCreateObjectName && (
+                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    placeholder="Type new script object name (e.g. pelican_drop)..."
+                    value={newObjNameDraft}
+                    disabled={isSaving}
+                    onChange={(e) => setNewObjNameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && newObjNameDraft.trim()) {
+                        onCreateObjectName(fieldPath, newObjNameDraft.trim());
+                        setNewObjNameDraft('');
+                      }
+                    }}
+                    style={{ ...inputStyle, flex: 1, fontSize: 10.5 }}
+                  />
+                  <button
+                    type="button"
+                    disabled={isSaving || !newObjNameDraft.trim()}
+                    onClick={() => {
+                      if (newObjNameDraft.trim()) {
+                        onCreateObjectName(fieldPath, newObjNameDraft.trim());
+                        setNewObjNameDraft('');
+                      }
+                    }}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10.5,
+                      fontWeight: 600,
+                      background: 'rgba(56, 189, 248, 0.16)',
+                      border: '1px solid rgba(56, 189, 248, 0.45)',
+                      color: '#38bdf8',
+                      borderRadius: 2,
+                      cursor: isSaving || !newObjNameDraft.trim() ? 'not-allowed' : 'pointer',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    + Create &amp; Assign
+                  </button>
+                </div>
+              )}
             </div>
-          )}
-          <input
-            data-testid={`field-input-${fieldPath}`}
-            type="number"
-            step="any"
-            value={localVal !== undefined && localVal !== null ? String(localVal) : ''}
-            disabled={isSaving}
-            onChange={(e) => setLocalVal(e.target.value)}
-            onBlur={() => {
-              const num = Number(localVal);
-              if (!Number.isNaN(num) && num !== field.value) {
-                onSave(fieldPath, num);
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
+          ) : (
+            <input
+              data-testid={`field-input-${fieldPath}`}
+              type="number"
+              step="any"
+              value={localVal !== undefined && localVal !== null ? String(localVal) : ''}
+              disabled={isSaving}
+              onChange={(e) => setLocalVal(e.target.value)}
+              onBlur={() => {
                 const num = Number(localVal);
                 if (!Number.isNaN(num) && num !== field.value) {
                   onSave(fieldPath, num);
                 }
-              }
-            }}
-            style={inputStyle}
-          />
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const num = Number(localVal);
+                  if (!Number.isNaN(num) && num !== field.value) {
+                    onSave(fieldPath, num);
+                  }
+                }
+              }}
+              style={inputStyle}
+            />
+          )}
         </div>
       ) : field.kind === 'bounds' ? (
         <div style={{ display: 'flex', gap: 6 }}>
