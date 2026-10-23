@@ -1486,7 +1486,7 @@ async function pickObjFileFlow(): Promise<{ path: string | null }> {
 
 async function analyzeCollisionObjFlow(
   filePath?: string,
-  options?: { scale?: number; flipYz?: boolean; centerOrigin?: boolean; forceAutoUv?: boolean },
+  options?: { scale?: number; flipYz?: boolean; centerOrigin?: boolean; forceAutoUv?: boolean; uvUnwrapMode?: 'box' | 'per_triangle' | 'smart' },
 ) {
   try {
     let p = filePath;
@@ -1510,6 +1510,7 @@ async function exportUvTemplateFlow(options: {
   flipYz?: boolean;
   centerOrigin?: boolean;
   forceAutoUv?: boolean;
+  uvUnwrapMode?: 'box' | 'per_triangle' | 'smart';
   previewOnly?: boolean;
 }): Promise<ExportUvTemplateResult> {
   try {
@@ -1523,6 +1524,7 @@ async function exportUvTemplateFlow(options: {
       flipYz: options.flipYz,
       centerOrigin: options.centerOrigin,
       forceAutoUv: options.forceAutoUv,
+      uvUnwrapMode: options.uvUnwrapMode,
     });
     const previewDataUrl = `data:image/png;base64,${pngBuffer.toString('base64')}`;
 
@@ -2557,6 +2559,190 @@ app.whenReady().then(() => {
   ipcMain.handle('3d:exportBsp', (_e, bspIndex: number, format: 'obj' | 'glb', outputPath: string) =>
     exportBsp3dFlow(bspIndex, format, outputPath),
   );
+  ipcMain.handle('hs:decompile', async () => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      hscSource: string;
+      scriptCount: number;
+      globalCount: number;
+      syntaxNodeCount: number;
+      scenarioEntities: {
+        objectNames: string[];
+        triggerVolumes: string[];
+        cutsceneCameraPoints: string[];
+        cutsceneFlags: string[];
+        encounters: string[];
+        recordedAnimations: string[];
+      };
+    } | { ok: false; message: string }>({ type: 'decompileHaloScript' }, sendLog);
+    return promise;
+  });
+  ipcMain.handle('hs:compile', async (_e, hscSource: string) => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      compiledScripts: number;
+      compiledGlobals: number;
+      syntaxNodesUsed: number;
+      diagnostics: Array<{ line: number; severity: 'error' | 'warning'; message: string }>;
+    } | { ok: false; message: string; diagnostics?: Array<{ line: number; severity: 'error' | 'warning'; message: string }> }>(
+      { type: 'compileHaloScript', hscSource },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok) {
+      currentMapModified = true;
+      sendLog('info', `Compiled ${res.compiledScripts} HaloScript(s) and ${res.compiledGlobals} global(s) into scenario (${res.syntaxNodesUsed} syntax nodes). Use File > Save to write changes.`);
+    }
+    return res;
+  });
+  ipcMain.handle(
+    'hs:setupEntities',
+    async (
+      _e,
+      required: { objectNames?: string[]; triggerVolumes?: string[]; cameraPoints?: string[] },
+    ) => {
+      if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+      if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+      const { promise } = sendWorkerRequest<{
+        ok: true;
+        addedObjectNames: string[];
+        addedTriggerVolumes: string[];
+        addedCameraPoints: string[];
+      } | { ok: false; message: string }>({ type: 'setupScenarioScriptEntities', required }, sendLog);
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          'info',
+          `Auto-configured scenario script entities (+${res.addedObjectNames.length} object names, +${res.addedTriggerVolumes.length} trigger volumes, +${res.addedCameraPoints.length} camera points).`,
+        );
+      }
+      return res;
+    },
+  );
+  ipcMain.handle('coll:extractWireframe', async (_e, collTagIndex: number) => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      tagIndex: number;
+      tagPath: string;
+      vertexCount: number;
+      edgeCount: number;
+      surfaceCount: number;
+      linePositions: number[];
+      objText: string;
+    } | { ok: false; message: string }>({ type: 'extractCollisionWireframe', collTagIndex }, sendLog);
+    return promise;
+  });
+  ipcMain.handle('convert:collToGbxmodel', async (_e, collTagIndex: number, targetPath?: string) => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      createdTagIndex: number;
+      createdTagPath: string;
+      createdTagGroup: string;
+      summary: string;
+      tags: OpenMapSummary['tags'];
+    } | { ok: false; message: string }>({ type: 'convertCollisionToGbxmodel', collTagIndex, targetPath }, sendLog);
+    const res = await promise;
+    if (res.ok) {
+      currentMapModified = true;
+      sendLog('info', res.summary);
+    }
+    return res;
+  });
+  ipcMain.handle('convert:sbspToScenery', async (_e, bspTagIndex?: number, targetPath?: string) => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      createdTagIndex: number;
+      createdTagPath: string;
+      createdTagGroup: string;
+      summary: string;
+      tags: OpenMapSummary['tags'];
+    } | { ok: false; message: string }>({ type: 'convertSbspToScenery', bspTagIndex, targetPath }, sendLog);
+    const res = await promise;
+    if (res.ok) {
+      currentMapModified = true;
+      sendLog('info', res.summary);
+    }
+    return res;
+  });
+  ipcMain.handle('convert:objectTagClass', async (_e, sourceTagIndex: number, targetGroup: string, targetPath?: string) => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      createdTagIndex: number;
+      createdTagPath: string;
+      createdTagGroup: string;
+      summary: string;
+      tags: OpenMapSummary['tags'];
+    } | { ok: false; message: string }>(
+      { type: 'convertObjectTagClass', sourceTagIndex, targetGroup, targetPath },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok) {
+      currentMapModified = true;
+      sendLog('info', res.summary);
+    }
+    return res;
+  });
+  ipcMain.handle('map:cleanOpenSauceYelo', async () => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      cleanedReferences: number;
+      details: string[];
+    } | { ok: false; message: string }>({ type: 'cleanOpenSauceYelo' }, sendLog);
+    const res = await promise;
+    if (res.ok && res.cleanedReferences > 0) {
+      currentMapModified = true;
+      sendLog('info', `Cleaned ${res.cleanedReferences} OpenSauce (.yelo / .gelo) reference(s).`);
+    }
+    return res;
+  });
+  ipcMain.handle('map:scanTagErrors', async () => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      totalTagsScanned: number;
+      errorCount: number;
+      warningCount: number;
+      findings: Array<{
+        tagIndex: number;
+        tagId: number;
+        tagPath: string;
+        tagGroup: string;
+        fieldPath: string;
+        severity: 'error' | 'warning';
+        message: string;
+      }>;
+    } | { ok: false; message: string }>({ type: 'scanMapTagErrors' }, sendLog);
+    return promise;
+  });
+  ipcMain.handle('map:globalReplaceTagReference', async (_e, fromTagId: number, toTagId: number) => {
+    if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      replacedCount: number;
+      affectedTags: Array<{ tagIndex: number; tagPath: string; tagGroup: string; fieldPath: string }>;
+    } | { ok: false; message: string }>({ type: 'globalReplaceTagReference', fromTagId, toTagId }, sendLog);
+    const res = await promise;
+    if (res.ok && res.replacedCount > 0) {
+      currentMapModified = true;
+      sendLog('info', `Globally replaced ${res.replacedCount} tag reference(s) across the map.`);
+    }
+    return res;
+  });
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());

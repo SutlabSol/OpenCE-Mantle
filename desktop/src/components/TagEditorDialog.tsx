@@ -33,7 +33,9 @@ export default function TagEditorDialog({
     tag.primaryClassName,
   );
 
-  const [tab, setTab] = useState<'strings' | 'fields' | 'curves'>(isUnicodeStrings ? 'strings' : 'fields');
+  const [tab, setTab] = useState<'strings' | 'fields' | 'curves'>(
+    isUnicodeStrings ? 'strings' : 'fields',
+  );
 
   useEffect(() => {
     shellRef.current?.focus();

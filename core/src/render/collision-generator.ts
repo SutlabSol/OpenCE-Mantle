@@ -31,6 +31,23 @@ import { resolveTagDataPointer } from '../map/tag-index';
 
 export type CustomObjectTagGroup = 'scenery' | 'weapon' | 'vehicle' | 'equipment';
 
+export type CustomObjectCollisionMode = 'auto' | 'exact' | 'box';
+
+export type CustomObjectUvUnwrapMode = 'box' | 'per_triangle' | 'smart';
+
+export interface CollisionCompilationStats {
+  mode: CustomObjectCollisionMode;
+  inputTriangles: number;
+  weldedVertices: number;
+  decimatedTriangles: number;
+  mergedSurfaces: number;
+  planes: number;
+  edges: number;
+  bsp3dNodes: number;
+  bsp2dNodes: number;
+  isConcave: boolean;
+}
+
 export interface ObjParseOptions {
   /** Uniform scale multiplier applied to vertex positions (default: 1.0). */
   scale?: number;
@@ -38,8 +55,12 @@ export interface ObjParseOptions {
   flipYz?: boolean;
   /** Center X/Y around 0 and place bottom at Z=0. */
   centerOrigin?: boolean;
-  /** Automatically unwrap UVs using a 6-face box projection atlas when the OBJ has no vt coordinates (or when forced). */
+  /** Automatically unwrap UVs when the OBJ has no vt coordinates (or when forced). */
   forceAutoUv?: boolean;
+  /** UV unwrap algorithm to use when auto-unwrapping ('box' | 'per_triangle' | 'smart'). */
+  uvUnwrapMode?: CustomObjectUvUnwrapMode;
+  /** Target maximum face budget for automatic QEM collision decimation (default: 800). */
+  targetCollisionFaces?: number;
 }
 
 export interface ObjMeshSummary {
@@ -59,6 +80,7 @@ export interface ObjMeshSummary {
   };
   isTooComplex: boolean;
   message: string;
+  collisionPreview?: CollisionCompilationStats;
 }
 
 export interface CompiledModelVertex {
@@ -189,6 +211,258 @@ function projectBoxAtlasUv(
   const vInCell = pad + Math.max(0, Math.min(1, localV)) * (1 - 2 * pad);
 
   return [(col + uInCell) / 3, (row + vInCell) / 2];
+}
+
+/**
+ * Unwraps every triangle into its own dedicated, non-overlapping grid cell in sequential order (`0..N-1`).
+ * Each triangle is projected into its local 2D plane and fitted inside its assigned cell with padding.
+ */
+function computePerTriangleGridUvs(
+  rawPositions: [number, number, number][],
+  triVertexIndices: [number, number, number][],
+): [[number, number], [number, number], [number, number]][] {
+  const numTris = Math.max(1, triVertexIndices.length);
+  const gridCols = Math.max(1, Math.ceil(Math.sqrt(numTris)));
+  const gridRows = Math.max(1, Math.ceil(numTris / gridCols));
+  const pad = 0.1;
+  const innerSpan = 1 - 2 * pad;
+  const result: [[number, number], [number, number], [number, number]][] = [];
+
+  for (let t = 0; t < triVertexIndices.length; t++) {
+    const [v0, v1, v2] = triVertexIndices[t];
+    const p0 = rawPositions[v0] ?? [0, 0, 0];
+    const p1 = rawPositions[v1] ?? [0, 0, 0];
+    const p2 = rawPositions[v2] ?? [0, 0, 0];
+
+    const e1x = p1[0] - p0[0], e1y = p1[1] - p0[1], e1z = p1[2] - p0[2];
+    const e2x = p2[0] - p0[0], e2y = p2[1] - p0[1], e2z = p2[2] - p0[2];
+    const uAxis = normalizeVec3(e1x, e1y, e1z);
+    const faceN = normalizeVec3(
+      e1y * e2z - e1z * e2y,
+      e1z * e2x - e1x * e2z,
+      e1x * e2y - e1y * e2x,
+    );
+    const vAxis = normalizeVec3(
+      faceN[1] * uAxis[2] - faceN[2] * uAxis[1],
+      faceN[2] * uAxis[0] - faceN[0] * uAxis[2],
+      faceN[0] * uAxis[1] - faceN[1] * uAxis[0],
+    );
+
+    const pts2d: [number, number][] = [p0, p1, p2].map((p) => {
+      const dx = p[0] - p0[0], dy = p[1] - p0[1], dz = p[2] - p0[2];
+      return [
+        dx * uAxis[0] + dy * uAxis[1] + dz * uAxis[2],
+        dx * vAxis[0] + dy * vAxis[1] + dz * vAxis[2],
+      ];
+    });
+
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (const [u, v] of pts2d) {
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    const span = Math.max(1e-5, maxU - minU, maxV - minV);
+    const col = t % gridCols;
+    const row = Math.floor(t / gridCols);
+
+    const triUvs = pts2d.map(([u, v]): [number, number] => {
+      const normU = (u - minU) / span;
+      const normV = 1 - (v - minV) / span;
+      const cellU = pad + Math.max(0, Math.min(1, normU)) * innerSpan;
+      const cellV = pad + Math.max(0, Math.min(1, normV)) * innerSpan;
+      return [(col + cellU) / gridCols, (row + cellV) / gridRows];
+    }) as [[number, number], [number, number], [number, number]];
+
+    result.push(triUvs);
+  }
+
+  return result;
+}
+
+/**
+ * Smart Angle-Based UV Unwrap (Blender "Smart UV Project" style):
+ * Groups adjacent triangles whose normals are within ~48 degrees into planar UV islands,
+ * projects each island onto its average normal tangent plane, and packs all islands into [0, 1] UV space.
+ */
+function computeSmartAngleUvs(
+  rawPositions: [number, number, number][],
+  triVertexIndices: [number, number, number][],
+): [[number, number], [number, number], [number, number]][] {
+  const numTris = triVertexIndices.length;
+  if (numTris === 0) return [];
+
+  const faceNormals: [number, number, number][] = [];
+  const faceAreas: number[] = [];
+  const edgeToTris = new Map<string, number[]>();
+
+  const addEdge = (a: number, b: number, triIdx: number) => {
+    const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+    const list = edgeToTris.get(key);
+    if (list) list.push(triIdx);
+    else edgeToTris.set(key, [triIdx]);
+  };
+
+  for (let t = 0; t < numTris; t++) {
+    const [v0, v1, v2] = triVertexIndices[t];
+    const p0 = rawPositions[v0] ?? [0, 0, 0];
+    const p1 = rawPositions[v1] ?? [0, 0, 0];
+    const p2 = rawPositions[v2] ?? [0, 0, 0];
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const area2 = Math.hypot(cx, cy, cz);
+    faceAreas.push(Math.max(1e-6, area2 * 0.5));
+    faceNormals.push(normalizeVec3(cx, cy, cz));
+    addEdge(v0, v1, t);
+    addEdge(v1, v2, t);
+    addEdge(v2, v0, t);
+  }
+
+  // Group adjacent faces by normal angle threshold (cos(48 deg) ~= 0.669)
+  const visited = new Uint8Array(numTris);
+  const islands: number[][] = [];
+  const angleThresholdCos = Math.cos((48 * Math.PI) / 180);
+
+  for (let seed = 0; seed < numTris; seed++) {
+    if (visited[seed]) continue;
+    visited[seed] = 1;
+    const island = [seed];
+    let avgNx = faceNormals[seed][0] * faceAreas[seed];
+    let avgNy = faceNormals[seed][1] * faceAreas[seed];
+    let avgNz = faceNormals[seed][2] * faceAreas[seed];
+
+    const queue = [seed];
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      const [v0, v1, v2] = triVertexIndices[curr];
+      const nCurr = faceNormals[curr];
+      const curAvg = normalizeVec3(avgNx, avgNy, avgNz);
+
+      for (const [a, b] of [
+        [v0, v1],
+        [v1, v2],
+        [v2, v0],
+      ]) {
+        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+        const neighbors = edgeToTris.get(key) ?? [];
+        for (const nb of neighbors) {
+          if (visited[nb]) continue;
+          const nNb = faceNormals[nb];
+          const dotAdj = nCurr[0] * nNb[0] + nCurr[1] * nNb[1] + nCurr[2] * nNb[2];
+          const dotIsland = curAvg[0] * nNb[0] + curAvg[1] * nNb[1] + curAvg[2] * nNb[2];
+          if (dotAdj >= angleThresholdCos && dotIsland >= 0.5) {
+            visited[nb] = 1;
+            island.push(nb);
+            avgNx += nNb[0] * faceAreas[nb];
+            avgNy += nNb[1] * faceAreas[nb];
+            avgNz += nNb[2] * faceAreas[nb];
+            queue.push(nb);
+          }
+        }
+      }
+    }
+    islands.push(island);
+  }
+
+  // Project each island onto its average normal's tangent plane
+  interface ProjectedIsland {
+    tris: number[];
+    localUvs: [[number, number], [number, number], [number, number]][];
+    width: number;
+    height: number;
+    placedX: number;
+    placedY: number;
+  }
+
+  const projIslands: ProjectedIsland[] = islands.map((tris) => {
+    let nx = 0, ny = 0, nz = 0;
+    for (const t of tris) {
+      nx += faceNormals[t][0] * faceAreas[t];
+      ny += faceNormals[t][1] * faceAreas[t];
+      nz += faceNormals[t][2] * faceAreas[t];
+    }
+    const avgN = normalizeVec3(nx, ny, nz);
+    const { tangent: uAxis, binormal: vAxis } = computeOrthonormalBasis(avgN[0], avgN[1], avgN[2]);
+
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    const raw2d: [[number, number], [number, number], [number, number]][] = [];
+
+    for (const t of tris) {
+      const [v0, v1, v2] = triVertexIndices[t];
+      const triPts = [rawPositions[v0], rawPositions[v1], rawPositions[v2]].map((p): [number, number] => {
+        const u = p[0] * uAxis[0] + p[1] * uAxis[1] + p[2] * uAxis[2];
+        const v = -(p[0] * vAxis[0] + p[1] * vAxis[1] + p[2] * vAxis[2]);
+        if (u < minU) minU = u;
+        if (u > maxU) maxU = u;
+        if (v < minV) minV = v;
+        if (v > maxV) maxV = v;
+        return [u, v];
+      }) as [[number, number], [number, number], [number, number]];
+      raw2d.push(triPts);
+    }
+
+    const w = Math.max(1e-4, maxU - minU);
+    const h = Math.max(1e-4, maxV - minV);
+    const localUvs = raw2d.map((triPts) =>
+      triPts.map(([u, v]): [number, number] => [u - minU, v - minV]) as [[number, number], [number, number], [number, number]],
+    );
+
+    return { tris, localUvs, width: w, height: h, placedX: 0, placedY: 0 };
+  });
+
+  // Sort islands by height descending for shelf bin packing
+  const sortedOrder = projIslands.map((_, i) => i).sort((a, b) => projIslands[b].height - projIslands[a].height);
+  let totalArea = 0;
+  let maxIslandWidth = 1e-4;
+  for (const isl of projIslands) {
+    totalArea += isl.width * isl.height;
+    if (isl.width > maxIslandWidth) maxIslandWidth = isl.width;
+  }
+
+  const margin = Math.max(1e-4, Math.sqrt(totalArea) * 0.025);
+  const targetAtlasWidth = Math.max(maxIslandWidth + 2 * margin, Math.sqrt(totalArea * 1.35) + margin * 4);
+
+  let cursorX = margin;
+  let cursorY = margin;
+  let shelfHeight = 0;
+  let usedMaxX = targetAtlasWidth;
+  let usedMaxY = margin;
+
+  for (const idx of sortedOrder) {
+    const isl = projIslands[idx];
+    if (cursorX + isl.width + margin > targetAtlasWidth && cursorX > margin) {
+      cursorX = margin;
+      cursorY += shelfHeight + margin;
+      shelfHeight = 0;
+    }
+    isl.placedX = cursorX;
+    isl.placedY = cursorY;
+    cursorX += isl.width + margin;
+    if (cursorX > usedMaxX) usedMaxX = cursorX;
+    if (isl.height > shelfHeight) shelfHeight = isl.height;
+    if (cursorY + isl.height + margin > usedMaxY) usedMaxY = cursorY + isl.height + margin;
+  }
+
+  const atlasSpan = Math.max(1e-4, usedMaxX, usedMaxY);
+  const result = new Array<[[number, number], [number, number], [number, number]]>(numTris);
+
+  for (const isl of projIslands) {
+    for (let i = 0; i < isl.tris.length; i++) {
+      const t = isl.tris[i];
+      const [c0, c1, c2] = isl.localUvs[i];
+      result[t] = [
+        [Math.max(0.002, Math.min(0.998, (isl.placedX + c0[0]) / atlasSpan)), Math.max(0.002, Math.min(0.998, (isl.placedY + c0[1]) / atlasSpan))],
+        [Math.max(0.002, Math.min(0.998, (isl.placedX + c1[0]) / atlasSpan)), Math.max(0.002, Math.min(0.998, (isl.placedY + c1[1]) / atlasSpan))],
+        [Math.max(0.002, Math.min(0.998, (isl.placedX + c2[0]) / atlasSpan)), Math.max(0.002, Math.min(0.998, (isl.placedY + c2[1]) / atlasSpan))],
+      ];
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -358,7 +632,22 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
   const radius = Math.max(0.1, Math.hypot(sizeBounds[0], sizeBounds[1], sizeBounds[2]) * 0.5);
 
   const hasUvCoordinates = rawUvs.length > 0 && rawTriangles.some((t) => t.corners.some((c) => c.vtIdx >= 0 && c.vtIdx < rawUvs.length));
-  const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv);
+  const uvUnwrapMode: CustomObjectUvUnwrapMode = options.uvUnwrapMode ?? 'box';
+  const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv) || uvUnwrapMode !== 'box';
+
+  // Precompute per-triangle or smart UV coordinates when needed
+  const precomputedTriUvs =
+    usedAutoUv && uvUnwrapMode === 'per_triangle'
+      ? computePerTriangleGridUvs(
+          rawPositions,
+          rawTriangles.map((t) => [t.corners[0].vIdx, t.corners[1].vIdx, t.corners[2].vIdx]),
+        )
+      : usedAutoUv && uvUnwrapMode === 'smart'
+        ? computeSmartAngleUvs(
+            rawPositions,
+            rawTriangles.map((t) => [t.corners[0].vIdx, t.corners[1].vIdx, t.corners[2].vIdx]),
+          )
+        : null;
 
   // Build deduplicated compiled vertices + triangle index list
   const vertices: CompiledModelVertex[] = [];
@@ -368,7 +657,8 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
   const vertexLookup = new Map<string, number>();
   const groupMinMax = new Map<number, { min: [number, number, number]; max: [number, number, number] }>();
 
-  for (const tri of rawTriangles) {
+  for (let triIdx = 0; triIdx < rawTriangles.length; triIdx++) {
+    const tri = rawTriangles[triIdx];
     // Note: when flipYz is enabled, (x, y, z) -> (x, -z, y) has determinant +1 (a proper 90-degree rotation around +X),
     // so vertex winding is preserved.
     const v0 = tri.corners[0].vIdx;
@@ -420,7 +710,7 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
         : faceNormal;
       const uv = !usedAutoUv && corner.vtIdx >= 0 && corner.vtIdx < rawUvs.length
         ? rawUvs[corner.vtIdx]
-        : projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds);
+        : precomputedTriUvs?.[triIdx]?.[k] ?? projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds);
 
       const key = `${corner.vIdx}:${norm[0].toFixed(4)},${norm[1].toFixed(4)},${norm[2].toFixed(4)}:${uv[0].toFixed(4)},${uv[1].toFixed(4)}`;
       let compiledIdx = vertexLookup.get(key);
@@ -451,9 +741,15 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
 
   const MAX_SIMPLE_TRIANGLES = 64;
   const isTooComplex = rawTriangles.length > MAX_SIMPLE_TRIANGLES;
-  const uvStatus = hasUvCoordinates
+  const uvModeLabel =
+    uvUnwrapMode === 'per_triangle'
+      ? 'Per-Triangle Ordered Grid'
+      : uvUnwrapMode === 'smart'
+        ? 'Smart Angle Unwrap'
+        : '6-Side Box Unfold';
+  const uvStatus = !usedAutoUv && hasUvCoordinates
     ? `${rawUvs.length} UV coords`
-    : 'Auto-unwrapped (6-face Box UV Atlas)';
+    : `Auto-unwrapped (${uvModeLabel})`;
 
   const finalMaterialSlots = materialSlots.length > 0 ? materialSlots : ['default'];
 
@@ -475,7 +771,7 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
     message: `Mesh ready: ${rawPositions.length} vertices, ${rawTriangles.length} triangles (${uvStatus}). Dimensions: ${sizeBounds[0].toFixed(2)} x ${sizeBounds[1].toFixed(2)} x ${sizeBounds[2].toFixed(2)} world units.`,
   };
 
-  return {
+  const parsedMesh: ParsedObjMesh = {
     summary,
     vertices,
     triangles,
@@ -485,6 +781,19 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
     usedAutoUv,
     groupBounds,
   };
+
+  // Pre-compute collision preview stats (welded vertices, coplanar-merged surfaces, planes, BSP nodes)
+  if (rawPositions.length >= 3 && rawFaces.length > 0 && rawFaces.length <= 15000) {
+    const previewBsp = compileMeshCollisionBspData(parsedMesh, Math.max(1, finalMaterialSlots.length), {
+      mode: 'auto',
+      targetFaces: options.targetCollisionFaces ?? 800,
+    });
+    if (previewBsp) {
+      summary.collisionPreview = previewBsp.stats;
+    }
+  }
+
+  return parsedMesh;
 }
 
 /**
@@ -603,6 +912,9 @@ export function renderObjUvTemplateRgba(
     [58, 52, 30], // -Z (amber bottom)
   ];
 
+  const uvUnwrapMode: CustomObjectUvUnwrapMode = options.uvUnwrapMode ?? 'box';
+  const isBoxAtlas = parsed.usedAutoUv && uvUnwrapMode === 'box';
+
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const checker = ((Math.floor(x / cellSize) + Math.floor(y / cellSize)) & 1) === 0;
@@ -610,7 +922,7 @@ export function renderObjUvTemplateRgba(
       let g = checker ? 29 : 38;
       let b = checker ? 34 : 44;
 
-      if (parsed.usedAutoUv) {
+      if (isBoxAtlas) {
         const col = Math.min(2, Math.floor((x / size) * 3));
         const row = Math.min(1, Math.floor((y / size) * 2));
         const tint = faceTintColors[row * 3 + col];
@@ -627,14 +939,26 @@ export function renderObjUvTemplateRgba(
     }
   }
 
-  // 2. If Box Atlas mode, draw cell dividers
-  if (parsed.usedAutoUv) {
+  // 2. If Box Atlas mode, draw cell dividers; if Per-Triangle Grid mode, draw grid dividers
+  if (isBoxAtlas) {
     for (let c = 1; c <= 2; c++) {
       const x = Math.round((c / 3) * size);
       drawLineRgba(rgba, size, x, 0, x, size - 1, 90, 100, 120, 255);
     }
     const midY = Math.round(size / 2);
     drawLineRgba(rgba, size, 0, midY, size - 1, midY, 90, 100, 120, 255);
+  } else if (parsed.usedAutoUv && uvUnwrapMode === 'per_triangle' && parsed.triangles.length > 0 && parsed.triangles.length <= 2500) {
+    const numTris = parsed.triangles.length;
+    const gridCols = Math.max(1, Math.ceil(Math.sqrt(numTris)));
+    const gridRows = Math.max(1, Math.ceil(numTris / gridCols));
+    for (let c = 1; c < gridCols; c++) {
+      const x = Math.round((c / gridCols) * size);
+      drawLineRgba(rgba, size, x, 0, x, size - 1, 55, 62, 76, 255);
+    }
+    for (let r = 1; r < gridRows; r++) {
+      const y = Math.round((r / gridRows) * size);
+      drawLineRgba(rgba, size, 0, y, size - 1, y, 55, 62, 76, 255);
+    }
   }
 
   // 3. Fill UV islands with translucent cyan
@@ -1701,39 +2025,793 @@ function writeBoxCollisionBsp(
   return cursor;
 }
 
-interface CompiledMeshCollisionBsp {
+export interface Bsp2dNodeEntry {
+  planeI: number;
+  planeJ: number;
+  planeD: number;
+  leftChild: number;
+  rightChild: number;
+}
+
+export interface CompiledMeshCollisionBsp {
   bsp3dNodes: [number, number, number][];
   planes: [number, number, number, number][];
   leaves: [number, number, number][];
   bsp2dReferences: [number, number][];
-  surfaces: { planeDesignator: number; firstEdgeIndex: number; materialIndex: number }[];
+  bsp2dNodes: Bsp2dNodeEntry[];
+  surfaces: { planeDesignator: number; firstEdgeIndex: number; flags: number; materialIndex: number }[];
   edges: { vertexIndices: [number, number]; edgeIndices: [number, number]; surfaceIndices: [number, number] }[];
   vertices: { point: [number, number, number]; firstEdgeIndex: number }[];
   byteSize: number;
+  stats: CollisionCompilationStats;
 }
 
 /**
- * Compiles an arbitrary triangulated 3D mesh (convex or concave, such as sloped bridges, ramps, arches, or props)
- * into a Halo CE `ModelCollisionGeometryBSP` structure verified against OpenCE's `collision_bsp.c`.
- *
- * Uses:
- * - Deduplicated directed 3D planes `(nx, ny, nz, d)` with outward normals pointing into empty space (`front`).
- * - Recursive 3D polygon-splitting BSP tree (`bsp3d_nodes`, strictly acyclic tree with depth <= 48).
- * - Winged-edge half-edge ring topology (`surfaces`, `edges`, `vertices`) matching `tools/stagekit/collision.c`,
- *   with counter-clockwise vertex ordering around each outward plane normal and per-surface `material_index`.
+ * Halo CE `global_projection3d_mappings[projection][sign]` from `source/math/real_math.c`.
+ * Maps 3D point `(x, y, z)` onto 2D plane coordinates `(x2d, y2d)` such that a counter-clockwise
+ * 3D polygon viewed against the plane normal always projects to a counter-clockwise 2D polygon.
  */
-function compileMeshCollisionBspData(
+const HALO_PROJECTION3D_MAPPINGS: readonly [readonly [number, number], readonly [number, number]][] = [
+  [
+    [2, 1], // _x (0), sign = 0 (nx <= 0): (z, y)
+    [1, 2], // _x (0), sign = 1 (nx > 0):  (y, z)
+  ],
+  [
+    [0, 2], // _y (1), sign = 0 (ny <= 0): (x, z)
+    [2, 0], // _y (1), sign = 1 (ny > 0):  (z, x)
+  ],
+  [
+    [1, 0], // _z (2), sign = 0 (nz <= 0): (y, x)
+    [0, 1], // _z (2), sign = 1 (nz > 0):  (x, y)
+  ],
+];
+
+function getHaloPlaneProjection(
+  plane: [number, number, number, number],
+  designatorNegated = false,
+): { axis: 0 | 1 | 2; sign: 0 | 1 } {
+  const ai = Math.abs(plane[0]);
+  const aj = Math.abs(plane[1]);
+  const ak = Math.abs(plane[2]);
+  const axis: 0 | 1 | 2 = ak >= aj && ak >= ai ? 2 : aj >= ai ? 1 : 0;
+  const rawPositive = plane[axis] > 0;
+  const sign: 0 | 1 = (rawPositive !== designatorNegated) ? 1 : 0;
+  return { axis, sign };
+}
+
+function projectHaloPoint3dTo2d(
+  pt: [number, number, number],
+  axis: 0 | 1 | 2,
+  sign: 0 | 1,
+): [number, number] {
+  const map = HALO_PROJECTION3D_MAPPINGS[axis][sign];
+  return [pt[map[0]], pt[map[1]]];
+}
+
+/**
+ * Stage 1A: Welds 3D vertices within `weldTolerance` (Blender "Merge by Distance" equivalent)
+ * and strips degenerate/duplicate triangles.
+ */
+function weldCollisionPositions(
+  rawPositions: [number, number, number][],
+  rawFaces: RawCollisionTriangle[],
+  weldTolerance = 1e-4,
+): { positions: [number, number, number][]; faces: RawCollisionTriangle[] } {
+  const invTol = 1 / Math.max(1e-6, weldTolerance);
+  const gridMap = new Map<string, number>();
+  const positions: [number, number, number][] = [];
+  const remap = new Int32Array(rawPositions.length);
+
+  for (let i = 0; i < rawPositions.length; i++) {
+    const p = rawPositions[i];
+    const gx = Math.round(p[0] * invTol);
+    const gy = Math.round(p[1] * invTol);
+    const gz = Math.round(p[2] * invTol);
+    const key = `${gx},${gy},${gz}`;
+    let idx = gridMap.get(key);
+    if (idx === undefined) {
+      idx = positions.length;
+      positions.push([p[0], p[1], p[2]]);
+      gridMap.set(key, idx);
+    }
+    remap[i] = idx;
+  }
+
+  const faces: RawCollisionTriangle[] = [];
+  const seenTri = new Set<string>();
+  for (const f of rawFaces) {
+    const v0 = remap[f.v0];
+    const v1 = remap[f.v1];
+    const v2 = remap[f.v2];
+    if (v0 === v1 || v1 === v2 || v2 === v0) continue;
+    const p0 = positions[v0];
+    const p1 = positions[v1];
+    const p2 = positions[v2];
+    if (!p0 || !p1 || !p2) continue;
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const area2 = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    if (area2 < 1e-6) continue;
+    // Deduplicate identical oriented triangles
+    const minV = Math.min(v0, v1, v2);
+    const canonKey =
+      minV === v0
+        ? `${v0},${v1},${v2}`
+        : minV === v1
+          ? `${v1},${v2},${v0}`
+          : `${v2},${v0},${v1}`;
+    if (seenTri.has(canonKey)) continue;
+    seenTri.add(canonKey);
+    faces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: f.materialSlotIndex,
+      groupId: f.groupId,
+    });
+  }
+
+  return { positions, faces };
+}
+
+/**
+ * Stage 1B: Garland-Heckbert Quadric Error Metric (QEM) Edge-Collapse Simplifier
+ * (Blender "Decimate -> Collapse" modifier equivalent).
+ * Preserves sharp silhouette creases, material boundaries, and open mesh borders while
+ * reducing high-poly render `.obj` files down to `targetFaceCount`.
+ */
+function decimateCollisionMeshQem(
+  positions: [number, number, number][],
+  faces: RawCollisionTriangle[],
+  targetFaceCount: number,
+): { positions: [number, number, number][]; faces: RawCollisionTriangle[] } {
+  if (faces.length <= targetFaceCount || targetFaceCount < 4) {
+    return { positions, faces };
+  }
+
+  const vCount = positions.length;
+  const pts: [number, number, number][] = positions.map((p) => [p[0], p[1], p[2]]);
+  // Symmetric 4x4 quadric matrix per vertex (10 floats: q00, q01, q02, q03, q11, q12, q13, q22, q23, q33)
+  const quadrics = new Float64Array(vCount * 10);
+
+  const addPlaneQuadric = (vIdx: number, a: number, b: number, c: number, d: number, weight = 1.0) => {
+    const base = vIdx * 10;
+    quadrics[base + 0] += weight * a * a;
+    quadrics[base + 1] += weight * a * b;
+    quadrics[base + 2] += weight * a * c;
+    quadrics[base + 3] += weight * a * d;
+    quadrics[base + 4] += weight * b * b;
+    quadrics[base + 5] += weight * b * c;
+    quadrics[base + 6] += weight * b * d;
+    quadrics[base + 7] += weight * c * c;
+    quadrics[base + 8] += weight * c * d;
+    quadrics[base + 9] += weight * d * d;
+  };
+
+  const evalQuadric = (qBase1: number, qBase2: number, x: number, y: number, z: number): number => {
+    const q00 = quadrics[qBase1 + 0] + quadrics[qBase2 + 0];
+    const q01 = quadrics[qBase1 + 1] + quadrics[qBase2 + 1];
+    const q02 = quadrics[qBase1 + 2] + quadrics[qBase2 + 2];
+    const q03 = quadrics[qBase1 + 3] + quadrics[qBase2 + 3];
+    const q11 = quadrics[qBase1 + 4] + quadrics[qBase2 + 4];
+    const q12 = quadrics[qBase1 + 5] + quadrics[qBase2 + 5];
+    const q13 = quadrics[qBase1 + 6] + quadrics[qBase2 + 6];
+    const q22 = quadrics[qBase1 + 7] + quadrics[qBase2 + 7];
+    const q23 = quadrics[qBase1 + 8] + quadrics[qBase2 + 8];
+    const q33 = quadrics[qBase1 + 9] + quadrics[qBase2 + 9];
+    return (
+      q00 * x * x +
+      2 * q01 * x * y +
+      2 * q02 * x * z +
+      2 * q03 * x +
+      q11 * y * y +
+      2 * q12 * y * z +
+      2 * q13 * y +
+      q22 * z * z +
+      2 * q23 * z +
+      q33
+    );
+  };
+
+  const edgeUseCount = new Map<string, { count: number; fIdx: number; u: number; v: number }>();
+  for (let fIdx = 0; fIdx < faces.length; fIdx++) {
+    const f = faces[fIdx];
+    const p0 = pts[f.v0], p1 = pts[f.v1], p2 = pts[f.v2];
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const len = Math.hypot(cx, cy, cz);
+    if (len < 1e-8) continue;
+    const a = cx / len, b = cy / len, c = cz / len;
+    const d = -(a * p0[0] + b * p0[1] + c * p0[2]);
+    const areaWeight = Math.max(0.1, len * 0.5);
+    addPlaneQuadric(f.v0, a, b, c, d, areaWeight);
+    addPlaneQuadric(f.v1, a, b, c, d, areaWeight);
+    addPlaneQuadric(f.v2, a, b, c, d, areaWeight);
+
+    const pairs: [number, number][] = [
+      [f.v0, f.v1],
+      [f.v1, f.v2],
+      [f.v2, f.v0],
+    ];
+    for (const [u, v] of pairs) {
+      const k = u < v ? `${u},${v}` : `${v},${u}`;
+      const existing = edgeUseCount.get(k);
+      if (existing) existing.count++;
+      else edgeUseCount.set(k, { count: 1, fIdx, u, v });
+    }
+  }
+
+  // Add boundary preservation planes for open edges (count === 1)
+  for (const entry of edgeUseCount.values()) {
+    if (entry.count === 1) {
+      const f = faces[entry.fIdx];
+      const p0 = pts[f.v0], p1 = pts[f.v1], p2 = pts[f.v2];
+      const fn = normalizeVec3(
+        (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]),
+        (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]),
+        (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]),
+      );
+      const pu = pts[entry.u], pv = pts[entry.v];
+      const ex = pv[0] - pu[0], ey = pv[1] - pu[1], ez = pv[2] - pu[2];
+      const bn = normalizeVec3(
+        ey * fn[2] - ez * fn[1],
+        ez * fn[0] - ex * fn[2],
+        ex * fn[1] - ey * fn[0],
+      );
+      const bd = -(bn[0] * pu[0] + bn[1] * pu[1] + bn[2] * pu[2]);
+      addPlaneQuadric(entry.u, bn[0], bn[1], bn[2], bd, 50.0);
+      addPlaneQuadric(entry.v, bn[0], bn[1], bn[2], bd, 50.0);
+    }
+  }
+
+  const activeFaces: (RawCollisionTriangle | null)[] = faces.map((f) => ({ ...f }));
+  let aliveFaceCount = activeFaces.length;
+  const vFaces: Set<number>[] = Array.from({ length: vCount }, () => new Set<number>());
+  for (let i = 0; i < activeFaces.length; i++) {
+    const f = activeFaces[i]!;
+    vFaces[f.v0].add(i);
+    vFaces[f.v1].add(i);
+    vFaces[f.v2].add(i);
+  }
+
+  const parent = new Int32Array(vCount);
+  for (let i = 0; i < vCount; i++) parent[i] = i;
+  const findRoot = (u: number): number => {
+    let r = u;
+    while (parent[r] !== r) r = parent[r];
+    let c = u;
+    while (c !== r) {
+      const nxt = parent[c];
+      parent[c] = r;
+      c = nxt;
+    }
+    return r;
+  };
+
+  // Iterative greedy pass over candidate edges sorted by QEM error
+  const maxPasses = 12;
+  for (let pass = 0; pass < maxPasses && aliveFaceCount > targetFaceCount; pass++) {
+    interface EdgeCandidate {
+      u: number;
+      v: number;
+      cost: number;
+      bestPos: [number, number, number];
+    }
+    const candidates: EdgeCandidate[] = [];
+    const seenEdge = new Set<string>();
+
+    for (let fIdx = 0; fIdx < activeFaces.length; fIdx++) {
+      const f = activeFaces[fIdx];
+      if (!f) continue;
+      const vs = [findRoot(f.v0), findRoot(f.v1), findRoot(f.v2)];
+      f.v0 = vs[0];
+      f.v1 = vs[1];
+      f.v2 = vs[2];
+      if (f.v0 === f.v1 || f.v1 === f.v2 || f.v2 === f.v0) {
+        activeFaces[fIdx] = null;
+        aliveFaceCount--;
+        continue;
+      }
+      for (let k = 0; k < 3; k++) {
+        const a = vs[k];
+        const b = vs[(k + 1) % 3];
+        const u = Math.min(a, b);
+        const v = Math.max(a, b);
+        const key = `${u},${v}`;
+        if (seenEdge.has(key)) continue;
+        seenEdge.add(key);
+
+        const pu = pts[u], pv = pts[v];
+        const mx = (pu[0] + pv[0]) * 0.5;
+        const my = (pu[1] + pv[1]) * 0.5;
+        const mz = (pu[2] + pv[2]) * 0.5;
+        const qbU = u * 10, qbV = v * 10;
+        const cU = evalQuadric(qbU, qbV, pu[0], pu[1], pu[2]);
+        const cV = evalQuadric(qbU, qbV, pv[0], pv[1], pv[2]);
+        const cM = evalQuadric(qbU, qbV, mx, my, mz);
+        const edgeLen2 = (pu[0] - pv[0]) ** 2 + (pu[1] - pv[1]) ** 2 + (pu[2] - pv[2]) ** 2;
+        let bestCost = cU;
+        let bestPos: [number, number, number] = [pu[0], pu[1], pu[2]];
+        if (cV < bestCost) {
+          bestCost = cV;
+          bestPos = [pv[0], pv[1], pv[2]];
+        }
+        if (cM < bestCost) {
+          bestCost = cM;
+          bestPos = [mx, my, mz];
+        }
+        candidates.push({
+          u,
+          v,
+          cost: Math.max(0, bestCost) + edgeLen2 * 1e-4,
+          bestPos,
+        });
+      }
+    }
+
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) => a.cost - b.cost);
+
+    const lockedVertex = new Uint8Array(vCount);
+    let collapsedInPass = 0;
+
+    for (const cand of candidates) {
+      if (aliveFaceCount <= targetFaceCount) break;
+      const u = findRoot(cand.u);
+      const v = findRoot(cand.v);
+      if (u === v || lockedVertex[u] || lockedVertex[v]) continue;
+
+      // Check that collapsing v -> u does not flip normal of incident faces
+      let flipsNormal = false;
+      for (const fIdx of vFaces[u]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        const v0 = findRoot(f.v0), v1 = findRoot(f.v1), v2 = findRoot(f.v2);
+        if (v0 === v || v1 === v || v2 === v) continue;
+        const p0 = v0 === u ? cand.bestPos : pts[v0];
+        const p1 = v1 === u ? cand.bestPos : pts[v1];
+        const p2 = v2 === u ? cand.bestPos : pts[v2];
+        const o0 = pts[v0], o1 = pts[v1], o2 = pts[v2];
+        const ox = (o1[1] - o0[1]) * (o2[2] - o0[2]) - (o1[2] - o0[2]) * (o2[1] - o0[1]);
+        const oy = (o1[2] - o0[2]) * (o2[0] - o0[0]) - (o1[0] - o0[0]) * (o2[2] - o0[2]);
+        const oz = (o1[0] - o0[0]) * (o2[1] - o0[1]) - (o1[1] - o0[1]) * (o2[0] - o0[0]);
+        const nx = (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]);
+        const ny = (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]);
+        const nz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+        const oLen = Math.hypot(ox, oy, oz);
+        const nLen = Math.hypot(nx, ny, nz);
+        if (nLen < 1e-6 || (oLen > 1e-6 && (ox * nx + oy * ny + oz * nz) / (oLen * nLen) < 0.2)) {
+          flipsNormal = true;
+          break;
+        }
+      }
+      if (flipsNormal) continue;
+
+      for (const fIdx of vFaces[v]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        const v0 = findRoot(f.v0), v1 = findRoot(f.v1), v2 = findRoot(f.v2);
+        if (v0 === u || v1 === u || v2 === u) continue;
+        const p0 = v0 === v ? cand.bestPos : pts[v0];
+        const p1 = v1 === v ? cand.bestPos : pts[v1];
+        const p2 = v2 === v ? cand.bestPos : pts[v2];
+        const o0 = pts[v0], o1 = pts[v1], o2 = pts[v2];
+        const ox = (o1[1] - o0[1]) * (o2[2] - o0[2]) - (o1[2] - o0[2]) * (o2[1] - o0[1]);
+        const oy = (o1[2] - o0[2]) * (o2[0] - o0[0]) - (o1[0] - o0[0]) * (o2[2] - o0[2]);
+        const oz = (o1[0] - o0[0]) * (o2[1] - o0[1]) - (o1[1] - o0[1]) * (o2[0] - o0[0]);
+        const nx = (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]);
+        const ny = (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]);
+        const nz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+        const oLen = Math.hypot(ox, oy, oz);
+        const nLen = Math.hypot(nx, ny, nz);
+        if (nLen < 1e-6 || (oLen > 1e-6 && (ox * nx + oy * ny + oz * nz) / (oLen * nLen) < 0.2)) {
+          flipsNormal = true;
+          break;
+        }
+      }
+      if (flipsNormal) continue;
+
+      // Collapse v into u
+      pts[u] = cand.bestPos;
+      parent[v] = u;
+      for (let k = 0; k < 10; k++) {
+        quadrics[u * 10 + k] += quadrics[v * 10 + k];
+      }
+      for (const fIdx of vFaces[v]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        f.v0 = findRoot(f.v0);
+        f.v1 = findRoot(f.v1);
+        f.v2 = findRoot(f.v2);
+        if (f.v0 === f.v1 || f.v1 === f.v2 || f.v2 === f.v0) {
+          activeFaces[fIdx] = null;
+          vFaces[u].delete(fIdx);
+          aliveFaceCount--;
+        } else {
+          vFaces[u].add(fIdx);
+        }
+      }
+      vFaces[v].clear();
+      lockedVertex[u] = 1;
+      lockedVertex[v] = 1;
+      collapsedInPass++;
+    }
+
+    if (collapsedInPass === 0) break;
+  }
+
+  // Compact surviving vertices and faces
+  const newPositions: [number, number, number][] = [];
+  const compactMap = new Map<number, number>();
+  const getCompactIdx = (oldV: number): number => {
+    const r = findRoot(oldV);
+    let idx = compactMap.get(r);
+    if (idx === undefined) {
+      idx = newPositions.length;
+      newPositions.push(pts[r]);
+      compactMap.set(r, idx);
+    }
+    return idx;
+  };
+
+  const survivingFaces: RawCollisionTriangle[] = [];
+  for (const f of activeFaces) {
+    if (!f) continue;
+    const v0 = getCompactIdx(f.v0);
+    const v1 = getCompactIdx(f.v1);
+    const v2 = getCompactIdx(f.v2);
+    if (v0 === v1 || v1 === v2 || v2 === v0) continue;
+    survivingFaces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: f.materialSlotIndex,
+      groupId: f.groupId,
+    });
+  }
+
+  return survivingFaces.length >= 4
+    ? { positions: newPositions, faces: survivingFaces }
+    : { positions, faces };
+}
+
+interface CollisionConvexPolygon {
+  ring: number[]; // 3..8 vertex indices in CCW order around `planes[planeIdx]`
+  planeIdx: number;
+  materialIndex: number;
+}
+
+/**
+ * Stage 1C: Coplanar Convex Polygon Merging (Blender "Limited Dissolve" equivalent).
+ * Merges adjacent coplanar triangles sharing an edge and material into convex polygons
+ * with up to 8 edges (`MAXIMUM_EDGES_PER_COLLISION_SURFACE = 8` in `collision_bsp.c`).
+ */
+function mergeCoplanarConvexPolygons(
+  positions: [number, number, number][],
+  polys: CollisionConvexPolygon[],
+  planes: [number, number, number, number][],
+): CollisionConvexPolygon[] {
+  const MAX_EDGES = 8; // Halo CE MAXIMUM_EDGES_PER_COLLISION_SURFACE
+
+  const isRingStrictlyConvexIn2d = (ring: number[], planeIdx: number): boolean => {
+    if (ring.length < 3 || ring.length > MAX_EDGES) return false;
+    const pl = planes[planeIdx];
+    const { axis, sign } = getHaloPlaneProjection(pl, false);
+    const pts2d = ring.map((vIdx) => projectHaloPoint3dTo2d(positions[vIdx], axis, sign));
+    const n = pts2d.length;
+    for (let i = 0; i < n; i++) {
+      const pPrev = pts2d[(i + n - 1) % n];
+      const pCurr = pts2d[i];
+      const pNext = pts2d[(i + 1) % n];
+      // In Halo's 2D projection, `cross_product2d(point - p0, p1 - p0) <= 0` for interior points.
+      // Specifically, for consecutive edges e1 = pCurr - pPrev, e2 = pNext - pCurr:
+      // cross2d(pNext - pPrev, pCurr - pPrev) must be < -1e-6 for strict convexity without collinearity.
+      const v0x = pNext[0] - pPrev[0];
+      const v0y = pNext[1] - pPrev[1];
+      const v1x = pCurr[0] - pPrev[0];
+      const v1y = pCurr[1] - pPrev[1];
+      const cross = v0x * v1y - v0y * v1x;
+      if (cross >= -1e-5) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // Group polygons by (planeIdx, materialIndex)
+  const byPlaneMat = new Map<string, CollisionConvexPolygon[]>();
+  for (const poly of polys) {
+    const key = `${poly.planeIdx}:${poly.materialIndex}`;
+    let list = byPlaneMat.get(key);
+    if (!list) {
+      list = [];
+      byPlaneMat.set(key, list);
+    }
+    list.push({ ring: [...poly.ring], planeIdx: poly.planeIdx, materialIndex: poly.materialIndex });
+  }
+
+  const result: CollisionConvexPolygon[] = [];
+  for (const groupPolys of byPlaneMat.values()) {
+    let changed = true;
+    while (changed && groupPolys.length > 1) {
+      changed = false;
+      outer: for (let i = 0; i < groupPolys.length; i++) {
+        const polyA = groupPolys[i];
+        if (polyA.ring.length >= MAX_EDGES) continue;
+        for (let j = i + 1; j < groupPolys.length; j++) {
+          const polyB = groupPolys[j];
+          if (polyA.ring.length + polyB.ring.length - 2 > MAX_EDGES) continue;
+
+          // Find a shared opposite directed edge: A has (u -> v), B has (v -> u)
+          const nA = polyA.ring.length;
+          const nB = polyB.ring.length;
+          for (let ea = 0; ea < nA; ea++) {
+            const u = polyA.ring[ea];
+            const v = polyA.ring[(ea + 1) % nA];
+            for (let eb = 0; eb < nB; eb++) {
+              if (polyB.ring[eb] === v && polyB.ring[(eb + 1) % nB] === u) {
+                // Splice rings: A[0..ea], B[(eb+2)..(eb+nB-1)], A[(ea+1)..(nA-1)]
+                const mergedRing: number[] = [];
+                for (let k = 0; k <= ea; k++) mergedRing.push(polyA.ring[k]);
+                for (let k = 2; k < nB; k++) mergedRing.push(polyB.ring[(eb + k) % nB]);
+                for (let k = ea + 1; k < nA; k++) mergedRing.push(polyA.ring[k]);
+
+                // Ensure no duplicate vertices in mergedRing (handles hole-pinching)
+                if (new Set(mergedRing).size === mergedRing.length && isRingStrictlyConvexIn2d(mergedRing, polyA.planeIdx)) {
+                  polyA.ring = mergedRing;
+                  groupPolys.splice(j, 1);
+                  changed = true;
+                  break outer;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    result.push(...groupPolys);
+  }
+
+  return result;
+}
+
+/**
+ * Builds a 2D BSP tree (`bsp2d_nodes`) on a single 3D plane (`planeDesignator`) when multiple
+ * convex surfaces share that plane. Uses Halo CE's exact 2D edge-line equation from `real_math.h`
+ * (`plane2d_from_points`) and `bsp2d.c` (`bsp2d_test_point`).
+ */
+function buildPlaneBsp2dTree(
+  surfaceIndices: number[],
+  surfaces: { ring: number[] }[],
+  positions: [number, number, number][],
+  plane: [number, number, number, number],
+  designatorNegated: boolean,
+  bsp2dNodes: Bsp2dNodeEntry[],
+): number {
+  if (surfaceIndices.length === 0) return 0xffffffff;
+  if (surfaceIndices.length === 1) {
+    return (0x80000000 | surfaceIndices[0]) >>> 0;
+  }
+
+  const { axis, sign } = getHaloPlaneProjection(plane, designatorNegated);
+  const poly2dMap = new Map<number, [number, number][]>();
+  const centroid2dMap = new Map<number, [number, number]>();
+
+  for (const sIdx of surfaceIndices) {
+    const ring = surfaces[sIdx].ring;
+    const pts2d = ring.map((vIdx) => {
+      const p2d = projectHaloPoint3dTo2d(positions[vIdx], axis, sign);
+      return p2d;
+    });
+    // If designatorNegated, reverse ring order so polygon is CCW in the negated 2D projection
+    if (designatorNegated) pts2d.reverse();
+    poly2dMap.set(sIdx, pts2d);
+    let cx = 0, cy = 0;
+    for (const p of pts2d) {
+      cx += p[0];
+      cy += p[1];
+    }
+    centroid2dMap.set(sIdx, [cx / pts2d.length, cy / pts2d.length]);
+  }
+
+  const MAX_BSP2D_DEPTH = 24; // Halo CE MAXIMUM_BSP2D_TRAVERSAL_DEPTH is 32
+
+  const build2dRecursive = (sList: number[], depth: number): number => {
+    if (sList.length === 1 || depth >= MAX_BSP2D_DEPTH || bsp2dNodes.length >= 16384) {
+      return (0x80000000 | sList[0]) >>> 0;
+    }
+
+    // Try to find a separating 2D edge line from one of the polygons in `sList`
+    let bestLine: { ni: number; nj: number; d: number } | null = null;
+    let bestLeft: number[] = [];
+    let bestRight: number[] = [];
+    let bestScore = Infinity;
+
+    for (const candSurf of sList) {
+      const pts = poly2dMap.get(candSurf)!;
+      for (let i = 0; i < pts.length; i++) {
+        const p0 = pts[i];
+        const p1 = pts[(i + 1) % pts.length];
+        // From real_math.h `plane2d_from_points`:
+        // ni = p1.y - p0.y, nj = p0.x - p1.x
+        // For a CCW polygon in Halo's 2D projection, `candSurf` itself has distance <= 0 (leftChild).
+        const rawNi = p1[1] - p0[1];
+        const rawNj = p0[0] - p1[0];
+        const len = Math.hypot(rawNi, rawNj);
+        if (len < 1e-6) continue;
+        const ni = rawNi / len;
+        const nj = rawNj / len;
+        const d = ni * p0[0] + nj * p0[1];
+
+        const left: number[] = [];
+        const right: number[] = [];
+        for (const otherSurf of sList) {
+          if (otherSurf === candSurf) {
+            left.push(otherSurf);
+            continue;
+          }
+          const oPts = poly2dMap.get(otherSurf)!;
+          let minDist = Infinity;
+          let maxDist = -Infinity;
+          for (const op of oPts) {
+            const dist = ni * op[0] + nj * op[1] - d;
+            if (dist < minDist) minDist = dist;
+            if (dist > maxDist) maxDist = dist;
+          }
+          if (maxDist <= 1e-4) {
+            left.push(otherSurf);
+          } else if (minDist >= -1e-4) {
+            right.push(otherSurf);
+          } else {
+            // Polygon straddles the 2D line: place on side of centroid (or both if few)
+            const c = centroid2dMap.get(otherSurf)!;
+            const cDist = ni * c[0] + nj * c[1] - d;
+            if (cDist < 0) left.push(otherSurf);
+            else right.push(otherSurf);
+          }
+        }
+
+        if (left.length > 0 && right.length > 0) {
+          const score = Math.abs(left.length - right.length);
+          if (score < bestScore) {
+            bestScore = score;
+            bestLine = { ni, nj, d };
+            bestLeft = left;
+            bestRight = right;
+            if (score <= 1) break;
+          }
+        }
+      }
+      if (bestScore <= 1) break;
+    }
+
+    // Fallback: axis-aligned 2D median split if all polygons overlap
+    if (!bestLine || bestLeft.length === 0 || bestRight.length === 0) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const sIdx of sList) {
+        const [cx, cy] = centroid2dMap.get(sIdx)!;
+        if (cx < minX) minX = cx;
+        if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy;
+        if (cy > maxY) maxY = cy;
+      }
+      const splitX = (maxX - minX) >= (maxY - minY);
+      const sorted = [...sList].sort((a, b) => {
+        const ca = centroid2dMap.get(a)!;
+        const cb = centroid2dMap.get(b)!;
+        return splitX ? ca[0] - cb[0] : ca[1] - cb[1];
+      });
+      const mid = Math.max(1, Math.floor(sorted.length / 2));
+      bestLeft = sorted.slice(0, mid);
+      bestRight = sorted.slice(mid);
+      const cA = centroid2dMap.get(bestLeft[bestLeft.length - 1])!;
+      const cB = centroid2dMap.get(bestRight[0])!;
+      bestLine = splitX
+        ? { ni: 1, nj: 0, d: (cA[0] + cB[0]) * 0.5 }
+        : { ni: 0, nj: 1, d: (cA[1] + cB[1]) * 0.5 };
+    }
+
+    const nodeIdx = bsp2dNodes.length;
+    bsp2dNodes.push({
+      planeI: bestLine.ni,
+      planeJ: bestLine.nj,
+      planeD: bestLine.d,
+      leftChild: 0xffffffff,
+      rightChild: 0xffffffff,
+    });
+
+    const leftChild = build2dRecursive(bestLeft, depth + 1);
+    const rightChild = build2dRecursive(bestRight, depth + 1);
+    bsp2dNodes[nodeIdx].leftChild = leftChild >>> 0;
+    bsp2dNodes[nodeIdx].rightChild = rightChild >>> 0;
+    return nodeIdx;
+  };
+
+  return build2dRecursive(surfaceIndices, 0);
+}
+
+/**
+ * Compiles an arbitrary 3D `.OBJ` mesh (convex or concave, including arches, tunnels, hollow buildings,
+ * sloped bridges, ramps, or high-poly models) into a Halo CE `ModelCollisionGeometryBSP` structure
+ * verified against OpenCE's `collision_bsp.c` and `bsp2d.c`.
+ *
+ * Implements the 4-stage "Blender-Workflow-in-a-Box" pipeline:
+ * 1. 3D Vertex Welding (`Merge by Distance` at `1e-4` units).
+ * 2. Automatic Quadric Error Metric (QEM) Edge-Collapse Decimation (`decimateCollisionMeshQem`)
+ *    when the input mesh exceeds `targetFaces` (removing the old 512-triangle box fallback cliff!).
+ * 3. Coplanar Convex Polygon Merging (`Limited Dissolve` up to 8 edges per surface).
+ * 4. Exact 3D & 2D BSP Compilation (`bsp3d_nodes` + `bsp2d_nodes` + winged-edge topology +
+ *    two-sided surface/leaf flags on concave meshes to eliminate invisible "ghost walls").
+ */
+export function compileMeshCollisionBspData(
   mesh: ParsedObjMesh,
   materialCount: number,
+  options?: {
+    mode?: CustomObjectCollisionMode;
+    targetFaces?: number;
+  },
 ): CompiledMeshCollisionBsp | null {
-  if (mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0 || mesh.rawFaces.length > 512) {
+  const mode: CustomObjectCollisionMode = options?.mode ?? 'auto';
+  if (mode === 'box' || mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0) {
     return null;
   }
 
+  const inputTriangleCount = mesh.rawFaces.length;
+  const maxFaceBudget =
+    mode === 'exact'
+      ? Math.max(256, Math.min(4096, options?.targetFaces ?? 2048))
+      : Math.max(64, Math.min(2048, options?.targetFaces ?? 800));
+
+  // Stage 1A: Weld UV/normal-split seams by 3D position
+  const welded = weldCollisionPositions(mesh.rawPositions, mesh.rawFaces, 1e-4);
+  if (welded.positions.length < 3 || welded.faces.length === 0) {
+    return null;
+  }
+
+  // Stage 1B: QEM Edge-Collapse Decimation if above face budget
+  const decimated =
+    welded.faces.length > maxFaceBudget
+      ? decimateCollisionMeshQem(welded.positions, welded.faces, maxFaceBudget)
+      : welded;
+
+  const positions = decimated.positions;
+  const activeFaces = decimated.faces;
+
   const planes: [number, number, number, number][] = [];
-  const findOrAddPlane = (nx: number, ny: number, nz: number, d: number): number => {
+  const findOrAddPlane = (nx: number, ny: number, nz: number, d: number): { planeIdx: number; negated: boolean } => {
     for (let i = 0; i < planes.length; i++) {
       const p = planes[i];
+      if (
+        Math.abs(p[0] - nx) < 1e-4 &&
+        Math.abs(p[1] - ny) < 1e-4 &&
+        Math.abs(p[2] - nz) < 1e-4 &&
+        Math.abs(p[3] - d) < 1e-3
+      ) {
+        return { planeIdx: i, negated: false };
+      }
+      if (
+        Math.abs(p[0] + nx) < 1e-4 &&
+        Math.abs(p[1] + ny) < 1e-4 &&
+        Math.abs(p[2] + nz) < 1e-4 &&
+        Math.abs(p[3] + d) < 1e-3
+      ) {
+        return { planeIdx: i, negated: true };
+      }
+    }
+    const idx = planes.length;
+    planes.push([nx, ny, nz, d]);
+    return { planeIdx: idx, negated: false };
+  };
+
+  // Build initial triangle polygons with deduplicated planes
+  const initialPolys: CollisionConvexPolygon[] = [];
+  const planeBySurfaceDesignator: [number, number, number, number][] = [];
+  const findOrAddDirectedPlane = (nx: number, ny: number, nz: number, d: number): number => {
+    for (let i = 0; i < planeBySurfaceDesignator.length; i++) {
+      const p = planeBySurfaceDesignator[i];
       if (
         Math.abs(p[0] - nx) < 1e-4 &&
         Math.abs(p[1] - ny) < 1e-4 &&
@@ -1743,22 +2821,15 @@ function compileMeshCollisionBspData(
         return i;
       }
     }
-    const idx = planes.length;
-    planes.push([nx, ny, nz, d]);
+    const idx = planeBySurfaceDesignator.length;
+    planeBySurfaceDesignator.push([nx, ny, nz, d]);
     return idx;
   };
 
-  interface ValidTri {
-    ring: [number, number, number];
-    planeIdx: number;
-    materialIndex: number;
-  }
-
-  const validTris: ValidTri[] = [];
-  for (const face of mesh.rawFaces) {
-    const p0 = mesh.rawPositions[face.v0];
-    const p1 = mesh.rawPositions[face.v1];
-    const p2 = mesh.rawPositions[face.v2];
+  for (const face of activeFaces) {
+    const p0 = positions[face.v0];
+    const p1 = positions[face.v1];
+    const p2 = positions[face.v2];
     if (!p0 || !p1 || !p2) continue;
 
     const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
@@ -1767,79 +2838,103 @@ function compileMeshCollisionBspData(
     const cy = uz * vx - ux * vz;
     const cz = ux * vy - uy * vx;
     const area2 = Math.hypot(cx, cy, cz);
-    if (area2 < 1e-6) continue; // skip degenerate zero-area triangle
+    if (area2 < 1e-6) continue;
 
     const nx = cx / area2;
     const ny = cy / area2;
     const nz = cz / area2;
     const d = nx * p0[0] + ny * p0[1] + nz * p0[2];
-    const planeIdx = findOrAddPlane(nx, ny, nz, d);
-
-    // Ensure counter-clockwise winding seen from in front of `planes[planeIdx]`
-    const pl = planes[planeIdx];
+    const dirPlaneIdx = findOrAddDirectedPlane(nx, ny, nz, d);
+    const pl = planeBySurfaceDesignator[dirPlaneIdx];
     const winding = cx * pl[0] + cy * pl[1] + cz * pl[2];
-    const ring: [number, number, number] = winding >= 0
-      ? [face.v0, face.v1, face.v2]
-      : [face.v0, face.v2, face.v1];
-
+    const ring = winding >= 0 ? [face.v0, face.v1, face.v2] : [face.v0, face.v2, face.v1];
     const matIdx = Math.max(0, Math.min(materialCount - 1, face.materialSlotIndex));
-    validTris.push({ ring, planeIdx, materialIndex: matIdx });
+    initialPolys.push({ ring, planeIdx: dirPlaneIdx, materialIndex: matIdx });
   }
 
-  if (validTris.length === 0 || planes.length === 0) {
+  if (initialPolys.length === 0) {
     return null;
   }
 
-  // Build winged-edge topology (`surfaces`, `edges`, `vertices`) matching `tools/stagekit/collision.c`
-  const surfaces: { planeDesignator: number; firstEdgeIndex: number; materialIndex: number }[] = [];
-  const edges: { vertexIndices: [number, number]; edgeIndices: [number, number]; surfaceIndices: [number, number] }[] = [];
-  const vertexFirstEdge = new Array<number>(mesh.rawPositions.length).fill(-1);
+  // Stage 1C: Coplanar Convex Polygon Merging (Limited Dissolve up to 8 edges)
+  const mergedPolys = mergeCoplanarConvexPolygons(positions, initialPolys, planeBySurfaceDesignator);
 
-  for (let surfIdx = 0; surfIdx < validTris.length; surfIdx++) {
-    const tri = validTris[surfIdx];
-    const ring = tri.ring;
-    const ringEdges: [number, number, number] = [0, 0, 0];
+  // Map each merged polygon's directed plane into `planes` (using `0x80000000 | planeIdx` if opposite to an existing plane)
+  const dirPlaneToDesignator = new Int32Array(planeBySurfaceDesignator.length);
+  for (let i = 0; i < planeBySurfaceDesignator.length; i++) {
+    const dp = planeBySurfaceDesignator[i];
+    const { planeIdx, negated } = findOrAddPlane(dp[0], dp[1], dp[2], dp[3]);
+    dirPlaneToDesignator[i] = negated ? ((0x80000000 | planeIdx) | 0) : planeIdx;
+  }
 
-    for (let point = 0; point < 3; point++) {
-      const from = ring[point];
-      const to = ring[(point + 1) % 3];
-      let edgeIndex = -1;
-      for (let e = 0; e < edges.length; e++) {
-        if (
-          edges[e].vertexIndices[0] === to &&
-          edges[e].vertexIndices[1] === from &&
-          edges[e].surfaceIndices[1] === -1
-        ) {
-          edgeIndex = e;
-          break;
-        }
+  // Check if the mesh is strictly convex (every polygon lies on or behind all other polygons' outward planes)
+  let isConcave = false;
+  outerConvexCheck: for (let i = 0; i < mergedPolys.length; i++) {
+    const dp = planeBySurfaceDesignator[mergedPolys[i].planeIdx];
+    for (let v = 0; v < positions.length; v++) {
+      const pt = positions[v];
+      const dist = dp[0] * pt[0] + dp[1] * pt[1] + dp[2] * pt[2] - dp[3];
+      if (dist > 1e-3) {
+        isConcave = true;
+        break outerConvexCheck;
       }
-      if (edgeIndex === -1) {
+    }
+  }
+
+  // Build winged-edge topology (`surfaces`, `edges`, `vertices`) supporting 3..8 edges per surface
+  const surfaceFlags = isConcave ? 0x01 : 0x00; // 0x01 = _collision_surface_two_sided_bit
+  const surfaces: { planeDesignator: number; firstEdgeIndex: number; flags: number; materialIndex: number; ring: number[] }[] = [];
+  const edges: { vertexIndices: [number, number]; edgeIndices: [number, number]; surfaceIndices: [number, number] }[] = [];
+  const vertexFirstEdge = new Array<number>(positions.length).fill(-1);
+  const openHalfEdgeMap = new Map<string, number>();
+
+  for (let surfIdx = 0; surfIdx < mergedPolys.length; surfIdx++) {
+    const poly = mergedPolys[surfIdx];
+    const designator = dirPlaneToDesignator[poly.planeIdx] >>> 0;
+    const ring = poly.ring;
+    const n = ring.length;
+    const ringEdges = new Array<number>(n);
+
+    for (let point = 0; point < n; point++) {
+      const from = ring[point];
+      const to = ring[(point + 1) % n];
+      const revKey = `${to},${from}`;
+      let edgeIndex = openHalfEdgeMap.get(revKey) ?? -1;
+
+      if (edgeIndex !== -1 && edges[edgeIndex].surfaceIndices[1] === -1) {
+        edges[edgeIndex].surfaceIndices[1] = surfIdx;
+        openHalfEdgeMap.delete(revKey);
+      } else {
         edgeIndex = edges.length;
         edges.push({
           vertexIndices: [from, to],
           edgeIndices: [-1, -1],
           surfaceIndices: [surfIdx, -1],
         });
-      } else {
-        edges[edgeIndex].surfaceIndices[1] = surfIdx;
+        const fwdKey = `${from},${to}`;
+        if (!openHalfEdgeMap.has(fwdKey)) {
+          openHalfEdgeMap.set(fwdKey, edgeIndex);
+        }
       }
+
       if (vertexFirstEdge[from] === -1) {
         vertexFirstEdge[from] = edgeIndex;
       }
       ringEdges[point] = edgeIndex;
     }
 
-    for (let point = 0; point < 3; point++) {
+    for (let point = 0; point < n; point++) {
       const edge = edges[ringEdges[point]];
       const side = edge.surfaceIndices[1] === surfIdx ? 1 : 0;
-      edge.edgeIndices[side] = ringEdges[(point + 1) % 3];
+      edge.edgeIndices[side] = ringEdges[(point + 1) % n];
     }
 
     surfaces.push({
-      planeDesignator: tri.planeIdx,
+      planeDesignator: designator,
       firstEdgeIndex: ringEdges[0],
-      materialIndex: tri.materialIndex,
+      flags: surfaceFlags,
+      materialIndex: poly.materialIndex,
+      ring,
     });
   }
 
@@ -1849,15 +2944,16 @@ function compileMeshCollisionBspData(
     if (vertexFirstEdge[v1] === -1) vertexFirstEdge[v1] = e;
   }
 
-  const vertices = mesh.rawPositions.map((pt, idx) => ({
+  const vertices = positions.map((pt, idx) => ({
     point: [pt[0], pt[1], pt[2]] as [number, number, number],
     firstEdgeIndex: vertexFirstEdge[idx] >= 0 ? vertexFirstEdge[idx] : 0,
   }));
 
-  // Build 3D BSP tree (`bsp3dNodes`) by recursively clipping the mesh polygons
+  // Build 3D BSP tree (`bsp3dNodes`)
   interface ClipPoly {
     pts: [number, number, number][];
-    planeIdx: number;
+    planeIdx: number; // index into `planes` (0..planes.length-1)
+    centroid: [number, number, number];
   }
 
   const EPS = 1e-4;
@@ -1865,9 +2961,16 @@ function compileMeshCollisionBspData(
     pts: [number, number, number][],
     plane: [number, number, number, number],
   ): { front: [number, number, number][] | null; back: [number, number, number][] | null; state: 'coplanar' | 'front' | 'back' | 'split' } => {
-    const dists = pts.map((p) => plane[0] * p[0] + plane[1] * p[1] + plane[2] * p[2] - plane[3]);
-    const maxD = Math.max(...dists);
-    const minD = Math.min(...dists);
+    let maxD = -Infinity;
+    let minD = Infinity;
+    const dists = new Float64Array(pts.length);
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const d = plane[0] * p[0] + plane[1] * p[1] + plane[2] * p[2] - plane[3];
+      dists[i] = d;
+      if (d > maxD) maxD = d;
+      if (d < minD) minD = d;
+    }
     if (Math.abs(maxD) <= EPS && Math.abs(minD) <= EPS) {
       return { front: null, back: null, state: 'coplanar' };
     }
@@ -1903,23 +3006,47 @@ function compileMeshCollisionBspData(
     };
   };
 
+  const computeCentroid = (pts: [number, number, number][]): [number, number, number] => {
+    let cx = 0, cy = 0, cz = 0;
+    for (const p of pts) {
+      cx += p[0];
+      cy += p[1];
+      cz += p[2];
+    }
+    const inv = 1 / Math.max(1, pts.length);
+    return [cx * inv, cy * inv, cz * inv];
+  };
+
   const bsp3dNodes: [number, number, number][] = [];
+  // For concave meshes, both empty sides of an open/concave splitting plane terminate at leaf 0 (`0x80000000`),
+  // which has `_collision_leaf_contains_two_sided_bit = 0x01`, forcing `collision_bsp_test_vector` to set
+  // `test_surface = TRUE` and test exact 2D polygon boundaries instead of hitting invisible infinite walls!
+  const defaultBackLeaf = isConcave ? 0x80000000 : 0xffffffff;
 
   const buildTree = (polys: ClipPoly[], usedPlanes: Set<number>, depth: number): number => {
-    if (polys.length === 0 || depth >= 48 || bsp3dNodes.length >= 2048) {
-      return 0xffffffff;
+    if (polys.length === 0 || depth >= 52 || bsp3dNodes.length >= 8192) {
+      return defaultBackLeaf;
     }
 
-    const candidatePlanes = Array.from(new Set(polys.map((p) => p.planeIdx))).filter(
-      (pIdx) => !usedPlanes.has(pIdx),
-    );
-    if (candidatePlanes.length === 0) {
-      return 0xffffffff;
+    const uniquePlanes: number[] = [];
+    const seenP = new Set<number>();
+    for (const p of polys) {
+      if (!usedPlanes.has(p.planeIdx) && !seenP.has(p.planeIdx)) {
+        seenP.add(p.planeIdx);
+        uniquePlanes.push(p.planeIdx);
+      }
+    }
+    if (uniquePlanes.length === 0) {
+      return defaultBackLeaf;
     }
 
-    let bestPlane = candidatePlanes[0];
+    // Sample up to 24 candidate planes to keep compilation fast even on 2,000-polygon meshes
+    const step = Math.max(1, Math.floor(uniquePlanes.length / 24));
+    let bestPlane = uniquePlanes[0];
     let bestScore = Infinity;
-    for (const pIdx of candidatePlanes) {
+
+    for (let idx = 0; idx < uniquePlanes.length; idx += step) {
+      const pIdx = uniquePlanes[idx];
       const pl = planes[pIdx];
       let frontCount = 0, backCount = 0, splitCount = 0;
       for (const poly of polys) {
@@ -1929,10 +3056,9 @@ function compileMeshCollisionBspData(
         else if (c.state === 'back') backCount++;
         else if (c.state === 'split') splitCount++;
       }
-      // Prefer convex outer hull planes (nothing in front, zero splits) first
-      const score = frontCount === 0 && splitCount === 0
+      const score = !isConcave && frontCount === 0 && splitCount === 0
         ? -1000 - backCount
-        : splitCount * 4 + Math.abs(frontCount - backCount);
+        : splitCount * 3 + Math.abs(frontCount - backCount);
       if (score < bestScore) {
         bestScore = score;
         bestPlane = pIdx;
@@ -1945,18 +3071,25 @@ function compileMeshCollisionBspData(
     for (const poly of polys) {
       if (poly.planeIdx === bestPlane) continue;
       const c = clipPolyAgainstPlane(poly.pts, pl);
-      if (c.state === 'coplanar') {
-        const op = planes[poly.planeIdx];
-        const dot = pl[0] * op[0] + pl[1] * op[1] + pl[2] * op[2];
-        if (dot < 0) backList.push(poly);
-      } else {
-        if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx });
-        if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx });
+      if (c.state === 'front') {
+        frontList.push(poly);
+      } else if (c.state === 'back') {
+        backList.push(poly);
+      } else if (c.state === 'split') {
+        // If tree is already deep, assign by centroid to prevent exponential fragment explosion
+        if (depth >= 18 || polys.length > 400) {
+          const dC = pl[0] * poly.centroid[0] + pl[1] * poly.centroid[1] + pl[2] * poly.centroid[2] - pl[3];
+          if (dC >= 0) frontList.push(poly);
+          else backList.push(poly);
+        } else {
+          if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
+          if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+        }
       }
     }
 
     const nodeIdx = bsp3dNodes.length;
-    bsp3dNodes.push([bestPlane, 0xffffffff, 0x80000000]);
+    bsp3dNodes.push([bestPlane, defaultBackLeaf, 0x80000000]);
 
     const nextUsed = new Set(usedPlanes);
     nextUsed.add(bestPlane);
@@ -1965,7 +3098,7 @@ function compileMeshCollisionBspData(
       ? 0x80000000
       : buildTree(frontList, nextUsed, depth + 1);
     const backChild = backList.length === 0
-      ? 0xffffffff
+      ? defaultBackLeaf
       : buildTree(backList, nextUsed, depth + 1);
 
     bsp3dNodes[nodeIdx][1] = backChild >>> 0;
@@ -1973,33 +3106,75 @@ function compileMeshCollisionBspData(
     return nodeIdx;
   };
 
-  const initialPolys: ClipPoly[] = validTris.map((tri) => ({
-    pts: [
-      mesh.rawPositions[tri.ring[0]],
-      mesh.rawPositions[tri.ring[1]],
-      mesh.rawPositions[tri.ring[2]],
-    ],
-    planeIdx: tri.planeIdx,
-  }));
+  const bspPolys: ClipPoly[] = surfaces.map((s) => {
+    const pts = s.ring.map((vIdx) => positions[vIdx]);
+    return {
+      pts,
+      planeIdx: (s.planeDesignator & 0x7fffffff) >>> 0,
+      centroid: computeCentroid(pts),
+    };
+  });
 
-  buildTree(initialPolys, new Set(), 0);
+  buildTree(bspPolys, new Set(), 0);
   if (bsp3dNodes.length === 0) {
     return null;
   }
 
+  // Stage 3B: Build `bsp2dNodes` and `bsp2dReferences`
+  const bsp2dNodes: Bsp2dNodeEntry[] = [];
+  const bsp2dReferences: [number, number][] = [];
+
+  if (!isConcave) {
+    // Group surfaces by `planeDesignator` and build a 2D BSP tree per plane
+    const byDesignator = new Map<number, number[]>();
+    for (let sIdx = 0; sIdx < surfaces.length; sIdx++) {
+      const des = surfaces[sIdx].planeDesignator >>> 0;
+      let list = byDesignator.get(des);
+      if (!list) {
+        list = [];
+        byDesignator.set(des, list);
+      }
+      list.push(sIdx);
+    }
+    for (const [designator, sIndices] of byDesignator.entries()) {
+      const rawPlaneIdx = (designator & 0x7fffffff) >>> 0;
+      const isNeg = (designator & 0x80000000) !== 0;
+      const rootNode = buildPlaneBsp2dTree(
+        sIndices,
+        surfaces,
+        positions,
+        planes[rawPlaneIdx],
+        isNeg,
+        bsp2dNodes,
+      );
+      bsp2dReferences.push([designator >>> 0, rootNode >>> 0]);
+    }
+  } else {
+    // For concave/open two-sided meshes:
+    // Emit per-surface forward and reverse `bsp2d_references` so:
+    // 1. `collision_leaf_test_vector` (with `test_surface = TRUE`) iterates every surface on `plane_index`
+    //    and tests `collision_surface_test_point` against its exact 2D polygon boundary.
+    // 2. `bsp3d_test_pill_recursive` & `bsp3d_test_sphere_recursive` match both `planeIdx` and `planeIdx | 0x80000000`
+    //    in `data->plane_stack` and test every surface's interior, edges, and vertices!
+    for (let sIdx = 0; sIdx < surfaces.length; sIdx++) {
+      const rawPlaneIdx = (surfaces[sIdx].planeDesignator & 0x7fffffff) >>> 0;
+      const leafSurfRef = (0x80000000 | sIdx) >>> 0;
+      bsp2dReferences.push([rawPlaneIdx, leafSurfRef]);
+      bsp2dReferences.push([(0x80000000 | rawPlaneIdx) >>> 0, leafSurfRef]);
+    }
+  }
+
+  const leafFlags = isConcave ? 0x01 : 0x00; // 0x01 = _collision_leaf_contains_two_sided_bit
   const leaves: [number, number, number][] = [
-    [0, surfaces.length, 0],
+    [leafFlags, bsp2dReferences.length, 0],
   ];
-  const bsp2dReferences: [number, number][] = surfaces.map((s, idx) => [
-    s.planeDesignator,
-    (0x80000000 | idx) >>> 0,
-  ]);
 
   const byteSize =
     bsp3dNodes.length * 12 +
     planes.length * 16 +
     leaves.length * 8 +
     bsp2dReferences.length * 8 +
+    bsp2dNodes.length * 20 +
     surfaces.length * 12 +
     edges.length * 24 +
     vertices.length * 16;
@@ -2009,10 +3184,28 @@ function compileMeshCollisionBspData(
     planes,
     leaves,
     bsp2dReferences,
-    surfaces,
+    bsp2dNodes,
+    surfaces: surfaces.map(({ planeDesignator, firstEdgeIndex, flags, materialIndex }) => ({
+      planeDesignator,
+      firstEdgeIndex,
+      flags,
+      materialIndex,
+    })),
     edges,
     vertices,
     byteSize,
+    stats: {
+      mode,
+      inputTriangles: inputTriangleCount,
+      weldedVertices: positions.length,
+      decimatedTriangles: activeFaces.length,
+      mergedSurfaces: surfaces.length,
+      planes: planes.length,
+      edges: edges.length,
+      bsp3dNodes: bsp3dNodes.length,
+      bsp2dNodes: bsp2dNodes.length,
+      isConcave,
+    },
   };
 }
 
@@ -2064,14 +3257,23 @@ function writeMeshCollisionBsp(
     cursor += 8;
   }
 
-  // 5. bsp2d_nodes: 0 entries
+  // 5. bsp2d_nodes: B * 20 bytes
+  const offBsp2dNodes = compiled.bsp2dNodes.length > 0 ? cursor : 0;
+  for (const node2d of compiled.bsp2dNodes) {
+    targetBuf.writeFloatLE(node2d.planeI, cursor + 0);
+    targetBuf.writeFloatLE(node2d.planeJ, cursor + 4);
+    targetBuf.writeFloatLE(node2d.planeD, cursor + 8);
+    targetBuf.writeUInt32LE(node2d.leftChild >>> 0, cursor + 12);
+    targetBuf.writeUInt32LE(node2d.rightChild >>> 0, cursor + 16);
+    cursor += 20;
+  }
 
   // 6. surfaces: S * 12 bytes
   const offSurfaces = cursor;
   for (const surf of compiled.surfaces) {
     targetBuf.writeUInt32LE(surf.planeDesignator >>> 0, cursor + 0);
     targetBuf.writeUInt32LE(surf.firstEdgeIndex >>> 0, cursor + 4);
-    targetBuf.writeUInt8(0, cursor + 8); // flags = 0
+    targetBuf.writeUInt8(surf.flags & 0xff, cursor + 8); // flags (0x01 = two_sided for concave shells)
     targetBuf.writeUInt8(0xff, cursor + 9); // breakable_surface = -1 (0xFF)
     targetBuf.writeInt16LE(surf.materialIndex, cursor + 10); // material index
     cursor += 12;
@@ -2108,8 +3310,8 @@ function writeMeshCollisionBsp(
   targetBuf.writeUInt32LE(offLeaves, structOff + 28);
   targetBuf.writeUInt32LE(compiled.bsp2dReferences.length, structOff + 36);
   targetBuf.writeUInt32LE(offBsp2dRefs, structOff + 40);
-  targetBuf.writeUInt32LE(0, structOff + 48); // bsp2d_nodes.count = 0
-  targetBuf.writeUInt32LE(0, structOff + 52);
+  targetBuf.writeUInt32LE(compiled.bsp2dNodes.length, structOff + 48);
+  targetBuf.writeUInt32LE(offBsp2dNodes, structOff + 52);
   targetBuf.writeUInt32LE(compiled.surfaces.length, structOff + 60);
   targetBuf.writeUInt32LE(offSurfaces, structOff + 64);
   targetBuf.writeUInt32LE(compiled.edges.length, structOff + 72);
@@ -2131,9 +3333,10 @@ export function buildCustomCollisionTag(
   originalIndex: number,
   mesh: ParsedObjMesh,
   rig?: TemplateRigInfo,
-  exactMeshCollision = true,
+  exactMeshCollision: boolean | CustomObjectCollisionMode = true,
   materialType = 7,
   slotMaterialTypes?: number[],
+  targetCollisionFaces?: number,
 ): ExtractedTag {
   const nodeCount = rig && rig.modelNodeCount > 0 ? rig.modelNodeCount : 1;
 
@@ -2151,10 +3354,37 @@ export function buildCustomCollisionTag(
   });
   const materialCount = Math.max(1, materials.length);
 
-  // Compile exact 3D mesh collision BSP when enabled (and <= 512 triangles)
-  const compiledMeshBsp = exactMeshCollision
-    ? compileMeshCollisionBspData(mesh, materialCount)
-    : null;
+  const collisionMode: CustomObjectCollisionMode =
+    typeof exactMeshCollision === 'string'
+      ? exactMeshCollision
+      : exactMeshCollision
+        ? 'auto'
+        : 'box';
+
+  const compiledMeshBsp =
+    collisionMode !== 'box'
+      ? compileMeshCollisionBspData(mesh, materialCount, {
+          mode: collisionMode,
+          targetFaces: targetCollisionFaces,
+        })
+      : null;
+
+  if (compiledMeshBsp) {
+    mesh.summary.collisionPreview = compiledMeshBsp.stats;
+  } else {
+    mesh.summary.collisionPreview = {
+      mode: 'box',
+      inputTriangles: mesh.rawFaces.length,
+      weldedVertices: 8,
+      decimatedTriangles: 12,
+      mergedSurfaces: 6,
+      planes: 6,
+      edges: 12,
+      bsp3dNodes: 6,
+      bsp2dNodes: 0,
+      isConcave: false,
+    };
+  }
   const bspCount = 1;
   const bspArraysByteSize = compiledMeshBsp ? compiledMeshBsp.byteSize : 752;
 
@@ -2533,6 +3763,10 @@ export interface BuildCustomObjectOptions {
   bitmapFormat?: number;
   /** Compile exact 3D mesh collision BSP following every triangle slope/ramp (default: true; false = 6-plane bounding box). */
   multiBoxCollision?: boolean;
+  /** Explicit collision mode ('auto' = 1:1 / QEM Decimate + Coplanar Merge, 'exact' = 1:1 up to 2048 faces, 'box' = 6-plane box). */
+  collisionMode?: CustomObjectCollisionMode;
+  /** Target maximum face budget for automatic QEM collision decimation (default: 800). */
+  targetCollisionFaces?: number;
   /** Halo CE MaterialType enum index (0..32, default: 7 = "metal thick"). */
   materialType?: number;
   /** Optional per-slot Halo CE MaterialType enum indices corresponding to `meshSummary.materialSlots` (`usemtl` slots from Blender). */
@@ -2684,16 +3918,23 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     options.templateRig,
   );
 
-  const exactMeshCollision = options.multiBoxCollision !== undefined ? Boolean(options.multiBoxCollision) : true;
+  const collisionMode: CustomObjectCollisionMode =
+    options.collisionMode ??
+    (options.multiBoxCollision !== undefined ? (options.multiBoxCollision ? 'auto' : 'box') : 'auto');
+  const activeCollisionMesh = collisionMesh.triangles.length > 0 ? collisionMesh : renderMesh;
   const collisionTag = buildCustomCollisionTag(
     collisionPath,
     collisionOrigIdx,
-    collisionMesh.triangles.length > 0 ? collisionMesh : renderMesh,
+    activeCollisionMesh,
     options.templateRig,
-    exactMeshCollision,
+    collisionMode,
     matType,
     options.slotMaterialTypes,
+    options.targetCollisionFaces ?? options.meshOptions?.targetCollisionFaces,
   );
+  if (activeCollisionMesh.summary.collisionPreview) {
+    renderMesh.summary.collisionPreview = activeCollisionMesh.summary.collisionPreview;
+  }
 
   // Map template root tag's existing dependencies (except .model and .collision model) to the new rootPath
   const templateDepRemap = new Map<string, ExtractedDependencyRef>();

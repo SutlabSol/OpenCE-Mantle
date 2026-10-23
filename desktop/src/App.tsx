@@ -29,6 +29,8 @@ import BspSwapperDialog from './components/BspSwapperDialog';
 import OpenCeForgeExportDialog from './components/OpenCeForgeExportDialog';
 import BuildObjectTagDialog from './components/BuildObjectTagDialog';
 import DeprotectDialog from './components/DeprotectDialog';
+import ScriptEditorDialog from './components/ScriptEditorDialog';
+import ModdingStudioDialog from './components/ModdingStudioDialog';
 import type { BatchExtractPreflightResult, HaloBitmapVersion } from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
@@ -48,6 +50,8 @@ export default function App() {
   const [forgeExportOpen, setForgeExportOpen] = useState(false);
   const [buildObjectTagOpen, setBuildObjectTagOpen] = useState(false);
   const [deprotectDialogOpen, setDeprotectDialogOpen] = useState(false);
+  const [scriptEditorOpen, setScriptEditorOpen] = useState(false);
+  const [moddingStudioOpen, setModdingStudioOpen] = useState(false);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
@@ -361,6 +365,8 @@ export default function App() {
             items: [
               { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
               { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
+              { label: 'HaloScript (.hsc) IDE & Sample Scripts...', onClick: () => setScriptEditorOpen(true), disabled: !canExtract },
+              { label: 'Universal Converter, Scanner & Mod Studio...', onClick: () => setModdingStudioOpen(true), disabled: !canExtract },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
               { label: '', separator: true },
@@ -575,6 +581,25 @@ export default function App() {
           onClose={() => setDeprotectDialogOpen(false)}
           onMapUpdated={(updated) => setMapState(updated)}
           log={log}
+        />
+      )}
+
+      {scriptEditorOpen && mapState?.status === 'ok' && (
+        <ScriptEditorDialog
+          onClose={() => setScriptEditorOpen(false)}
+          onMapModified={() => {
+            setMapState((prev) => (prev && prev.status === 'ok' ? { ...prev, modified: true } : prev));
+          }}
+        />
+      )}
+
+      {moddingStudioOpen && mapState?.status === 'ok' && (
+        <ModdingStudioDialog
+          allTags={mapState.tags}
+          onClose={() => setModdingStudioOpen(false)}
+          onTagsUpdated={(newTags) => {
+            setMapState((prev) => (prev && prev.status === 'ok' ? { ...prev, tags: newTags, modified: true } : prev));
+          }}
         />
       )}
 

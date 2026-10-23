@@ -34,6 +34,18 @@ const WEAPON_TRIGGER_TIME_TO_RATE: Record<string, string> = {
   'error deceleration time': 'error deceleration rate',
 };
 
+const SCENARIO_PLACEMENT_TO_OBJECT_TYPE: Record<string, number> = {
+  bipeds: 0,
+  vehicles: 1,
+  weapons: 2,
+  equipment: 3,
+  scenery: 6,
+  machines: 7,
+  controls: 8,
+  'light fixtures': 9,
+  'sound scenery': 11,
+};
+
 /**
  * Runs post-edit derived field recalculation (`postprocess_proc`) on a tag in `buffer`
  * after a field write. When `editedFieldPath` is provided, only updates the specific
@@ -60,6 +72,46 @@ export function postprocessTagFields(
 
   const rootOffset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
   if (!isRangeInBuffer(rootOffset, structDef.totalSize, buffer.length)) return [];
+
+  if (group === 'scenario' && editedFieldPath) {
+    const m = editedFieldPath.match(/^([a-z ]+)\[(\d+)\]\.name$/i);
+    if (m) {
+      const blockName = m[1].toLowerCase();
+      const placementIdx = Number(m[2]);
+      const objType = SCENARIO_PLACEMENT_TO_OBJECT_TYPE[blockName];
+      if (objType !== undefined) {
+        const decoded = decodeStruct(buffer, rootOffset, structDef.name);
+        const placementBlock = decoded.get(blockName);
+        const objNamesBlock = decoded.get('object names');
+        if (
+          placementBlock?.kind === 'reflexive' &&
+          placementIdx >= 0 &&
+          placementIdx < placementBlock.value.count &&
+          objNamesBlock?.kind === 'reflexive' &&
+          objNamesBlock.value.count > 0
+        ) {
+          const placementField = structDef.fields.find((f) => f.name === blockName);
+          if (placementField?.def.struct) {
+            const childStruct = resolveStruct(placementField.def.struct);
+            const nameField = childStruct.fields.find((f) => f.name === 'name');
+            const placementBase = resolvePointer(placementBlock.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+            const objNamesBase = resolvePointer(objNamesBlock.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+            if (nameField) {
+              const nameIdx = buffer.readInt16LE(placementBase + placementIdx * childStruct.totalSize + nameField.offset);
+              if (nameIdx >= 0 && nameIdx < objNamesBlock.value.count) {
+                const objNameElemOff = objNamesBase + nameIdx * 36;
+                if (isRangeInBuffer(objNameElemOff, 36, buffer.length)) {
+                  buffer.writeInt16LE(objType, objNameElemOff + 32);
+                  buffer.writeInt16LE(placementIdx, objNameElemOff + 34);
+                  updated.push(`object names[${nameIdx}].object type`, `object names[${nameIdx}].object index`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 
   if (group === 'weapon') {
     const decoded = decodeStruct(buffer, rootOffset, structDef.name);

@@ -158,7 +158,7 @@ export function validateBitmapAssetSize(decoded: Map<string, DecodedFieldValue>,
       ? { ok: true }
       : { ok: false, reason: `unsupported/"unused" bitmap format "${formatName}" - size cannot be validated` };
   }
-  if (actualSize !== expected) {
+  if (actualSize < expected) {
     return { ok: false, reason: `expected ${expected} bytes from ${width}x${height}x${depth} ${typeName}/${formatName}/${mipmapCount} mips, but the tag's stored pixel data size is ${actualSize}` };
   }
   return { ok: true };

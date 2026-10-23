@@ -34118,6 +34118,203 @@ function projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds) {
   const vInCell = pad + Math.max(0, Math.min(1, localV)) * (1 - 2 * pad);
   return [(col + uInCell) / 3, (row + vInCell) / 2];
 }
+function computePerTriangleGridUvs(rawPositions, triVertexIndices) {
+  const numTris = Math.max(1, triVertexIndices.length);
+  const gridCols = Math.max(1, Math.ceil(Math.sqrt(numTris)));
+  const gridRows = Math.max(1, Math.ceil(numTris / gridCols));
+  const pad = 0.1;
+  const innerSpan = 1 - 2 * pad;
+  const result = [];
+  for (let t = 0; t < triVertexIndices.length; t++) {
+    const [v0, v1, v2] = triVertexIndices[t];
+    const p0 = rawPositions[v0] ?? [0, 0, 0];
+    const p1 = rawPositions[v1] ?? [0, 0, 0];
+    const p2 = rawPositions[v2] ?? [0, 0, 0];
+    const e1x = p1[0] - p0[0], e1y = p1[1] - p0[1], e1z = p1[2] - p0[2];
+    const e2x = p2[0] - p0[0], e2y = p2[1] - p0[1], e2z = p2[2] - p0[2];
+    const uAxis = normalizeVec3(e1x, e1y, e1z);
+    const faceN = normalizeVec3(
+      e1y * e2z - e1z * e2y,
+      e1z * e2x - e1x * e2z,
+      e1x * e2y - e1y * e2x
+    );
+    const vAxis = normalizeVec3(
+      faceN[1] * uAxis[2] - faceN[2] * uAxis[1],
+      faceN[2] * uAxis[0] - faceN[0] * uAxis[2],
+      faceN[0] * uAxis[1] - faceN[1] * uAxis[0]
+    );
+    const pts2d = [p0, p1, p2].map((p) => {
+      const dx = p[0] - p0[0], dy = p[1] - p0[1], dz = p[2] - p0[2];
+      return [
+        dx * uAxis[0] + dy * uAxis[1] + dz * uAxis[2],
+        dx * vAxis[0] + dy * vAxis[1] + dz * vAxis[2]
+      ];
+    });
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (const [u, v] of pts2d) {
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    const span = Math.max(1e-5, maxU - minU, maxV - minV);
+    const col = t % gridCols;
+    const row = Math.floor(t / gridCols);
+    const triUvs = pts2d.map(([u, v]) => {
+      const normU = (u - minU) / span;
+      const normV = 1 - (v - minV) / span;
+      const cellU = pad + Math.max(0, Math.min(1, normU)) * innerSpan;
+      const cellV = pad + Math.max(0, Math.min(1, normV)) * innerSpan;
+      return [(col + cellU) / gridCols, (row + cellV) / gridRows];
+    });
+    result.push(triUvs);
+  }
+  return result;
+}
+function computeSmartAngleUvs(rawPositions, triVertexIndices) {
+  const numTris = triVertexIndices.length;
+  if (numTris === 0) return [];
+  const faceNormals = [];
+  const faceAreas = [];
+  const edgeToTris = /* @__PURE__ */ new Map();
+  const addEdge = (a, b, triIdx) => {
+    const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+    const list = edgeToTris.get(key);
+    if (list) list.push(triIdx);
+    else edgeToTris.set(key, [triIdx]);
+  };
+  for (let t = 0; t < numTris; t++) {
+    const [v0, v1, v2] = triVertexIndices[t];
+    const p0 = rawPositions[v0] ?? [0, 0, 0];
+    const p1 = rawPositions[v1] ?? [0, 0, 0];
+    const p2 = rawPositions[v2] ?? [0, 0, 0];
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const area2 = Math.hypot(cx, cy, cz);
+    faceAreas.push(Math.max(1e-6, area2 * 0.5));
+    faceNormals.push(normalizeVec3(cx, cy, cz));
+    addEdge(v0, v1, t);
+    addEdge(v1, v2, t);
+    addEdge(v2, v0, t);
+  }
+  const visited = new Uint8Array(numTris);
+  const islands = [];
+  const angleThresholdCos = Math.cos(48 * Math.PI / 180);
+  for (let seed = 0; seed < numTris; seed++) {
+    if (visited[seed]) continue;
+    visited[seed] = 1;
+    const island = [seed];
+    let avgNx = faceNormals[seed][0] * faceAreas[seed];
+    let avgNy = faceNormals[seed][1] * faceAreas[seed];
+    let avgNz = faceNormals[seed][2] * faceAreas[seed];
+    const queue = [seed];
+    while (queue.length > 0) {
+      const curr = queue.shift();
+      const [v0, v1, v2] = triVertexIndices[curr];
+      const nCurr = faceNormals[curr];
+      const curAvg = normalizeVec3(avgNx, avgNy, avgNz);
+      for (const [a, b] of [
+        [v0, v1],
+        [v1, v2],
+        [v2, v0]
+      ]) {
+        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+        const neighbors = edgeToTris.get(key) ?? [];
+        for (const nb of neighbors) {
+          if (visited[nb]) continue;
+          const nNb = faceNormals[nb];
+          const dotAdj = nCurr[0] * nNb[0] + nCurr[1] * nNb[1] + nCurr[2] * nNb[2];
+          const dotIsland = curAvg[0] * nNb[0] + curAvg[1] * nNb[1] + curAvg[2] * nNb[2];
+          if (dotAdj >= angleThresholdCos && dotIsland >= 0.5) {
+            visited[nb] = 1;
+            island.push(nb);
+            avgNx += nNb[0] * faceAreas[nb];
+            avgNy += nNb[1] * faceAreas[nb];
+            avgNz += nNb[2] * faceAreas[nb];
+            queue.push(nb);
+          }
+        }
+      }
+    }
+    islands.push(island);
+  }
+  const projIslands = islands.map((tris) => {
+    let nx = 0, ny = 0, nz = 0;
+    for (const t of tris) {
+      nx += faceNormals[t][0] * faceAreas[t];
+      ny += faceNormals[t][1] * faceAreas[t];
+      nz += faceNormals[t][2] * faceAreas[t];
+    }
+    const avgN = normalizeVec3(nx, ny, nz);
+    const { tangent: uAxis, binormal: vAxis } = computeOrthonormalBasis(avgN[0], avgN[1], avgN[2]);
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    const raw2d = [];
+    for (const t of tris) {
+      const [v0, v1, v2] = triVertexIndices[t];
+      const triPts = [rawPositions[v0], rawPositions[v1], rawPositions[v2]].map((p) => {
+        const u = p[0] * uAxis[0] + p[1] * uAxis[1] + p[2] * uAxis[2];
+        const v = -(p[0] * vAxis[0] + p[1] * vAxis[1] + p[2] * vAxis[2]);
+        if (u < minU) minU = u;
+        if (u > maxU) maxU = u;
+        if (v < minV) minV = v;
+        if (v > maxV) maxV = v;
+        return [u, v];
+      });
+      raw2d.push(triPts);
+    }
+    const w = Math.max(1e-4, maxU - minU);
+    const h = Math.max(1e-4, maxV - minV);
+    const localUvs = raw2d.map(
+      (triPts) => triPts.map(([u, v]) => [u - minU, v - minV])
+    );
+    return { tris, localUvs, width: w, height: h, placedX: 0, placedY: 0 };
+  });
+  const sortedOrder = projIslands.map((_, i) => i).sort((a, b) => projIslands[b].height - projIslands[a].height);
+  let totalArea = 0;
+  let maxIslandWidth = 1e-4;
+  for (const isl of projIslands) {
+    totalArea += isl.width * isl.height;
+    if (isl.width > maxIslandWidth) maxIslandWidth = isl.width;
+  }
+  const margin = Math.max(1e-4, Math.sqrt(totalArea) * 0.025);
+  const targetAtlasWidth = Math.max(maxIslandWidth + 2 * margin, Math.sqrt(totalArea * 1.35) + margin * 4);
+  let cursorX = margin;
+  let cursorY = margin;
+  let shelfHeight = 0;
+  let usedMaxX = targetAtlasWidth;
+  let usedMaxY = margin;
+  for (const idx of sortedOrder) {
+    const isl = projIslands[idx];
+    if (cursorX + isl.width + margin > targetAtlasWidth && cursorX > margin) {
+      cursorX = margin;
+      cursorY += shelfHeight + margin;
+      shelfHeight = 0;
+    }
+    isl.placedX = cursorX;
+    isl.placedY = cursorY;
+    cursorX += isl.width + margin;
+    if (cursorX > usedMaxX) usedMaxX = cursorX;
+    if (isl.height > shelfHeight) shelfHeight = isl.height;
+    if (cursorY + isl.height + margin > usedMaxY) usedMaxY = cursorY + isl.height + margin;
+  }
+  const atlasSpan = Math.max(1e-4, usedMaxX, usedMaxY);
+  const result = new Array(numTris);
+  for (const isl of projIslands) {
+    for (let i = 0; i < isl.tris.length; i++) {
+      const t = isl.tris[i];
+      const [c0, c1, c2] = isl.localUvs[i];
+      result[t] = [
+        [Math.max(2e-3, Math.min(0.998, (isl.placedX + c0[0]) / atlasSpan)), Math.max(2e-3, Math.min(0.998, (isl.placedY + c0[1]) / atlasSpan))],
+        [Math.max(2e-3, Math.min(0.998, (isl.placedX + c1[0]) / atlasSpan)), Math.max(2e-3, Math.min(0.998, (isl.placedY + c1[1]) / atlasSpan))],
+        [Math.max(2e-3, Math.min(0.998, (isl.placedX + c2[0]) / atlasSpan)), Math.max(2e-3, Math.min(0.998, (isl.placedY + c2[1]) / atlasSpan))]
+      ];
+    }
+  }
+  return result;
+}
 function parseObjMesh(objText, options = {}) {
   const scale = options.scale && Number.isFinite(options.scale) && options.scale > 0 ? options.scale : 1;
   const flipYz = Boolean(options.flipYz);
@@ -34254,14 +34451,23 @@ function parseObjMesh(objText, options = {}) {
   const sizeBounds = [maxX - minX, maxY - minY, maxZ - minZ];
   const radius = Math.max(0.1, Math.hypot(sizeBounds[0], sizeBounds[1], sizeBounds[2]) * 0.5);
   const hasUvCoordinates = rawUvs.length > 0 && rawTriangles.some((t) => t.corners.some((c) => c.vtIdx >= 0 && c.vtIdx < rawUvs.length));
-  const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv);
+  const uvUnwrapMode = options.uvUnwrapMode ?? "box";
+  const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv) || uvUnwrapMode !== "box";
+  const precomputedTriUvs = usedAutoUv && uvUnwrapMode === "per_triangle" ? computePerTriangleGridUvs(
+    rawPositions,
+    rawTriangles.map((t) => [t.corners[0].vIdx, t.corners[1].vIdx, t.corners[2].vIdx])
+  ) : usedAutoUv && uvUnwrapMode === "smart" ? computeSmartAngleUvs(
+    rawPositions,
+    rawTriangles.map((t) => [t.corners[0].vIdx, t.corners[1].vIdx, t.corners[2].vIdx])
+  ) : null;
   const vertices = [];
   const triangles = [];
   const rawFaces = [];
   const triangleMaterialSlots = [];
   const vertexLookup = /* @__PURE__ */ new Map();
   const groupMinMax = /* @__PURE__ */ new Map();
-  for (const tri of rawTriangles) {
+  for (let triIdx = 0; triIdx < rawTriangles.length; triIdx++) {
+    const tri = rawTriangles[triIdx];
     const v0 = tri.corners[0].vIdx;
     const v1 = tri.corners[1].vIdx;
     const v2 = tri.corners[2].vIdx;
@@ -34301,7 +34507,7 @@ function parseObjMesh(objText, options = {}) {
       const corner = tri.corners[k];
       const pos = rawPositions[corner.vIdx];
       const norm = corner.vnIdx >= 0 && corner.vnIdx < rawNormals.length ? rawNormals[corner.vnIdx] : faceNormal;
-      const uv = !usedAutoUv && corner.vtIdx >= 0 && corner.vtIdx < rawUvs.length ? rawUvs[corner.vtIdx] : projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds);
+      const uv = !usedAutoUv && corner.vtIdx >= 0 && corner.vtIdx < rawUvs.length ? rawUvs[corner.vtIdx] : precomputedTriUvs?.[triIdx]?.[k] ?? projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds);
       const key = `${corner.vIdx}:${norm[0].toFixed(4)},${norm[1].toFixed(4)},${norm[2].toFixed(4)}:${uv[0].toFixed(4)},${uv[1].toFixed(4)}`;
       let compiledIdx = vertexLookup.get(key);
       if (compiledIdx === void 0 && vertices.length < 65534) {
@@ -34329,7 +34535,8 @@ function parseObjMesh(objText, options = {}) {
   );
   const MAX_SIMPLE_TRIANGLES = 64;
   const isTooComplex = rawTriangles.length > MAX_SIMPLE_TRIANGLES;
-  const uvStatus = hasUvCoordinates ? `${rawUvs.length} UV coords` : "Auto-unwrapped (6-face Box UV Atlas)";
+  const uvModeLabel = uvUnwrapMode === "per_triangle" ? "Per-Triangle Ordered Grid" : uvUnwrapMode === "smart" ? "Smart Angle Unwrap" : "6-Side Box Unfold";
+  const uvStatus = !usedAutoUv && hasUvCoordinates ? `${rawUvs.length} UV coords` : `Auto-unwrapped (${uvModeLabel})`;
   const finalMaterialSlots = materialSlots.length > 0 ? materialSlots : ["default"];
   const summary = {
     vertexCount: rawPositions.length,
@@ -34348,7 +34555,7 @@ function parseObjMesh(objText, options = {}) {
     isTooComplex,
     message: `Mesh ready: ${rawPositions.length} vertices, ${rawTriangles.length} triangles (${uvStatus}). Dimensions: ${sizeBounds[0].toFixed(2)} x ${sizeBounds[1].toFixed(2)} x ${sizeBounds[2].toFixed(2)} world units.`
   };
-  return {
+  const parsedMesh = {
     summary,
     vertices,
     triangles,
@@ -34358,6 +34565,16 @@ function parseObjMesh(objText, options = {}) {
     usedAutoUv,
     groupBounds
   };
+  if (rawPositions.length >= 3 && rawFaces.length > 0 && rawFaces.length <= 15e3) {
+    const previewBsp = compileMeshCollisionBspData(parsedMesh, Math.max(1, finalMaterialSlots.length), {
+      mode: "auto",
+      targetFaces: options.targetCollisionFaces ?? 800
+    });
+    if (previewBsp) {
+      summary.collisionPreview = previewBsp.stats;
+    }
+  }
+  return parsedMesh;
 }
 function parseAndAnalyzeObj(objText, options) {
   return parseObjMesh(objText, options).summary;
@@ -34430,13 +34647,15 @@ function renderObjUvTemplateRgba(objText, size = 1024, options = {}) {
     [58, 52, 30]
     // -Z (amber bottom)
   ];
+  const uvUnwrapMode = options.uvUnwrapMode ?? "box";
+  const isBoxAtlas = parsed.usedAutoUv && uvUnwrapMode === "box";
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const checker = (Math.floor(x / cellSize) + Math.floor(y / cellSize) & 1) === 0;
       let r = checker ? 28 : 36;
       let g = checker ? 29 : 38;
       let b = checker ? 34 : 44;
-      if (parsed.usedAutoUv) {
+      if (isBoxAtlas) {
         const col = Math.min(2, Math.floor(x / size * 3));
         const row = Math.min(1, Math.floor(y / size * 2));
         const tint = faceTintColors[row * 3 + col];
@@ -34451,13 +34670,25 @@ function renderObjUvTemplateRgba(objText, size = 1024, options = {}) {
       rgba[idx + 3] = 255;
     }
   }
-  if (parsed.usedAutoUv) {
+  if (isBoxAtlas) {
     for (let c = 1; c <= 2; c++) {
       const x = Math.round(c / 3 * size);
       drawLineRgba(rgba, size, x, 0, x, size - 1, 90, 100, 120, 255);
     }
     const midY = Math.round(size / 2);
     drawLineRgba(rgba, size, 0, midY, size - 1, midY, 90, 100, 120, 255);
+  } else if (parsed.usedAutoUv && uvUnwrapMode === "per_triangle" && parsed.triangles.length > 0 && parsed.triangles.length <= 2500) {
+    const numTris = parsed.triangles.length;
+    const gridCols = Math.max(1, Math.ceil(Math.sqrt(numTris)));
+    const gridRows = Math.max(1, Math.ceil(numTris / gridCols));
+    for (let c = 1; c < gridCols; c++) {
+      const x = Math.round(c / gridCols * size);
+      drawLineRgba(rgba, size, x, 0, x, size - 1, 55, 62, 76, 255);
+    }
+    for (let r = 1; r < gridRows; r++) {
+      const y = Math.round(r / gridRows * size);
+      drawLineRgba(rgba, size, 0, y, size - 1, y, 55, 62, 76, 255);
+    }
   }
   for (const [i0, i1, i2] of parsed.triangles) {
     const v0 = parsed.vertices[i0];
@@ -34509,6 +34740,895 @@ function renderObjUvTemplatePng(objText, size = 1024, options = {}) {
     usedAutoUv
   };
 }
+var HALO_PROJECTION3D_MAPPINGS = [
+  [
+    [2, 1],
+    // _x (0), sign = 0 (nx <= 0): (z, y)
+    [1, 2]
+    // _x (0), sign = 1 (nx > 0):  (y, z)
+  ],
+  [
+    [0, 2],
+    // _y (1), sign = 0 (ny <= 0): (x, z)
+    [2, 0]
+    // _y (1), sign = 1 (ny > 0):  (z, x)
+  ],
+  [
+    [1, 0],
+    // _z (2), sign = 0 (nz <= 0): (y, x)
+    [0, 1]
+    // _z (2), sign = 1 (nz > 0):  (x, y)
+  ]
+];
+function getHaloPlaneProjection(plane, designatorNegated = false) {
+  const ai = Math.abs(plane[0]);
+  const aj = Math.abs(plane[1]);
+  const ak = Math.abs(plane[2]);
+  const axis = ak >= aj && ak >= ai ? 2 : aj >= ai ? 1 : 0;
+  const rawPositive = plane[axis] > 0;
+  const sign = rawPositive !== designatorNegated ? 1 : 0;
+  return { axis, sign };
+}
+function projectHaloPoint3dTo2d(pt, axis, sign) {
+  const map = HALO_PROJECTION3D_MAPPINGS[axis][sign];
+  return [pt[map[0]], pt[map[1]]];
+}
+function weldCollisionPositions(rawPositions, rawFaces, weldTolerance = 1e-4) {
+  const invTol = 1 / Math.max(1e-6, weldTolerance);
+  const gridMap = /* @__PURE__ */ new Map();
+  const positions = [];
+  const remap = new Int32Array(rawPositions.length);
+  for (let i = 0; i < rawPositions.length; i++) {
+    const p = rawPositions[i];
+    const gx = Math.round(p[0] * invTol);
+    const gy = Math.round(p[1] * invTol);
+    const gz = Math.round(p[2] * invTol);
+    const key = `${gx},${gy},${gz}`;
+    let idx = gridMap.get(key);
+    if (idx === void 0) {
+      idx = positions.length;
+      positions.push([p[0], p[1], p[2]]);
+      gridMap.set(key, idx);
+    }
+    remap[i] = idx;
+  }
+  const faces = [];
+  const seenTri = /* @__PURE__ */ new Set();
+  for (const f of rawFaces) {
+    const v0 = remap[f.v0];
+    const v1 = remap[f.v1];
+    const v2 = remap[f.v2];
+    if (v0 === v1 || v1 === v2 || v2 === v0) continue;
+    const p0 = positions[v0];
+    const p1 = positions[v1];
+    const p2 = positions[v2];
+    if (!p0 || !p1 || !p2) continue;
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const area2 = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    if (area2 < 1e-6) continue;
+    const minV = Math.min(v0, v1, v2);
+    const canonKey = minV === v0 ? `${v0},${v1},${v2}` : minV === v1 ? `${v1},${v2},${v0}` : `${v2},${v0},${v1}`;
+    if (seenTri.has(canonKey)) continue;
+    seenTri.add(canonKey);
+    faces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: f.materialSlotIndex,
+      groupId: f.groupId
+    });
+  }
+  return { positions, faces };
+}
+function decimateCollisionMeshQem(positions, faces, targetFaceCount) {
+  if (faces.length <= targetFaceCount || targetFaceCount < 4) {
+    return { positions, faces };
+  }
+  const vCount = positions.length;
+  const pts = positions.map((p) => [p[0], p[1], p[2]]);
+  const quadrics = new Float64Array(vCount * 10);
+  const addPlaneQuadric = (vIdx, a, b, c, d, weight = 1) => {
+    const base = vIdx * 10;
+    quadrics[base + 0] += weight * a * a;
+    quadrics[base + 1] += weight * a * b;
+    quadrics[base + 2] += weight * a * c;
+    quadrics[base + 3] += weight * a * d;
+    quadrics[base + 4] += weight * b * b;
+    quadrics[base + 5] += weight * b * c;
+    quadrics[base + 6] += weight * b * d;
+    quadrics[base + 7] += weight * c * c;
+    quadrics[base + 8] += weight * c * d;
+    quadrics[base + 9] += weight * d * d;
+  };
+  const evalQuadric = (qBase1, qBase2, x, y, z) => {
+    const q00 = quadrics[qBase1 + 0] + quadrics[qBase2 + 0];
+    const q01 = quadrics[qBase1 + 1] + quadrics[qBase2 + 1];
+    const q02 = quadrics[qBase1 + 2] + quadrics[qBase2 + 2];
+    const q03 = quadrics[qBase1 + 3] + quadrics[qBase2 + 3];
+    const q11 = quadrics[qBase1 + 4] + quadrics[qBase2 + 4];
+    const q12 = quadrics[qBase1 + 5] + quadrics[qBase2 + 5];
+    const q13 = quadrics[qBase1 + 6] + quadrics[qBase2 + 6];
+    const q22 = quadrics[qBase1 + 7] + quadrics[qBase2 + 7];
+    const q23 = quadrics[qBase1 + 8] + quadrics[qBase2 + 8];
+    const q33 = quadrics[qBase1 + 9] + quadrics[qBase2 + 9];
+    return q00 * x * x + 2 * q01 * x * y + 2 * q02 * x * z + 2 * q03 * x + q11 * y * y + 2 * q12 * y * z + 2 * q13 * y + q22 * z * z + 2 * q23 * z + q33;
+  };
+  const edgeUseCount = /* @__PURE__ */ new Map();
+  for (let fIdx = 0; fIdx < faces.length; fIdx++) {
+    const f = faces[fIdx];
+    const p0 = pts[f.v0], p1 = pts[f.v1], p2 = pts[f.v2];
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const len = Math.hypot(cx, cy, cz);
+    if (len < 1e-8) continue;
+    const a = cx / len, b = cy / len, c = cz / len;
+    const d = -(a * p0[0] + b * p0[1] + c * p0[2]);
+    const areaWeight = Math.max(0.1, len * 0.5);
+    addPlaneQuadric(f.v0, a, b, c, d, areaWeight);
+    addPlaneQuadric(f.v1, a, b, c, d, areaWeight);
+    addPlaneQuadric(f.v2, a, b, c, d, areaWeight);
+    const pairs = [
+      [f.v0, f.v1],
+      [f.v1, f.v2],
+      [f.v2, f.v0]
+    ];
+    for (const [u, v] of pairs) {
+      const k = u < v ? `${u},${v}` : `${v},${u}`;
+      const existing = edgeUseCount.get(k);
+      if (existing) existing.count++;
+      else edgeUseCount.set(k, { count: 1, fIdx, u, v });
+    }
+  }
+  for (const entry of edgeUseCount.values()) {
+    if (entry.count === 1) {
+      const f = faces[entry.fIdx];
+      const p0 = pts[f.v0], p1 = pts[f.v1], p2 = pts[f.v2];
+      const fn = normalizeVec3(
+        (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]),
+        (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]),
+        (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0])
+      );
+      const pu = pts[entry.u], pv = pts[entry.v];
+      const ex = pv[0] - pu[0], ey = pv[1] - pu[1], ez = pv[2] - pu[2];
+      const bn = normalizeVec3(
+        ey * fn[2] - ez * fn[1],
+        ez * fn[0] - ex * fn[2],
+        ex * fn[1] - ey * fn[0]
+      );
+      const bd = -(bn[0] * pu[0] + bn[1] * pu[1] + bn[2] * pu[2]);
+      addPlaneQuadric(entry.u, bn[0], bn[1], bn[2], bd, 50);
+      addPlaneQuadric(entry.v, bn[0], bn[1], bn[2], bd, 50);
+    }
+  }
+  const activeFaces = faces.map((f) => ({ ...f }));
+  let aliveFaceCount = activeFaces.length;
+  const vFaces = Array.from({ length: vCount }, () => /* @__PURE__ */ new Set());
+  for (let i = 0; i < activeFaces.length; i++) {
+    const f = activeFaces[i];
+    vFaces[f.v0].add(i);
+    vFaces[f.v1].add(i);
+    vFaces[f.v2].add(i);
+  }
+  const parent = new Int32Array(vCount);
+  for (let i = 0; i < vCount; i++) parent[i] = i;
+  const findRoot = (u) => {
+    let r = u;
+    while (parent[r] !== r) r = parent[r];
+    let c = u;
+    while (c !== r) {
+      const nxt = parent[c];
+      parent[c] = r;
+      c = nxt;
+    }
+    return r;
+  };
+  const maxPasses = 12;
+  for (let pass = 0; pass < maxPasses && aliveFaceCount > targetFaceCount; pass++) {
+    const candidates = [];
+    const seenEdge = /* @__PURE__ */ new Set();
+    for (let fIdx = 0; fIdx < activeFaces.length; fIdx++) {
+      const f = activeFaces[fIdx];
+      if (!f) continue;
+      const vs = [findRoot(f.v0), findRoot(f.v1), findRoot(f.v2)];
+      f.v0 = vs[0];
+      f.v1 = vs[1];
+      f.v2 = vs[2];
+      if (f.v0 === f.v1 || f.v1 === f.v2 || f.v2 === f.v0) {
+        activeFaces[fIdx] = null;
+        aliveFaceCount--;
+        continue;
+      }
+      for (let k = 0; k < 3; k++) {
+        const a = vs[k];
+        const b = vs[(k + 1) % 3];
+        const u = Math.min(a, b);
+        const v = Math.max(a, b);
+        const key = `${u},${v}`;
+        if (seenEdge.has(key)) continue;
+        seenEdge.add(key);
+        const pu = pts[u], pv = pts[v];
+        const mx = (pu[0] + pv[0]) * 0.5;
+        const my = (pu[1] + pv[1]) * 0.5;
+        const mz = (pu[2] + pv[2]) * 0.5;
+        const qbU = u * 10, qbV = v * 10;
+        const cU = evalQuadric(qbU, qbV, pu[0], pu[1], pu[2]);
+        const cV = evalQuadric(qbU, qbV, pv[0], pv[1], pv[2]);
+        const cM = evalQuadric(qbU, qbV, mx, my, mz);
+        const edgeLen2 = (pu[0] - pv[0]) ** 2 + (pu[1] - pv[1]) ** 2 + (pu[2] - pv[2]) ** 2;
+        let bestCost = cU;
+        let bestPos = [pu[0], pu[1], pu[2]];
+        if (cV < bestCost) {
+          bestCost = cV;
+          bestPos = [pv[0], pv[1], pv[2]];
+        }
+        if (cM < bestCost) {
+          bestCost = cM;
+          bestPos = [mx, my, mz];
+        }
+        candidates.push({
+          u,
+          v,
+          cost: Math.max(0, bestCost) + edgeLen2 * 1e-4,
+          bestPos
+        });
+      }
+    }
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) => a.cost - b.cost);
+    const lockedVertex = new Uint8Array(vCount);
+    let collapsedInPass = 0;
+    for (const cand of candidates) {
+      if (aliveFaceCount <= targetFaceCount) break;
+      const u = findRoot(cand.u);
+      const v = findRoot(cand.v);
+      if (u === v || lockedVertex[u] || lockedVertex[v]) continue;
+      let flipsNormal = false;
+      for (const fIdx of vFaces[u]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        const v0 = findRoot(f.v0), v1 = findRoot(f.v1), v2 = findRoot(f.v2);
+        if (v0 === v || v1 === v || v2 === v) continue;
+        const p0 = v0 === u ? cand.bestPos : pts[v0];
+        const p1 = v1 === u ? cand.bestPos : pts[v1];
+        const p2 = v2 === u ? cand.bestPos : pts[v2];
+        const o0 = pts[v0], o1 = pts[v1], o2 = pts[v2];
+        const ox = (o1[1] - o0[1]) * (o2[2] - o0[2]) - (o1[2] - o0[2]) * (o2[1] - o0[1]);
+        const oy = (o1[2] - o0[2]) * (o2[0] - o0[0]) - (o1[0] - o0[0]) * (o2[2] - o0[2]);
+        const oz = (o1[0] - o0[0]) * (o2[1] - o0[1]) - (o1[1] - o0[1]) * (o2[0] - o0[0]);
+        const nx = (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]);
+        const ny = (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]);
+        const nz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+        const oLen = Math.hypot(ox, oy, oz);
+        const nLen = Math.hypot(nx, ny, nz);
+        if (nLen < 1e-6 || oLen > 1e-6 && (ox * nx + oy * ny + oz * nz) / (oLen * nLen) < 0.2) {
+          flipsNormal = true;
+          break;
+        }
+      }
+      if (flipsNormal) continue;
+      for (const fIdx of vFaces[v]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        const v0 = findRoot(f.v0), v1 = findRoot(f.v1), v2 = findRoot(f.v2);
+        if (v0 === u || v1 === u || v2 === u) continue;
+        const p0 = v0 === v ? cand.bestPos : pts[v0];
+        const p1 = v1 === v ? cand.bestPos : pts[v1];
+        const p2 = v2 === v ? cand.bestPos : pts[v2];
+        const o0 = pts[v0], o1 = pts[v1], o2 = pts[v2];
+        const ox = (o1[1] - o0[1]) * (o2[2] - o0[2]) - (o1[2] - o0[2]) * (o2[1] - o0[1]);
+        const oy = (o1[2] - o0[2]) * (o2[0] - o0[0]) - (o1[0] - o0[0]) * (o2[2] - o0[2]);
+        const oz = (o1[0] - o0[0]) * (o2[1] - o0[1]) - (o1[1] - o0[1]) * (o2[0] - o0[0]);
+        const nx = (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]);
+        const ny = (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]);
+        const nz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+        const oLen = Math.hypot(ox, oy, oz);
+        const nLen = Math.hypot(nx, ny, nz);
+        if (nLen < 1e-6 || oLen > 1e-6 && (ox * nx + oy * ny + oz * nz) / (oLen * nLen) < 0.2) {
+          flipsNormal = true;
+          break;
+        }
+      }
+      if (flipsNormal) continue;
+      pts[u] = cand.bestPos;
+      parent[v] = u;
+      for (let k = 0; k < 10; k++) {
+        quadrics[u * 10 + k] += quadrics[v * 10 + k];
+      }
+      for (const fIdx of vFaces[v]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        f.v0 = findRoot(f.v0);
+        f.v1 = findRoot(f.v1);
+        f.v2 = findRoot(f.v2);
+        if (f.v0 === f.v1 || f.v1 === f.v2 || f.v2 === f.v0) {
+          activeFaces[fIdx] = null;
+          vFaces[u].delete(fIdx);
+          aliveFaceCount--;
+        } else {
+          vFaces[u].add(fIdx);
+        }
+      }
+      vFaces[v].clear();
+      lockedVertex[u] = 1;
+      lockedVertex[v] = 1;
+      collapsedInPass++;
+    }
+    if (collapsedInPass === 0) break;
+  }
+  const newPositions = [];
+  const compactMap = /* @__PURE__ */ new Map();
+  const getCompactIdx = (oldV) => {
+    const r = findRoot(oldV);
+    let idx = compactMap.get(r);
+    if (idx === void 0) {
+      idx = newPositions.length;
+      newPositions.push(pts[r]);
+      compactMap.set(r, idx);
+    }
+    return idx;
+  };
+  const survivingFaces = [];
+  for (const f of activeFaces) {
+    if (!f) continue;
+    const v0 = getCompactIdx(f.v0);
+    const v1 = getCompactIdx(f.v1);
+    const v2 = getCompactIdx(f.v2);
+    if (v0 === v1 || v1 === v2 || v2 === v0) continue;
+    survivingFaces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: f.materialSlotIndex,
+      groupId: f.groupId
+    });
+  }
+  return survivingFaces.length >= 4 ? { positions: newPositions, faces: survivingFaces } : { positions, faces };
+}
+function mergeCoplanarConvexPolygons(positions, polys, planes) {
+  const MAX_EDGES = 8;
+  const isRingStrictlyConvexIn2d = (ring, planeIdx) => {
+    if (ring.length < 3 || ring.length > MAX_EDGES) return false;
+    const pl = planes[planeIdx];
+    const { axis, sign } = getHaloPlaneProjection(pl, false);
+    const pts2d = ring.map((vIdx) => projectHaloPoint3dTo2d(positions[vIdx], axis, sign));
+    const n = pts2d.length;
+    for (let i = 0; i < n; i++) {
+      const pPrev = pts2d[(i + n - 1) % n];
+      const pCurr = pts2d[i];
+      const pNext = pts2d[(i + 1) % n];
+      const v0x = pNext[0] - pPrev[0];
+      const v0y = pNext[1] - pPrev[1];
+      const v1x = pCurr[0] - pPrev[0];
+      const v1y = pCurr[1] - pPrev[1];
+      const cross = v0x * v1y - v0y * v1x;
+      if (cross >= -1e-5) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const byPlaneMat = /* @__PURE__ */ new Map();
+  for (const poly of polys) {
+    const key = `${poly.planeIdx}:${poly.materialIndex}`;
+    let list = byPlaneMat.get(key);
+    if (!list) {
+      list = [];
+      byPlaneMat.set(key, list);
+    }
+    list.push({ ring: [...poly.ring], planeIdx: poly.planeIdx, materialIndex: poly.materialIndex });
+  }
+  const result = [];
+  for (const groupPolys of byPlaneMat.values()) {
+    let changed = true;
+    while (changed && groupPolys.length > 1) {
+      changed = false;
+      outer: for (let i = 0; i < groupPolys.length; i++) {
+        const polyA = groupPolys[i];
+        if (polyA.ring.length >= MAX_EDGES) continue;
+        for (let j = i + 1; j < groupPolys.length; j++) {
+          const polyB = groupPolys[j];
+          if (polyA.ring.length + polyB.ring.length - 2 > MAX_EDGES) continue;
+          const nA = polyA.ring.length;
+          const nB = polyB.ring.length;
+          for (let ea = 0; ea < nA; ea++) {
+            const u = polyA.ring[ea];
+            const v = polyA.ring[(ea + 1) % nA];
+            for (let eb = 0; eb < nB; eb++) {
+              if (polyB.ring[eb] === v && polyB.ring[(eb + 1) % nB] === u) {
+                const mergedRing = [];
+                for (let k = 0; k <= ea; k++) mergedRing.push(polyA.ring[k]);
+                for (let k = 2; k < nB; k++) mergedRing.push(polyB.ring[(eb + k) % nB]);
+                for (let k = ea + 1; k < nA; k++) mergedRing.push(polyA.ring[k]);
+                if (new Set(mergedRing).size === mergedRing.length && isRingStrictlyConvexIn2d(mergedRing, polyA.planeIdx)) {
+                  polyA.ring = mergedRing;
+                  groupPolys.splice(j, 1);
+                  changed = true;
+                  break outer;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    result.push(...groupPolys);
+  }
+  return result;
+}
+function buildPlaneBsp2dTree(surfaceIndices, surfaces, positions, plane, designatorNegated, bsp2dNodes) {
+  if (surfaceIndices.length === 0) return 4294967295;
+  if (surfaceIndices.length === 1) {
+    return (2147483648 | surfaceIndices[0]) >>> 0;
+  }
+  const { axis, sign } = getHaloPlaneProjection(plane, designatorNegated);
+  const poly2dMap = /* @__PURE__ */ new Map();
+  const centroid2dMap = /* @__PURE__ */ new Map();
+  for (const sIdx of surfaceIndices) {
+    const ring = surfaces[sIdx].ring;
+    const pts2d = ring.map((vIdx) => {
+      const p2d = projectHaloPoint3dTo2d(positions[vIdx], axis, sign);
+      return p2d;
+    });
+    if (designatorNegated) pts2d.reverse();
+    poly2dMap.set(sIdx, pts2d);
+    let cx = 0, cy = 0;
+    for (const p of pts2d) {
+      cx += p[0];
+      cy += p[1];
+    }
+    centroid2dMap.set(sIdx, [cx / pts2d.length, cy / pts2d.length]);
+  }
+  const MAX_BSP2D_DEPTH = 24;
+  const build2dRecursive = (sList, depth) => {
+    if (sList.length === 1 || depth >= MAX_BSP2D_DEPTH || bsp2dNodes.length >= 16384) {
+      return (2147483648 | sList[0]) >>> 0;
+    }
+    let bestLine = null;
+    let bestLeft = [];
+    let bestRight = [];
+    let bestScore = Infinity;
+    for (const candSurf of sList) {
+      const pts = poly2dMap.get(candSurf);
+      for (let i = 0; i < pts.length; i++) {
+        const p0 = pts[i];
+        const p1 = pts[(i + 1) % pts.length];
+        const rawNi = p1[1] - p0[1];
+        const rawNj = p0[0] - p1[0];
+        const len = Math.hypot(rawNi, rawNj);
+        if (len < 1e-6) continue;
+        const ni = rawNi / len;
+        const nj = rawNj / len;
+        const d = ni * p0[0] + nj * p0[1];
+        const left = [];
+        const right = [];
+        for (const otherSurf of sList) {
+          if (otherSurf === candSurf) {
+            left.push(otherSurf);
+            continue;
+          }
+          const oPts = poly2dMap.get(otherSurf);
+          let minDist = Infinity;
+          let maxDist = -Infinity;
+          for (const op of oPts) {
+            const dist = ni * op[0] + nj * op[1] - d;
+            if (dist < minDist) minDist = dist;
+            if (dist > maxDist) maxDist = dist;
+          }
+          if (maxDist <= 1e-4) {
+            left.push(otherSurf);
+          } else if (minDist >= -1e-4) {
+            right.push(otherSurf);
+          } else {
+            const c = centroid2dMap.get(otherSurf);
+            const cDist = ni * c[0] + nj * c[1] - d;
+            if (cDist < 0) left.push(otherSurf);
+            else right.push(otherSurf);
+          }
+        }
+        if (left.length > 0 && right.length > 0) {
+          const score = Math.abs(left.length - right.length);
+          if (score < bestScore) {
+            bestScore = score;
+            bestLine = { ni, nj, d };
+            bestLeft = left;
+            bestRight = right;
+            if (score <= 1) break;
+          }
+        }
+      }
+      if (bestScore <= 1) break;
+    }
+    if (!bestLine || bestLeft.length === 0 || bestRight.length === 0) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const sIdx of sList) {
+        const [cx, cy] = centroid2dMap.get(sIdx);
+        if (cx < minX) minX = cx;
+        if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy;
+        if (cy > maxY) maxY = cy;
+      }
+      const splitX = maxX - minX >= maxY - minY;
+      const sorted = [...sList].sort((a, b) => {
+        const ca = centroid2dMap.get(a);
+        const cb = centroid2dMap.get(b);
+        return splitX ? ca[0] - cb[0] : ca[1] - cb[1];
+      });
+      const mid = Math.max(1, Math.floor(sorted.length / 2));
+      bestLeft = sorted.slice(0, mid);
+      bestRight = sorted.slice(mid);
+      const cA = centroid2dMap.get(bestLeft[bestLeft.length - 1]);
+      const cB = centroid2dMap.get(bestRight[0]);
+      bestLine = splitX ? { ni: 1, nj: 0, d: (cA[0] + cB[0]) * 0.5 } : { ni: 0, nj: 1, d: (cA[1] + cB[1]) * 0.5 };
+    }
+    const nodeIdx = bsp2dNodes.length;
+    bsp2dNodes.push({
+      planeI: bestLine.ni,
+      planeJ: bestLine.nj,
+      planeD: bestLine.d,
+      leftChild: 4294967295,
+      rightChild: 4294967295
+    });
+    const leftChild = build2dRecursive(bestLeft, depth + 1);
+    const rightChild = build2dRecursive(bestRight, depth + 1);
+    bsp2dNodes[nodeIdx].leftChild = leftChild >>> 0;
+    bsp2dNodes[nodeIdx].rightChild = rightChild >>> 0;
+    return nodeIdx;
+  };
+  return build2dRecursive(surfaceIndices, 0);
+}
+function compileMeshCollisionBspData(mesh, materialCount, options) {
+  const mode = options?.mode ?? "auto";
+  if (mode === "box" || mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0) {
+    return null;
+  }
+  const inputTriangleCount = mesh.rawFaces.length;
+  const maxFaceBudget = mode === "exact" ? Math.max(256, Math.min(4096, options?.targetFaces ?? 2048)) : Math.max(64, Math.min(2048, options?.targetFaces ?? 800));
+  const welded = weldCollisionPositions(mesh.rawPositions, mesh.rawFaces, 1e-4);
+  if (welded.positions.length < 3 || welded.faces.length === 0) {
+    return null;
+  }
+  const decimated = welded.faces.length > maxFaceBudget ? decimateCollisionMeshQem(welded.positions, welded.faces, maxFaceBudget) : welded;
+  const positions = decimated.positions;
+  const activeFaces = decimated.faces;
+  const planes = [];
+  const findOrAddPlane = (nx, ny, nz, d) => {
+    for (let i = 0; i < planes.length; i++) {
+      const p = planes[i];
+      if (Math.abs(p[0] - nx) < 1e-4 && Math.abs(p[1] - ny) < 1e-4 && Math.abs(p[2] - nz) < 1e-4 && Math.abs(p[3] - d) < 1e-3) {
+        return { planeIdx: i, negated: false };
+      }
+      if (Math.abs(p[0] + nx) < 1e-4 && Math.abs(p[1] + ny) < 1e-4 && Math.abs(p[2] + nz) < 1e-4 && Math.abs(p[3] + d) < 1e-3) {
+        return { planeIdx: i, negated: true };
+      }
+    }
+    const idx = planes.length;
+    planes.push([nx, ny, nz, d]);
+    return { planeIdx: idx, negated: false };
+  };
+  const initialPolys = [];
+  const planeBySurfaceDesignator = [];
+  const findOrAddDirectedPlane = (nx, ny, nz, d) => {
+    for (let i = 0; i < planeBySurfaceDesignator.length; i++) {
+      const p = planeBySurfaceDesignator[i];
+      if (Math.abs(p[0] - nx) < 1e-4 && Math.abs(p[1] - ny) < 1e-4 && Math.abs(p[2] - nz) < 1e-4 && Math.abs(p[3] - d) < 1e-3) {
+        return i;
+      }
+    }
+    const idx = planeBySurfaceDesignator.length;
+    planeBySurfaceDesignator.push([nx, ny, nz, d]);
+    return idx;
+  };
+  for (const face of activeFaces) {
+    const p0 = positions[face.v0];
+    const p1 = positions[face.v1];
+    const p2 = positions[face.v2];
+    if (!p0 || !p1 || !p2) continue;
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const area2 = Math.hypot(cx, cy, cz);
+    if (area2 < 1e-6) continue;
+    const nx = cx / area2;
+    const ny = cy / area2;
+    const nz = cz / area2;
+    const d = nx * p0[0] + ny * p0[1] + nz * p0[2];
+    const dirPlaneIdx = findOrAddDirectedPlane(nx, ny, nz, d);
+    const pl = planeBySurfaceDesignator[dirPlaneIdx];
+    const winding = cx * pl[0] + cy * pl[1] + cz * pl[2];
+    const ring = winding >= 0 ? [face.v0, face.v1, face.v2] : [face.v0, face.v2, face.v1];
+    const matIdx = Math.max(0, Math.min(materialCount - 1, face.materialSlotIndex));
+    initialPolys.push({ ring, planeIdx: dirPlaneIdx, materialIndex: matIdx });
+  }
+  if (initialPolys.length === 0) {
+    return null;
+  }
+  const mergedPolys = mergeCoplanarConvexPolygons(positions, initialPolys, planeBySurfaceDesignator);
+  const dirPlaneToDesignator = new Int32Array(planeBySurfaceDesignator.length);
+  for (let i = 0; i < planeBySurfaceDesignator.length; i++) {
+    const dp = planeBySurfaceDesignator[i];
+    const { planeIdx, negated } = findOrAddPlane(dp[0], dp[1], dp[2], dp[3]);
+    dirPlaneToDesignator[i] = negated ? 2147483648 | planeIdx | 0 : planeIdx;
+  }
+  let isConcave = false;
+  outerConvexCheck: for (let i = 0; i < mergedPolys.length; i++) {
+    const dp = planeBySurfaceDesignator[mergedPolys[i].planeIdx];
+    for (let v = 0; v < positions.length; v++) {
+      const pt = positions[v];
+      const dist = dp[0] * pt[0] + dp[1] * pt[1] + dp[2] * pt[2] - dp[3];
+      if (dist > 1e-3) {
+        isConcave = true;
+        break outerConvexCheck;
+      }
+    }
+  }
+  const surfaceFlags = isConcave ? 1 : 0;
+  const surfaces = [];
+  const edges = [];
+  const vertexFirstEdge = new Array(positions.length).fill(-1);
+  const openHalfEdgeMap = /* @__PURE__ */ new Map();
+  for (let surfIdx = 0; surfIdx < mergedPolys.length; surfIdx++) {
+    const poly = mergedPolys[surfIdx];
+    const designator = dirPlaneToDesignator[poly.planeIdx] >>> 0;
+    const ring = poly.ring;
+    const n = ring.length;
+    const ringEdges = new Array(n);
+    for (let point = 0; point < n; point++) {
+      const from = ring[point];
+      const to = ring[(point + 1) % n];
+      const revKey = `${to},${from}`;
+      let edgeIndex = openHalfEdgeMap.get(revKey) ?? -1;
+      if (edgeIndex !== -1 && edges[edgeIndex].surfaceIndices[1] === -1) {
+        edges[edgeIndex].surfaceIndices[1] = surfIdx;
+        openHalfEdgeMap.delete(revKey);
+      } else {
+        edgeIndex = edges.length;
+        edges.push({
+          vertexIndices: [from, to],
+          edgeIndices: [-1, -1],
+          surfaceIndices: [surfIdx, -1]
+        });
+        const fwdKey = `${from},${to}`;
+        if (!openHalfEdgeMap.has(fwdKey)) {
+          openHalfEdgeMap.set(fwdKey, edgeIndex);
+        }
+      }
+      if (vertexFirstEdge[from] === -1) {
+        vertexFirstEdge[from] = edgeIndex;
+      }
+      ringEdges[point] = edgeIndex;
+    }
+    for (let point = 0; point < n; point++) {
+      const edge = edges[ringEdges[point]];
+      const side = edge.surfaceIndices[1] === surfIdx ? 1 : 0;
+      edge.edgeIndices[side] = ringEdges[(point + 1) % n];
+    }
+    surfaces.push({
+      planeDesignator: designator,
+      firstEdgeIndex: ringEdges[0],
+      flags: surfaceFlags,
+      materialIndex: poly.materialIndex,
+      ring
+    });
+  }
+  for (let e = 0; e < edges.length; e++) {
+    const [v0, v1] = edges[e].vertexIndices;
+    if (vertexFirstEdge[v0] === -1) vertexFirstEdge[v0] = e;
+    if (vertexFirstEdge[v1] === -1) vertexFirstEdge[v1] = e;
+  }
+  const vertices = positions.map((pt, idx) => ({
+    point: [pt[0], pt[1], pt[2]],
+    firstEdgeIndex: vertexFirstEdge[idx] >= 0 ? vertexFirstEdge[idx] : 0
+  }));
+  const EPS = 1e-4;
+  const clipPolyAgainstPlane = (pts, plane) => {
+    let maxD = -Infinity;
+    let minD = Infinity;
+    const dists = new Float64Array(pts.length);
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const d = plane[0] * p[0] + plane[1] * p[1] + plane[2] * p[2] - plane[3];
+      dists[i] = d;
+      if (d > maxD) maxD = d;
+      if (d < minD) minD = d;
+    }
+    if (Math.abs(maxD) <= EPS && Math.abs(minD) <= EPS) {
+      return { front: null, back: null, state: "coplanar" };
+    }
+    if (minD >= -EPS) {
+      return { front: pts, back: null, state: "front" };
+    }
+    if (maxD <= EPS) {
+      return { front: null, back: pts, state: "back" };
+    }
+    const frontPts = [];
+    const backPts = [];
+    for (let i = 0; i < pts.length; i++) {
+      const j = (i + 1) % pts.length;
+      const pA = pts[i], pB = pts[j];
+      const dA = dists[i], dB = dists[j];
+      if (dA >= -EPS) frontPts.push(pA);
+      if (dA <= EPS) backPts.push(pA);
+      if (dA > EPS && dB < -EPS || dA < -EPS && dB > EPS) {
+        const t = dA / (dA - dB);
+        const inter = [
+          pA[0] + t * (pB[0] - pA[0]),
+          pA[1] + t * (pB[1] - pA[1]),
+          pA[2] + t * (pB[2] - pA[2])
+        ];
+        frontPts.push(inter);
+        backPts.push(inter);
+      }
+    }
+    return {
+      front: frontPts.length >= 3 ? frontPts : null,
+      back: backPts.length >= 3 ? backPts : null,
+      state: "split"
+    };
+  };
+  const computeCentroid = (pts) => {
+    let cx = 0, cy = 0, cz = 0;
+    for (const p of pts) {
+      cx += p[0];
+      cy += p[1];
+      cz += p[2];
+    }
+    const inv = 1 / Math.max(1, pts.length);
+    return [cx * inv, cy * inv, cz * inv];
+  };
+  const bsp3dNodes = [];
+  const defaultBackLeaf = isConcave ? 2147483648 : 4294967295;
+  const buildTree = (polys, usedPlanes, depth) => {
+    if (polys.length === 0 || depth >= 52 || bsp3dNodes.length >= 8192) {
+      return defaultBackLeaf;
+    }
+    const uniquePlanes = [];
+    const seenP = /* @__PURE__ */ new Set();
+    for (const p of polys) {
+      if (!usedPlanes.has(p.planeIdx) && !seenP.has(p.planeIdx)) {
+        seenP.add(p.planeIdx);
+        uniquePlanes.push(p.planeIdx);
+      }
+    }
+    if (uniquePlanes.length === 0) {
+      return defaultBackLeaf;
+    }
+    const step = Math.max(1, Math.floor(uniquePlanes.length / 24));
+    let bestPlane = uniquePlanes[0];
+    let bestScore = Infinity;
+    for (let idx = 0; idx < uniquePlanes.length; idx += step) {
+      const pIdx = uniquePlanes[idx];
+      const pl2 = planes[pIdx];
+      let frontCount = 0, backCount = 0, splitCount = 0;
+      for (const poly of polys) {
+        if (poly.planeIdx === pIdx) continue;
+        const c = clipPolyAgainstPlane(poly.pts, pl2);
+        if (c.state === "front") frontCount++;
+        else if (c.state === "back") backCount++;
+        else if (c.state === "split") splitCount++;
+      }
+      const score = !isConcave && frontCount === 0 && splitCount === 0 ? -1e3 - backCount : splitCount * 3 + Math.abs(frontCount - backCount);
+      if (score < bestScore) {
+        bestScore = score;
+        bestPlane = pIdx;
+      }
+    }
+    const pl = planes[bestPlane];
+    const frontList = [];
+    const backList = [];
+    for (const poly of polys) {
+      if (poly.planeIdx === bestPlane) continue;
+      const c = clipPolyAgainstPlane(poly.pts, pl);
+      if (c.state === "front") {
+        frontList.push(poly);
+      } else if (c.state === "back") {
+        backList.push(poly);
+      } else if (c.state === "split") {
+        if (depth >= 18 || polys.length > 400) {
+          const dC = pl[0] * poly.centroid[0] + pl[1] * poly.centroid[1] + pl[2] * poly.centroid[2] - pl[3];
+          if (dC >= 0) frontList.push(poly);
+          else backList.push(poly);
+        } else {
+          if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
+          if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+        }
+      }
+    }
+    const nodeIdx = bsp3dNodes.length;
+    bsp3dNodes.push([bestPlane, defaultBackLeaf, 2147483648]);
+    const nextUsed = new Set(usedPlanes);
+    nextUsed.add(bestPlane);
+    const frontChild = frontList.length === 0 ? 2147483648 : buildTree(frontList, nextUsed, depth + 1);
+    const backChild = backList.length === 0 ? defaultBackLeaf : buildTree(backList, nextUsed, depth + 1);
+    bsp3dNodes[nodeIdx][1] = backChild >>> 0;
+    bsp3dNodes[nodeIdx][2] = frontChild >>> 0;
+    return nodeIdx;
+  };
+  const bspPolys = surfaces.map((s) => {
+    const pts = s.ring.map((vIdx) => positions[vIdx]);
+    return {
+      pts,
+      planeIdx: (s.planeDesignator & 2147483647) >>> 0,
+      centroid: computeCentroid(pts)
+    };
+  });
+  buildTree(bspPolys, /* @__PURE__ */ new Set(), 0);
+  if (bsp3dNodes.length === 0) {
+    return null;
+  }
+  const bsp2dNodes = [];
+  const bsp2dReferences = [];
+  if (!isConcave) {
+    const byDesignator = /* @__PURE__ */ new Map();
+    for (let sIdx = 0; sIdx < surfaces.length; sIdx++) {
+      const des = surfaces[sIdx].planeDesignator >>> 0;
+      let list = byDesignator.get(des);
+      if (!list) {
+        list = [];
+        byDesignator.set(des, list);
+      }
+      list.push(sIdx);
+    }
+    for (const [designator, sIndices] of byDesignator.entries()) {
+      const rawPlaneIdx = (designator & 2147483647) >>> 0;
+      const isNeg = (designator & 2147483648) !== 0;
+      const rootNode = buildPlaneBsp2dTree(
+        sIndices,
+        surfaces,
+        positions,
+        planes[rawPlaneIdx],
+        isNeg,
+        bsp2dNodes
+      );
+      bsp2dReferences.push([designator >>> 0, rootNode >>> 0]);
+    }
+  } else {
+    for (let sIdx = 0; sIdx < surfaces.length; sIdx++) {
+      const rawPlaneIdx = (surfaces[sIdx].planeDesignator & 2147483647) >>> 0;
+      const leafSurfRef = (2147483648 | sIdx) >>> 0;
+      bsp2dReferences.push([rawPlaneIdx, leafSurfRef]);
+      bsp2dReferences.push([(2147483648 | rawPlaneIdx) >>> 0, leafSurfRef]);
+    }
+  }
+  const leafFlags = isConcave ? 1 : 0;
+  const leaves = [
+    [leafFlags, bsp2dReferences.length, 0]
+  ];
+  const byteSize = bsp3dNodes.length * 12 + planes.length * 16 + leaves.length * 8 + bsp2dReferences.length * 8 + bsp2dNodes.length * 20 + surfaces.length * 12 + edges.length * 24 + vertices.length * 16;
+  return {
+    bsp3dNodes,
+    planes,
+    leaves,
+    bsp2dReferences,
+    bsp2dNodes,
+    surfaces: surfaces.map(({ planeDesignator, firstEdgeIndex, flags, materialIndex }) => ({
+      planeDesignator,
+      firstEdgeIndex,
+      flags,
+      materialIndex
+    })),
+    edges,
+    vertices,
+    byteSize,
+    stats: {
+      mode,
+      inputTriangles: inputTriangleCount,
+      weldedVertices: positions.length,
+      decimatedTriangles: activeFaces.length,
+      mergedSurfaces: surfaces.length,
+      planes: planes.length,
+      edges: edges.length,
+      bsp3dNodes: bsp3dNodes.length,
+      bsp2dNodes: bsp2dNodes.length,
+      isConcave
+    }
+  };
+}
 var OBJECT_GROUP_SPEC = {
   scenery: {
     structName: "Scenery",
@@ -34535,6 +35655,74 @@ var OBJECT_GROUP_SPEC = {
     tertiaryFourCC: fourCCFromString("obje")
   }
 };
+
+// ../core/src/map/hs-decompiler.ts
+var HS_SCRIPT_TYPES = {
+  0: "startup",
+  1: "dormant",
+  2: "continuous",
+  3: "static",
+  4: "stub"
+};
+var HS_VALUE_TYPES = {
+  0: "unparsed",
+  1: "special_form",
+  2: "function_name",
+  3: "passthrough",
+  4: "void",
+  5: "boolean",
+  6: "real",
+  7: "short",
+  8: "long",
+  9: "string",
+  10: "script",
+  11: "trigger_volume",
+  12: "cutscene_flag",
+  13: "cutscene_camera_point",
+  14: "cutscene_title",
+  15: "cutscene_recording",
+  16: "device_group",
+  17: "ai",
+  18: "ai_command_list",
+  19: "starting_profile",
+  20: "conversation",
+  21: "navpoint",
+  22: "hud_message",
+  23: "object_list",
+  24: "sound",
+  25: "effect",
+  26: "damage",
+  27: "looping_sound",
+  28: "animation_graph",
+  29: "actor_variant",
+  30: "damage_effect",
+  31: "object_definition",
+  32: "game_difficulty",
+  33: "team",
+  34: "ai_default_state",
+  35: "actor_type",
+  36: "hud_corner",
+  37: "object",
+  38: "unit",
+  39: "vehicle",
+  40: "weapon",
+  41: "device",
+  42: "scenery",
+  43: "object_name",
+  44: "unit_name",
+  45: "vehicle_name",
+  46: "weapon_name",
+  47: "device_name",
+  48: "scenery_name"
+};
+
+// ../core/src/map/hs-compiler.ts
+var SCRIPT_TYPE_BY_NAME = Object.fromEntries(
+  Object.entries(HS_SCRIPT_TYPES).map(([k, v]) => [v, Number(k)])
+);
+var VALUE_TYPE_BY_NAME = Object.fromEntries(
+  Object.entries(HS_VALUE_TYPES).map(([k, v]) => [v, Number(k)])
+);
 
 // electron/recent-maps.ts
 var fs = __toESM(require("fs"));
@@ -36830,7 +38018,8 @@ async function exportUvTemplateFlow(options) {
       scale: options.scale,
       flipYz: options.flipYz,
       centerOrigin: options.centerOrigin,
-      forceAutoUv: options.forceAutoUv
+      forceAutoUv: options.forceAutoUv,
+      uvUnwrapMode: options.uvUnwrapMode
     });
     const previewDataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
     if (options.previewOnly) {
@@ -37744,6 +38933,110 @@ import_electron3.app.whenReady().then(() => {
     "3d:exportBsp",
     (_e, bspIndex, format, outputPath) => exportBsp3dFlow(bspIndex, format, outputPath)
   );
+  import_electron3.ipcMain.handle("hs:decompile", async () => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    const { promise } = sendWorkerRequest({ type: "decompileHaloScript" }, sendLog);
+    return promise;
+  });
+  import_electron3.ipcMain.handle("hs:compile", async (_e, hscSource) => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest(
+      { type: "compileHaloScript", hscSource },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok) {
+      currentMapModified = true;
+      sendLog("info", `Compiled ${res.compiledScripts} HaloScript(s) and ${res.compiledGlobals} global(s) into scenario (${res.syntaxNodesUsed} syntax nodes). Use File > Save to write changes.`);
+    }
+    return res;
+  });
+  import_electron3.ipcMain.handle(
+    "hs:setupEntities",
+    async (_e, required) => {
+      if (!currentMapPath) return { ok: false, message: "No map is open." };
+      if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+      const { promise } = sendWorkerRequest({ type: "setupScenarioScriptEntities", required }, sendLog);
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          "info",
+          `Auto-configured scenario script entities (+${res.addedObjectNames.length} object names, +${res.addedTriggerVolumes.length} trigger volumes, +${res.addedCameraPoints.length} camera points).`
+        );
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle("coll:extractWireframe", async (_e, collTagIndex) => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    const { promise } = sendWorkerRequest({ type: "extractCollisionWireframe", collTagIndex }, sendLog);
+    return promise;
+  });
+  import_electron3.ipcMain.handle("convert:collToGbxmodel", async (_e, collTagIndex, targetPath) => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest({ type: "convertCollisionToGbxmodel", collTagIndex, targetPath }, sendLog);
+    const res = await promise;
+    if (res.ok) {
+      currentMapModified = true;
+      sendLog("info", res.summary);
+    }
+    return res;
+  });
+  import_electron3.ipcMain.handle("convert:sbspToScenery", async (_e, bspTagIndex, targetPath) => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest({ type: "convertSbspToScenery", bspTagIndex, targetPath }, sendLog);
+    const res = await promise;
+    if (res.ok) {
+      currentMapModified = true;
+      sendLog("info", res.summary);
+    }
+    return res;
+  });
+  import_electron3.ipcMain.handle("convert:objectTagClass", async (_e, sourceTagIndex, targetGroup, targetPath) => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest(
+      { type: "convertObjectTagClass", sourceTagIndex, targetGroup, targetPath },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok) {
+      currentMapModified = true;
+      sendLog("info", res.summary);
+    }
+    return res;
+  });
+  import_electron3.ipcMain.handle("map:cleanOpenSauceYelo", async () => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest({ type: "cleanOpenSauceYelo" }, sendLog);
+    const res = await promise;
+    if (res.ok && res.cleanedReferences > 0) {
+      currentMapModified = true;
+      sendLog("info", `Cleaned ${res.cleanedReferences} OpenSauce (.yelo / .gelo) reference(s).`);
+    }
+    return res;
+  });
+  import_electron3.ipcMain.handle("map:scanTagErrors", async () => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    const { promise } = sendWorkerRequest({ type: "scanMapTagErrors" }, sendLog);
+    return promise;
+  });
+  import_electron3.ipcMain.handle("map:globalReplaceTagReference", async (_e, fromTagId, toTagId) => {
+    if (!currentMapPath) return { ok: false, message: "No map is open." };
+    if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+    const { promise } = sendWorkerRequest({ type: "globalReplaceTagReference", fromTagId, toTagId }, sendLog);
+    const res = await promise;
+    if (res.ok && res.replacedCount > 0) {
+      currentMapModified = true;
+      sendLog("info", `Globally replaced ${res.replacedCount} tag reference(s) across the map.`);
+    }
+    return res;
+  });
   import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
   import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());

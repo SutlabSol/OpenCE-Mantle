@@ -134,7 +134,10 @@ export default function BuildObjectTagDialog({
   const [flipYz, setFlipYz] = useState<boolean>(false);
   const [centerOrigin, setCenterOrigin] = useState<boolean>(true);
   const [forceAutoUv, setForceAutoUv] = useState<boolean>(false);
+  const [uvUnwrapMode, setUvUnwrapMode] = useState<'box' | 'per_triangle' | 'smart'>('box');
   const [multiBoxCollision, setMultiBoxCollision] = useState<boolean>(true);
+  const [collisionMode, setCollisionMode] = useState<'auto' | 'exact' | 'box'>('auto');
+  const [targetCollisionFaces, setTargetCollisionFaces] = useState<number>(800);
   const [materialType, setMaterialType] = useState<number>(7); // 7 = metal thick (for Scenery)
   const [slotMaterialTypes, setSlotMaterialTypes] = useState<number[]>([7]);
 
@@ -196,7 +199,8 @@ export default function BuildObjectTagDialog({
           scale,
           flipYz,
           centerOrigin,
-          forceAutoUv,
+          forceAutoUv: forceAutoUv || uvUnwrapMode !== 'box',
+          uvUnwrapMode,
         });
         const uvPromise =
           typeof window.opence.exportUvTemplate === 'function'
@@ -206,7 +210,8 @@ export default function BuildObjectTagDialog({
                 scale,
                 flipYz,
                 centerOrigin,
-                forceAutoUv,
+                forceAutoUv: forceAutoUv || uvUnwrapMode !== 'box',
+                uvUnwrapMode,
                 previewOnly: true,
               })
             : Promise.resolve({ ok: false } as any);
@@ -237,7 +242,7 @@ export default function BuildObjectTagDialog({
     return () => {
       cancelled = true;
     };
-  }, [objFilePath, scale, flipYz, centerOrigin, forceAutoUv]);
+  }, [objFilePath, scale, flipYz, centerOrigin, forceAutoUv, uvUnwrapMode]);
 
   if (!open) return null;
 
@@ -285,7 +290,8 @@ export default function BuildObjectTagDialog({
       scale,
       flipYz,
       centerOrigin,
-      forceAutoUv,
+      forceAutoUv: forceAutoUv || uvUnwrapMode !== 'box',
+      uvUnwrapMode,
       previewOnly: false,
     });
     if (res.ok && res.outputPath) {
@@ -338,8 +344,11 @@ export default function BuildObjectTagDialog({
         scale,
         flipYz,
         centerOrigin,
-        forceAutoUv,
-        multiBoxCollision,
+        forceAutoUv: forceAutoUv || uvUnwrapMode !== 'box',
+        uvUnwrapMode,
+        multiBoxCollision: collisionMode !== 'box',
+        collisionMode,
+        targetCollisionFaces,
         materialType: effectiveMaterialType,
         slotMaterialTypes: effectiveSlotMaterials,
         templateTagIndex: templateTagIndex >= 0 ? templateTagIndex : undefined,
@@ -549,8 +558,43 @@ export default function BuildObjectTagDialog({
               padding: 14,
             }}
           >
-            <div style={{ fontWeight: 600, fontSize: 12, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 }}>
-              2. Select 3D Model File (.OBJ) & Collision Geometry
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <div style={{ fontWeight: 600, fontSize: 12, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                2. Select 3D Model File (.OBJ) & Collision Geometry
+              </div>
+              {meshSummary && !analyzing && (
+                <div
+                  data-testid="obj-face-counter-badge"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: '4px 10px',
+                    borderRadius: 5,
+                    backgroundColor: 'rgba(56, 189, 248, 0.14)',
+                    border: '1px solid rgba(56, 189, 248, 0.45)',
+                    fontSize: 12,
+                    fontFamily: 'monospace',
+                    color: '#e0f2fe',
+                  }}
+                >
+                  <span>
+                    Faces / Triangles: <strong style={{ color: '#38bdf8', fontSize: 13 }}>{(meshSummary.triangleCount ?? 0).toLocaleString()}</strong>
+                  </span>
+                  <span style={{ color: '#64748b' }}>|</span>
+                  <span>
+                    Vertices: <strong>{(meshSummary.vertexCount ?? 0).toLocaleString()}</strong>
+                  </span>
+                  {meshSummary.collisionPreview && collisionMode !== 'box' && (
+                    <>
+                      <span style={{ color: '#64748b' }}>|</span>
+                      <span>
+                        Collision Surfaces: <strong style={{ color: '#34d399' }}>{meshSummary.collisionPreview.mergedSurfaces}</strong>
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -655,17 +699,59 @@ export default function BuildObjectTagDialog({
                 Center X/Y & Rest on Z=0
               </label>
 
-              <label
-                title="When enabled (recommended), compiles a true 3D Polyhedral Mesh Collision BSP directly from the triangulated .OBJ so sloped ramps, bridges, curbs, arches, and concave shapes have exact per-triangle collision. Uncheck only to use a simple 6-plane rectangular bounding box."
-                style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12 }}
-              >
-                <input
-                  type="checkbox"
-                  checked={multiBoxCollision}
-                  onChange={(e) => setMultiBoxCollision(e.target.checked)}
-                />
-                Exact 3D Mesh Collision BSP (Slopes, Ramps &amp; Concavities)
-              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, color: '#a1a1aa' }}>Collision BSP Mode:</span>
+                <select
+                  value={collisionMode}
+                  onChange={(e) => {
+                    const next = e.target.value as 'auto' | 'exact' | 'box';
+                    setCollisionMode(next);
+                    setMultiBoxCollision(next !== 'box');
+                  }}
+                  style={{
+                    padding: '4px 8px',
+                    backgroundColor: '#18181b',
+                    border: '1px solid #3f3f46',
+                    borderRadius: 4,
+                    color: '#f4f4f5',
+                    fontSize: 12,
+                  }}
+                >
+                  <option value="auto">
+                    Auto (1:1 Exact + Blender Weld / Coplanar Merge / QEM Decimate)
+                  </option>
+                  <option value="exact">
+                    1:1 Exact Mesh (Every Polygon up to 2,048 Faces)
+                  </option>
+                  <option value="box">
+                    Simple 6-Plane Bounding Box
+                  </option>
+                </select>
+                {collisionMode === 'auto' && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ fontSize: 11, color: '#a1a1aa' }}>Max Faces:</span>
+                    <input
+                      type="number"
+                      min={64}
+                      max={2048}
+                      step={64}
+                      value={targetCollisionFaces}
+                      onChange={(e) =>
+                        setTargetCollisionFaces(Math.max(64, Math.min(2048, parseInt(e.target.value, 10) || 800)))
+                      }
+                      style={{
+                        width: 64,
+                        padding: '3px 6px',
+                        backgroundColor: '#18181b',
+                        border: '1px solid #3f3f46',
+                        borderRadius: 4,
+                        color: '#f4f4f5',
+                        fontSize: 11,
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Tag-Type-Scoped Surface Material Configuration */}
@@ -875,12 +961,17 @@ export default function BuildObjectTagDialog({
               >
                 <div>
                   <strong>{(meshSummary.vertexCount ?? 0).toLocaleString()}</strong> vertices •{' '}
-                  <strong>{(meshSummary.triangleCount ?? 0).toLocaleString()}</strong> triangles •{' '}
+                  <strong>{(meshSummary.triangleCount ?? 0).toLocaleString()}</strong> faces (triangles) •{' '}
                   {meshSummary.hasUvCoordinates && !forceAutoUv ? (
                     <span>Using OBJ UV coordinates ({(meshSummary.uvCoordCount ?? 0).toLocaleString()} vt)</span>
                   ) : (
                     <span style={{ color: '#fde68a' }}>
-                      Auto-Unwrapped via Built-In 6-Face Box UV Atlas
+                      Auto-Unwrapped via{' '}
+                      {uvUnwrapMode === 'per_triangle'
+                        ? 'Per-Triangle Ordered Grid (Every Triangle Separated)'
+                        : uvUnwrapMode === 'smart'
+                          ? 'Smart Angle-Based UV Unwrap'
+                          : '6-Side Box Unfold Atlas'}
                     </span>
                   )}
                 </div>
@@ -898,6 +989,48 @@ export default function BuildObjectTagDialog({
                   ).toFixed(2)}
                   )
                 </div>
+                {meshSummary.collisionPreview && collisionMode !== 'box' && (
+                  <div
+                    style={{
+                      width: '100%',
+                      paddingTop: 6,
+                      borderTop: '1px solid rgba(16, 185, 129, 0.25)',
+                      fontSize: 11,
+                      color: '#6ee7b7',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      flexWrap: 'wrap',
+                      gap: 6,
+                    }}
+                  >
+                    <span>
+                      <strong>Blender-Parity Collision BSP:</strong>{' '}
+                      {meshSummary.collisionPreview.weldedVertices} welded verts •{' '}
+                      {meshSummary.collisionPreview.mergedSurfaces} convex surfaces (merged from{' '}
+                      {meshSummary.collisionPreview.decimatedTriangles} tris) •{' '}
+                      {meshSummary.collisionPreview.planes} 3D planes •{' '}
+                      {meshSummary.collisionPreview.bsp3dNodes} 3D nodes
+                      {meshSummary.collisionPreview.bsp2dNodes > 0
+                        ? ` • ${meshSummary.collisionPreview.bsp2dNodes} 2D nodes`
+                        : ''}
+                    </span>
+                    <span
+                      style={{
+                        backgroundColor: meshSummary.collisionPreview.isConcave
+                          ? 'rgba(56, 189, 248, 0.2)'
+                          : 'rgba(16, 185, 129, 0.2)',
+                        color: meshSummary.collisionPreview.isConcave ? '#7dd3fc' : '#a7f3d0',
+                        padding: '1px 6px',
+                        borderRadius: 3,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {meshSummary.collisionPreview.isConcave
+                        ? 'Concave 2-Sided Surface BSP (No Ghost Walls)'
+                        : 'Closed Convex Hull BSP'}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -986,8 +1119,29 @@ export default function BuildObjectTagDialog({
                         checked={forceAutoUv}
                         onChange={(e) => setForceAutoUv(e.target.checked)}
                       />
-                      Force Built-In 6-Face Box Atlas UV Unwrap (+X, -X, +Y, -Y, +Z, -Z)
+                      Override OBJ UVs with Built-In Unwrapper:
                     </label>
+
+                    <select
+                      value={uvUnwrapMode}
+                      onChange={(e) => {
+                        setUvUnwrapMode(e.target.value as 'box' | 'per_triangle' | 'smart');
+                        setForceAutoUv(true);
+                      }}
+                      style={{
+                        padding: '5px 8px',
+                        backgroundColor: '#18181b',
+                        border: '1px solid #3f3f46',
+                        borderRadius: 4,
+                        color: '#f4f4f5',
+                        fontSize: 12,
+                        fontWeight: 600,
+                      }}
+                    >
+                      <option value="box">6-Side Box Unfold (+X, -X, +Y, -Y, +Z, -Z)</option>
+                      <option value="per_triangle">Per-Triangle Grid (Every Triangle Separated in Order)</option>
+                      <option value="smart">Smart Angle Unwrap (Connected Coplanar Islands)</option>
+                    </select>
 
                     <button
                       type="button"
@@ -1008,8 +1162,10 @@ export default function BuildObjectTagDialog({
                     </button>
                   </div>
                   <div style={{ fontSize: 11, color: '#a1a1aa', lineHeight: 1.4 }}>
-                    Don&apos;t have a UV map for your model? OpenCE Mantle automatically unwraps models without UVs into a 3×2 6-face Box UV Atlas. Click{' '}
-                    <strong>Export UV Wireframe Template (.PNG)</strong> to save a 1024×1024 drawing guide you can paint over in any image editor (the light-blue UV guide lines are for reference only and will not be applied to the 3D model).
+                    Choose from 3 built-in UV unwrap modes: <strong>6-Side Box Unfold</strong> (classic 3×2 cube projection),{' '}
+                    <strong>Per-Triangle Grid</strong> (places every triangle into its own non-overlapping cell in sequential face order #1..#N), or{' '}
+                    <strong>Smart Angle Unwrap</strong> (groups connected triangles within 42° into planar UV islands and packs them). Click{' '}
+                    <strong>Export UV Wireframe Template (.PNG)</strong> to save a 1024×1024 drawing guide.
                   </div>
                   {savedUvPath && (
                     <div style={{ fontSize: 11, color: '#34d399' }}>

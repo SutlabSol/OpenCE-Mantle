@@ -34667,7 +34667,7 @@ function validateBitmapAssetSize(decoded, actualSize) {
   if (expected === null) {
     return actualSize > 0 && actualSize <= 64 * 1024 * 1024 ? { ok: true } : { ok: false, reason: `unsupported/"unused" bitmap format "${formatName}" - size cannot be validated` };
   }
-  if (actualSize !== expected) {
+  if (actualSize < expected) {
     return { ok: false, reason: `expected ${expected} bytes from ${width}x${height}x${depth} ${typeName}/${formatName}/${mipmapCount} mips, but the tag's stored pixel data size is ${actualSize}` };
   }
   return { ok: true };
@@ -40302,6 +40302,17 @@ var WEAPON_TRIGGER_TIME_TO_RATE = {
   "error acceleration time": "error acceleration rate",
   "error deceleration time": "error deceleration rate"
 };
+var SCENARIO_PLACEMENT_TO_OBJECT_TYPE = {
+  bipeds: 0,
+  vehicles: 1,
+  weapons: 2,
+  equipment: 3,
+  scenery: 6,
+  machines: 7,
+  controls: 8,
+  "light fixtures": 9,
+  "sound scenery": 11
+};
 function postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, editedFieldPath) {
   const entry = tagIndex.entries[tagEntryIndex];
   if (!entry || entry.isExternal || !entry.primaryClassName) return [];
@@ -40315,6 +40326,39 @@ function postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, editedFie
   }
   const rootOffset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
   if (!isRangeInBuffer(rootOffset, structDef.totalSize, buffer.length)) return [];
+  if (group === "scenario" && editedFieldPath) {
+    const m = editedFieldPath.match(/^([a-z ]+)\[(\d+)\]\.name$/i);
+    if (m) {
+      const blockName = m[1].toLowerCase();
+      const placementIdx = Number(m[2]);
+      const objType = SCENARIO_PLACEMENT_TO_OBJECT_TYPE[blockName];
+      if (objType !== void 0) {
+        const decoded = decodeStruct(buffer, rootOffset, structDef.name);
+        const placementBlock = decoded.get(blockName);
+        const objNamesBlock = decoded.get("object names");
+        if (placementBlock?.kind === "reflexive" && placementIdx >= 0 && placementIdx < placementBlock.value.count && objNamesBlock?.kind === "reflexive" && objNamesBlock.value.count > 0) {
+          const placementField = structDef.fields.find((f) => f.name === blockName);
+          if (placementField?.def.struct) {
+            const childStruct = resolveStruct(placementField.def.struct);
+            const nameField = childStruct.fields.find((f) => f.name === "name");
+            const placementBase = resolvePointer(placementBlock.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+            const objNamesBase = resolvePointer(objNamesBlock.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+            if (nameField) {
+              const nameIdx = buffer.readInt16LE(placementBase + placementIdx * childStruct.totalSize + nameField.offset);
+              if (nameIdx >= 0 && nameIdx < objNamesBlock.value.count) {
+                const objNameElemOff = objNamesBase + nameIdx * 36;
+                if (isRangeInBuffer(objNameElemOff, 36, buffer.length)) {
+                  buffer.writeInt16LE(objType, objNameElemOff + 32);
+                  buffer.writeInt16LE(placementIdx, objNameElemOff + 34);
+                  updated.push(`object names[${nameIdx}].object type`, `object names[${nameIdx}].object index`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   if (group === "weapon") {
     const decoded = decodeStruct(buffer, rootOffset, structDef.name);
     const triggers = decoded.get("triggers");
@@ -40685,10 +40729,11 @@ function addReflexiveChunk(buffer, header, tagIndex, tagEntryIndex, reflexiveFie
   const oldCount = buffer.readUInt32LE(refFieldAbsOffset);
   const oldPointerLow = buffer.readUInt32LE(refFieldAbsOffset + 4);
   const newCount = oldCount + 1;
+  const prePad = (4 - (buffer.length - header.tagDataOffset) % 4) % 4;
   const newArrayBytes = newCount * elementSize;
-  const pad = (4 - newArrayBytes % 4) % 4;
-  const totalAlloc = newArrayBytes + pad;
-  const newArrayOffset = buffer.length;
+  const postPad = (4 - newArrayBytes % 4) % 4;
+  const totalAlloc = prePad + newArrayBytes + postPad;
+  const newArrayOffset = buffer.length + prePad;
   const newVirtualPointer = tagIndex.baseMemoryAddress + (newArrayOffset - header.tagDataOffset);
   const out = Buffer.alloc(buffer.length + totalAlloc);
   buffer.copy(out, 0, 0, buffer.length);
@@ -46969,6 +47014,203 @@ function projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds) {
   const vInCell = pad + Math.max(0, Math.min(1, localV)) * (1 - 2 * pad);
   return [(col + uInCell) / 3, (row2 + vInCell) / 2];
 }
+function computePerTriangleGridUvs(rawPositions, triVertexIndices) {
+  const numTris = Math.max(1, triVertexIndices.length);
+  const gridCols = Math.max(1, Math.ceil(Math.sqrt(numTris)));
+  const gridRows = Math.max(1, Math.ceil(numTris / gridCols));
+  const pad = 0.1;
+  const innerSpan = 1 - 2 * pad;
+  const result = [];
+  for (let t = 0; t < triVertexIndices.length; t++) {
+    const [v0, v1, v2] = triVertexIndices[t];
+    const p0 = rawPositions[v0] ?? [0, 0, 0];
+    const p1 = rawPositions[v1] ?? [0, 0, 0];
+    const p2 = rawPositions[v2] ?? [0, 0, 0];
+    const e1x = p1[0] - p0[0], e1y = p1[1] - p0[1], e1z = p1[2] - p0[2];
+    const e2x = p2[0] - p0[0], e2y = p2[1] - p0[1], e2z = p2[2] - p0[2];
+    const uAxis = normalizeVec3(e1x, e1y, e1z);
+    const faceN = normalizeVec3(
+      e1y * e2z - e1z * e2y,
+      e1z * e2x - e1x * e2z,
+      e1x * e2y - e1y * e2x
+    );
+    const vAxis = normalizeVec3(
+      faceN[1] * uAxis[2] - faceN[2] * uAxis[1],
+      faceN[2] * uAxis[0] - faceN[0] * uAxis[2],
+      faceN[0] * uAxis[1] - faceN[1] * uAxis[0]
+    );
+    const pts2d = [p0, p1, p2].map((p) => {
+      const dx = p[0] - p0[0], dy = p[1] - p0[1], dz = p[2] - p0[2];
+      return [
+        dx * uAxis[0] + dy * uAxis[1] + dz * uAxis[2],
+        dx * vAxis[0] + dy * vAxis[1] + dz * vAxis[2]
+      ];
+    });
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (const [u, v] of pts2d) {
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    const span = Math.max(1e-5, maxU - minU, maxV - minV);
+    const col = t % gridCols;
+    const row2 = Math.floor(t / gridCols);
+    const triUvs = pts2d.map(([u, v]) => {
+      const normU = (u - minU) / span;
+      const normV = 1 - (v - minV) / span;
+      const cellU = pad + Math.max(0, Math.min(1, normU)) * innerSpan;
+      const cellV = pad + Math.max(0, Math.min(1, normV)) * innerSpan;
+      return [(col + cellU) / gridCols, (row2 + cellV) / gridRows];
+    });
+    result.push(triUvs);
+  }
+  return result;
+}
+function computeSmartAngleUvs(rawPositions, triVertexIndices) {
+  const numTris = triVertexIndices.length;
+  if (numTris === 0) return [];
+  const faceNormals = [];
+  const faceAreas = [];
+  const edgeToTris = /* @__PURE__ */ new Map();
+  const addEdge = (a, b, triIdx) => {
+    const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+    const list = edgeToTris.get(key);
+    if (list) list.push(triIdx);
+    else edgeToTris.set(key, [triIdx]);
+  };
+  for (let t = 0; t < numTris; t++) {
+    const [v0, v1, v2] = triVertexIndices[t];
+    const p0 = rawPositions[v0] ?? [0, 0, 0];
+    const p1 = rawPositions[v1] ?? [0, 0, 0];
+    const p2 = rawPositions[v2] ?? [0, 0, 0];
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const area2 = Math.hypot(cx, cy, cz);
+    faceAreas.push(Math.max(1e-6, area2 * 0.5));
+    faceNormals.push(normalizeVec3(cx, cy, cz));
+    addEdge(v0, v1, t);
+    addEdge(v1, v2, t);
+    addEdge(v2, v0, t);
+  }
+  const visited = new Uint8Array(numTris);
+  const islands = [];
+  const angleThresholdCos = Math.cos(48 * Math.PI / 180);
+  for (let seed = 0; seed < numTris; seed++) {
+    if (visited[seed]) continue;
+    visited[seed] = 1;
+    const island = [seed];
+    let avgNx = faceNormals[seed][0] * faceAreas[seed];
+    let avgNy = faceNormals[seed][1] * faceAreas[seed];
+    let avgNz = faceNormals[seed][2] * faceAreas[seed];
+    const queue = [seed];
+    while (queue.length > 0) {
+      const curr = queue.shift();
+      const [v0, v1, v2] = triVertexIndices[curr];
+      const nCurr = faceNormals[curr];
+      const curAvg = normalizeVec3(avgNx, avgNy, avgNz);
+      for (const [a, b] of [
+        [v0, v1],
+        [v1, v2],
+        [v2, v0]
+      ]) {
+        const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+        const neighbors = edgeToTris.get(key) ?? [];
+        for (const nb of neighbors) {
+          if (visited[nb]) continue;
+          const nNb = faceNormals[nb];
+          const dotAdj = nCurr[0] * nNb[0] + nCurr[1] * nNb[1] + nCurr[2] * nNb[2];
+          const dotIsland = curAvg[0] * nNb[0] + curAvg[1] * nNb[1] + curAvg[2] * nNb[2];
+          if (dotAdj >= angleThresholdCos && dotIsland >= 0.5) {
+            visited[nb] = 1;
+            island.push(nb);
+            avgNx += nNb[0] * faceAreas[nb];
+            avgNy += nNb[1] * faceAreas[nb];
+            avgNz += nNb[2] * faceAreas[nb];
+            queue.push(nb);
+          }
+        }
+      }
+    }
+    islands.push(island);
+  }
+  const projIslands = islands.map((tris) => {
+    let nx = 0, ny = 0, nz = 0;
+    for (const t of tris) {
+      nx += faceNormals[t][0] * faceAreas[t];
+      ny += faceNormals[t][1] * faceAreas[t];
+      nz += faceNormals[t][2] * faceAreas[t];
+    }
+    const avgN = normalizeVec3(nx, ny, nz);
+    const { tangent: uAxis, binormal: vAxis } = computeOrthonormalBasis(avgN[0], avgN[1], avgN[2]);
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    const raw2d = [];
+    for (const t of tris) {
+      const [v0, v1, v2] = triVertexIndices[t];
+      const triPts = [rawPositions[v0], rawPositions[v1], rawPositions[v2]].map((p) => {
+        const u = p[0] * uAxis[0] + p[1] * uAxis[1] + p[2] * uAxis[2];
+        const v = -(p[0] * vAxis[0] + p[1] * vAxis[1] + p[2] * vAxis[2]);
+        if (u < minU) minU = u;
+        if (u > maxU) maxU = u;
+        if (v < minV) minV = v;
+        if (v > maxV) maxV = v;
+        return [u, v];
+      });
+      raw2d.push(triPts);
+    }
+    const w = Math.max(1e-4, maxU - minU);
+    const h = Math.max(1e-4, maxV - minV);
+    const localUvs = raw2d.map(
+      (triPts) => triPts.map(([u, v]) => [u - minU, v - minV])
+    );
+    return { tris, localUvs, width: w, height: h, placedX: 0, placedY: 0 };
+  });
+  const sortedOrder = projIslands.map((_, i) => i).sort((a, b) => projIslands[b].height - projIslands[a].height);
+  let totalArea = 0;
+  let maxIslandWidth = 1e-4;
+  for (const isl of projIslands) {
+    totalArea += isl.width * isl.height;
+    if (isl.width > maxIslandWidth) maxIslandWidth = isl.width;
+  }
+  const margin = Math.max(1e-4, Math.sqrt(totalArea) * 0.025);
+  const targetAtlasWidth = Math.max(maxIslandWidth + 2 * margin, Math.sqrt(totalArea * 1.35) + margin * 4);
+  let cursorX = margin;
+  let cursorY = margin;
+  let shelfHeight = 0;
+  let usedMaxX = targetAtlasWidth;
+  let usedMaxY = margin;
+  for (const idx of sortedOrder) {
+    const isl = projIslands[idx];
+    if (cursorX + isl.width + margin > targetAtlasWidth && cursorX > margin) {
+      cursorX = margin;
+      cursorY += shelfHeight + margin;
+      shelfHeight = 0;
+    }
+    isl.placedX = cursorX;
+    isl.placedY = cursorY;
+    cursorX += isl.width + margin;
+    if (cursorX > usedMaxX) usedMaxX = cursorX;
+    if (isl.height > shelfHeight) shelfHeight = isl.height;
+    if (cursorY + isl.height + margin > usedMaxY) usedMaxY = cursorY + isl.height + margin;
+  }
+  const atlasSpan = Math.max(1e-4, usedMaxX, usedMaxY);
+  const result = new Array(numTris);
+  for (const isl of projIslands) {
+    for (let i = 0; i < isl.tris.length; i++) {
+      const t = isl.tris[i];
+      const [c0, c1, c2] = isl.localUvs[i];
+      result[t] = [
+        [Math.max(2e-3, Math.min(0.998, (isl.placedX + c0[0]) / atlasSpan)), Math.max(2e-3, Math.min(0.998, (isl.placedY + c0[1]) / atlasSpan))],
+        [Math.max(2e-3, Math.min(0.998, (isl.placedX + c1[0]) / atlasSpan)), Math.max(2e-3, Math.min(0.998, (isl.placedY + c1[1]) / atlasSpan))],
+        [Math.max(2e-3, Math.min(0.998, (isl.placedX + c2[0]) / atlasSpan)), Math.max(2e-3, Math.min(0.998, (isl.placedY + c2[1]) / atlasSpan))]
+      ];
+    }
+  }
+  return result;
+}
 function parseObjMesh(objText, options = {}) {
   const scale = options.scale && Number.isFinite(options.scale) && options.scale > 0 ? options.scale : 1;
   const flipYz = Boolean(options.flipYz);
@@ -47105,14 +47347,23 @@ function parseObjMesh(objText, options = {}) {
   const sizeBounds = [maxX - minX, maxY - minY, maxZ - minZ];
   const radius = Math.max(0.1, Math.hypot(sizeBounds[0], sizeBounds[1], sizeBounds[2]) * 0.5);
   const hasUvCoordinates = rawUvs.length > 0 && rawTriangles.some((t) => t.corners.some((c) => c.vtIdx >= 0 && c.vtIdx < rawUvs.length));
-  const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv);
+  const uvUnwrapMode = options.uvUnwrapMode ?? "box";
+  const usedAutoUv = !hasUvCoordinates || Boolean(options.forceAutoUv) || uvUnwrapMode !== "box";
+  const precomputedTriUvs = usedAutoUv && uvUnwrapMode === "per_triangle" ? computePerTriangleGridUvs(
+    rawPositions,
+    rawTriangles.map((t) => [t.corners[0].vIdx, t.corners[1].vIdx, t.corners[2].vIdx])
+  ) : usedAutoUv && uvUnwrapMode === "smart" ? computeSmartAngleUvs(
+    rawPositions,
+    rawTriangles.map((t) => [t.corners[0].vIdx, t.corners[1].vIdx, t.corners[2].vIdx])
+  ) : null;
   const vertices = [];
   const triangles = [];
   const rawFaces = [];
   const triangleMaterialSlots = [];
   const vertexLookup = /* @__PURE__ */ new Map();
   const groupMinMax = /* @__PURE__ */ new Map();
-  for (const tri of rawTriangles) {
+  for (let triIdx = 0; triIdx < rawTriangles.length; triIdx++) {
+    const tri = rawTriangles[triIdx];
     const v0 = tri.corners[0].vIdx;
     const v1 = tri.corners[1].vIdx;
     const v2 = tri.corners[2].vIdx;
@@ -47152,7 +47403,7 @@ function parseObjMesh(objText, options = {}) {
       const corner = tri.corners[k];
       const pos = rawPositions[corner.vIdx];
       const norm = corner.vnIdx >= 0 && corner.vnIdx < rawNormals.length ? rawNormals[corner.vnIdx] : faceNormal;
-      const uv = !usedAutoUv && corner.vtIdx >= 0 && corner.vtIdx < rawUvs.length ? rawUvs[corner.vtIdx] : projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds);
+      const uv = !usedAutoUv && corner.vtIdx >= 0 && corner.vtIdx < rawUvs.length ? rawUvs[corner.vtIdx] : precomputedTriUvs?.[triIdx]?.[k] ?? projectBoxAtlasUv(pos, faceNormal, minBounds, maxBounds);
       const key = `${corner.vIdx}:${norm[0].toFixed(4)},${norm[1].toFixed(4)},${norm[2].toFixed(4)}:${uv[0].toFixed(4)},${uv[1].toFixed(4)}`;
       let compiledIdx = vertexLookup.get(key);
       if (compiledIdx === void 0 && vertices.length < 65534) {
@@ -47180,7 +47431,8 @@ function parseObjMesh(objText, options = {}) {
   );
   const MAX_SIMPLE_TRIANGLES = 64;
   const isTooComplex = rawTriangles.length > MAX_SIMPLE_TRIANGLES;
-  const uvStatus = hasUvCoordinates ? `${rawUvs.length} UV coords` : "Auto-unwrapped (6-face Box UV Atlas)";
+  const uvModeLabel = uvUnwrapMode === "per_triangle" ? "Per-Triangle Ordered Grid" : uvUnwrapMode === "smart" ? "Smart Angle Unwrap" : "6-Side Box Unfold";
+  const uvStatus = !usedAutoUv && hasUvCoordinates ? `${rawUvs.length} UV coords` : `Auto-unwrapped (${uvModeLabel})`;
   const finalMaterialSlots = materialSlots.length > 0 ? materialSlots : ["default"];
   const summary = {
     vertexCount: rawPositions.length,
@@ -47199,7 +47451,7 @@ function parseObjMesh(objText, options = {}) {
     isTooComplex,
     message: `Mesh ready: ${rawPositions.length} vertices, ${rawTriangles.length} triangles (${uvStatus}). Dimensions: ${sizeBounds[0].toFixed(2)} x ${sizeBounds[1].toFixed(2)} x ${sizeBounds[2].toFixed(2)} world units.`
   };
-  return {
+  const parsedMesh = {
     summary,
     vertices,
     triangles,
@@ -47209,6 +47461,16 @@ function parseObjMesh(objText, options = {}) {
     usedAutoUv,
     groupBounds
   };
+  if (rawPositions.length >= 3 && rawFaces.length > 0 && rawFaces.length <= 15e3) {
+    const previewBsp = compileMeshCollisionBspData(parsedMesh, Math.max(1, finalMaterialSlots.length), {
+      mode: "auto",
+      targetFaces: options.targetCollisionFaces ?? 800
+    });
+    if (previewBsp) {
+      summary.collisionPreview = previewBsp.stats;
+    }
+  }
+  return parsedMesh;
 }
 function renderCleanDefaultTextureRgba(size = 512) {
   const rgba = new Uint8Array(size * size * 4);
@@ -47943,27 +48205,592 @@ function writeBoxCollisionBsp(targetBuf, structOff, arraysOff, boundsMin, bounds
   targetBuf.writeUInt32LE(offVertices, structOff + 88);
   return cursor;
 }
-function compileMeshCollisionBspData(mesh, materialCount) {
-  if (mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0 || mesh.rawFaces.length > 512) {
+var HALO_PROJECTION3D_MAPPINGS = [
+  [
+    [2, 1],
+    // _x (0), sign = 0 (nx <= 0): (z, y)
+    [1, 2]
+    // _x (0), sign = 1 (nx > 0):  (y, z)
+  ],
+  [
+    [0, 2],
+    // _y (1), sign = 0 (ny <= 0): (x, z)
+    [2, 0]
+    // _y (1), sign = 1 (ny > 0):  (z, x)
+  ],
+  [
+    [1, 0],
+    // _z (2), sign = 0 (nz <= 0): (y, x)
+    [0, 1]
+    // _z (2), sign = 1 (nz > 0):  (x, y)
+  ]
+];
+function getHaloPlaneProjection(plane, designatorNegated = false) {
+  const ai = Math.abs(plane[0]);
+  const aj = Math.abs(plane[1]);
+  const ak = Math.abs(plane[2]);
+  const axis = ak >= aj && ak >= ai ? 2 : aj >= ai ? 1 : 0;
+  const rawPositive = plane[axis] > 0;
+  const sign = rawPositive !== designatorNegated ? 1 : 0;
+  return { axis, sign };
+}
+function projectHaloPoint3dTo2d(pt, axis, sign) {
+  const map = HALO_PROJECTION3D_MAPPINGS[axis][sign];
+  return [pt[map[0]], pt[map[1]]];
+}
+function weldCollisionPositions(rawPositions, rawFaces, weldTolerance = 1e-4) {
+  const invTol = 1 / Math.max(1e-6, weldTolerance);
+  const gridMap = /* @__PURE__ */ new Map();
+  const positions = [];
+  const remap = new Int32Array(rawPositions.length);
+  for (let i = 0; i < rawPositions.length; i++) {
+    const p = rawPositions[i];
+    const gx = Math.round(p[0] * invTol);
+    const gy = Math.round(p[1] * invTol);
+    const gz = Math.round(p[2] * invTol);
+    const key = `${gx},${gy},${gz}`;
+    let idx = gridMap.get(key);
+    if (idx === void 0) {
+      idx = positions.length;
+      positions.push([p[0], p[1], p[2]]);
+      gridMap.set(key, idx);
+    }
+    remap[i] = idx;
+  }
+  const faces = [];
+  const seenTri = /* @__PURE__ */ new Set();
+  for (const f of rawFaces) {
+    const v0 = remap[f.v0];
+    const v1 = remap[f.v1];
+    const v2 = remap[f.v2];
+    if (v0 === v1 || v1 === v2 || v2 === v0) continue;
+    const p0 = positions[v0];
+    const p1 = positions[v1];
+    const p2 = positions[v2];
+    if (!p0 || !p1 || !p2) continue;
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const area2 = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    if (area2 < 1e-6) continue;
+    const minV = Math.min(v0, v1, v2);
+    const canonKey = minV === v0 ? `${v0},${v1},${v2}` : minV === v1 ? `${v1},${v2},${v0}` : `${v2},${v0},${v1}`;
+    if (seenTri.has(canonKey)) continue;
+    seenTri.add(canonKey);
+    faces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: f.materialSlotIndex,
+      groupId: f.groupId
+    });
+  }
+  return { positions, faces };
+}
+function decimateCollisionMeshQem(positions, faces, targetFaceCount) {
+  if (faces.length <= targetFaceCount || targetFaceCount < 4) {
+    return { positions, faces };
+  }
+  const vCount = positions.length;
+  const pts = positions.map((p) => [p[0], p[1], p[2]]);
+  const quadrics = new Float64Array(vCount * 10);
+  const addPlaneQuadric = (vIdx, a, b, c, d, weight = 1) => {
+    const base = vIdx * 10;
+    quadrics[base + 0] += weight * a * a;
+    quadrics[base + 1] += weight * a * b;
+    quadrics[base + 2] += weight * a * c;
+    quadrics[base + 3] += weight * a * d;
+    quadrics[base + 4] += weight * b * b;
+    quadrics[base + 5] += weight * b * c;
+    quadrics[base + 6] += weight * b * d;
+    quadrics[base + 7] += weight * c * c;
+    quadrics[base + 8] += weight * c * d;
+    quadrics[base + 9] += weight * d * d;
+  };
+  const evalQuadric = (qBase1, qBase2, x, y, z) => {
+    const q00 = quadrics[qBase1 + 0] + quadrics[qBase2 + 0];
+    const q01 = quadrics[qBase1 + 1] + quadrics[qBase2 + 1];
+    const q02 = quadrics[qBase1 + 2] + quadrics[qBase2 + 2];
+    const q03 = quadrics[qBase1 + 3] + quadrics[qBase2 + 3];
+    const q11 = quadrics[qBase1 + 4] + quadrics[qBase2 + 4];
+    const q12 = quadrics[qBase1 + 5] + quadrics[qBase2 + 5];
+    const q13 = quadrics[qBase1 + 6] + quadrics[qBase2 + 6];
+    const q22 = quadrics[qBase1 + 7] + quadrics[qBase2 + 7];
+    const q23 = quadrics[qBase1 + 8] + quadrics[qBase2 + 8];
+    const q33 = quadrics[qBase1 + 9] + quadrics[qBase2 + 9];
+    return q00 * x * x + 2 * q01 * x * y + 2 * q02 * x * z + 2 * q03 * x + q11 * y * y + 2 * q12 * y * z + 2 * q13 * y + q22 * z * z + 2 * q23 * z + q33;
+  };
+  const edgeUseCount = /* @__PURE__ */ new Map();
+  for (let fIdx = 0; fIdx < faces.length; fIdx++) {
+    const f = faces[fIdx];
+    const p0 = pts[f.v0], p1 = pts[f.v1], p2 = pts[f.v2];
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const len = Math.hypot(cx, cy, cz);
+    if (len < 1e-8) continue;
+    const a = cx / len, b = cy / len, c = cz / len;
+    const d = -(a * p0[0] + b * p0[1] + c * p0[2]);
+    const areaWeight = Math.max(0.1, len * 0.5);
+    addPlaneQuadric(f.v0, a, b, c, d, areaWeight);
+    addPlaneQuadric(f.v1, a, b, c, d, areaWeight);
+    addPlaneQuadric(f.v2, a, b, c, d, areaWeight);
+    const pairs = [
+      [f.v0, f.v1],
+      [f.v1, f.v2],
+      [f.v2, f.v0]
+    ];
+    for (const [u, v] of pairs) {
+      const k = u < v ? `${u},${v}` : `${v},${u}`;
+      const existing = edgeUseCount.get(k);
+      if (existing) existing.count++;
+      else edgeUseCount.set(k, { count: 1, fIdx, u, v });
+    }
+  }
+  for (const entry of edgeUseCount.values()) {
+    if (entry.count === 1) {
+      const f = faces[entry.fIdx];
+      const p0 = pts[f.v0], p1 = pts[f.v1], p2 = pts[f.v2];
+      const fn = normalizeVec3(
+        (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]),
+        (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]),
+        (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0])
+      );
+      const pu = pts[entry.u], pv = pts[entry.v];
+      const ex = pv[0] - pu[0], ey = pv[1] - pu[1], ez = pv[2] - pu[2];
+      const bn = normalizeVec3(
+        ey * fn[2] - ez * fn[1],
+        ez * fn[0] - ex * fn[2],
+        ex * fn[1] - ey * fn[0]
+      );
+      const bd = -(bn[0] * pu[0] + bn[1] * pu[1] + bn[2] * pu[2]);
+      addPlaneQuadric(entry.u, bn[0], bn[1], bn[2], bd, 50);
+      addPlaneQuadric(entry.v, bn[0], bn[1], bn[2], bd, 50);
+    }
+  }
+  const activeFaces = faces.map((f) => ({ ...f }));
+  let aliveFaceCount = activeFaces.length;
+  const vFaces = Array.from({ length: vCount }, () => /* @__PURE__ */ new Set());
+  for (let i = 0; i < activeFaces.length; i++) {
+    const f = activeFaces[i];
+    vFaces[f.v0].add(i);
+    vFaces[f.v1].add(i);
+    vFaces[f.v2].add(i);
+  }
+  const parent = new Int32Array(vCount);
+  for (let i = 0; i < vCount; i++) parent[i] = i;
+  const findRoot = (u) => {
+    let r = u;
+    while (parent[r] !== r) r = parent[r];
+    let c = u;
+    while (c !== r) {
+      const nxt = parent[c];
+      parent[c] = r;
+      c = nxt;
+    }
+    return r;
+  };
+  const maxPasses = 12;
+  for (let pass = 0; pass < maxPasses && aliveFaceCount > targetFaceCount; pass++) {
+    const candidates = [];
+    const seenEdge = /* @__PURE__ */ new Set();
+    for (let fIdx = 0; fIdx < activeFaces.length; fIdx++) {
+      const f = activeFaces[fIdx];
+      if (!f) continue;
+      const vs = [findRoot(f.v0), findRoot(f.v1), findRoot(f.v2)];
+      f.v0 = vs[0];
+      f.v1 = vs[1];
+      f.v2 = vs[2];
+      if (f.v0 === f.v1 || f.v1 === f.v2 || f.v2 === f.v0) {
+        activeFaces[fIdx] = null;
+        aliveFaceCount--;
+        continue;
+      }
+      for (let k = 0; k < 3; k++) {
+        const a = vs[k];
+        const b = vs[(k + 1) % 3];
+        const u = Math.min(a, b);
+        const v = Math.max(a, b);
+        const key = `${u},${v}`;
+        if (seenEdge.has(key)) continue;
+        seenEdge.add(key);
+        const pu = pts[u], pv = pts[v];
+        const mx = (pu[0] + pv[0]) * 0.5;
+        const my = (pu[1] + pv[1]) * 0.5;
+        const mz = (pu[2] + pv[2]) * 0.5;
+        const qbU = u * 10, qbV = v * 10;
+        const cU = evalQuadric(qbU, qbV, pu[0], pu[1], pu[2]);
+        const cV = evalQuadric(qbU, qbV, pv[0], pv[1], pv[2]);
+        const cM = evalQuadric(qbU, qbV, mx, my, mz);
+        const edgeLen2 = (pu[0] - pv[0]) ** 2 + (pu[1] - pv[1]) ** 2 + (pu[2] - pv[2]) ** 2;
+        let bestCost = cU;
+        let bestPos = [pu[0], pu[1], pu[2]];
+        if (cV < bestCost) {
+          bestCost = cV;
+          bestPos = [pv[0], pv[1], pv[2]];
+        }
+        if (cM < bestCost) {
+          bestCost = cM;
+          bestPos = [mx, my, mz];
+        }
+        candidates.push({
+          u,
+          v,
+          cost: Math.max(0, bestCost) + edgeLen2 * 1e-4,
+          bestPos
+        });
+      }
+    }
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) => a.cost - b.cost);
+    const lockedVertex = new Uint8Array(vCount);
+    let collapsedInPass = 0;
+    for (const cand of candidates) {
+      if (aliveFaceCount <= targetFaceCount) break;
+      const u = findRoot(cand.u);
+      const v = findRoot(cand.v);
+      if (u === v || lockedVertex[u] || lockedVertex[v]) continue;
+      let flipsNormal = false;
+      for (const fIdx of vFaces[u]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        const v0 = findRoot(f.v0), v1 = findRoot(f.v1), v2 = findRoot(f.v2);
+        if (v0 === v || v1 === v || v2 === v) continue;
+        const p0 = v0 === u ? cand.bestPos : pts[v0];
+        const p1 = v1 === u ? cand.bestPos : pts[v1];
+        const p2 = v2 === u ? cand.bestPos : pts[v2];
+        const o0 = pts[v0], o1 = pts[v1], o2 = pts[v2];
+        const ox = (o1[1] - o0[1]) * (o2[2] - o0[2]) - (o1[2] - o0[2]) * (o2[1] - o0[1]);
+        const oy = (o1[2] - o0[2]) * (o2[0] - o0[0]) - (o1[0] - o0[0]) * (o2[2] - o0[2]);
+        const oz = (o1[0] - o0[0]) * (o2[1] - o0[1]) - (o1[1] - o0[1]) * (o2[0] - o0[0]);
+        const nx = (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]);
+        const ny = (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]);
+        const nz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+        const oLen = Math.hypot(ox, oy, oz);
+        const nLen = Math.hypot(nx, ny, nz);
+        if (nLen < 1e-6 || oLen > 1e-6 && (ox * nx + oy * ny + oz * nz) / (oLen * nLen) < 0.2) {
+          flipsNormal = true;
+          break;
+        }
+      }
+      if (flipsNormal) continue;
+      for (const fIdx of vFaces[v]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        const v0 = findRoot(f.v0), v1 = findRoot(f.v1), v2 = findRoot(f.v2);
+        if (v0 === u || v1 === u || v2 === u) continue;
+        const p0 = v0 === v ? cand.bestPos : pts[v0];
+        const p1 = v1 === v ? cand.bestPos : pts[v1];
+        const p2 = v2 === v ? cand.bestPos : pts[v2];
+        const o0 = pts[v0], o1 = pts[v1], o2 = pts[v2];
+        const ox = (o1[1] - o0[1]) * (o2[2] - o0[2]) - (o1[2] - o0[2]) * (o2[1] - o0[1]);
+        const oy = (o1[2] - o0[2]) * (o2[0] - o0[0]) - (o1[0] - o0[0]) * (o2[2] - o0[2]);
+        const oz = (o1[0] - o0[0]) * (o2[1] - o0[1]) - (o1[1] - o0[1]) * (o2[0] - o0[0]);
+        const nx = (p1[1] - p0[1]) * (p2[2] - p0[2]) - (p1[2] - p0[2]) * (p2[1] - p0[1]);
+        const ny = (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2]);
+        const nz = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+        const oLen = Math.hypot(ox, oy, oz);
+        const nLen = Math.hypot(nx, ny, nz);
+        if (nLen < 1e-6 || oLen > 1e-6 && (ox * nx + oy * ny + oz * nz) / (oLen * nLen) < 0.2) {
+          flipsNormal = true;
+          break;
+        }
+      }
+      if (flipsNormal) continue;
+      pts[u] = cand.bestPos;
+      parent[v] = u;
+      for (let k = 0; k < 10; k++) {
+        quadrics[u * 10 + k] += quadrics[v * 10 + k];
+      }
+      for (const fIdx of vFaces[v]) {
+        const f = activeFaces[fIdx];
+        if (!f) continue;
+        f.v0 = findRoot(f.v0);
+        f.v1 = findRoot(f.v1);
+        f.v2 = findRoot(f.v2);
+        if (f.v0 === f.v1 || f.v1 === f.v2 || f.v2 === f.v0) {
+          activeFaces[fIdx] = null;
+          vFaces[u].delete(fIdx);
+          aliveFaceCount--;
+        } else {
+          vFaces[u].add(fIdx);
+        }
+      }
+      vFaces[v].clear();
+      lockedVertex[u] = 1;
+      lockedVertex[v] = 1;
+      collapsedInPass++;
+    }
+    if (collapsedInPass === 0) break;
+  }
+  const newPositions = [];
+  const compactMap = /* @__PURE__ */ new Map();
+  const getCompactIdx = (oldV) => {
+    const r = findRoot(oldV);
+    let idx = compactMap.get(r);
+    if (idx === void 0) {
+      idx = newPositions.length;
+      newPositions.push(pts[r]);
+      compactMap.set(r, idx);
+    }
+    return idx;
+  };
+  const survivingFaces = [];
+  for (const f of activeFaces) {
+    if (!f) continue;
+    const v0 = getCompactIdx(f.v0);
+    const v1 = getCompactIdx(f.v1);
+    const v2 = getCompactIdx(f.v2);
+    if (v0 === v1 || v1 === v2 || v2 === v0) continue;
+    survivingFaces.push({
+      v0,
+      v1,
+      v2,
+      materialSlotIndex: f.materialSlotIndex,
+      groupId: f.groupId
+    });
+  }
+  return survivingFaces.length >= 4 ? { positions: newPositions, faces: survivingFaces } : { positions, faces };
+}
+function mergeCoplanarConvexPolygons(positions, polys, planes) {
+  const MAX_EDGES = 8;
+  const isRingStrictlyConvexIn2d = (ring, planeIdx) => {
+    if (ring.length < 3 || ring.length > MAX_EDGES) return false;
+    const pl = planes[planeIdx];
+    const { axis, sign } = getHaloPlaneProjection(pl, false);
+    const pts2d = ring.map((vIdx) => projectHaloPoint3dTo2d(positions[vIdx], axis, sign));
+    const n = pts2d.length;
+    for (let i = 0; i < n; i++) {
+      const pPrev = pts2d[(i + n - 1) % n];
+      const pCurr = pts2d[i];
+      const pNext = pts2d[(i + 1) % n];
+      const v0x = pNext[0] - pPrev[0];
+      const v0y = pNext[1] - pPrev[1];
+      const v1x = pCurr[0] - pPrev[0];
+      const v1y = pCurr[1] - pPrev[1];
+      const cross = v0x * v1y - v0y * v1x;
+      if (cross >= -1e-5) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const byPlaneMat = /* @__PURE__ */ new Map();
+  for (const poly of polys) {
+    const key = `${poly.planeIdx}:${poly.materialIndex}`;
+    let list = byPlaneMat.get(key);
+    if (!list) {
+      list = [];
+      byPlaneMat.set(key, list);
+    }
+    list.push({ ring: [...poly.ring], planeIdx: poly.planeIdx, materialIndex: poly.materialIndex });
+  }
+  const result = [];
+  for (const groupPolys of byPlaneMat.values()) {
+    let changed = true;
+    while (changed && groupPolys.length > 1) {
+      changed = false;
+      outer: for (let i = 0; i < groupPolys.length; i++) {
+        const polyA = groupPolys[i];
+        if (polyA.ring.length >= MAX_EDGES) continue;
+        for (let j = i + 1; j < groupPolys.length; j++) {
+          const polyB = groupPolys[j];
+          if (polyA.ring.length + polyB.ring.length - 2 > MAX_EDGES) continue;
+          const nA = polyA.ring.length;
+          const nB = polyB.ring.length;
+          for (let ea = 0; ea < nA; ea++) {
+            const u = polyA.ring[ea];
+            const v = polyA.ring[(ea + 1) % nA];
+            for (let eb = 0; eb < nB; eb++) {
+              if (polyB.ring[eb] === v && polyB.ring[(eb + 1) % nB] === u) {
+                const mergedRing = [];
+                for (let k = 0; k <= ea; k++) mergedRing.push(polyA.ring[k]);
+                for (let k = 2; k < nB; k++) mergedRing.push(polyB.ring[(eb + k) % nB]);
+                for (let k = ea + 1; k < nA; k++) mergedRing.push(polyA.ring[k]);
+                if (new Set(mergedRing).size === mergedRing.length && isRingStrictlyConvexIn2d(mergedRing, polyA.planeIdx)) {
+                  polyA.ring = mergedRing;
+                  groupPolys.splice(j, 1);
+                  changed = true;
+                  break outer;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    result.push(...groupPolys);
+  }
+  return result;
+}
+function buildPlaneBsp2dTree(surfaceIndices, surfaces, positions, plane, designatorNegated, bsp2dNodes) {
+  if (surfaceIndices.length === 0) return 4294967295;
+  if (surfaceIndices.length === 1) {
+    return (2147483648 | surfaceIndices[0]) >>> 0;
+  }
+  const { axis, sign } = getHaloPlaneProjection(plane, designatorNegated);
+  const poly2dMap = /* @__PURE__ */ new Map();
+  const centroid2dMap = /* @__PURE__ */ new Map();
+  for (const sIdx of surfaceIndices) {
+    const ring = surfaces[sIdx].ring;
+    const pts2d = ring.map((vIdx) => {
+      const p2d = projectHaloPoint3dTo2d(positions[vIdx], axis, sign);
+      return p2d;
+    });
+    if (designatorNegated) pts2d.reverse();
+    poly2dMap.set(sIdx, pts2d);
+    let cx = 0, cy = 0;
+    for (const p of pts2d) {
+      cx += p[0];
+      cy += p[1];
+    }
+    centroid2dMap.set(sIdx, [cx / pts2d.length, cy / pts2d.length]);
+  }
+  const MAX_BSP2D_DEPTH = 24;
+  const build2dRecursive = (sList, depth) => {
+    if (sList.length === 1 || depth >= MAX_BSP2D_DEPTH || bsp2dNodes.length >= 16384) {
+      return (2147483648 | sList[0]) >>> 0;
+    }
+    let bestLine = null;
+    let bestLeft = [];
+    let bestRight = [];
+    let bestScore = Infinity;
+    for (const candSurf of sList) {
+      const pts = poly2dMap.get(candSurf);
+      for (let i = 0; i < pts.length; i++) {
+        const p0 = pts[i];
+        const p1 = pts[(i + 1) % pts.length];
+        const rawNi = p1[1] - p0[1];
+        const rawNj = p0[0] - p1[0];
+        const len = Math.hypot(rawNi, rawNj);
+        if (len < 1e-6) continue;
+        const ni = rawNi / len;
+        const nj = rawNj / len;
+        const d = ni * p0[0] + nj * p0[1];
+        const left = [];
+        const right = [];
+        for (const otherSurf of sList) {
+          if (otherSurf === candSurf) {
+            left.push(otherSurf);
+            continue;
+          }
+          const oPts = poly2dMap.get(otherSurf);
+          let minDist = Infinity;
+          let maxDist = -Infinity;
+          for (const op of oPts) {
+            const dist = ni * op[0] + nj * op[1] - d;
+            if (dist < minDist) minDist = dist;
+            if (dist > maxDist) maxDist = dist;
+          }
+          if (maxDist <= 1e-4) {
+            left.push(otherSurf);
+          } else if (minDist >= -1e-4) {
+            right.push(otherSurf);
+          } else {
+            const c = centroid2dMap.get(otherSurf);
+            const cDist = ni * c[0] + nj * c[1] - d;
+            if (cDist < 0) left.push(otherSurf);
+            else right.push(otherSurf);
+          }
+        }
+        if (left.length > 0 && right.length > 0) {
+          const score = Math.abs(left.length - right.length);
+          if (score < bestScore) {
+            bestScore = score;
+            bestLine = { ni, nj, d };
+            bestLeft = left;
+            bestRight = right;
+            if (score <= 1) break;
+          }
+        }
+      }
+      if (bestScore <= 1) break;
+    }
+    if (!bestLine || bestLeft.length === 0 || bestRight.length === 0) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const sIdx of sList) {
+        const [cx, cy] = centroid2dMap.get(sIdx);
+        if (cx < minX) minX = cx;
+        if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy;
+        if (cy > maxY) maxY = cy;
+      }
+      const splitX = maxX - minX >= maxY - minY;
+      const sorted = [...sList].sort((a, b) => {
+        const ca = centroid2dMap.get(a);
+        const cb = centroid2dMap.get(b);
+        return splitX ? ca[0] - cb[0] : ca[1] - cb[1];
+      });
+      const mid = Math.max(1, Math.floor(sorted.length / 2));
+      bestLeft = sorted.slice(0, mid);
+      bestRight = sorted.slice(mid);
+      const cA = centroid2dMap.get(bestLeft[bestLeft.length - 1]);
+      const cB = centroid2dMap.get(bestRight[0]);
+      bestLine = splitX ? { ni: 1, nj: 0, d: (cA[0] + cB[0]) * 0.5 } : { ni: 0, nj: 1, d: (cA[1] + cB[1]) * 0.5 };
+    }
+    const nodeIdx = bsp2dNodes.length;
+    bsp2dNodes.push({
+      planeI: bestLine.ni,
+      planeJ: bestLine.nj,
+      planeD: bestLine.d,
+      leftChild: 4294967295,
+      rightChild: 4294967295
+    });
+    const leftChild = build2dRecursive(bestLeft, depth + 1);
+    const rightChild = build2dRecursive(bestRight, depth + 1);
+    bsp2dNodes[nodeIdx].leftChild = leftChild >>> 0;
+    bsp2dNodes[nodeIdx].rightChild = rightChild >>> 0;
+    return nodeIdx;
+  };
+  return build2dRecursive(surfaceIndices, 0);
+}
+function compileMeshCollisionBspData(mesh, materialCount, options) {
+  const mode = options?.mode ?? "auto";
+  if (mode === "box" || mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0) {
     return null;
   }
+  const inputTriangleCount = mesh.rawFaces.length;
+  const maxFaceBudget = mode === "exact" ? Math.max(256, Math.min(4096, options?.targetFaces ?? 2048)) : Math.max(64, Math.min(2048, options?.targetFaces ?? 800));
+  const welded = weldCollisionPositions(mesh.rawPositions, mesh.rawFaces, 1e-4);
+  if (welded.positions.length < 3 || welded.faces.length === 0) {
+    return null;
+  }
+  const decimated = welded.faces.length > maxFaceBudget ? decimateCollisionMeshQem(welded.positions, welded.faces, maxFaceBudget) : welded;
+  const positions = decimated.positions;
+  const activeFaces = decimated.faces;
   const planes = [];
   const findOrAddPlane = (nx, ny, nz, d) => {
     for (let i = 0; i < planes.length; i++) {
       const p = planes[i];
       if (Math.abs(p[0] - nx) < 1e-4 && Math.abs(p[1] - ny) < 1e-4 && Math.abs(p[2] - nz) < 1e-4 && Math.abs(p[3] - d) < 1e-3) {
-        return i;
+        return { planeIdx: i, negated: false };
+      }
+      if (Math.abs(p[0] + nx) < 1e-4 && Math.abs(p[1] + ny) < 1e-4 && Math.abs(p[2] + nz) < 1e-4 && Math.abs(p[3] + d) < 1e-3) {
+        return { planeIdx: i, negated: true };
       }
     }
     const idx = planes.length;
     planes.push([nx, ny, nz, d]);
+    return { planeIdx: idx, negated: false };
+  };
+  const initialPolys = [];
+  const planeBySurfaceDesignator = [];
+  const findOrAddDirectedPlane = (nx, ny, nz, d) => {
+    for (let i = 0; i < planeBySurfaceDesignator.length; i++) {
+      const p = planeBySurfaceDesignator[i];
+      if (Math.abs(p[0] - nx) < 1e-4 && Math.abs(p[1] - ny) < 1e-4 && Math.abs(p[2] - nz) < 1e-4 && Math.abs(p[3] - d) < 1e-3) {
+        return i;
+      }
+    }
+    const idx = planeBySurfaceDesignator.length;
+    planeBySurfaceDesignator.push([nx, ny, nz, d]);
     return idx;
   };
-  const validTris = [];
-  for (const face of mesh.rawFaces) {
-    const p0 = mesh.rawPositions[face.v0];
-    const p1 = mesh.rawPositions[face.v1];
-    const p2 = mesh.rawPositions[face.v2];
+  for (const face of activeFaces) {
+    const p0 = positions[face.v0];
+    const p1 = positions[face.v1];
+    const p2 = positions[face.v2];
     if (!p0 || !p1 || !p2) continue;
     const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
     const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
@@ -47976,57 +48803,82 @@ function compileMeshCollisionBspData(mesh, materialCount) {
     const ny = cy / area2;
     const nz = cz / area2;
     const d = nx * p0[0] + ny * p0[1] + nz * p0[2];
-    const planeIdx = findOrAddPlane(nx, ny, nz, d);
-    const pl = planes[planeIdx];
+    const dirPlaneIdx = findOrAddDirectedPlane(nx, ny, nz, d);
+    const pl = planeBySurfaceDesignator[dirPlaneIdx];
     const winding = cx * pl[0] + cy * pl[1] + cz * pl[2];
     const ring = winding >= 0 ? [face.v0, face.v1, face.v2] : [face.v0, face.v2, face.v1];
     const matIdx = Math.max(0, Math.min(materialCount - 1, face.materialSlotIndex));
-    validTris.push({ ring, planeIdx, materialIndex: matIdx });
+    initialPolys.push({ ring, planeIdx: dirPlaneIdx, materialIndex: matIdx });
   }
-  if (validTris.length === 0 || planes.length === 0) {
+  if (initialPolys.length === 0) {
     return null;
   }
+  const mergedPolys = mergeCoplanarConvexPolygons(positions, initialPolys, planeBySurfaceDesignator);
+  const dirPlaneToDesignator = new Int32Array(planeBySurfaceDesignator.length);
+  for (let i = 0; i < planeBySurfaceDesignator.length; i++) {
+    const dp = planeBySurfaceDesignator[i];
+    const { planeIdx, negated } = findOrAddPlane(dp[0], dp[1], dp[2], dp[3]);
+    dirPlaneToDesignator[i] = negated ? 2147483648 | planeIdx | 0 : planeIdx;
+  }
+  let isConcave = false;
+  outerConvexCheck: for (let i = 0; i < mergedPolys.length; i++) {
+    const dp = planeBySurfaceDesignator[mergedPolys[i].planeIdx];
+    for (let v = 0; v < positions.length; v++) {
+      const pt = positions[v];
+      const dist = dp[0] * pt[0] + dp[1] * pt[1] + dp[2] * pt[2] - dp[3];
+      if (dist > 1e-3) {
+        isConcave = true;
+        break outerConvexCheck;
+      }
+    }
+  }
+  const surfaceFlags = isConcave ? 1 : 0;
   const surfaces = [];
   const edges = [];
-  const vertexFirstEdge = new Array(mesh.rawPositions.length).fill(-1);
-  for (let surfIdx = 0; surfIdx < validTris.length; surfIdx++) {
-    const tri = validTris[surfIdx];
-    const ring = tri.ring;
-    const ringEdges = [0, 0, 0];
-    for (let point = 0; point < 3; point++) {
+  const vertexFirstEdge = new Array(positions.length).fill(-1);
+  const openHalfEdgeMap = /* @__PURE__ */ new Map();
+  for (let surfIdx = 0; surfIdx < mergedPolys.length; surfIdx++) {
+    const poly = mergedPolys[surfIdx];
+    const designator = dirPlaneToDesignator[poly.planeIdx] >>> 0;
+    const ring = poly.ring;
+    const n = ring.length;
+    const ringEdges = new Array(n);
+    for (let point = 0; point < n; point++) {
       const from = ring[point];
-      const to = ring[(point + 1) % 3];
-      let edgeIndex = -1;
-      for (let e = 0; e < edges.length; e++) {
-        if (edges[e].vertexIndices[0] === to && edges[e].vertexIndices[1] === from && edges[e].surfaceIndices[1] === -1) {
-          edgeIndex = e;
-          break;
-        }
-      }
-      if (edgeIndex === -1) {
+      const to = ring[(point + 1) % n];
+      const revKey = `${to},${from}`;
+      let edgeIndex = openHalfEdgeMap.get(revKey) ?? -1;
+      if (edgeIndex !== -1 && edges[edgeIndex].surfaceIndices[1] === -1) {
+        edges[edgeIndex].surfaceIndices[1] = surfIdx;
+        openHalfEdgeMap.delete(revKey);
+      } else {
         edgeIndex = edges.length;
         edges.push({
           vertexIndices: [from, to],
           edgeIndices: [-1, -1],
           surfaceIndices: [surfIdx, -1]
         });
-      } else {
-        edges[edgeIndex].surfaceIndices[1] = surfIdx;
+        const fwdKey = `${from},${to}`;
+        if (!openHalfEdgeMap.has(fwdKey)) {
+          openHalfEdgeMap.set(fwdKey, edgeIndex);
+        }
       }
       if (vertexFirstEdge[from] === -1) {
         vertexFirstEdge[from] = edgeIndex;
       }
       ringEdges[point] = edgeIndex;
     }
-    for (let point = 0; point < 3; point++) {
+    for (let point = 0; point < n; point++) {
       const edge = edges[ringEdges[point]];
       const side = edge.surfaceIndices[1] === surfIdx ? 1 : 0;
-      edge.edgeIndices[side] = ringEdges[(point + 1) % 3];
+      edge.edgeIndices[side] = ringEdges[(point + 1) % n];
     }
     surfaces.push({
-      planeDesignator: tri.planeIdx,
+      planeDesignator: designator,
       firstEdgeIndex: ringEdges[0],
-      materialIndex: tri.materialIndex
+      flags: surfaceFlags,
+      materialIndex: poly.materialIndex,
+      ring
     });
   }
   for (let e = 0; e < edges.length; e++) {
@@ -48034,15 +48886,22 @@ function compileMeshCollisionBspData(mesh, materialCount) {
     if (vertexFirstEdge[v0] === -1) vertexFirstEdge[v0] = e;
     if (vertexFirstEdge[v1] === -1) vertexFirstEdge[v1] = e;
   }
-  const vertices = mesh.rawPositions.map((pt, idx) => ({
+  const vertices = positions.map((pt, idx) => ({
     point: [pt[0], pt[1], pt[2]],
     firstEdgeIndex: vertexFirstEdge[idx] >= 0 ? vertexFirstEdge[idx] : 0
   }));
   const EPS = 1e-4;
   const clipPolyAgainstPlane = (pts, plane) => {
-    const dists = pts.map((p) => plane[0] * p[0] + plane[1] * p[1] + plane[2] * p[2] - plane[3]);
-    const maxD = Math.max(...dists);
-    const minD = Math.min(...dists);
+    let maxD = -Infinity;
+    let minD = Infinity;
+    const dists = new Float64Array(pts.length);
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const d = plane[0] * p[0] + plane[1] * p[1] + plane[2] * p[2] - plane[3];
+      dists[i] = d;
+      if (d > maxD) maxD = d;
+      if (d < minD) minD = d;
+    }
     if (Math.abs(maxD) <= EPS && Math.abs(minD) <= EPS) {
       return { front: null, back: null, state: "coplanar" };
     }
@@ -48077,20 +48936,38 @@ function compileMeshCollisionBspData(mesh, materialCount) {
       state: "split"
     };
   };
+  const computeCentroid = (pts) => {
+    let cx = 0, cy = 0, cz = 0;
+    for (const p of pts) {
+      cx += p[0];
+      cy += p[1];
+      cz += p[2];
+    }
+    const inv = 1 / Math.max(1, pts.length);
+    return [cx * inv, cy * inv, cz * inv];
+  };
   const bsp3dNodes = [];
+  const defaultBackLeaf = isConcave ? 2147483648 : 4294967295;
   const buildTree = (polys, usedPlanes, depth) => {
-    if (polys.length === 0 || depth >= 48 || bsp3dNodes.length >= 2048) {
-      return 4294967295;
+    if (polys.length === 0 || depth >= 52 || bsp3dNodes.length >= 8192) {
+      return defaultBackLeaf;
     }
-    const candidatePlanes = Array.from(new Set(polys.map((p) => p.planeIdx))).filter(
-      (pIdx) => !usedPlanes.has(pIdx)
-    );
-    if (candidatePlanes.length === 0) {
-      return 4294967295;
+    const uniquePlanes = [];
+    const seenP = /* @__PURE__ */ new Set();
+    for (const p of polys) {
+      if (!usedPlanes.has(p.planeIdx) && !seenP.has(p.planeIdx)) {
+        seenP.add(p.planeIdx);
+        uniquePlanes.push(p.planeIdx);
+      }
     }
-    let bestPlane = candidatePlanes[0];
+    if (uniquePlanes.length === 0) {
+      return defaultBackLeaf;
+    }
+    const step = Math.max(1, Math.floor(uniquePlanes.length / 24));
+    let bestPlane = uniquePlanes[0];
     let bestScore = Infinity;
-    for (const pIdx of candidatePlanes) {
+    for (let idx = 0; idx < uniquePlanes.length; idx += step) {
+      const pIdx = uniquePlanes[idx];
       const pl2 = planes[pIdx];
       let frontCount = 0, backCount = 0, splitCount = 0;
       for (const poly of polys) {
@@ -48100,7 +48977,7 @@ function compileMeshCollisionBspData(mesh, materialCount) {
         else if (c.state === "back") backCount++;
         else if (c.state === "split") splitCount++;
       }
-      const score = frontCount === 0 && splitCount === 0 ? -1e3 - backCount : splitCount * 4 + Math.abs(frontCount - backCount);
+      const score = !isConcave && frontCount === 0 && splitCount === 0 ? -1e3 - backCount : splitCount * 3 + Math.abs(frontCount - backCount);
       if (score < bestScore) {
         bestScore = score;
         bestPlane = pIdx;
@@ -48112,54 +48989,109 @@ function compileMeshCollisionBspData(mesh, materialCount) {
     for (const poly of polys) {
       if (poly.planeIdx === bestPlane) continue;
       const c = clipPolyAgainstPlane(poly.pts, pl);
-      if (c.state === "coplanar") {
-        const op = planes[poly.planeIdx];
-        const dot = pl[0] * op[0] + pl[1] * op[1] + pl[2] * op[2];
-        if (dot < 0) backList.push(poly);
-      } else {
-        if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx });
-        if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx });
+      if (c.state === "front") {
+        frontList.push(poly);
+      } else if (c.state === "back") {
+        backList.push(poly);
+      } else if (c.state === "split") {
+        if (depth >= 18 || polys.length > 400) {
+          const dC = pl[0] * poly.centroid[0] + pl[1] * poly.centroid[1] + pl[2] * poly.centroid[2] - pl[3];
+          if (dC >= 0) frontList.push(poly);
+          else backList.push(poly);
+        } else {
+          if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
+          if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+        }
       }
     }
     const nodeIdx = bsp3dNodes.length;
-    bsp3dNodes.push([bestPlane, 4294967295, 2147483648]);
+    bsp3dNodes.push([bestPlane, defaultBackLeaf, 2147483648]);
     const nextUsed = new Set(usedPlanes);
     nextUsed.add(bestPlane);
     const frontChild = frontList.length === 0 ? 2147483648 : buildTree(frontList, nextUsed, depth + 1);
-    const backChild = backList.length === 0 ? 4294967295 : buildTree(backList, nextUsed, depth + 1);
+    const backChild = backList.length === 0 ? defaultBackLeaf : buildTree(backList, nextUsed, depth + 1);
     bsp3dNodes[nodeIdx][1] = backChild >>> 0;
     bsp3dNodes[nodeIdx][2] = frontChild >>> 0;
     return nodeIdx;
   };
-  const initialPolys = validTris.map((tri) => ({
-    pts: [
-      mesh.rawPositions[tri.ring[0]],
-      mesh.rawPositions[tri.ring[1]],
-      mesh.rawPositions[tri.ring[2]]
-    ],
-    planeIdx: tri.planeIdx
-  }));
-  buildTree(initialPolys, /* @__PURE__ */ new Set(), 0);
+  const bspPolys = surfaces.map((s) => {
+    const pts = s.ring.map((vIdx) => positions[vIdx]);
+    return {
+      pts,
+      planeIdx: (s.planeDesignator & 2147483647) >>> 0,
+      centroid: computeCentroid(pts)
+    };
+  });
+  buildTree(bspPolys, /* @__PURE__ */ new Set(), 0);
   if (bsp3dNodes.length === 0) {
     return null;
   }
+  const bsp2dNodes = [];
+  const bsp2dReferences = [];
+  if (!isConcave) {
+    const byDesignator = /* @__PURE__ */ new Map();
+    for (let sIdx = 0; sIdx < surfaces.length; sIdx++) {
+      const des = surfaces[sIdx].planeDesignator >>> 0;
+      let list = byDesignator.get(des);
+      if (!list) {
+        list = [];
+        byDesignator.set(des, list);
+      }
+      list.push(sIdx);
+    }
+    for (const [designator, sIndices] of byDesignator.entries()) {
+      const rawPlaneIdx = (designator & 2147483647) >>> 0;
+      const isNeg = (designator & 2147483648) !== 0;
+      const rootNode = buildPlaneBsp2dTree(
+        sIndices,
+        surfaces,
+        positions,
+        planes[rawPlaneIdx],
+        isNeg,
+        bsp2dNodes
+      );
+      bsp2dReferences.push([designator >>> 0, rootNode >>> 0]);
+    }
+  } else {
+    for (let sIdx = 0; sIdx < surfaces.length; sIdx++) {
+      const rawPlaneIdx = (surfaces[sIdx].planeDesignator & 2147483647) >>> 0;
+      const leafSurfRef = (2147483648 | sIdx) >>> 0;
+      bsp2dReferences.push([rawPlaneIdx, leafSurfRef]);
+      bsp2dReferences.push([(2147483648 | rawPlaneIdx) >>> 0, leafSurfRef]);
+    }
+  }
+  const leafFlags = isConcave ? 1 : 0;
   const leaves = [
-    [0, surfaces.length, 0]
+    [leafFlags, bsp2dReferences.length, 0]
   ];
-  const bsp2dReferences = surfaces.map((s, idx) => [
-    s.planeDesignator,
-    (2147483648 | idx) >>> 0
-  ]);
-  const byteSize = bsp3dNodes.length * 12 + planes.length * 16 + leaves.length * 8 + bsp2dReferences.length * 8 + surfaces.length * 12 + edges.length * 24 + vertices.length * 16;
+  const byteSize = bsp3dNodes.length * 12 + planes.length * 16 + leaves.length * 8 + bsp2dReferences.length * 8 + bsp2dNodes.length * 20 + surfaces.length * 12 + edges.length * 24 + vertices.length * 16;
   return {
     bsp3dNodes,
     planes,
     leaves,
     bsp2dReferences,
-    surfaces,
+    bsp2dNodes,
+    surfaces: surfaces.map(({ planeDesignator, firstEdgeIndex, flags, materialIndex }) => ({
+      planeDesignator,
+      firstEdgeIndex,
+      flags,
+      materialIndex
+    })),
     edges,
     vertices,
-    byteSize
+    byteSize,
+    stats: {
+      mode,
+      inputTriangles: inputTriangleCount,
+      weldedVertices: positions.length,
+      decimatedTriangles: activeFaces.length,
+      mergedSurfaces: surfaces.length,
+      planes: planes.length,
+      edges: edges.length,
+      bsp3dNodes: bsp3dNodes.length,
+      bsp2dNodes: bsp2dNodes.length,
+      isConcave
+    }
   };
 }
 function writeMeshCollisionBsp(targetBuf, structOff, arraysOff, compiled) {
@@ -48192,11 +49124,20 @@ function writeMeshCollisionBsp(targetBuf, structOff, arraysOff, compiled) {
     targetBuf.writeUInt32LE(ref[1] >>> 0, cursor + 4);
     cursor += 8;
   }
+  const offBsp2dNodes = compiled.bsp2dNodes.length > 0 ? cursor : 0;
+  for (const node2d of compiled.bsp2dNodes) {
+    targetBuf.writeFloatLE(node2d.planeI, cursor + 0);
+    targetBuf.writeFloatLE(node2d.planeJ, cursor + 4);
+    targetBuf.writeFloatLE(node2d.planeD, cursor + 8);
+    targetBuf.writeUInt32LE(node2d.leftChild >>> 0, cursor + 12);
+    targetBuf.writeUInt32LE(node2d.rightChild >>> 0, cursor + 16);
+    cursor += 20;
+  }
   const offSurfaces = cursor;
   for (const surf of compiled.surfaces) {
     targetBuf.writeUInt32LE(surf.planeDesignator >>> 0, cursor + 0);
     targetBuf.writeUInt32LE(surf.firstEdgeIndex >>> 0, cursor + 4);
-    targetBuf.writeUInt8(0, cursor + 8);
+    targetBuf.writeUInt8(surf.flags & 255, cursor + 8);
     targetBuf.writeUInt8(255, cursor + 9);
     targetBuf.writeInt16LE(surf.materialIndex, cursor + 10);
     cursor += 12;
@@ -48227,8 +49168,8 @@ function writeMeshCollisionBsp(targetBuf, structOff, arraysOff, compiled) {
   targetBuf.writeUInt32LE(offLeaves, structOff + 28);
   targetBuf.writeUInt32LE(compiled.bsp2dReferences.length, structOff + 36);
   targetBuf.writeUInt32LE(offBsp2dRefs, structOff + 40);
-  targetBuf.writeUInt32LE(0, structOff + 48);
-  targetBuf.writeUInt32LE(0, structOff + 52);
+  targetBuf.writeUInt32LE(compiled.bsp2dNodes.length, structOff + 48);
+  targetBuf.writeUInt32LE(offBsp2dNodes, structOff + 52);
   targetBuf.writeUInt32LE(compiled.surfaces.length, structOff + 60);
   targetBuf.writeUInt32LE(offSurfaces, structOff + 64);
   targetBuf.writeUInt32LE(compiled.edges.length, structOff + 72);
@@ -48237,7 +49178,7 @@ function writeMeshCollisionBsp(targetBuf, structOff, arraysOff, compiled) {
   targetBuf.writeUInt32LE(offVertices, structOff + 88);
   return cursor;
 }
-function buildCustomCollisionTag(tagPath, originalIndex, mesh, rig, exactMeshCollision = true, materialType = 7, slotMaterialTypes) {
+function buildCustomCollisionTag(tagPath, originalIndex, mesh, rig, exactMeshCollision = true, materialType = 7, slotMaterialTypes, targetCollisionFaces) {
   const nodeCount = rig && rig.modelNodeCount > 0 ? rig.modelNodeCount : 1;
   const slotNames = mesh.summary.materialSlots.length > 0 ? mesh.summary.materialSlots : ["default"];
   const materials = slotNames.map((slotName, idx) => {
@@ -48247,7 +49188,27 @@ function buildCustomCollisionTag(tagPath, originalIndex, mesh, rig, exactMeshCol
     return { name: cleanName, haloMaterialType: safeType };
   });
   const materialCount = Math.max(1, materials.length);
-  const compiledMeshBsp = exactMeshCollision ? compileMeshCollisionBspData(mesh, materialCount) : null;
+  const collisionMode = typeof exactMeshCollision === "string" ? exactMeshCollision : exactMeshCollision ? "auto" : "box";
+  const compiledMeshBsp = collisionMode !== "box" ? compileMeshCollisionBspData(mesh, materialCount, {
+    mode: collisionMode,
+    targetFaces: targetCollisionFaces
+  }) : null;
+  if (compiledMeshBsp) {
+    mesh.summary.collisionPreview = compiledMeshBsp.stats;
+  } else {
+    mesh.summary.collisionPreview = {
+      mode: "box",
+      inputTriangles: mesh.rawFaces.length,
+      weldedVertices: 8,
+      decimatedTriangles: 12,
+      mergedSurfaces: 6,
+      planes: 6,
+      edges: 12,
+      bsp3dNodes: 6,
+      bsp2dNodes: 0,
+      isConcave: false
+    };
+  }
   const bspCount = 1;
   const bspArraysByteSize = compiledMeshBsp ? compiledMeshBsp.byteSize : 752;
   const offMaterials = 664;
@@ -48600,16 +49561,21 @@ function buildCustomObjectContainer(options) {
     shaderLocalIdx,
     options.templateRig
   );
-  const exactMeshCollision = options.multiBoxCollision !== void 0 ? Boolean(options.multiBoxCollision) : true;
+  const collisionMode = options.collisionMode ?? (options.multiBoxCollision !== void 0 ? options.multiBoxCollision ? "auto" : "box" : "auto");
+  const activeCollisionMesh = collisionMesh.triangles.length > 0 ? collisionMesh : renderMesh;
   const collisionTag = buildCustomCollisionTag(
     collisionPath,
     collisionOrigIdx,
-    collisionMesh.triangles.length > 0 ? collisionMesh : renderMesh,
+    activeCollisionMesh,
     options.templateRig,
-    exactMeshCollision,
+    collisionMode,
     matType,
-    options.slotMaterialTypes
+    options.slotMaterialTypes,
+    options.targetCollisionFaces ?? options.meshOptions?.targetCollisionFaces
   );
+  if (activeCollisionMesh.summary.collisionPreview) {
+    renderMesh.summary.collisionPreview = activeCollisionMesh.summary.collisionPreview;
+  }
   const templateDepRemap = /* @__PURE__ */ new Map();
   if (templateRootTag) {
     const oldPrefix = `${templateRootTag.path}.`;
@@ -48713,6 +49679,1870 @@ function buildCustomObjectContainer(options) {
     rootTagPath: rootPath,
     rootTagGroup: options.tagGroup,
     generatedTagPaths
+  };
+}
+
+// ../core/src/map/hs-decompiler.ts
+var NONE2 = 4294967295;
+var FLAG_PRIMITIVE2 = 1;
+var FLAG_SCRIPT_CALL2 = 2;
+var FLAG_GLOBAL_INDEX = 4;
+var NODE_SALT = 0;
+var NODE_INDEX_UNION = 2;
+var NODE_TYPE = 4;
+var NODE_FLAGS2 = 6;
+var NODE_NEXT2 = 8;
+var NODE_STRING2 = 12;
+var NODE_DATA2 = 16;
+var HS_SCRIPT_TYPES = {
+  0: "startup",
+  1: "dormant",
+  2: "continuous",
+  3: "static",
+  4: "stub"
+};
+var HS_VALUE_TYPES = {
+  0: "unparsed",
+  1: "special_form",
+  2: "function_name",
+  3: "passthrough",
+  4: "void",
+  5: "boolean",
+  6: "real",
+  7: "short",
+  8: "long",
+  9: "string",
+  10: "script",
+  11: "trigger_volume",
+  12: "cutscene_flag",
+  13: "cutscene_camera_point",
+  14: "cutscene_title",
+  15: "cutscene_recording",
+  16: "device_group",
+  17: "ai",
+  18: "ai_command_list",
+  19: "starting_profile",
+  20: "conversation",
+  21: "navpoint",
+  22: "hud_message",
+  23: "object_list",
+  24: "sound",
+  25: "effect",
+  26: "damage",
+  27: "looping_sound",
+  28: "animation_graph",
+  29: "actor_variant",
+  30: "damage_effect",
+  31: "object_definition",
+  32: "game_difficulty",
+  33: "team",
+  34: "ai_default_state",
+  35: "actor_type",
+  36: "hud_corner",
+  37: "object",
+  38: "unit",
+  39: "vehicle",
+  40: "weapon",
+  41: "device",
+  42: "scenery",
+  43: "object_name",
+  44: "unit_name",
+  45: "vehicle_name",
+  46: "weapon_name",
+  47: "device_name",
+  48: "scenery_name"
+};
+function decompileScenarioScripts(view) {
+  const header = parseCacheFileHeader(view);
+  const tagIndex = parseTagIndex(view, header);
+  const scenario = scenarioEntryOf(tagIndex);
+  const scenarioStruct = getGroupStructName("scenario");
+  const emptyResult = {
+    hscSource: "; No compiled HaloScript syntax nodes found in this scenario.\n",
+    scriptCount: 0,
+    globalCount: 0,
+    syntaxNodeCount: 0,
+    globals: [],
+    scripts: [],
+    scenarioEntities: {
+      objectNames: [],
+      triggerVolumes: [],
+      cutsceneCameraPoints: [],
+      cutsceneFlags: [],
+      encounters: [],
+      recordedAnimations: []
+    }
+  };
+  if (!scenario) return emptyResult;
+  const scnrAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(scnrAt, resolveStruct(scenarioStruct).totalSize, view.length)) return emptyResult;
+  const decoded = decodeStruct(view, scnrAt, scenarioStruct);
+  const readReflexiveNames = (blockName, strOffset = 0, strLen = 32) => {
+    const field = decoded.get(blockName);
+    const fieldDef = resolveStruct(scenarioStruct).fields.find((f) => f.name === blockName);
+    const elemStructName = fieldDef?.def.type === "TagReflexive" ? fieldDef.def.struct : void 0;
+    if (field?.kind !== "reflexive" || !elemStructName || field.value.count <= 0) return [];
+    const elemStruct = resolveStruct(elemStructName);
+    const out = [];
+    for (let i = 0; i < field.value.count; i++) {
+      const elemAt = resolvePointer(
+        field.value.pointerLow + i * elemStruct.totalSize >>> 0,
+        header.tagDataOffset,
+        tagIndex.baseMemoryAddress
+      );
+      if (!isRangeInBuffer(elemAt, elemStruct.totalSize, view.length)) break;
+      const zeroIdx = view.indexOf(0, elemAt + strOffset);
+      const end = zeroIdx >= elemAt + strOffset && zeroIdx < elemAt + strOffset + strLen ? zeroIdx : elemAt + strOffset + strLen;
+      out.push(view.toString("latin1", elemAt + strOffset, end).trim() || `${blockName}_${i}`);
+    }
+    return out;
+  };
+  const scenarioEntities = {
+    objectNames: readReflexiveNames("object names", 0, 32),
+    triggerVolumes: readReflexiveNames("trigger volumes", 4, 32),
+    cutsceneCameraPoints: readReflexiveNames("cutscene camera points", 4, 32),
+    cutsceneFlags: readReflexiveNames("cutscene flags", 4, 32),
+    encounters: readReflexiveNames("encounters", 0, 32),
+    recordedAnimations: readReflexiveNames("recorded animations", 0, 32)
+  };
+  const syntax = decoded.get("script syntax data");
+  const strings = decoded.get("script string data");
+  if (syntax?.kind !== "tagDataOffset" || syntax.value.size < DATA_ARRAY_HEADER_SIZE) {
+    return { ...emptyResult, scenarioEntities };
+  }
+  const tableAt = resolvePointer(syntax.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(tableAt, syntax.value.size, view.length)) {
+    return { ...emptyResult, scenarioEntities };
+  }
+  const used = view.readInt16LE(tableAt + DATA_ARRAY_COUNT);
+  if (used <= 0 || DATA_ARRAY_HEADER_SIZE + used * SCRIPT_NODE_SIZE > syntax.value.size) {
+    return { ...emptyResult, scenarioEntities };
+  }
+  let stringsAt = -1;
+  let stringBytes = 0;
+  if (strings?.kind === "tagDataOffset" && strings.value.size > 0) {
+    stringsAt = resolvePointer(strings.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    stringBytes = isRangeInBuffer(stringsAt, strings.value.size, view.length) ? strings.value.size : 0;
+  }
+  const nodeOffset = (i) => tableAt + DATA_ARRAY_HEADER_SIZE + i * SCRIPT_NODE_SIZE;
+  const readStringAt = (offset) => {
+    if (stringsAt < 0 || offset < 0 || offset >= stringBytes) return null;
+    const end = view.indexOf(0, stringsAt + offset);
+    return end >= stringsAt + offset && end < stringsAt + stringBytes ? view.toString("latin1", stringsAt + offset, end) : null;
+  };
+  const scriptsField = decoded.get("scripts");
+  const rawScripts = [];
+  if (scriptsField?.kind === "reflexive" && scriptsField.value.count > 0) {
+    const elemSize = 92;
+    for (let i = 0; i < scriptsField.value.count; i++) {
+      const at = resolvePointer(
+        scriptsField.value.pointerLow + i * elemSize >>> 0,
+        header.tagDataOffset,
+        tagIndex.baseMemoryAddress
+      );
+      if (!isRangeInBuffer(at, elemSize, view.length)) break;
+      const zero = view.indexOf(0, at);
+      const name = view.toString("latin1", at, zero >= at && zero < at + 32 ? zero : at + 32);
+      const scriptType = view.readInt16LE(at + 32);
+      const returnType = view.readInt16LE(at + 34);
+      const rootNode = view.readUInt32LE(at + 36);
+      rawScripts.push({ name, scriptType, returnType, rootNode });
+    }
+  }
+  const globalsField = decoded.get("globals");
+  const rawGlobals = [];
+  if (globalsField?.kind === "reflexive" && globalsField.value.count > 0) {
+    const elemSize = 92;
+    for (let i = 0; i < globalsField.value.count; i++) {
+      const at = resolvePointer(
+        globalsField.value.pointerLow + i * elemSize >>> 0,
+        header.tagDataOffset,
+        tagIndex.baseMemoryAddress
+      );
+      if (!isRangeInBuffer(at, elemSize, view.length)) break;
+      const zero = view.indexOf(0, at);
+      const name = view.toString("latin1", at, zero >= at && zero < at + 32 ? zero : at + 32);
+      const type = view.readInt16LE(at + 32);
+      const initNode = view.readUInt32LE(at + 40);
+      rawGlobals.push({ name, type, initNode });
+    }
+  }
+  const decompileNode = (nodeHandle, indent, visited, calledScripts) => {
+    if (nodeHandle === NONE2 || nodeHandle === 0) return "none";
+    const idx = nodeHandle & 65535;
+    if (idx >= used || visited.has(idx)) return "none";
+    const nextVisited = new Set(visited);
+    nextVisited.add(idx);
+    const n = nodeOffset(idx);
+    const salt = view.readUInt16LE(n + NODE_SALT);
+    if (salt === 0) return "none";
+    const unionIdx = view.readUInt16LE(n + NODE_INDEX_UNION);
+    const valType = view.readInt16LE(n + NODE_TYPE);
+    const flags = view.readUInt16LE(n + NODE_FLAGS2);
+    const strOff = view.readInt32LE(n + NODE_STRING2);
+    const dataRaw = view.readUInt32LE(n + NODE_DATA2);
+    const strVal = readStringAt(strOff);
+    if ((flags & FLAG_PRIMITIVE2) !== 0) {
+      if ((flags & FLAG_GLOBAL_INDEX) !== 0) {
+        if (strVal && strVal.length > 0) return strVal;
+        const gIdx = dataRaw & 65535;
+        return rawGlobals[gIdx]?.name ?? `global_${gIdx}`;
+      }
+      if (strVal && strVal.length > 0) {
+        if (valType === 9) {
+          return `"${strVal.replace(/"/g, '\\"')}"`;
+        }
+        return strVal;
+      }
+      switch (valType) {
+        case 5:
+          return (dataRaw & 255) !== 0 ? "true" : "false";
+        case 6: {
+          const f = view.readFloatLE(n + NODE_DATA2);
+          return Number.isFinite(f) ? f.toFixed(4).replace(/\.?0+$/, (m) => m === ".0000" ? ".0" : "") : "0.0";
+        }
+        case 7:
+          return String(view.readInt16LE(n + NODE_DATA2));
+        case 8:
+          return String(view.readInt32LE(n + NODE_DATA2));
+        case 43:
+        case 44:
+        case 45:
+        case 46:
+        case 47:
+        case 48:
+          return scenarioEntities.objectNames[dataRaw & 65535] ?? `obj_${dataRaw & 65535}`;
+        case 11:
+          return scenarioEntities.triggerVolumes[dataRaw & 65535] ?? `vol_${dataRaw & 65535}`;
+        case 13:
+          return scenarioEntities.cutsceneCameraPoints[dataRaw & 65535] ?? `cam_${dataRaw & 65535}`;
+        default:
+          return String(dataRaw);
+      }
+    }
+    const firstChildIdx = dataRaw & 65535;
+    if (firstChildIdx >= used) return "()";
+    const firstChildAt = nodeOffset(firstChildIdx);
+    let fnName = readStringAt(view.readInt32LE(firstChildAt + NODE_STRING2)) ?? "";
+    if (!fnName) {
+      if ((flags & FLAG_SCRIPT_CALL2) !== 0 && rawScripts[unionIdx]) {
+        fnName = rawScripts[unionIdx].name;
+      } else {
+        fnName = `fn_${unionIdx}`;
+      }
+    }
+    if ((flags & FLAG_SCRIPT_CALL2) !== 0 || rawScripts.some((s) => s.name === fnName && s.scriptType === 3)) {
+      calledScripts.add(fnName);
+    }
+    const args = [];
+    let argHandle = view.readUInt32LE(firstChildAt + NODE_NEXT2);
+    const argSeen = /* @__PURE__ */ new Set();
+    while (argHandle !== NONE2 && argHandle !== 0) {
+      const argIdx = argHandle & 65535;
+      if (argIdx >= used || argSeen.has(argIdx)) break;
+      argSeen.add(argIdx);
+      const childIndent = `${indent}  `;
+      args.push(decompileNode(argHandle, childIndent, nextVisited, calledScripts));
+      argHandle = view.readUInt32LE(nodeOffset(argIdx) + NODE_NEXT2);
+    }
+    if (args.length === 0) {
+      return `(${fnName})`;
+    }
+    const isMultiLine = fnName === "begin" || fnName === "begin_random" || fnName === "if" || fnName === "cond" || args.some((a) => a.includes("\n")) || args.join(" ").length > 68;
+    if (!isMultiLine) {
+      return `(${fnName} ${args.join(" ")})`;
+    }
+    return `(${fnName}
+${args.map((a) => `${indent}  ${a}`).join("\n")}
+${indent})`;
+  };
+  const globals = rawGlobals.map((g, index) => {
+    const typeName = HS_VALUE_TYPES[g.type] ?? "short";
+    const dummySet = /* @__PURE__ */ new Set();
+    const initExpr = g.initNode !== NONE2 ? decompileNode(g.initNode, "  ", /* @__PURE__ */ new Set(), dummySet) : "0";
+    return {
+      index,
+      name: g.name,
+      type: typeName,
+      initExpression: initExpr
+    };
+  });
+  const unsortedScripts = rawScripts.map((s, index) => {
+    const scriptType = HS_SCRIPT_TYPES[s.scriptType] ?? "startup";
+    const returnType = HS_VALUE_TYPES[s.returnType] ?? "void";
+    const calledSet = /* @__PURE__ */ new Set();
+    let bodySource = decompileNode(s.rootNode, "  ", /* @__PURE__ */ new Set(), calledSet);
+    if (bodySource.startsWith("(begin\n") && bodySource.endsWith("\n  )")) {
+      bodySource = bodySource.slice("(begin\n".length, -"\n  )".length);
+    }
+    return {
+      index,
+      name: s.name,
+      scriptType,
+      returnType,
+      bodySource,
+      calledStaticScripts: Array.from(calledSet)
+    };
+  });
+  const scriptByName = /* @__PURE__ */ new Map();
+  for (const s of unsortedScripts) scriptByName.set(s.name, s);
+  const sortedScripts = [];
+  const emitted = /* @__PURE__ */ new Set();
+  const visiting = /* @__PURE__ */ new Set();
+  const emitScript = (s) => {
+    if (emitted.has(s.name)) return;
+    if (visiting.has(s.name)) return;
+    visiting.add(s.name);
+    for (const calleeName of s.calledStaticScripts) {
+      const callee = scriptByName.get(calleeName);
+      if (callee && !emitted.has(callee.name)) {
+        emitScript(callee);
+      }
+    }
+    visiting.delete(s.name);
+    emitted.add(s.name);
+    sortedScripts.push(s);
+  };
+  for (const s of unsortedScripts) {
+    if (s.scriptType === "static") emitScript(s);
+  }
+  for (const s of unsortedScripts) {
+    emitScript(s);
+  }
+  const lines = [
+    `; ============================================================================`,
+    `; Decompiled HaloScript (.hsc) \u2014 ${scenario.path}`,
+    `; Scripts: ${sortedScripts.length} | Globals: ${globals.length} | Syntax Nodes: ${used}`,
+    `; ============================================================================`,
+    ""
+  ];
+  if (globals.length > 0) {
+    lines.push("; --- Globals ---");
+    for (const g of globals) {
+      lines.push(`(global ${g.type} ${g.name} ${g.initExpression})`);
+    }
+    lines.push("");
+  }
+  if (sortedScripts.length > 0) {
+    lines.push("; --- Scripts (Topologically Sorted) ---");
+    for (const s of sortedScripts) {
+      lines.push(`(script ${s.scriptType} ${s.returnType} ${s.name}`);
+      lines.push(s.bodySource.startsWith("  ") ? s.bodySource : `  ${s.bodySource}`);
+      lines.push(")");
+      lines.push("");
+    }
+  }
+  return {
+    hscSource: lines.join("\n"),
+    scriptCount: sortedScripts.length,
+    globalCount: globals.length,
+    syntaxNodeCount: used,
+    globals,
+    scripts: sortedScripts,
+    scenarioEntities
+  };
+}
+
+// ../core/src/map/hs-compiler.ts
+var NONE3 = 4294967295;
+var FLAG_PRIMITIVE3 = 1;
+var FLAG_SCRIPT_CALL3 = 2;
+var FLAG_GLOBAL_INDEX2 = 4;
+var FLAG_PERMANENT = 8;
+var MAXIMUM_HS_SYNTAX_NODES_PER_SCENARIO = 19001;
+var HS_MAXIMUM_DYNAMIC_SOURCE_DATA_BYTES = 1024;
+var SCRIPT_TYPE_BY_NAME = Object.fromEntries(
+  Object.entries(HS_SCRIPT_TYPES).map(([k, v]) => [v, Number(k)])
+);
+var VALUE_TYPE_BY_NAME = Object.fromEntries(
+  Object.entries(HS_VALUE_TYPES).map(([k, v]) => [v, Number(k)])
+);
+var BUILTIN_FUNCTIONS = {
+  begin: { index: 0, ret: 3, params: [] },
+  begin_random: { index: 1, ret: 3, params: [] },
+  if: { index: 2, ret: 3, params: [] },
+  cond: { index: 3, ret: 3, params: [] },
+  set: { index: 4, ret: 3, params: [] },
+  and: { index: 5, ret: 5, params: [] },
+  or: { index: 6, ret: 5, params: [] },
+  "+": { index: 7, ret: 6, params: [] },
+  "-": { index: 8, ret: 6, params: [] },
+  "*": { index: 9, ret: 6, params: [] },
+  "/": { index: 10, ret: 6, params: [] },
+  min: { index: 11, ret: 6, params: [] },
+  max: { index: 12, ret: 6, params: [] },
+  "=": { index: 13, ret: 5, params: [] },
+  "!=": { index: 14, ret: 5, params: [] },
+  ">": { index: 15, ret: 5, params: [] },
+  "<": { index: 16, ret: 5, params: [] },
+  ">=": { index: 17, ret: 5, params: [] },
+  "<=": { index: 18, ret: 5, params: [] },
+  sleep: { index: 19, ret: 4, params: [] },
+  sleep_until: { index: 20, ret: 4, params: [] },
+  wake: { index: 21, ret: 4, params: [] },
+  inspect: { index: 22, ret: 4, params: [] },
+  unit: { index: 23, ret: 38, params: [37] },
+  not: { index: 27, ret: 5, params: [5] },
+  print: { index: 28, ret: 4, params: [9] },
+  players: { index: 29, ret: 23, params: [] },
+  volume_teleport_players_not_inside: { index: 30, ret: 4, params: [11, 12] },
+  volume_test_object: { index: 31, ret: 5, params: [11, 37] },
+  volume_test_objects: { index: 32, ret: 5, params: [11, 23] },
+  volume_test_objects_all: { index: 33, ret: 5, params: [11, 23] },
+  object_teleport: { index: 34, ret: 4, params: [37, 12] },
+  object_set_facing: { index: 35, ret: 4, params: [37, 12] },
+  object_set_shield: { index: 36, ret: 4, params: [37, 6] },
+  object_set_permutation: { index: 37, ret: 4, params: [37, 9, 9] },
+  object_create: { index: 38, ret: 4, params: [43] },
+  object_destroy: { index: 39, ret: 4, params: [37] },
+  object_create_anew: { index: 40, ret: 4, params: [43] },
+  object_create_containing: { index: 41, ret: 4, params: [9] },
+  object_create_anew_containing: { index: 42, ret: 4, params: [9] },
+  object_destroy_containing: { index: 43, ret: 4, params: [9] },
+  object_destroy_all: { index: 44, ret: 4, params: [] },
+  list_get: { index: 45, ret: 37, params: [23, 7] },
+  list_count: { index: 46, ret: 7, params: [23] },
+  effect_new: { index: 47, ret: 4, params: [25, 12] },
+  effect_new_on_object_marker: { index: 48, ret: 4, params: [25, 37, 9] },
+  damage_new: { index: 49, ret: 4, params: [26, 12] },
+  damage_object: { index: 50, ret: 4, params: [26, 37] },
+  recording_play: { index: 66, ret: 5, params: [38, 15] },
+  recording_play_and_delete: { index: 67, ret: 5, params: [38, 15] },
+  recording_play_and_hover: { index: 68, ret: 5, params: [39, 15] },
+  recording_kill: { index: 69, ret: 4, params: [38] },
+  recording_time: { index: 70, ret: 7, params: [38] },
+  object_set_collideable: { index: 74, ret: 4, params: [37, 5] },
+  object_set_scale: { index: 75, ret: 4, params: [37, 6, 7] },
+  objects_attach: { index: 76, ret: 4, params: [37, 9, 37, 9] },
+  objects_detach: { index: 77, ret: 4, params: [37, 37] },
+  garbage_collect_now: { index: 78, ret: 4, params: [] },
+  object_cannot_take_damage: { index: 79, ret: 4, params: [23] },
+  object_can_take_damage: { index: 80, ret: 4, params: [23] },
+  unit_open: { index: 94, ret: 4, params: [38] },
+  unit_close: { index: 95, ret: 4, params: [38] },
+  unit_kill: { index: 96, ret: 4, params: [38] },
+  unit_kill_silent: { index: 97, ret: 4, params: [38] },
+  unit_set_enterable_by_player: { index: 106, ret: 4, params: [38, 5] },
+  unit_enter_vehicle: { index: 107, ret: 4, params: [38, 39, 9] },
+  vehicle_test_seat_list: { index: 108, ret: 5, params: [39, 9, 23] },
+  vehicle_test_seat: { index: 109, ret: 5, params: [39, 9, 38] },
+  unit_exit_vehicle: { index: 111, ret: 4, params: [38] },
+  unit_set_maximum_vitality: { index: 112, ret: 4, params: [38, 6, 6] },
+  units_set_maximum_vitality: { index: 113, ret: 4, params: [23, 6, 6] },
+  unit_set_current_vitality: { index: 114, ret: 4, params: [38, 6, 6] },
+  units_set_current_vitality: { index: 115, ret: 4, params: [23, 6, 6] },
+  vehicle_load_magic: { index: 116, ret: 7, params: [38, 9, 23] },
+  vehicle_unload: { index: 117, ret: 7, params: [38, 9] },
+  vehicle_riders: { index: 121, ret: 23, params: [38] },
+  vehicle_driver: { index: 122, ret: 38, params: [38] },
+  vehicle_gunner: { index: 123, ret: 38, params: [38] },
+  unit_get_health: { index: 124, ret: 6, params: [38] },
+  unit_get_shield: { index: 125, ret: 6, params: [38] },
+  unit_get_total_grenade_count: { index: 126, ret: 7, params: [38] },
+  unit_impervious: { index: 130, ret: 4, params: [23, 5] },
+  device_set_never_appears_locked: { index: 136, ret: 4, params: [41, 5] },
+  device_get_power: { index: 137, ret: 6, params: [41] },
+  device_set_power: { index: 138, ret: 4, params: [41, 6] },
+  device_set_position: { index: 139, ret: 5, params: [41, 6] },
+  device_get_position: { index: 140, ret: 6, params: [41] },
+  device_set_position_immediate: { index: 141, ret: 4, params: [41, 6] },
+  ai_place: { index: 161, ret: 4, params: [17] },
+  ai_kill: { index: 162, ret: 4, params: [17] },
+  ai_kill_silent: { index: 163, ret: 4, params: [17] },
+  ai_erase: { index: 164, ret: 4, params: [17] },
+  ai_erase_all: { index: 165, ret: 4, params: [] },
+  ai_set_respawn: { index: 169, ret: 4, params: [17, 5] },
+  ai_set_deaf: { index: 170, ret: 4, params: [17, 5] },
+  ai_set_blind: { index: 171, ret: 4, params: [17, 5] },
+  ai_magically_see_encounter: { index: 172, ret: 4, params: [17, 17] },
+  ai_magically_see_players: { index: 173, ret: 4, params: [17] },
+  ai_magically_see_unit: { index: 174, ret: 4, params: [17, 38] },
+  ai_attack: { index: 177, ret: 4, params: [17] },
+  ai_defend: { index: 178, ret: 4, params: [17] },
+  ai_retreat: { index: 179, ret: 4, params: [17] },
+  ai_maneuver: { index: 180, ret: 4, params: [17] },
+  ai_migrate: { index: 182, ret: 4, params: [17, 17] },
+  ai_allegiance: { index: 185, ret: 4, params: [33, 33] },
+  ai_allegiance_remove: { index: 186, ret: 4, params: [33, 33] },
+  ai_living_count: { index: 187, ret: 7, params: [17] },
+  ai_living_fraction: { index: 188, ret: 6, params: [17] },
+  ai_strength: { index: 189, ret: 6, params: [17] },
+  ai_actors: { index: 192, ret: 23, params: [17] },
+  ai_go_to_vehicle: { index: 193, ret: 4, params: [17, 38, 9] },
+  ai_exit_vehicle: { index: 196, ret: 4, params: [17] },
+  ai_braindead: { index: 197, ret: 4, params: [17, 5] },
+  ai_disregard: { index: 199, ret: 4, params: [23, 5] },
+  ai_renew: { index: 203, ret: 4, params: [17] },
+  ai_try_to_fight_player: { index: 206, ret: 4, params: [17] },
+  ai_command_list: { index: 207, ret: 4, params: [17, 18] },
+  ai_force_active: { index: 213, ret: 4, params: [17, 5] },
+  camera_control: { index: 245, ret: 4, params: [5] },
+  camera_set: { index: 246, ret: 4, params: [13, 7] },
+  camera_set_relative: { index: 247, ret: 4, params: [13, 7, 37] },
+  camera_set_animation: { index: 248, ret: 4, params: [28, 9] },
+  camera_set_first_person: { index: 249, ret: 4, params: [38] },
+  camera_set_dead: { index: 250, ret: 4, params: [38] },
+  camera_time: { index: 251, ret: 7, params: [] },
+  fade_in: { index: 292, ret: 4, params: [6, 6, 6, 7] },
+  fade_out: { index: 293, ret: 4, params: [6, 6, 6, 7] },
+  cinematic_start: { index: 294, ret: 4, params: [] },
+  cinematic_stop: { index: 295, ret: 4, params: [] },
+  cinematic_show_letterbox: { index: 298, ret: 4, params: [5] },
+  cinematic_set_title: { index: 299, ret: 4, params: [14] },
+  cinematic_set_title_delayed: { index: 300, ret: 4, params: [14, 6] },
+  cinematic_suppress_bsp_object_creation: { index: 301, ret: 4, params: [5] },
+  vehicle_hover: { index: 336, ret: 4, params: [39, 5] },
+  sv_say: { index: 418, ret: 4, params: [9] },
+  sv_end_game: { index: 419, ret: 4, params: [] }
+};
+function parseHaloScriptSExpressions(source) {
+  const diagnostics = [];
+  const stack = [{ kind: "list", items: [], line: 1 }];
+  let line = 1;
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "\n") {
+      line++;
+      i++;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+    if (ch === ";") {
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "(") {
+      const list = { kind: "list", items: [], line };
+      stack[stack.length - 1].items.push(list);
+      stack.push(list);
+      i++;
+      continue;
+    }
+    if (ch === ")") {
+      if (stack.length <= 1) {
+        diagnostics.push({ line, severity: "error", message: "Unexpected closing parenthesis `)`" });
+      } else {
+        stack.pop();
+      }
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      const startLine2 = line;
+      i++;
+      let text2 = "";
+      while (i < source.length && source[i] !== '"') {
+        if (source[i] === "\\" && i + 1 < source.length) {
+          i++;
+          text2 += source[i];
+        } else {
+          if (source[i] === "\n") line++;
+          text2 += source[i];
+        }
+        i++;
+      }
+      if (i >= source.length) {
+        diagnostics.push({ line: startLine2, severity: "error", message: "Unterminated string literal" });
+      } else {
+        i++;
+      }
+      stack[stack.length - 1].items.push({ kind: "atom", text: text2, quoted: true, line: startLine2 });
+      continue;
+    }
+    const startLine = line;
+    let text = "";
+    while (i < source.length && !/[\s()";]/.test(source[i])) {
+      text += source[i];
+      i++;
+    }
+    stack[stack.length - 1].items.push({ kind: "atom", text, quoted: false, line: startLine });
+  }
+  if (stack.length > 1) {
+    diagnostics.push({
+      line: stack[stack.length - 1].line,
+      severity: "error",
+      message: `Unclosed parenthesis \`(\` opened at line ${stack[stack.length - 1].line}`
+    });
+  }
+  return { expressions: stack[0].items, diagnostics };
+}
+function lintHaloScript(source) {
+  const { expressions, diagnostics } = parseHaloScriptSExpressions(source);
+  const checkRandomRecursive = (expr) => {
+    if (expr.kind !== "list" || expr.items.length === 0) return;
+    const head = expr.items[0];
+    if (head?.kind === "atom" && head.text === "begin_random") {
+      const argCount = expr.items.length - 1;
+      if (argCount >= 32) {
+        diagnostics.push({
+          line: expr.line,
+          severity: argCount > 32 ? "error" : "warning",
+          message: `begin_random has ${argCount} arguments; OpenCE asserts < 32 arguments in hs_evaluate_begin_random.`
+        });
+      }
+    }
+    for (const item of expr.items) checkRandomRecursive(item);
+  };
+  for (const expr of expressions) {
+    if (expr.kind !== "list" || expr.items.length === 0) {
+      diagnostics.push({ line: expr.line, severity: "error", message: "Top-level form must be `(global ...)` or `(script ...)`." });
+      continue;
+    }
+    const head = expr.items[0];
+    if (head.kind !== "atom" || head.text !== "global" && head.text !== "script") {
+      diagnostics.push({
+        line: expr.line,
+        severity: "error",
+        message: `Unknown top-level form "${head.kind === "atom" ? head.text : "list"}"; expected "global" or "script".`
+      });
+      continue;
+    }
+    if (head.text === "global") {
+      if (expr.items.length !== 4) {
+        diagnostics.push({ line: expr.line, severity: "error", message: "`(global <type> <name> <value>)` requires 4 items." });
+      } else {
+        const typeAtom = expr.items[1];
+        if (typeAtom.kind !== "atom" || VALUE_TYPE_BY_NAME[typeAtom.text] === void 0) {
+          diagnostics.push({ line: expr.line, severity: "error", message: `Unknown HaloScript value type "${typeAtom.kind === "atom" ? typeAtom.text : ""}".` });
+        }
+      }
+    } else if (head.text === "script") {
+      if (expr.items.length < 4) {
+        diagnostics.push({
+          line: expr.line,
+          severity: "error",
+          message: "`(script <type> [return_type] <name> <body>...)` requires at least 4 items."
+        });
+      } else {
+        const scriptTypeAtom = expr.items[1];
+        const secondAtom = expr.items[2];
+        if (scriptTypeAtom.kind !== "atom" || SCRIPT_TYPE_BY_NAME[scriptTypeAtom.text] === void 0) {
+          diagnostics.push({
+            line: expr.line,
+            severity: "error",
+            message: `Unknown script type "${scriptTypeAtom.kind === "atom" ? scriptTypeAtom.text : ""}" (expected startup, dormant, continuous, static, or stub).`
+          });
+        }
+        const isImplicitVoid = scriptTypeAtom.kind === "atom" && (scriptTypeAtom.text === "startup" || scriptTypeAtom.text === "dormant" || scriptTypeAtom.text === "continuous") && secondAtom.kind === "atom" && VALUE_TYPE_BY_NAME[secondAtom.text] === void 0;
+        if (!isImplicitVoid) {
+          if (expr.items.length < 5) {
+            diagnostics.push({
+              line: expr.line,
+              severity: "error",
+              message: "`(script <type> <return_type> <name> <body>...)` requires at least 5 items."
+            });
+          } else if (secondAtom.kind !== "atom" || VALUE_TYPE_BY_NAME[secondAtom.text] === void 0) {
+            diagnostics.push({
+              line: expr.line,
+              severity: "error",
+              message: `Unknown return type "${secondAtom.kind === "atom" ? secondAtom.text : ""}".`
+            });
+          }
+        }
+      }
+    }
+    checkRandomRecursive(expr);
+  }
+  return diagnostics;
+}
+function ensureScenarioScriptEntities(view, required) {
+  let current = Buffer.from(view);
+  const header = parseCacheFileHeader(current);
+  const tagIndex = parseTagIndex(current, header);
+  const scenario = scenarioEntryOf(tagIndex);
+  if (!scenario) {
+    return { buffer: current, addedObjectNames: [], addedTriggerVolumes: [], addedCameraPoints: [] };
+  }
+  const decompiled = decompileScenarioScripts(current);
+  const existingObj = new Set(decompiled.scenarioEntities.objectNames);
+  const existingTrig = new Set(decompiled.scenarioEntities.triggerVolumes);
+  const existingCam = new Set(decompiled.scenarioEntities.cutsceneCameraPoints);
+  const addedObjectNames = [];
+  const addedTriggerVolumes = [];
+  const addedCameraPoints = [];
+  let curHeader = header;
+  let curTagIndex = tagIndex;
+  for (const objName of required.objectNames ?? []) {
+    if (existingObj.has(objName)) continue;
+    const addRes = addReflexiveChunk(current, curHeader, curTagIndex, scenario.index, "object names", -1);
+    current = addRes.buffer;
+    curHeader = addRes.header;
+    curTagIndex = addRes.tagIndex;
+    const idx = addRes.newElementIndex;
+    writeTagFieldValue(current, curHeader, curTagIndex, scenario.index, `object names[${idx}].name`, objName);
+    const defaultObjType = /door|gate|shutter|switch|lift|elevator/i.test(objName) ? 7 : 1;
+    current.writeInt16LE(defaultObjType, addRes.newElementOffset + 32);
+    current.writeInt16LE(-1, addRes.newElementOffset + 34);
+    existingObj.add(objName);
+    addedObjectNames.push(objName);
+  }
+  for (const trigName of required.triggerVolumes ?? []) {
+    if (existingTrig.has(trigName)) continue;
+    const addRes = addReflexiveChunk(current, curHeader, curTagIndex, scenario.index, "trigger volumes", -1);
+    current = addRes.buffer;
+    curHeader = addRes.header;
+    curTagIndex = addRes.tagIndex;
+    const idx = addRes.newElementIndex;
+    writeTagFieldValue(current, curHeader, curTagIndex, scenario.index, `trigger volumes[${idx}].name`, trigName);
+    current.writeFloatLE(1, addRes.newElementOffset + 36);
+    current.writeFloatLE(1, addRes.newElementOffset + 56);
+    current.writeFloatLE(10, addRes.newElementOffset + 72);
+    current.writeFloatLE(10, addRes.newElementOffset + 76);
+    current.writeFloatLE(5, addRes.newElementOffset + 80);
+    existingTrig.add(trigName);
+    addedTriggerVolumes.push(trigName);
+  }
+  for (let c = 0; c < (required.cameraPoints ?? []).length; c++) {
+    const camName = required.cameraPoints[c];
+    if (existingCam.has(camName)) continue;
+    const addRes = addReflexiveChunk(current, curHeader, curTagIndex, scenario.index, "cutscene camera points", -1);
+    current = addRes.buffer;
+    curHeader = addRes.header;
+    curTagIndex = addRes.tagIndex;
+    const idx = addRes.newElementIndex;
+    writeTagFieldValue(current, curHeader, curTagIndex, scenario.index, `cutscene camera points[${idx}].name`, camName);
+    current.writeFloatLE(70, addRes.newElementOffset + 60);
+    existingCam.add(camName);
+    addedCameraPoints.push(camName);
+  }
+  return { buffer: current, addedObjectNames, addedTriggerVolumes, addedCameraPoints };
+}
+function syncScenarioObjectNamesForScripts(buffer, scnrAt, tagDataOffset, baseMemoryAddress, inferredObjectTypesByNameIdx) {
+  const scenarioStruct = getGroupStructName("scenario");
+  const decoded = decodeStruct(buffer, scnrAt, scenarioStruct);
+  const objNamesRef = decoded.get("object names");
+  if (objNamesRef?.kind !== "reflexive" || objNamesRef.value.count <= 0) return;
+  const objNamesBase = resolvePointer(objNamesRef.value.pointerLow, tagDataOffset, baseMemoryAddress);
+  if (!isRangeInBuffer(objNamesBase, objNamesRef.value.count * 36, buffer.length)) return;
+  const placementBlocks = [
+    { block: "bipeds", objType: 0 },
+    { block: "vehicles", objType: 1 },
+    { block: "weapons", objType: 2 },
+    { block: "equipment", objType: 3 },
+    { block: "scenery", objType: 6 },
+    { block: "machines", objType: 7 },
+    { block: "controls", objType: 8 },
+    { block: "light fixtures", objType: 9 },
+    { block: "sound scenery", objType: 11 }
+  ];
+  const scnrDef = resolveStruct(scenarioStruct);
+  for (const { block, objType } of placementBlocks) {
+    const ref = decoded.get(block);
+    const fieldDef = scnrDef.fields.find((f) => f.name === block);
+    if (ref?.kind !== "reflexive" || ref.value.count <= 0 || !fieldDef?.def.struct) continue;
+    const childStruct = resolveStruct(fieldDef.def.struct);
+    const nameField = childStruct.fields.find((f) => f.name === "name");
+    if (!nameField) continue;
+    const blockBase = resolvePointer(ref.value.pointerLow, tagDataOffset, baseMemoryAddress);
+    if (!isRangeInBuffer(blockBase, ref.value.count * childStruct.totalSize, buffer.length)) continue;
+    for (let i = 0; i < ref.value.count; i++) {
+      const nameIdx = buffer.readInt16LE(blockBase + i * childStruct.totalSize + nameField.offset);
+      if (nameIdx >= 0 && nameIdx < objNamesRef.value.count) {
+        const entryOff = objNamesBase + nameIdx * 36;
+        buffer.writeInt16LE(objType, entryOff + 32);
+        buffer.writeInt16LE(i, entryOff + 34);
+      }
+    }
+  }
+  for (let i = 0; i < objNamesRef.value.count; i++) {
+    const entryOff = objNamesBase + i * 36;
+    const curType = buffer.readInt16LE(entryOff + 32);
+    const inferred = inferredObjectTypesByNameIdx.get(i);
+    if (inferred !== void 0) {
+      if (inferred === 7 && (curType < 7 || curType > 9)) {
+        buffer.writeInt16LE(7, entryOff + 32);
+      } else if (inferred === 1 && curType !== 1 && curType !== 0) {
+        buffer.writeInt16LE(1, entryOff + 32);
+      } else if (curType < 0) {
+        buffer.writeInt16LE(inferred, entryOff + 32);
+      }
+    } else if (curType < 0) {
+      buffer.writeInt16LE(1, entryOff + 32);
+    }
+  }
+}
+function compileHaloScriptIntoScenario(view, hscSource) {
+  const diagnostics = lintHaloScript(hscSource);
+  const hasErrors = diagnostics.some((d) => d.severity === "error");
+  if (hasErrors) {
+    return {
+      buffer: view,
+      compiledScripts: 0,
+      compiledGlobals: 0,
+      syntaxNodesUsed: 0,
+      diagnostics
+    };
+  }
+  const { expressions } = parseHaloScriptSExpressions(hscSource);
+  const currentDecompiled = decompileScenarioScripts(view);
+  const entities = currentDecompiled.scenarioEntities;
+  const inferredObjectTypesByNameIdx = /* @__PURE__ */ new Map();
+  const stringOffsets = /* @__PURE__ */ new Map();
+  const stringChunks = [];
+  let stringTotalBytes = 0;
+  const internString = (str) => {
+    const existing = stringOffsets.get(str);
+    if (existing !== void 0) return existing;
+    const off = stringTotalBytes;
+    const buf = Buffer.from(`${str}\0`, "latin1");
+    stringOffsets.set(str, off);
+    stringChunks.push(buf);
+    stringTotalBytes += buf.length;
+    return off;
+  };
+  internString("");
+  const nodes = [];
+  const makeHandle = (idx) => (58228 + idx & 65535) << 16 | idx & 65535;
+  const allocNode = (rec) => {
+    const idx = nodes.length;
+    const salt = 58228 + idx & 65535;
+    nodes.push({ salt, ...rec });
+    return makeHandle(idx);
+  };
+  const globals = [];
+  const scripts = [];
+  for (const expr of expressions) {
+    if (expr.kind !== "list") continue;
+    const head = expr.items[0];
+    if (head.kind === "atom" && head.text === "global" && expr.items.length === 4) {
+      const typeName = expr.items[1].text;
+      const name = expr.items[2].text;
+      globals.push({
+        name,
+        type: VALUE_TYPE_BY_NAME[typeName] ?? 7,
+        initExpr: expr.items[3],
+        initNodeHandle: NONE3
+      });
+    } else if (head.kind === "atom" && head.text === "script" && expr.items.length >= 4) {
+      const sTypeName = expr.items[1].text;
+      const secondAtom = expr.items[2];
+      const hasExplicitReturn = VALUE_TYPE_BY_NAME[secondAtom.text] !== void 0 && expr.items.length >= 5;
+      const rTypeName = hasExplicitReturn ? secondAtom.text : "void";
+      const name = hasExplicitReturn ? expr.items[3].text : secondAtom.text;
+      const bodyStartIdx = hasExplicitReturn ? 4 : 3;
+      scripts.push({
+        name,
+        scriptType: SCRIPT_TYPE_BY_NAME[sTypeName] ?? 0,
+        returnType: VALUE_TYPE_BY_NAME[rTypeName] ?? 4,
+        bodyExprs: expr.items.slice(bodyStartIdx),
+        rootNodeHandle: NONE3
+      });
+    }
+  }
+  const inferNaturalType = (expr) => {
+    if (expr.kind === "atom") {
+      if (expr.quoted) return 9;
+      const g = globals.find((gl) => gl.name === expr.text);
+      if (g) return g.type;
+      if (expr.text === "true" || expr.text === "false") return 5;
+      if (/^-?\d+\.\d+$/.test(expr.text)) return 6;
+      if (/^-?\d+$/.test(expr.text)) return 7;
+      if (entities.objectNames.includes(expr.text)) return 43;
+      if (entities.triggerVolumes.includes(expr.text)) return 11;
+      if (entities.cutsceneCameraPoints.includes(expr.text)) return 13;
+      return 7;
+    }
+    if (expr.items.length === 0) return 4;
+    const head = expr.items[0];
+    if (head.kind === "atom") {
+      const s = scripts.find((sc) => sc.name === head.text);
+      if (s) return s.returnType;
+      const fn = BUILTIN_FUNCTIONS[head.text];
+      if (fn && fn.ret !== 3) return fn.ret;
+    }
+    return 6;
+  };
+  const compileExpr = (expr, expectedType = 4) => {
+    if (expr.kind === "atom") {
+      const text = expr.text;
+      const strOffset = internString(text);
+      if (expr.quoted) {
+        const strType = expectedType >= 9 ? expectedType : 9;
+        return allocNode({
+          indexUnion: strType,
+          type: strType,
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: strOffset
+        });
+      }
+      const globalIdx = globals.findIndex((g) => g.name === text);
+      if (globalIdx >= 0) {
+        const g = globals[globalIdx];
+        const nodeType = expectedType && expectedType !== 4 ? expectedType : g.type;
+        return allocNode({
+          indexUnion: g.type,
+          type: nodeType,
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3 | FLAG_GLOBAL_INDEX2,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: globalIdx >>> 0
+        });
+      }
+      if (expectedType === 10) {
+        const scriptIdx = scripts.findIndex((s) => s.name === text);
+        return allocNode({
+          indexUnion: 10,
+          type: 10,
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: (scriptIdx >= 0 ? scriptIdx : 0) >>> 0
+        });
+      }
+      if (text === "true" || text === "false" || expectedType === 5 && (text === "0" || text === "1")) {
+        const boolVal = text === "true" || text === "1" ? 1 : 0;
+        return allocNode({
+          indexUnion: 5,
+          type: 5,
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: boolVal
+        });
+      }
+      const objIdx = entities.objectNames.indexOf(text);
+      if (objIdx >= 0) {
+        if (expectedType === 39 || expectedType === 45 || expectedType === 38 || expectedType === 44) {
+          inferredObjectTypesByNameIdx.set(objIdx, 1);
+        } else if (expectedType === 41 || expectedType === 47) {
+          inferredObjectTypesByNameIdx.set(objIdx, 7);
+        } else if (expectedType === 40 || expectedType === 46) {
+          inferredObjectTypesByNameIdx.set(objIdx, 2);
+        } else if (expectedType === 42 || expectedType === 48) {
+          inferredObjectTypesByNameIdx.set(objIdx, 6);
+        } else if (!inferredObjectTypesByNameIdx.has(objIdx)) {
+          inferredObjectTypesByNameIdx.set(objIdx, 1);
+        }
+        const nodeType = expectedType === 23 || expectedType >= 37 && expectedType <= 48 ? expectedType : 43;
+        const constType = nodeType === 23 ? 43 : nodeType >= 37 && nodeType <= 42 ? nodeType + 6 : nodeType;
+        return allocNode({
+          indexUnion: constType,
+          type: nodeType,
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: objIdx >>> 0
+        });
+      }
+      const trigIdx = entities.triggerVolumes.indexOf(text);
+      if (trigIdx >= 0) {
+        return allocNode({
+          indexUnion: 11,
+          type: 11,
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: trigIdx >>> 0
+        });
+      }
+      const camIdx = entities.cutsceneCameraPoints.indexOf(text);
+      if (camIdx >= 0) {
+        return allocNode({
+          indexUnion: 13,
+          type: 13,
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: camIdx >>> 0
+        });
+      }
+      if (/^-?\d+\.\d+$/.test(text) || expectedType === 6 && /^-?\d+$/.test(text)) {
+        const floatBuf = Buffer.alloc(4);
+        floatBuf.writeFloatLE(Number.parseFloat(text), 0);
+        return allocNode({
+          indexUnion: 6,
+          type: 6,
+          // real
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: floatBuf.readUInt32LE(0)
+        });
+      }
+      if (/^-?\d+$/.test(text)) {
+        const intVal = Number.parseInt(text, 10);
+        const typeCode = expectedType === 8 ? 8 : 7;
+        const dataVal = typeCode === 8 ? intVal >>> 0 : intVal & 65535;
+        return allocNode({
+          indexUnion: typeCode,
+          type: typeCode,
+          flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+          nextNode: NONE3,
+          stringOffset: strOffset,
+          dataUInt32: dataVal
+        });
+      }
+      const symType = expectedType && expectedType !== 4 ? expectedType : 9;
+      return allocNode({
+        indexUnion: symType,
+        type: symType,
+        flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+        nextNode: NONE3,
+        stringOffset: strOffset,
+        dataUInt32: text === "none" ? NONE3 : strOffset
+      });
+    }
+    if (expr.items.length === 0) {
+      return allocNode({
+        indexUnion: 4,
+        type: 4,
+        flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+        nextNode: NONE3,
+        stringOffset: 0,
+        dataUInt32: 0
+      });
+    }
+    const headAtom = expr.items[0];
+    const fnName = headAtom.kind === "atom" ? headAtom.text : "begin";
+    const fnStrOff = internString(fnName);
+    const staticScriptIdx = scripts.findIndex((s) => s.name === fnName);
+    const isScriptCall = staticScriptIdx >= 0;
+    const builtin = BUILTIN_FUNCTIONS[fnName];
+    const fnIndex = isScriptCall ? staticScriptIdx : builtin?.index ?? 0;
+    let callReturnType = expectedType;
+    if (isScriptCall) {
+      callReturnType = expectedType === 4 ? 4 : scripts[staticScriptIdx].returnType;
+    } else if (builtin) {
+      if (builtin.ret === 3) {
+        if (fnName === "set" && expr.items[1]?.kind === "atom") {
+          const g = globals.find((gl) => gl.name === expr.items[1].text);
+          callReturnType = expectedType === 4 ? 4 : g?.type ?? expectedType;
+        } else {
+          callReturnType = expectedType || 4;
+        }
+      } else {
+        callReturnType = expectedType === 4 ? 4 : expectedType || builtin.ret;
+      }
+    }
+    const callHandle = allocNode({
+      indexUnion: fnIndex,
+      type: callReturnType,
+      flags: FLAG_PERMANENT | (isScriptCall ? FLAG_SCRIPT_CALL3 : 0),
+      nextNode: NONE3,
+      stringOffset: fnStrOff,
+      dataUInt32: NONE3
+    });
+    const callIdx = callHandle & 65535;
+    const fnNameHandle = allocNode({
+      indexUnion: fnIndex,
+      type: 2,
+      // function_name
+      flags: FLAG_PERMANENT | FLAG_PRIMITIVE3,
+      nextNode: NONE3,
+      stringOffset: fnStrOff,
+      dataUInt32: fnIndex >>> 0
+    });
+    nodes[callIdx].dataUInt32 = fnNameHandle >>> 0;
+    let prevChildIdx = fnNameHandle & 65535;
+    const argCount = expr.items.length - 1;
+    let sharedCompareType = 6;
+    if (fnName === "=" || fnName === "!=" || fnName === ">" || fnName === "<" || fnName === ">=" || fnName === "<=") {
+      const t1 = expr.items[1] ? inferNaturalType(expr.items[1]) : 6;
+      const t2 = expr.items[2] ? inferNaturalType(expr.items[2]) : 6;
+      sharedCompareType = t1 === 6 || t2 === 6 ? 6 : t1;
+    }
+    for (let a = 1; a < expr.items.length; a++) {
+      const argIdx = a - 1;
+      let argExpectedType = 4;
+      if (fnName === "begin") {
+        argExpectedType = a === argCount ? callReturnType : 4;
+      } else if (fnName === "begin_random") {
+        argExpectedType = callReturnType;
+      } else if (fnName === "if") {
+        argExpectedType = argIdx === 0 ? 5 : callReturnType;
+      } else if (fnName === "set") {
+        const varName = expr.items[1]?.kind === "atom" ? expr.items[1].text : "";
+        const g = globals.find((gl) => gl.name === varName);
+        argExpectedType = g?.type ?? 7;
+      } else if (fnName === "and" || fnName === "or") {
+        argExpectedType = 5;
+      } else if (fnName === "+" || fnName === "-" || fnName === "*" || fnName === "/" || fnName === "min" || fnName === "max") {
+        argExpectedType = 6;
+      } else if (fnName === "=" || fnName === "!=" || fnName === ">" || fnName === "<" || fnName === ">=" || fnName === "<=") {
+        argExpectedType = sharedCompareType;
+      } else if (fnName === "sleep") {
+        argExpectedType = argIdx === 0 ? 7 : 10;
+      } else if (fnName === "sleep_until") {
+        argExpectedType = argIdx === 0 ? 5 : 7;
+      } else if (fnName === "wake") {
+        argExpectedType = 10;
+      } else if (fnName === "inspect") {
+        argExpectedType = inferNaturalType(expr.items[a]);
+      } else if (fnName === "unit") {
+        argExpectedType = 37;
+      } else if (builtin && argIdx < builtin.params.length) {
+        argExpectedType = builtin.params[argIdx];
+      }
+      const argHandle = compileExpr(expr.items[a], argExpectedType);
+      nodes[prevChildIdx].nextNode = argHandle >>> 0;
+      prevChildIdx = argHandle & 65535;
+    }
+    return callHandle;
+  };
+  for (const g of globals) {
+    g.initNodeHandle = compileExpr(g.initExpr, g.type);
+  }
+  for (const s of scripts) {
+    const wrappedBody = s.bodyExprs.length === 1 && s.bodyExprs[0].kind === "list" && s.bodyExprs[0].items[0]?.kind === "atom" && s.bodyExprs[0].items[0].text === "begin" ? s.bodyExprs[0] : {
+      kind: "list",
+      line: s.bodyExprs[0]?.line ?? 1,
+      items: [{ kind: "atom", text: "begin", quoted: false, line: 1 }, ...s.bodyExprs]
+    };
+    s.rootNodeHandle = compileExpr(wrappedBody, s.returnType);
+  }
+  const header = parseCacheFileHeader(view);
+  const tagIndex = parseTagIndex(view, header);
+  const scenario = scenarioEntryOf(tagIndex);
+  const scenarioStruct = getGroupStructName("scenario");
+  if (!scenario) {
+    return { buffer: view, compiledScripts: 0, compiledGlobals: 0, syntaxNodesUsed: 0, diagnostics };
+  }
+  const scnrAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(scnrAt, resolveStruct(scenarioStruct).totalSize, view.length)) {
+    return { buffer: view, compiledScripts: 0, compiledGlobals: 0, syntaxNodesUsed: 0, diagnostics };
+  }
+  const globalsBlock = Buffer.alloc(globals.length * 92, 0);
+  for (let i = 0; i < globals.length; i++) {
+    const g = globals[i];
+    const base = i * 92;
+    globalsBlock.write(g.name.slice(0, 31), base, "latin1");
+    globalsBlock.writeInt16LE(g.type, base + 32);
+    globalsBlock.writeUInt32LE(g.initNodeHandle >>> 0, base + 40);
+  }
+  const scriptsBlock = Buffer.alloc(scripts.length * 92, 0);
+  for (let i = 0; i < scripts.length; i++) {
+    const s = scripts[i];
+    const base = i * 92;
+    scriptsBlock.write(s.name.slice(0, 31), base, "latin1");
+    scriptsBlock.writeInt16LE(s.scriptType, base + 32);
+    scriptsBlock.writeInt16LE(s.returnType, base + 34);
+    scriptsBlock.writeUInt32LE(s.rootNodeHandle >>> 0, base + 36);
+  }
+  const rawStrings = Buffer.concat(stringChunks);
+  const paddedStringLen = (rawStrings.length + 3 & ~3) + HS_MAXIMUM_DYNAMIC_SOURCE_DATA_BYTES;
+  const stringDataBlock = Buffer.alloc(paddedStringLen, 0);
+  rawStrings.copy(stringDataBlock, 0);
+  const maxNodes = MAXIMUM_HS_SYNTAX_NODES_PER_SCENARIO;
+  const syntaxBlock = Buffer.alloc(DATA_ARRAY_HEADER_SIZE + maxNodes * SCRIPT_NODE_SIZE, 0);
+  syntaxBlock.write("script node", 0, "latin1");
+  syntaxBlock.writeInt16LE(maxNodes, 32);
+  syntaxBlock.writeInt16LE(SCRIPT_NODE_SIZE, 34);
+  syntaxBlock.writeUInt8(1, 36);
+  syntaxBlock.writeUInt8(0, 37);
+  syntaxBlock.write("@t@d", 40, "latin1");
+  syntaxBlock.writeInt16LE(nodes.length, 44);
+  syntaxBlock.writeInt16LE(nodes.length, 46);
+  syntaxBlock.writeInt16LE(nodes.length, 48);
+  syntaxBlock.writeUInt16LE(58228 + nodes.length & 65535, 50);
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const off = DATA_ARRAY_HEADER_SIZE + i * SCRIPT_NODE_SIZE;
+    syntaxBlock.writeUInt16LE(n.salt & 65535, off + 0);
+    syntaxBlock.writeUInt16LE(n.indexUnion & 65535, off + 2);
+    syntaxBlock.writeInt16LE(n.type, off + 4);
+    syntaxBlock.writeUInt16LE(n.flags & 65535, off + 6);
+    syntaxBlock.writeUInt32LE(n.nextNode >>> 0, off + 8);
+    syntaxBlock.writeInt32LE(n.stringOffset, off + 12);
+    syntaxBlock.writeUInt32LE(n.dataUInt32 >>> 0, off + 16);
+  }
+  const padBytes = (4 - (view.length - header.tagDataOffset) % 4) % 4;
+  const padBuf = Buffer.alloc(padBytes, 0);
+  const appendStart = view.length + padBytes;
+  const globalsFileOffset = appendStart;
+  const scriptsFileOffset = globalsFileOffset + globalsBlock.length;
+  const stringsFileOffset = scriptsFileOffset + scriptsBlock.length;
+  const syntaxFileOffset = stringsFileOffset + stringDataBlock.length;
+  const toMemoryPtr = (fileOffset) => tagIndex.baseMemoryAddress + (fileOffset - header.tagDataOffset) >>> 0;
+  const outBuffer = Buffer.concat([
+    view,
+    padBuf,
+    globalsBlock,
+    scriptsBlock,
+    stringDataBlock,
+    syntaxBlock
+  ]);
+  syncScenarioObjectNamesForScripts(
+    outBuffer,
+    scnrAt,
+    header.tagDataOffset,
+    tagIndex.baseMemoryAddress,
+    inferredObjectTypesByNameIdx
+  );
+  outBuffer.writeInt32LE(syntaxBlock.length, scnrAt + 1140);
+  outBuffer.writeInt32LE(0, scnrAt + 1140 + 4);
+  outBuffer.writeInt32LE(0, scnrAt + 1140 + 8);
+  outBuffer.writeUInt32LE(toMemoryPtr(syntaxFileOffset), scnrAt + 1140 + 12);
+  outBuffer.writeInt32LE(0, scnrAt + 1140 + 16);
+  outBuffer.writeInt32LE(stringDataBlock.length, scnrAt + 1160);
+  outBuffer.writeInt32LE(0, scnrAt + 1160 + 4);
+  outBuffer.writeInt32LE(0, scnrAt + 1160 + 8);
+  outBuffer.writeUInt32LE(toMemoryPtr(stringsFileOffset), scnrAt + 1160 + 12);
+  outBuffer.writeInt32LE(0, scnrAt + 1160 + 16);
+  outBuffer.writeInt32LE(scripts.length, scnrAt + 1180);
+  outBuffer.writeUInt32LE(scripts.length > 0 ? toMemoryPtr(scriptsFileOffset) : 0, scnrAt + 1180 + 4);
+  outBuffer.writeInt32LE(0, scnrAt + 1180 + 8);
+  outBuffer.writeInt32LE(globals.length, scnrAt + 1192);
+  outBuffer.writeUInt32LE(globals.length > 0 ? toMemoryPtr(globalsFileOffset) : 0, scnrAt + 1192 + 4);
+  outBuffer.writeInt32LE(0, scnrAt + 1192 + 8);
+  outBuffer.writeUInt32LE(outBuffer.length >>> 0, 8);
+  outBuffer.writeUInt32LE(outBuffer.length - header.tagDataOffset >>> 0, 20);
+  return {
+    buffer: outBuffer,
+    compiledScripts: scripts.length,
+    compiledGlobals: globals.length,
+    syntaxNodesUsed: nodes.length,
+    diagnostics
+  };
+}
+
+// ../core/src/map/mod-packager.ts
+function cleanOpenSauceYeloScenario(view) {
+  const out = Buffer.from(view);
+  const header = parseCacheFileHeader(out);
+  const tagIndex = parseTagIndex(out, header);
+  const scenario = scenarioEntryOf(tagIndex);
+  const details = [];
+  let cleanedReferences = 0;
+  if (!scenario) {
+    return { buffer: out, cleanedReferences: 0, details: ["No scenario tag found in map."] };
+  }
+  const scnrStructName = getGroupStructName("scenario");
+  const scnrAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(scnrAt, resolveStruct(scnrStructName).totalSize, out.length)) {
+    return { buffer: out, cleanedReferences: 0, details: ["Scenario struct out of buffer bounds."] };
+  }
+  for (const depOffset of [0, 16, 32]) {
+    const groupTag = out.toString("latin1", scnrAt + depOffset, scnrAt + depOffset + 4);
+    const tagId = out.readUInt32LE(scnrAt + depOffset + 12);
+    if (groupTag === "olev" || groupTag === "yelo" || groupTag === "oleg" || groupTag === "gelo" || tagId !== NULL_TAG_ID && tagId !== 0) {
+      out.write("sbsp", scnrAt + depOffset, "latin1");
+      out.writeUInt32LE(0, scnrAt + depOffset + 4);
+      out.writeUInt32LE(0, scnrAt + depOffset + 8);
+      out.writeUInt32LE(NULL_TAG_ID, scnrAt + depOffset + 12);
+      cleanedReferences++;
+      details.push(`Cleared scenario header OpenSauce dependency slot at +0x${depOffset.toString(16)} (was "${groupTag.trim()}").`);
+    }
+  }
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName === "yelo" || entry.primaryClassName === "gelo") {
+      details.push(`Neutralized ${entry.primaryClassName} tag #${entry.index} ("${entry.path}").`);
+      cleanedReferences++;
+    }
+  }
+  if (cleanedReferences === 0) {
+    details.push("Scenario is already clean of OpenSauce (.yelo / .gelo) dependencies.");
+  }
+  return { buffer: out, cleanedReferences, details };
+}
+
+// ../core/src/map/tag-class-converter.ts
+var OBJECT_SUBCLASS_SPECS = {
+  biped: { fourCC: "bipd", secondaryFourCC: "unit", tertiaryFourCC: "obje", objectTypeEnum: 0, structSize: 1268 },
+  vehicle: { fourCC: "vehi", secondaryFourCC: "unit", tertiaryFourCC: "obje", objectTypeEnum: 1, structSize: 1008 },
+  weapon: { fourCC: "weap", secondaryFourCC: "item", tertiaryFourCC: "obje", objectTypeEnum: 2, structSize: 1288 },
+  equipment: { fourCC: "eqip", secondaryFourCC: "item", tertiaryFourCC: "obje", objectTypeEnum: 3, structSize: 944 },
+  garbage: { fourCC: "garb", secondaryFourCC: "item", tertiaryFourCC: "obje", objectTypeEnum: 4, structSize: 944 },
+  projectile: { fourCC: "proj", secondaryFourCC: "obje", tertiaryFourCC: null, objectTypeEnum: 5, structSize: 588 },
+  scenery: { fourCC: "scen", secondaryFourCC: "obje", tertiaryFourCC: null, objectTypeEnum: 6, structSize: 508 },
+  device_machine: { fourCC: "mach", secondaryFourCC: "devi", tertiaryFourCC: "obje", objectTypeEnum: 7, structSize: 804 },
+  device_control: { fourCC: "ctrl", secondaryFourCC: "devi", tertiaryFourCC: "obje", objectTypeEnum: 8, structSize: 792 },
+  device_light_fixture: { fourCC: "lifi", secondaryFourCC: "devi", tertiaryFourCC: "obje", objectTypeEnum: 9, structSize: 720 },
+  sound_scenery: { fourCC: "ssce", secondaryFourCC: "obje", tertiaryFourCC: null, objectTypeEnum: 11, structSize: 508 }
+};
+function extractCollisionModelGeometry(view, collTagIndex) {
+  const header = parseCacheFileHeader(view);
+  const tagIndex = parseTagIndex(view, header);
+  const entry = tagIndex.entries[collTagIndex];
+  if (!entry || entry.primaryClassName !== "model_collision_geometry") {
+    throw new Error(`Tag #${collTagIndex} is not a model_collision_geometry (coll) tag.`);
+  }
+  const collAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(collAt, 664, view.length)) {
+    throw new Error(`Collision model "${entry.path}" header is outside buffer bounds.`);
+  }
+  const nodeCount = view.readInt32LE(collAt + 652);
+  const nodePtr = view.readUInt32LE(collAt + 656);
+  const nodesAt = nodeCount > 0 ? resolvePointer(nodePtr, header.tagDataOffset, tagIndex.baseMemoryAddress) : -1;
+  const linePositions = [];
+  const objLines = [`# Collision model extracted from ${entry.path}`];
+  let globalVertOffset = 1;
+  let totalVertices = 0;
+  let totalEdges = 0;
+  let totalSurfaces = 0;
+  if (nodesAt >= 0 && isRangeInBuffer(nodesAt, nodeCount * 64, view.length)) {
+    for (let n = 0; n < nodeCount; n++) {
+      const nOff = nodesAt + n * 64;
+      const bspCount = view.readInt32LE(nOff + 52);
+      const bspPtr = view.readUInt32LE(nOff + 56);
+      if (bspCount <= 0 || bspPtr === 0) continue;
+      const bspsAt = resolvePointer(bspPtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      if (!isRangeInBuffer(bspsAt, bspCount * 96, view.length)) continue;
+      for (let b = 0; b < bspCount; b++) {
+        const bOff = bspsAt + b * 96;
+        const planeCount = view.readInt32LE(bOff + 12);
+        const planePtr = view.readUInt32LE(bOff + 16);
+        const surfCount = view.readInt32LE(bOff + 60);
+        const surfPtr = view.readUInt32LE(bOff + 64);
+        const edgeCount = view.readInt32LE(bOff + 72);
+        const edgePtr = view.readUInt32LE(bOff + 76);
+        const vertCount = view.readInt32LE(bOff + 84);
+        const vertPtr = view.readUInt32LE(bOff + 88);
+        if (vertCount <= 0 || edgeCount <= 0) continue;
+        const vertsAt = resolvePointer(vertPtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        const edgesAt = resolvePointer(edgePtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+        if (!isRangeInBuffer(vertsAt, vertCount * 16, view.length) || !isRangeInBuffer(edgesAt, edgeCount * 24, view.length)) {
+          continue;
+        }
+        const localVerts = [];
+        for (let v = 0; v < vertCount; v++) {
+          const vAt = vertsAt + v * 16;
+          const x = view.readFloatLE(vAt + 0);
+          const y = view.readFloatLE(vAt + 4);
+          const z = view.readFloatLE(vAt + 8);
+          localVerts.push([x, y, z]);
+          objLines.push(`v ${x.toFixed(5)} ${y.toFixed(5)} ${z.toFixed(5)}`);
+        }
+        const localEdges = [];
+        for (let e = 0; e < edgeCount; e++) {
+          const eAt = edgesAt + e * 24;
+          const v0 = view.readInt32LE(eAt + 0);
+          const v1 = view.readInt32LE(eAt + 4);
+          const fwdEdge = view.readInt32LE(eAt + 8);
+          const revEdge = view.readInt32LE(eAt + 12);
+          const leftSurf = view.readInt32LE(eAt + 16);
+          const rightSurf = view.readInt32LE(eAt + 20);
+          localEdges.push({ v0, v1, fwdEdge, revEdge, leftSurf, rightSurf });
+          const p0 = localVerts[v0];
+          const p1 = localVerts[v1];
+          if (p0 && p1) {
+            linePositions.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]);
+          }
+        }
+        if (surfCount > 0 && surfPtr !== 0) {
+          const surfsAt = resolvePointer(surfPtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          const planesAt = planeCount > 0 ? resolvePointer(planePtr, header.tagDataOffset, tagIndex.baseMemoryAddress) : -1;
+          if (isRangeInBuffer(surfsAt, surfCount * 12, view.length)) {
+            for (let s = 0; s < surfCount; s++) {
+              const sAt = surfsAt + s * 12;
+              const firstEdge = view.readInt32LE(sAt + 4);
+              if (firstEdge < 0 || firstEdge >= localEdges.length) continue;
+              const ring = [];
+              let currEdgeIdx = firstEdge;
+              const visitedEdges = /* @__PURE__ */ new Set();
+              while (currEdgeIdx >= 0 && currEdgeIdx < localEdges.length && !visitedEdges.has(currEdgeIdx)) {
+                visitedEdges.add(currEdgeIdx);
+                const ed = localEdges[currEdgeIdx];
+                const isRight = ed.rightSurf === s;
+                const startV = isRight ? ed.v1 : ed.v0;
+                ring.push(startV);
+                currEdgeIdx = isRight ? ed.revEdge : ed.fwdEdge;
+                if (currEdgeIdx === firstEdge) break;
+              }
+              if (ring.length >= 3) {
+                for (let k = 1; k + 1 < ring.length; k++) {
+                  const a = globalVertOffset + ring[0];
+                  const bIdx = globalVertOffset + ring[k];
+                  const c = globalVertOffset + ring[k + 1];
+                  objLines.push(`f ${a} ${bIdx} ${c}`);
+                }
+              }
+            }
+          }
+        }
+        totalVertices += vertCount;
+        totalEdges += edgeCount;
+        totalSurfaces += Math.max(0, surfCount);
+        globalVertOffset += vertCount;
+      }
+    }
+  }
+  return {
+    tagIndex: collTagIndex,
+    tagPath: entry.path,
+    vertexCount: totalVertices,
+    edgeCount: totalEdges,
+    surfaceCount: totalSurfaces,
+    linePositions,
+    objText: objLines.join("\n")
+  };
+}
+function convertCollisionToGbxmodelInMap(view, collTagIndex, targetPath) {
+  const wf = extractCollisionModelGeometry(view, collTagIndex);
+  if (wf.vertexCount < 3 || wf.surfaceCount < 1) {
+    throw new Error(`Collision tag "${wf.tagPath}" has no extractable 3D BSP surfaces.`);
+  }
+  const outPath = (targetPath?.trim() || `${wf.tagPath}_visible_coll`).replace(/\//g, "\\");
+  const built = buildCustomObjectContainer({
+    tagGroup: "scenery",
+    tagPath: outPath,
+    objText: wf.objText,
+    collisionMode: "exact",
+    itemName: `${outPath.split("\\").pop()} (Visible Collision)`
+  });
+  const header = parseCacheFileHeader(view);
+  const tagIndex = parseTagIndex(view, header);
+  const plan = planAddInjection(
+    { buffer: view, header, tagIndex },
+    built.container,
+    {},
+    { allowEmbeddedRelocation: true }
+  );
+  if (plan.kind === "refused") {
+    throw new Error(`Cannot inject converted collision model: ${plan.reason}`);
+  }
+  const injected = applyInjectionWithReport(view, header, tagIndex, built.container, plan, {
+    allowEmbeddedRelocation: true
+  });
+  const newHeader = parseCacheFileHeader(injected.buffer);
+  const newTagIndex = parseTagIndex(injected.buffer, newHeader);
+  const gbxEntry = newTagIndex.entries.find((e) => e.path === outPath && e.primaryClassName === "gbxmodel");
+  return {
+    buffer: injected.buffer,
+    createdTagIndex: gbxEntry?.index ?? newTagIndex.entries.length - 1,
+    createdTagPath: outPath,
+    createdTagGroup: "gbxmodel",
+    summary: `Converted collision model "${wf.tagPath}" (${wf.surfaceCount} surfaces, ${wf.vertexCount} vertices) into visible gbxmodel & scenery at "${outPath}".`
+  };
+}
+function convertSbspToSceneryInMap(view, bspTagIndex, targetPath) {
+  const header = parseCacheFileHeader(view);
+  const tagIndex = parseTagIndex(view, header);
+  const bspGeom = extractBspRenderMesh(view, header, tagIndex, bspTagIndex);
+  if (bspGeom.submeshes.length === 0) {
+    throw new Error("Selected BSP contains no renderable lightmap surfaces.");
+  }
+  const exportedObj = exportBspToObj(bspGeom);
+  const bspPathName = bspGeom.bspNames?.[bspGeom.bspIndex] ?? `levels\\bsp\\bsp_${bspGeom.bspIndex}`;
+  const outPath = (targetPath?.trim() || `${bspPathName}_bsp_scenery`).replace(/\//g, "\\");
+  const built = buildCustomObjectContainer({
+    tagGroup: "scenery",
+    tagPath: outPath,
+    objText: exportedObj.objText,
+    collisionMode: "box",
+    itemName: `${outPath.split("\\").pop()} (BSP Scenery)`
+  });
+  const plan = planAddInjection(
+    { buffer: view, header, tagIndex },
+    built.container,
+    {},
+    { allowEmbeddedRelocation: true }
+  );
+  if (plan.kind === "refused") {
+    throw new Error(`Cannot inject converted BSP scenery: ${plan.reason}`);
+  }
+  const injected = applyInjectionWithReport(view, header, tagIndex, built.container, plan, {
+    allowEmbeddedRelocation: true
+  });
+  const newHeader = parseCacheFileHeader(injected.buffer);
+  const newTagIndex = parseTagIndex(injected.buffer, newHeader);
+  const scenEntry = newTagIndex.entries.find((e) => e.path === outPath && e.primaryClassName === "scenery");
+  return {
+    buffer: injected.buffer,
+    createdTagIndex: scenEntry?.index ?? newTagIndex.entries.length - 1,
+    createdTagPath: outPath,
+    createdTagGroup: "scenery",
+    summary: `Converted BSP "${bspPathName}" (${bspGeom.totalVertices} vertices, ${bspGeom.totalTriangles} triangles) into gbxmodel + scenery tag "${outPath}".`
+  };
+}
+function convertObjectTagClassInMap(view, sourceTagIndex, targetGroup, targetPath) {
+  const spec = OBJECT_SUBCLASS_SPECS[targetGroup];
+  if (!spec) {
+    throw new Error(`Unsupported target object class "${targetGroup}".`);
+  }
+  const header = parseCacheFileHeader(view);
+  const tagIndex = parseTagIndex(view, header);
+  const sourceEntry = tagIndex.entries[sourceTagIndex];
+  if (!sourceEntry) {
+    throw new Error(`Source tag #${sourceTagIndex} not found.`);
+  }
+  if (!sourceEntry.primaryClassName || !OBJECT_SUBCLASS_SPECS[sourceEntry.primaryClassName]) {
+    throw new Error(`Source tag "${sourceEntry.path}" (${sourceEntry.primaryClassName}) is not one of the 11 object subclasses.`);
+  }
+  const donorCandidates = tagIndex.entries.filter(
+    (e) => e.primaryClassName === targetGroup && !e.isExternal && e.index !== sourceTagIndex
+  );
+  const preferredDonor = donorCandidates.find(
+    (e) => targetGroup === "vehicle" ? e.path.includes("warthog") || e.path.includes("ghost") : targetGroup === "weapon" ? e.path.includes("assault rifle") || e.path.includes("pistol") : targetGroup === "biped" ? e.path.includes("cyborg") || e.path.includes("marine") : true
+  ) ?? donorCandidates[0];
+  const outPath = (targetPath?.trim() || `${sourceEntry.path}_as_${targetGroup}`).replace(/\//g, "\\");
+  const dup = duplicateTagInMap(view, header, tagIndex, sourceTagIndex, outPath);
+  let outBuf = dup.buffer;
+  let curHeader = parseCacheFileHeader(outBuf);
+  let curTagIndex = parseTagIndex(outBuf, curHeader);
+  let graftedModelTagId = null;
+  let graftedModelPath = null;
+  let graftedCollTagId = null;
+  let graftedCollPath = null;
+  const srcDataAtInitial = resolveTagDataPointer(
+    curTagIndex.entries[sourceTagIndex].tagDataPointerOrResourceIndex,
+    curHeader,
+    curTagIndex.baseMemoryAddress
+  );
+  const donorDataAtInitial = preferredDonor ? resolveTagDataPointer(
+    curTagIndex.entries[preferredDonor.index].tagDataPointerOrResourceIndex,
+    curHeader,
+    curTagIndex.baseMemoryAddress
+  ) : -1;
+  if (preferredDonor && donorDataAtInitial >= 0 && isRangeInBuffer(srcDataAtInitial, 160, outBuf.length) && isRangeInBuffer(donorDataAtInitial, 160, outBuf.length)) {
+    const srcModelTagId = outBuf.readUInt32LE(srcDataAtInitial + 52);
+    const donorModelTagId = outBuf.readUInt32LE(donorDataAtInitial + 52);
+    const srcModelIdx = srcModelTagId & 65535;
+    const donorModelIdx = donorModelTagId & 65535;
+    if (srcModelTagId !== 4294967295 && donorModelTagId !== 4294967295 && curTagIndex.entries[srcModelIdx] && curTagIndex.entries[donorModelIdx]) {
+      const modelDup = duplicateTagInMap(outBuf, curHeader, curTagIndex, srcModelIdx, `${outPath}_model`);
+      outBuf = modelDup.buffer;
+      curHeader = parseCacheFileHeader(outBuf);
+      curTagIndex = parseTagIndex(outBuf, curHeader);
+      const newModelEntry = curTagIndex.entries[modelDup.newTagIndex];
+      graftedModelTagId = newModelEntry.tagId;
+      graftedModelPath = newModelEntry.path;
+      const newModelAt = resolveTagDataPointer(
+        newModelEntry.tagDataPointerOrResourceIndex,
+        curHeader,
+        curTagIndex.baseMemoryAddress
+      );
+      const donorModelAt = resolveTagDataPointer(
+        curTagIndex.entries[donorModelIdx].tagDataPointerOrResourceIndex,
+        curHeader,
+        curTagIndex.baseMemoryAddress
+      );
+      if (isRangeInBuffer(newModelAt, 232, outBuf.length) && isRangeInBuffer(donorModelAt, 232, outBuf.length)) {
+        outBuf.writeInt32LE(outBuf.readInt32LE(donorModelAt + 4), newModelAt + 4);
+        donorCopyRange(outBuf, donorModelAt + 28, newModelAt + 28, 10);
+        donorCopyRange(outBuf, donorModelAt + 172, newModelAt + 172, 24);
+        const srcRegCount = outBuf.readUInt32LE(newModelAt + 196);
+        const srcRegPtr = outBuf.readUInt32LE(newModelAt + 200);
+        const donorRegCount = outBuf.readUInt32LE(donorModelAt + 196);
+        const donorRegPtr = outBuf.readUInt32LE(donorModelAt + 200);
+        if (srcRegCount > 0 && donorRegCount > 0) {
+          const srcRegAt = resolvePointer(srcRegPtr, curHeader.tagDataOffset, curTagIndex.baseMemoryAddress);
+          const donorRegAt = resolvePointer(donorRegPtr, curHeader.tagDataOffset, curTagIndex.baseMemoryAddress);
+          if (isRangeInBuffer(srcRegAt, srcRegCount * 76, outBuf.length) && isRangeInBuffer(donorRegAt, 76, outBuf.length)) {
+            const srcPermCount = outBuf.readUInt32LE(srcRegAt + 64);
+            const srcPermPtr = outBuf.readUInt32LE(srcRegAt + 68);
+            const donorPermCount = outBuf.readUInt32LE(donorRegAt + 64);
+            const donorPermPtr = outBuf.readUInt32LE(donorRegAt + 68);
+            if (srcPermCount > 0 && donorPermCount > 0) {
+              const srcPermAt = resolvePointer(srcPermPtr, curHeader.tagDataOffset, curTagIndex.baseMemoryAddress);
+              const donorPermAt = resolvePointer(donorPermPtr, curHeader.tagDataOffset, curTagIndex.baseMemoryAddress);
+              if (isRangeInBuffer(srcPermAt, srcPermCount * 88, outBuf.length) && isRangeInBuffer(donorPermAt, 88, outBuf.length)) {
+                const clonedRegs = Buffer.from(outBuf.subarray(srcRegAt, srcRegAt + srcRegCount * 76));
+                const clonedPerms = Buffer.from(outBuf.subarray(srcPermAt, srcPermAt + srcPermCount * 88));
+                outBuf.copy(clonedPerms, 76, donorPermAt + 76, donorPermAt + 88);
+                const align1 = outBuf.length + 3 & ~3;
+                const pad1 = Buffer.alloc(align1 - outBuf.length, 0);
+                const newRegsOffset = align1;
+                const newPermsOffset = align1 + clonedRegs.length;
+                const newRegsPtr = curTagIndex.baseMemoryAddress + (newRegsOffset - curHeader.tagDataOffset) >>> 0;
+                const newPermsPtr = curTagIndex.baseMemoryAddress + (newPermsOffset - curHeader.tagDataOffset) >>> 0;
+                clonedRegs.writeUInt32LE(newPermsPtr, 68);
+                outBuf.writeUInt32LE(newRegsPtr, newModelAt + 200);
+                outBuf = Buffer.concat([outBuf, pad1, clonedRegs, clonedPerms]);
+                const delta = pad1.length + clonedRegs.length + clonedPerms.length;
+                outBuf.writeUInt32LE(outBuf.length >>> 0, 8);
+                outBuf.writeUInt32LE(curHeader.tagDataSize + delta >>> 0, 20);
+                curHeader = parseCacheFileHeader(outBuf);
+                curTagIndex = parseTagIndex(outBuf, curHeader);
+              }
+            }
+          }
+        }
+      }
+    }
+    const srcDataAt2 = resolveTagDataPointer(
+      curTagIndex.entries[sourceTagIndex].tagDataPointerOrResourceIndex,
+      curHeader,
+      curTagIndex.baseMemoryAddress
+    );
+    const donorDataAt2 = resolveTagDataPointer(
+      curTagIndex.entries[preferredDonor.index].tagDataPointerOrResourceIndex,
+      curHeader,
+      curTagIndex.baseMemoryAddress
+    );
+    const srcCollTagId = outBuf.readUInt32LE(srcDataAt2 + 124);
+    const donorCollTagId = outBuf.readUInt32LE(donorDataAt2 + 124);
+    const srcCollIdx = srcCollTagId & 65535;
+    const donorCollIdx = donorCollTagId & 65535;
+    if (srcCollTagId !== 4294967295 && donorCollTagId !== 4294967295 && curTagIndex.entries[srcCollIdx] && curTagIndex.entries[donorCollIdx]) {
+      const collDup = duplicateTagInMap(outBuf, curHeader, curTagIndex, srcCollIdx, `${outPath}_collision`);
+      outBuf = collDup.buffer;
+      curHeader = parseCacheFileHeader(outBuf);
+      curTagIndex = parseTagIndex(outBuf, curHeader);
+      const newCollEntry = curTagIndex.entries[collDup.newTagIndex];
+      graftedCollTagId = newCollEntry.tagId;
+      graftedCollPath = newCollEntry.path;
+      const newCollAt = resolveTagDataPointer(
+        newCollEntry.tagDataPointerOrResourceIndex,
+        curHeader,
+        curTagIndex.baseMemoryAddress
+      );
+      const donorCollAt = resolveTagDataPointer(
+        curTagIndex.entries[donorCollIdx].tagDataPointerOrResourceIndex,
+        curHeader,
+        curTagIndex.baseMemoryAddress
+      );
+      if (isRangeInBuffer(newCollAt, 664, outBuf.length) && isRangeInBuffer(donorCollAt, 664, outBuf.length)) {
+        const srcNodesCount = outBuf.readUInt32LE(newCollAt + 652);
+        const srcNodesPtr = outBuf.readUInt32LE(newCollAt + 656);
+        const donorNodesCount = outBuf.readUInt32LE(donorCollAt + 652);
+        const donorNodesPtr = outBuf.readUInt32LE(donorCollAt + 656);
+        if (srcNodesCount > 0 && donorNodesCount > 0) {
+          const srcNodesAt = resolvePointer(srcNodesPtr, curHeader.tagDataOffset, curTagIndex.baseMemoryAddress);
+          const donorNodesAt = resolvePointer(donorNodesPtr, curHeader.tagDataOffset, curTagIndex.baseMemoryAddress);
+          if (isRangeInBuffer(srcNodesAt, 64, outBuf.length) && isRangeInBuffer(donorNodesAt, donorNodesCount * 64, outBuf.length)) {
+            const newCollNodes = Buffer.from(outBuf.subarray(donorNodesAt, donorNodesAt + donorNodesCount * 64));
+            for (let n = 0; n < donorNodesCount; n++) {
+              newCollNodes.writeUInt32LE(0, n * 64 + 52);
+              newCollNodes.writeUInt32LE(0, n * 64 + 56);
+              newCollNodes.writeUInt32LE(0, n * 64 + 60);
+            }
+            outBuf.copy(newCollNodes, 52, srcNodesAt + 52, srcNodesAt + 64);
+            const align2 = outBuf.length + 3 & ~3;
+            const pad2 = Buffer.alloc(align2 - outBuf.length, 0);
+            const newNodesPtr = curTagIndex.baseMemoryAddress + (align2 - curHeader.tagDataOffset) >>> 0;
+            outBuf.writeUInt32LE(donorNodesCount, newCollAt + 652);
+            outBuf.writeUInt32LE(newNodesPtr, newCollAt + 656);
+            outBuf = Buffer.concat([outBuf, pad2, newCollNodes]);
+            const delta2 = pad2.length + newCollNodes.length;
+            outBuf.writeUInt32LE(outBuf.length >>> 0, 8);
+            outBuf.writeUInt32LE(curHeader.tagDataSize + delta2 >>> 0, 20);
+            curHeader = parseCacheFileHeader(outBuf);
+            curTagIndex = parseTagIndex(outBuf, curHeader);
+          }
+        }
+      }
+    }
+  }
+  const newEntry = curTagIndex.entries[dup.newTagIndex];
+  const oldDataAt = resolveTagDataPointer(newEntry.tagDataPointerOrResourceIndex, curHeader, curTagIndex.baseMemoryAddress);
+  const alignedEnd = outBuf.length + 3 & ~3;
+  const pad = Buffer.alloc(alignedEnd - outBuf.length, 0);
+  const newStructBuf = Buffer.alloc(spec.structSize, 0);
+  if (preferredDonor) {
+    const donorAt = resolveTagDataPointer(
+      curTagIndex.entries[preferredDonor.index].tagDataPointerOrResourceIndex,
+      curHeader,
+      curTagIndex.baseMemoryAddress
+    );
+    if (isRangeInBuffer(donorAt, spec.structSize, outBuf.length)) {
+      outBuf.copy(newStructBuf, 0, donorAt, donorAt + spec.structSize);
+    }
+  }
+  outBuf.copy(newStructBuf, 0, oldDataAt, Math.min(outBuf.length, oldDataAt + 380));
+  if (graftedModelTagId !== null && graftedModelPath !== null) {
+    newStructBuf.writeUInt32LE(fourCCFromString("mod2"), 40);
+    newStructBuf.writeUInt32LE(graftedModelTagId >>> 0, 52);
+  }
+  if (graftedCollTagId !== null && graftedCollPath !== null) {
+    newStructBuf.writeUInt32LE(fourCCFromString("coll"), 112);
+    newStructBuf.writeUInt32LE(graftedCollTagId >>> 0, 124);
+  }
+  if (preferredDonor) {
+    const donorAt = resolveTagDataPointer(
+      curTagIndex.entries[preferredDonor.index].tagDataPointerOrResourceIndex,
+      curHeader,
+      curTagIndex.baseMemoryAddress
+    );
+    if (isRangeInBuffer(donorAt, 160, outBuf.length)) {
+      if (newStructBuf.readUInt32LE(68) === 4294967295) {
+        outBuf.copy(newStructBuf, 56, donorAt + 56, donorAt + 72);
+      }
+      if (newStructBuf.readUInt32LE(140) === 4294967295) {
+        outBuf.copy(newStructBuf, 128, donorAt + 128, donorAt + 144);
+      }
+    }
+  }
+  newStructBuf.writeInt16LE(spec.objectTypeEnum, 0);
+  newStructBuf.writeUInt32LE(0, 368);
+  newStructBuf.writeUInt32LE(0, 372);
+  const prevSize = outBuf.length;
+  outBuf = Buffer.concat([outBuf, pad, newStructBuf]);
+  const addedBytes = outBuf.length - prevSize;
+  outBuf.writeUInt32LE(outBuf.length >>> 0, 8);
+  outBuf.writeUInt32LE(curHeader.tagDataSize + addedBytes >>> 0, 20);
+  const tagHeaderSize = curHeader.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE;
+  const entryOffset = curHeader.tagDataOffset + tagHeaderSize + dup.newTagIndex * TAG_ENTRY_SIZE;
+  outBuf.writeUInt32LE(fourCCFromString(spec.fourCC), entryOffset + 0);
+  outBuf.writeUInt32LE(fourCCFromString(spec.secondaryFourCC), entryOffset + 4);
+  outBuf.writeUInt32LE(spec.tertiaryFourCC ? fourCCFromString(spec.tertiaryFourCC) : 4294967295, entryOffset + 8);
+  const newDataPtr = curTagIndex.baseMemoryAddress + (alignedEnd - curHeader.tagDataOffset) >>> 0;
+  outBuf.writeUInt32LE(newDataPtr, entryOffset + 20);
+  const donorNote = preferredDonor ? ` Inherited ${targetGroup} seats, physics, and rig markers from "${preferredDonor.path}".` : "";
+  return {
+    buffer: outBuf,
+    createdTagIndex: dup.newTagIndex,
+    createdTagPath: outPath,
+    createdTagGroup: targetGroup,
+    summary: `Converted "${sourceEntry.path}" (${sourceEntry.primaryClassName}) -> "${outPath}" (${targetGroup}) preserving base Object properties, model, and collision.${donorNote}`
+  };
+}
+function donorCopyRange(buf, srcOff, dstOff, length) {
+  buf.copy(buf, dstOff, srcOff, srcOff + length);
+}
+
+// ../core/src/map/tag-scanner-gametype.ts
+function scanMapTagsForErrors(view) {
+  const header = parseCacheFileHeader(view);
+  const tagIndex = parseTagIndex(view, header);
+  const validTagIds = new Set(tagIndex.entries.map((e) => e.tagId));
+  const findings = [];
+  for (const entry of tagIndex.entries) {
+    if (entry.isExternal || !entry.primaryClassName) continue;
+    const groupName = entry.primaryClassName;
+    const structName = getGroupStructName(groupName);
+    if (!structName) continue;
+    const resolved = resolveStruct(structName);
+    const baseAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(baseAt, resolved.totalSize, view.length)) {
+      findings.push({
+        tagIndex: entry.index,
+        tagId: entry.tagId,
+        tagPath: entry.path,
+        tagGroup: groupName,
+        fieldPath: "<root>",
+        severity: "error",
+        message: `Root struct (${resolved.totalSize} bytes) at file offset 0x${baseAt.toString(16)} extends outside map buffer.`
+      });
+      continue;
+    }
+    for (const field of resolved.fields) {
+      const fAt = baseAt + field.offset;
+      if (field.def.type === "TagDependency") {
+        const depTagId = view.readUInt32LE(fAt + 12);
+        if (depTagId !== NULL_TAG_ID && depTagId !== 0 && !validTagIds.has(depTagId)) {
+          findings.push({
+            tagIndex: entry.index,
+            tagId: entry.tagId,
+            tagPath: entry.path,
+            tagGroup: groupName,
+            fieldPath: field.name,
+            severity: "error",
+            message: `Broken TagDependency "${field.name}": references non-existent Tag ID 0x${depTagId.toString(16).toUpperCase()}.`
+          });
+        }
+      } else if (field.def.type === "TagReflexive" && field.def.struct) {
+        const count2 = view.readInt32LE(fAt);
+        const ptr = view.readUInt32LE(fAt + 4);
+        if (count2 < 0 || count2 > 65535) {
+          findings.push({
+            tagIndex: entry.index,
+            tagId: entry.tagId,
+            tagPath: entry.path,
+            tagGroup: groupName,
+            fieldPath: field.name,
+            severity: "error",
+            message: `Corrupt reflexive block "${field.name}" count (${count2}).`
+          });
+        } else if (count2 > 0) {
+          const childStruct = resolveStruct(field.def.struct);
+          const childAt = resolvePointer(ptr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          if (!isRangeInBuffer(childAt, count2 * childStruct.totalSize, view.length)) {
+            findings.push({
+              tagIndex: entry.index,
+              tagId: entry.tagId,
+              tagPath: entry.path,
+              tagGroup: groupName,
+              fieldPath: field.name,
+              severity: "error",
+              message: `Reflexive block "${field.name}" (${count2} elements) points outside buffer bounds (ptr 0x${ptr.toString(16)}).`
+            });
+          }
+        }
+      } else if (field.name === "bounding radius" && field.def.type === "float") {
+        const r = view.readFloatLE(fAt);
+        if (!Number.isFinite(r) || r < 0) {
+          findings.push({
+            tagIndex: entry.index,
+            tagId: entry.tagId,
+            tagPath: entry.path,
+            tagGroup: groupName,
+            fieldPath: field.name,
+            severity: "warning",
+            message: `Object has invalid bounding radius (${r}).`
+          });
+        }
+      }
+    }
+  }
+  return {
+    totalTagsScanned: tagIndex.entries.length,
+    errorCount: findings.filter((f) => f.severity === "error").length,
+    warningCount: findings.filter((f) => f.severity === "warning").length,
+    findings
+  };
+}
+function globalReplaceTagReference(view, fromTagId, toTagId) {
+  const out = Buffer.from(view);
+  const header = parseCacheFileHeader(out);
+  const tagIndex = parseTagIndex(out, header);
+  const targetEntry = tagIndex.entries.find((e) => e.tagId === toTagId);
+  const affectedTags = [];
+  const scanStructRecursive = (structName, baseAt, pathPrefix, owner, depth) => {
+    if (depth > 4) return;
+    const resolved = resolveStruct(structName);
+    if (!isRangeInBuffer(baseAt, resolved.totalSize, out.length)) return;
+    for (const field of resolved.fields) {
+      const fAt = baseAt + field.offset;
+      const fieldPath = pathPrefix ? `${pathPrefix}.${field.name}` : field.name;
+      if (field.def.type === "TagDependency") {
+        const currentId = out.readUInt32LE(fAt + 12);
+        if (currentId === fromTagId >>> 0) {
+          out.writeUInt32LE(toTagId >>> 0, fAt + 12);
+          if (targetEntry) {
+            out.writeUInt32LE(targetEntry.primaryClassFourCC >>> 0, fAt + 0);
+            const pathPtrOffset = header.tagDataOffset + (header.engine === 5 ? 36 : 40) + targetEntry.index * 32 + 16;
+            const targetPathPtr = out.readUInt32LE(pathPtrOffset);
+            out.writeUInt32LE(targetPathPtr, fAt + 4);
+          } else if (toTagId === NULL_TAG_ID) {
+            out.writeUInt32LE(0, fAt + 4);
+            out.writeUInt32LE(0, fAt + 8);
+          }
+          affectedTags.push({
+            tagIndex: owner.index,
+            tagPath: owner.path,
+            tagGroup: owner.primaryClassName ?? "unknown",
+            fieldPath
+          });
+        }
+      } else if (field.def.type === "TagReflexive" && field.def.struct) {
+        const count2 = out.readInt32LE(fAt);
+        const ptr = out.readUInt32LE(fAt + 4);
+        if (count2 > 0 && count2 <= 8192) {
+          const childStructName = field.def.struct;
+          const childStruct = resolveStruct(childStructName);
+          const childAt = resolvePointer(ptr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          if (isRangeInBuffer(childAt, count2 * childStruct.totalSize, out.length)) {
+            for (let i = 0; i < count2; i++) {
+              scanStructRecursive(
+                childStructName,
+                childAt + i * childStruct.totalSize,
+                `${fieldPath}[${i}]`,
+                owner,
+                depth + 1
+              );
+            }
+          }
+        }
+      }
+    }
+  };
+  for (const entry of tagIndex.entries) {
+    if (entry.isExternal || !entry.primaryClassName) continue;
+    const structName = getGroupStructName(entry.primaryClassName);
+    if (!structName) continue;
+    const baseAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    scanStructRecursive(structName, baseAt, "", entry, 0);
+  }
+  return {
+    buffer: out,
+    replacedCount: affectedTags.length,
+    affectedTags
   };
 }
 
@@ -50586,10 +53416,14 @@ function runBuildCustomObjectTag(task) {
         scale: req.scale,
         flipYz: req.flipYz,
         centerOrigin: req.centerOrigin,
-        forceAutoUv: req.forceAutoUv
+        forceAutoUv: req.forceAutoUv,
+        uvUnwrapMode: req.uvUnwrapMode,
+        targetCollisionFaces: req.targetCollisionFaces
       },
       textureRgba,
       multiBoxCollision: req.multiBoxCollision,
+      collisionMode: req.collisionMode,
+      targetCollisionFaces: req.targetCollisionFaces,
       materialType: req.materialType,
       slotMaterialTypes: req.slotMaterialTypes,
       templateExtractedSet,
@@ -50733,6 +53567,192 @@ function runSpoofMapCrc32(task) {
     handleTaskError(task.requestId, err);
   }
 }
+function refreshCurrentMapBuffer(newBuffer) {
+  if (!currentMap) return;
+  currentMap.buffer = newBuffer;
+  currentMap.header = parseCacheFileHeader(newBuffer);
+  currentMap.tagIndex = parseTagIndex(newBuffer, currentMap.header);
+  currentMap.modified = true;
+}
+function runDecompileHaloScript(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = decompileScenarioScripts(currentMap.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      hscSource: res.hscSource,
+      scriptCount: res.scriptCount,
+      globalCount: res.globalCount,
+      syntaxNodeCount: res.syntaxNodeCount,
+      scenarioEntities: res.scenarioEntities
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runCompileHaloScript(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = compileHaloScriptIntoScenario(currentMap.buffer, task.hscSource);
+    const hasErrors = res.diagnostics.some((d) => d.severity === "error");
+    if (hasErrors) {
+      return sendResult(task.requestId, {
+        ok: false,
+        message: `Compilation failed with ${res.diagnostics.filter((d) => d.severity === "error").length} syntax error(s).`,
+        diagnostics: res.diagnostics
+      });
+    }
+    refreshCurrentMapBuffer(res.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      compiledScripts: res.compiledScripts,
+      compiledGlobals: res.compiledGlobals,
+      syntaxNodesUsed: res.syntaxNodesUsed,
+      diagnostics: res.diagnostics
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runSetupScenarioScriptEntities(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = ensureScenarioScriptEntities(currentMap.buffer, task.required);
+    refreshCurrentMapBuffer(res.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      addedObjectNames: res.addedObjectNames,
+      addedTriggerVolumes: res.addedTriggerVolumes,
+      addedCameraPoints: res.addedCameraPoints
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runExtractCollisionWireframe(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const wf = extractCollisionModelGeometry(currentMap.buffer, task.collTagIndex);
+    sendResult(task.requestId, { ok: true, ...wf });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runConvertCollisionToGbxmodel(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = convertCollisionToGbxmodelInMap(currentMap.buffer, task.collTagIndex, task.targetPath);
+    refreshCurrentMapBuffer(res.buffer);
+    const summary = summarizeOpenMap(currentMap);
+    sendResult(task.requestId, {
+      ok: true,
+      createdTagIndex: res.createdTagIndex,
+      createdTagPath: res.createdTagPath,
+      createdTagGroup: res.createdTagGroup,
+      summary: res.summary,
+      tags: summary.tags
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runConvertSbspToScenery(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = convertSbspToSceneryInMap(currentMap.buffer, task.bspTagIndex, task.targetPath);
+    refreshCurrentMapBuffer(res.buffer);
+    const summary = summarizeOpenMap(currentMap);
+    sendResult(task.requestId, {
+      ok: true,
+      createdTagIndex: res.createdTagIndex,
+      createdTagPath: res.createdTagPath,
+      createdTagGroup: res.createdTagGroup,
+      summary: res.summary,
+      tags: summary.tags
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runConvertObjectTagClass(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = convertObjectTagClassInMap(currentMap.buffer, task.sourceTagIndex, task.targetGroup, task.targetPath);
+    refreshCurrentMapBuffer(res.buffer);
+    const summary = summarizeOpenMap(currentMap);
+    sendResult(task.requestId, {
+      ok: true,
+      createdTagIndex: res.createdTagIndex,
+      createdTagPath: res.createdTagPath,
+      createdTagGroup: res.createdTagGroup,
+      summary: res.summary,
+      tags: summary.tags
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runCleanOpenSauceYelo(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = cleanOpenSauceYeloScenario(currentMap.buffer);
+    if (res.cleanedReferences > 0) {
+      refreshCurrentMapBuffer(res.buffer);
+    }
+    sendResult(task.requestId, {
+      ok: true,
+      cleanedReferences: res.cleanedReferences,
+      details: res.details
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runScanMapTagErrors(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const report = scanMapTagsForErrors(currentMap.buffer);
+    sendResult(task.requestId, { ok: true, ...report });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
+function runGlobalReplaceTagReference(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = globalReplaceTagReference(currentMap.buffer, task.fromTagId, task.toTagId);
+    if (res.replacedCount > 0) {
+      refreshCurrentMapBuffer(res.buffer);
+    }
+    sendResult(task.requestId, {
+      ok: true,
+      replacedCount: res.replacedCount,
+      affectedTags: res.affectedTags
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err.message });
+  }
+}
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
     if (task.type === "cancel") {
@@ -50788,6 +53808,16 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "inspectDeprotect") runInspectDeprotect(task);
     else if (task.type === "deprotectMap") runDeprotectMap(task);
     else if (task.type === "spoofMapCrc32") runSpoofMapCrc32(task);
+    else if (task.type === "decompileHaloScript") runDecompileHaloScript(task);
+    else if (task.type === "compileHaloScript") runCompileHaloScript(task);
+    else if (task.type === "setupScenarioScriptEntities") runSetupScenarioScriptEntities(task);
+    else if (task.type === "extractCollisionWireframe") runExtractCollisionWireframe(task);
+    else if (task.type === "convertCollisionToGbxmodel") runConvertCollisionToGbxmodel(task);
+    else if (task.type === "convertSbspToScenery") runConvertSbspToScenery(task);
+    else if (task.type === "convertObjectTagClass") runConvertObjectTagClass(task);
+    else if (task.type === "cleanOpenSauceYelo") runCleanOpenSauceYelo(task);
+    else if (task.type === "scanMapTagErrors") runScanMapTagErrors(task);
+    else if (task.type === "globalReplaceTagReference") runGlobalReplaceTagReference(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }

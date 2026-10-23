@@ -112,6 +112,21 @@ const api: OpenceApi = {
   inspectDeprotect: () => ipcRenderer.invoke('deprotect:inspect'),
   deprotectMap: (options) => ipcRenderer.invoke('deprotect:run', options),
   spoofMapCrc32: (targetCrc32: number) => ipcRenderer.invoke('deprotect:spoofCrc32', targetCrc32),
+  decompileHaloScript: () => ipcRenderer.invoke('hs:decompile'),
+  compileHaloScript: (hscSource: string) => ipcRenderer.invoke('hs:compile', hscSource),
+  setupScenarioScriptEntities: (required: { objectNames?: string[]; triggerVolumes?: string[]; cameraPoints?: string[] }) =>
+    ipcRenderer.invoke('hs:setupEntities', required),
+  extractCollisionWireframe: (collTagIndex: number) => ipcRenderer.invoke('coll:extractWireframe', collTagIndex),
+  convertCollisionToGbxmodel: (collTagIndex: number, targetPath?: string) =>
+    ipcRenderer.invoke('convert:collToGbxmodel', collTagIndex, targetPath),
+  convertSbspToScenery: (bspTagIndex?: number, targetPath?: string) =>
+    ipcRenderer.invoke('convert:sbspToScenery', bspTagIndex, targetPath),
+  convertObjectTagClass: (sourceTagIndex: number, targetGroup: string, targetPath?: string) =>
+    ipcRenderer.invoke('convert:objectTagClass', sourceTagIndex, targetGroup, targetPath),
+  cleanOpenSauceYelo: () => ipcRenderer.invoke('map:cleanOpenSauceYelo'),
+  scanMapTagErrors: () => ipcRenderer.invoke('map:scanTagErrors'),
+  globalReplaceTagReference: (fromTagId: number, toTagId: number) =>
+    ipcRenderer.invoke('map:globalReplaceTagReference', fromTagId, toTagId),
   exportModel3d: (modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     ipcRenderer.invoke('3d:exportModel', modelTagId, lod, format, outputPath),
   exportBsp3d: (bspIndex: number, format: 'obj' | 'glb', outputPath: string) =>

@@ -99,6 +99,18 @@ import {
   spoofCacheCrc32,
   repairTruncatedBitmapMipmaps,
   repairCorruptedModelPartStrips,
+  parseCacheFileHeader,
+  parseTagIndex,
+  decompileScenarioScripts,
+  compileHaloScriptIntoScenario,
+  ensureScenarioScriptEntities,
+  extractCollisionModelGeometry,
+  convertCollisionToGbxmodelInMap,
+  convertSbspToSceneryInMap,
+  convertObjectTagClassInMap,
+  cleanOpenSauceYeloScenario,
+  scanMapTagsForErrors,
+  globalReplaceTagReference,
 } from '../../core/src/index';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
@@ -2218,9 +2230,13 @@ export function runBuildCustomObjectTag(task: {
         flipYz: req.flipYz,
         centerOrigin: req.centerOrigin,
         forceAutoUv: req.forceAutoUv,
+        uvUnwrapMode: req.uvUnwrapMode,
+        targetCollisionFaces: req.targetCollisionFaces,
       },
       textureRgba,
       multiBoxCollision: req.multiBoxCollision,
+      collisionMode: req.collisionMode,
+      targetCollisionFaces: req.targetCollisionFaces,
       materialType: req.materialType,
       slotMaterialTypes: req.slotMaterialTypes,
       templateExtractedSet,
@@ -2381,6 +2397,203 @@ function runSpoofMapCrc32(task: Extract<WorkerRequest, { type: 'spoofMapCrc32' }
   }
 }
 
+function refreshCurrentMapBuffer(newBuffer: Buffer): void {
+  if (!currentMap) return;
+  currentMap.buffer = newBuffer;
+  currentMap.header = parseCacheFileHeader(newBuffer);
+  currentMap.tagIndex = parseTagIndex(newBuffer, currentMap.header);
+  currentMap.modified = true;
+}
+
+function runDecompileHaloScript(task: Extract<WorkerRequest, { type: 'decompileHaloScript' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = decompileScenarioScripts(currentMap.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      hscSource: res.hscSource,
+      scriptCount: res.scriptCount,
+      globalCount: res.globalCount,
+      syntaxNodeCount: res.syntaxNodeCount,
+      scenarioEntities: res.scenarioEntities,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runCompileHaloScript(task: Extract<WorkerRequest, { type: 'compileHaloScript' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = compileHaloScriptIntoScenario(currentMap.buffer, task.hscSource);
+    const hasErrors = res.diagnostics.some((d) => d.severity === 'error');
+    if (hasErrors) {
+      return sendResult(task.requestId, {
+        ok: false,
+        message: `Compilation failed with ${res.diagnostics.filter((d) => d.severity === 'error').length} syntax error(s).`,
+        diagnostics: res.diagnostics,
+      });
+    }
+    refreshCurrentMapBuffer(res.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      compiledScripts: res.compiledScripts,
+      compiledGlobals: res.compiledGlobals,
+      syntaxNodesUsed: res.syntaxNodesUsed,
+      diagnostics: res.diagnostics,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runSetupScenarioScriptEntities(task: Extract<WorkerRequest, { type: 'setupScenarioScriptEntities' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = ensureScenarioScriptEntities(currentMap.buffer, task.required);
+    refreshCurrentMapBuffer(res.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      addedObjectNames: res.addedObjectNames,
+      addedTriggerVolumes: res.addedTriggerVolumes,
+      addedCameraPoints: res.addedCameraPoints,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runExtractCollisionWireframe(task: Extract<WorkerRequest, { type: 'extractCollisionWireframe' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const wf = extractCollisionModelGeometry(currentMap.buffer, task.collTagIndex);
+    sendResult(task.requestId, { ok: true, ...wf });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runConvertCollisionToGbxmodel(task: Extract<WorkerRequest, { type: 'convertCollisionToGbxmodel' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = convertCollisionToGbxmodelInMap(currentMap.buffer, task.collTagIndex, task.targetPath);
+    refreshCurrentMapBuffer(res.buffer);
+    const summary = summarizeOpenMap(currentMap);
+    sendResult(task.requestId, {
+      ok: true,
+      createdTagIndex: res.createdTagIndex,
+      createdTagPath: res.createdTagPath,
+      createdTagGroup: res.createdTagGroup,
+      summary: res.summary,
+      tags: summary.tags,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runConvertSbspToScenery(task: Extract<WorkerRequest, { type: 'convertSbspToScenery' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = convertSbspToSceneryInMap(currentMap.buffer, task.bspTagIndex, task.targetPath);
+    refreshCurrentMapBuffer(res.buffer);
+    const summary = summarizeOpenMap(currentMap);
+    sendResult(task.requestId, {
+      ok: true,
+      createdTagIndex: res.createdTagIndex,
+      createdTagPath: res.createdTagPath,
+      createdTagGroup: res.createdTagGroup,
+      summary: res.summary,
+      tags: summary.tags,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runConvertObjectTagClass(task: Extract<WorkerRequest, { type: 'convertObjectTagClass' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = convertObjectTagClassInMap(currentMap.buffer, task.sourceTagIndex, task.targetGroup, task.targetPath);
+    refreshCurrentMapBuffer(res.buffer);
+    const summary = summarizeOpenMap(currentMap);
+    sendResult(task.requestId, {
+      ok: true,
+      createdTagIndex: res.createdTagIndex,
+      createdTagPath: res.createdTagPath,
+      createdTagGroup: res.createdTagGroup,
+      summary: res.summary,
+      tags: summary.tags,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runCleanOpenSauceYelo(task: Extract<WorkerRequest, { type: 'cleanOpenSauceYelo' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = cleanOpenSauceYeloScenario(currentMap.buffer);
+    if (res.cleanedReferences > 0) {
+      refreshCurrentMapBuffer(res.buffer);
+    }
+    sendResult(task.requestId, {
+      ok: true,
+      cleanedReferences: res.cleanedReferences,
+      details: res.details,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runScanMapTagErrors(task: Extract<WorkerRequest, { type: 'scanMapTagErrors' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const report = scanMapTagsForErrors(currentMap.buffer);
+    sendResult(task.requestId, { ok: true, ...report });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
+function runGlobalReplaceTagReference(task: Extract<WorkerRequest, { type: 'globalReplaceTagReference' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = globalReplaceTagReference(currentMap.buffer, task.fromTagId, task.toTagId);
+    if (res.replacedCount > 0) {
+      refreshCurrentMapBuffer(res.buffer);
+    }
+    sendResult(task.requestId, {
+      ok: true,
+      replacedCount: res.replacedCount,
+      affectedTags: res.affectedTags,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -2436,6 +2649,16 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'inspectDeprotect') runInspectDeprotect(task);
     else if (task.type === 'deprotectMap') runDeprotectMap(task);
     else if (task.type === 'spoofMapCrc32') runSpoofMapCrc32(task);
+    else if (task.type === 'decompileHaloScript') runDecompileHaloScript(task);
+    else if (task.type === 'compileHaloScript') runCompileHaloScript(task);
+    else if (task.type === 'setupScenarioScriptEntities') runSetupScenarioScriptEntities(task);
+    else if (task.type === 'extractCollisionWireframe') runExtractCollisionWireframe(task);
+    else if (task.type === 'convertCollisionToGbxmodel') runConvertCollisionToGbxmodel(task);
+    else if (task.type === 'convertSbspToScenery') runConvertSbspToScenery(task);
+    else if (task.type === 'convertObjectTagClass') runConvertObjectTagClass(task);
+    else if (task.type === 'cleanOpenSauceYelo') runCleanOpenSauceYelo(task);
+    else if (task.type === 'scanMapTagErrors') runScanMapTagErrors(task);
+    else if (task.type === 'globalReplaceTagReference') runGlobalReplaceTagReference(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

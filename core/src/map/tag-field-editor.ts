@@ -572,11 +572,12 @@ export function addReflexiveChunk(
   const oldPointerLow = buffer.readUInt32LE(refFieldAbsOffset + 4);
   const newCount = oldCount + 1;
 
+  const prePad = (4 - ((buffer.length - header.tagDataOffset) % 4)) % 4;
   const newArrayBytes = newCount * elementSize;
-  const pad = (4 - (newArrayBytes % 4)) % 4;
-  const totalAlloc = newArrayBytes + pad;
+  const postPad = (4 - (newArrayBytes % 4)) % 4;
+  const totalAlloc = prePad + newArrayBytes + postPad;
 
-  const newArrayOffset = buffer.length;
+  const newArrayOffset = buffer.length + prePad;
   const newVirtualPointer = tagIndex.baseMemoryAddress + (newArrayOffset - header.tagDataOffset);
 
   const out = Buffer.alloc(buffer.length + totalAlloc);

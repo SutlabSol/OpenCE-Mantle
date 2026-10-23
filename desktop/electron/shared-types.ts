@@ -594,6 +594,20 @@ export type WorkerRequest =
   | { type: 'inspectDeprotect'; requestId: string }
   | { type: 'deprotectMap'; requestId: string; options?: DeprotectMapOptions }
   | { type: 'spoofMapCrc32'; requestId: string; targetCrc32: number }
+  | { type: 'decompileHaloScript'; requestId: string }
+  | { type: 'compileHaloScript'; requestId: string; hscSource: string }
+  | {
+      type: 'setupScenarioScriptEntities';
+      requestId: string;
+      required: { objectNames?: string[]; triggerVolumes?: string[]; cameraPoints?: string[] };
+    }
+  | { type: 'extractCollisionWireframe'; requestId: string; collTagIndex: number }
+  | { type: 'convertCollisionToGbxmodel'; requestId: string; collTagIndex: number; targetPath?: string }
+  | { type: 'convertSbspToScenery'; requestId: string; bspTagIndex?: number; targetPath?: string }
+  | { type: 'convertObjectTagClass'; requestId: string; sourceTagIndex: number; targetGroup: string; targetPath?: string }
+  | { type: 'cleanOpenSauceYelo'; requestId: string }
+  | { type: 'scanMapTagErrors'; requestId: string }
+  | { type: 'globalReplaceTagReference'; requestId: string; fromTagId: number; toTagId: number }
   | { type: 'cancel'; requestId: string };
 
 export interface DeprotectInspectionSummary {
@@ -657,7 +671,10 @@ export interface BuildCustomObjectRequest {
   flipYz?: boolean;
   centerOrigin?: boolean;
   forceAutoUv?: boolean;
+  uvUnwrapMode?: 'box' | 'per_triangle' | 'smart';
   multiBoxCollision?: boolean;
+  collisionMode?: 'auto' | 'exact' | 'box';
+  targetCollisionFaces?: number;
   materialType?: number;
   slotMaterialTypes?: number[];
   templateTagIndex?: number;
@@ -962,7 +979,7 @@ export interface OpenceApi {
   exportBsp3d(bspIndex: number, format: 'obj' | 'glb', outputPath: string): Promise<Export3dResult>;
   pickExport3dPath(defaultName: string, format: 'obj' | 'glb'): Promise<{ path: string | null; format?: 'obj' | 'glb' }>;
   pickObjFile(): Promise<{ path: string | null }>;
-  analyzeCollisionObj(filePath?: string, options?: { scale?: number; flipYz?: boolean; centerOrigin?: boolean; forceAutoUv?: boolean }): Promise<{ ok: boolean; summary?: any; filePath?: string; error?: string }>;
+  analyzeCollisionObj(filePath?: string, options?: { scale?: number; flipYz?: boolean; centerOrigin?: boolean; forceAutoUv?: boolean; uvUnwrapMode?: 'box' | 'per_triangle' | 'smart' }): Promise<{ ok: boolean; summary?: any; filePath?: string; error?: string }>;
   exportUvTemplate(options: {
     objFilePath: string;
     size?: number;
@@ -970,6 +987,7 @@ export interface OpenceApi {
     flipYz?: boolean;
     centerOrigin?: boolean;
     forceAutoUv?: boolean;
+    uvUnwrapMode?: 'box' | 'per_triangle' | 'smart';
     previewOnly?: boolean;
   }): Promise<ExportUvTemplateResult>;
   buildCustomObjectTag(request: BuildCustomObjectRequest): Promise<BuildCustomObjectResult>;
@@ -979,6 +997,103 @@ export interface OpenceApi {
   inspectDeprotect?(): Promise<InspectDeprotectResult>;
   deprotectMap?(options?: DeprotectMapOptions): Promise<DeprotectMapResult>;
   spoofMapCrc32?(targetCrc32: number): Promise<SpoofMapCrc32Result>;
+  /** M14: HaloScript (.hsc) Decompiler, Compiler & Scenario Setup */
+  decompileHaloScript?(): Promise<{
+    ok: true;
+    hscSource: string;
+    scriptCount: number;
+    globalCount: number;
+    syntaxNodeCount: number;
+    scenarioEntities: {
+      objectNames: string[];
+      triggerVolumes: string[];
+      cutsceneCameraPoints: string[];
+      cutsceneFlags: string[];
+      encounters: string[];
+      recordedAnimations: string[];
+    };
+  } | { ok: false; message: string }>;
+  compileHaloScript?(hscSource: string): Promise<{
+    ok: true;
+    compiledScripts: number;
+    compiledGlobals: number;
+    syntaxNodesUsed: number;
+    diagnostics: Array<{ line: number; severity: 'error' | 'warning'; message: string }>;
+  } | {
+    ok: false;
+    message: string;
+    diagnostics?: Array<{ line: number; severity: 'error' | 'warning'; message: string }>;
+  }>;
+  setupScenarioScriptEntities?(required: {
+    objectNames?: string[];
+    triggerVolumes?: string[];
+    cameraPoints?: string[];
+  }): Promise<{
+    ok: true;
+    addedObjectNames: string[];
+    addedTriggerVolumes: string[];
+    addedCameraPoints: string[];
+  } | { ok: false; message: string }>;
+  /** M15–M19: Universal Tag Class Converter, 3D Collision Wireframe, Yelo Cleaner, Error Scanner & Global Search/Replace */
+  extractCollisionWireframe?(collTagIndex: number): Promise<{
+    ok: true;
+    tagIndex: number;
+    tagPath: string;
+    vertexCount: number;
+    edgeCount: number;
+    surfaceCount: number;
+    linePositions: number[];
+    objText: string;
+  } | { ok: false; message: string }>;
+  convertCollisionToGbxmodel?(collTagIndex: number, targetPath?: string): Promise<{
+    ok: true;
+    createdTagIndex: number;
+    createdTagPath: string;
+    createdTagGroup: string;
+    summary: string;
+    tags: TagEntrySummary[];
+  } | { ok: false; message: string }>;
+  convertSbspToScenery?(bspTagIndex?: number, targetPath?: string): Promise<{
+    ok: true;
+    createdTagIndex: number;
+    createdTagPath: string;
+    createdTagGroup: string;
+    summary: string;
+    tags: TagEntrySummary[];
+  } | { ok: false; message: string }>;
+  convertObjectTagClass?(sourceTagIndex: number, targetGroup: string, targetPath?: string): Promise<{
+    ok: true;
+    createdTagIndex: number;
+    createdTagPath: string;
+    createdTagGroup: string;
+    summary: string;
+    tags: TagEntrySummary[];
+  } | { ok: false; message: string }>;
+  cleanOpenSauceYelo?(): Promise<{
+    ok: true;
+    cleanedReferences: number;
+    details: string[];
+  } | { ok: false; message: string }>;
+  scanMapTagErrors?(): Promise<{
+    ok: true;
+    totalTagsScanned: number;
+    errorCount: number;
+    warningCount: number;
+    findings: Array<{
+      tagIndex: number;
+      tagId: number;
+      tagPath: string;
+      tagGroup: string;
+      fieldPath: string;
+      severity: 'error' | 'warning';
+      message: string;
+    }>;
+  } | { ok: false; message: string }>;
+  globalReplaceTagReference?(fromTagId: number, toTagId: number): Promise<{
+    ok: true;
+    replacedCount: number;
+    affectedTags: Array<{ tagIndex: number; tagPath: string; tagGroup: string; fieldPath: string }>;
+  } | { ok: false; message: string }>;
   tagTestSetAlwaysOnTop(flag: boolean): Promise<void>;
   tagTestIsAlwaysOnTop(): Promise<boolean>;
   tagTestTriggerFlycam(): Promise<{ ok: boolean; message?: string }>;
