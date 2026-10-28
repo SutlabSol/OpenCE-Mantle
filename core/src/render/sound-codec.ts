@@ -192,30 +192,61 @@ export function encodeXboxAdpcmMono(pcm: Int16Array): Uint8Array {
     for (let i = 0; i < 32; i++) {
       let byteVal = 0;
       for (let n = 0; n < 2; n++) {
+        const curPcmIdx = pcmIdx;
         const nextSample = pcmIdx < pcm.length ? pcm[pcmIdx++] : sample;
+        const lookaheadSample = curPcmIdx + 1 < pcm.length ? pcm[curPcmIdx + 1] : nextSample;
         let diff = nextSample - sample;
-        let code = 0;
+        let signBit = 0;
         if (diff < 0) {
-          code = 8;
+          signBit = 8;
           diff = -diff;
         }
 
         const step = STEP_TABLE[stepIndex];
+        let baseMag = 0;
+        let rem = diff;
+        if (rem >= step) {
+          baseMag |= 4;
+          rem -= step;
+        }
+        if (rem >= (step >> 1)) {
+          baseMag |= 2;
+          rem -= step >> 1;
+        }
+        if (rem >= (step >> 2)) {
+          baseMag |= 1;
+        }
+
+        // Evaluate baseMag and neighbors (baseMag - 1, baseMag + 1) with 1-step lookahead
+        let bestCode = signBit | baseMag;
+        let bestScore = Number.POSITIVE_INFINITY;
+        for (let dMag = -1; dMag <= 1; dMag++) {
+          const candMag = Math.max(0, Math.min(7, baseMag + dMag));
+          const candCode = signBit | candMag;
+          let candDelta = step >> 3;
+          if (candCode & 4) candDelta += step;
+          if (candCode & 2) candDelta += step >> 1;
+          if (candCode & 1) candDelta += step >> 2;
+          const candPred = Math.max(-32768, Math.min(32767, (candCode & 8) ? sample - candDelta : sample + candDelta));
+          const err0 = nextSample - candPred;
+          const nextStepIdx = Math.max(0, Math.min(88, stepIndex + INDEX_TABLE[candCode]));
+          const nextStep = STEP_TABLE[nextStepIdx];
+          // Estimate 1-step lookahead tracking error
+          const lookDiff = Math.abs(lookaheadSample - candPred);
+          const maxReach = nextStep + (nextStep >> 1) + (nextStep >> 2) + (nextStep >> 3);
+          const err1 = lookDiff > maxReach ? lookDiff - maxReach : 0;
+          const score = err0 * err0 + 0.35 * (err1 * err1);
+          if (score < bestScore) {
+            bestScore = score;
+            bestCode = candCode;
+          }
+        }
+
+        const code = bestCode;
         let delta = step >> 3;
-        if (diff >= step) {
-          code |= 4;
-          diff -= step;
-          delta += step;
-        }
-        if (diff >= (step >> 1)) {
-          code |= 2;
-          diff -= step >> 1;
-          delta += step >> 1;
-        }
-        if (diff >= (step >> 2)) {
-          code |= 1;
-          delta += step >> 2;
-        }
+        if (code & 4) delta += step;
+        if (code & 2) delta += step >> 1;
+        if (code & 1) delta += step >> 2;
 
         if (code & 8) sample -= delta;
         else sample += delta;
@@ -650,6 +681,57 @@ export function decodeSoundPermutationPcm(
 }
 
 /**
+ * Generates Halo CE's 8,000 Hz `uint8` (`0..255`) smoothed mouth amplitude envelope (`mouth_data`)
+ * for biped facial lip-sync animation during dialogue playback.
+ */
+export function computeMouthDataEnvelope(pcmSamples: Int16Array, sampleRate: number, channels: number): Buffer {
+  const safeCh = Math.max(1, channels);
+  const safeRate = Math.max(1000, sampleRate);
+  const totalFrames = Math.floor(pcmSamples.length / safeCh);
+  if (totalFrames <= 0) return Buffer.alloc(0);
+
+  const mouthRate = 8000;
+  const mouthLen = Math.max(1, Math.ceil((totalFrames / safeRate) * mouthRate));
+  const rawEnv = new Float32Array(mouthLen);
+  const windowFrames = Math.max(1, Math.round(safeRate / mouthRate));
+
+  let peakRms = 1200; // baseline floor so quiet static doesn't blow up lip-sync
+  for (let i = 0; i < mouthLen; i++) {
+    const startFrame = Math.floor((i * totalFrames) / mouthLen);
+    const endFrame = Math.min(totalFrames, startFrame + windowFrames * 2);
+    let sumSq = 0;
+    let count = 0;
+    for (let f = startFrame; f < endFrame; f++) {
+      let mono = 0;
+      for (let c = 0; c < safeCh; c++) {
+        mono += pcmSamples[f * safeCh + c];
+      }
+      mono /= safeCh;
+      sumSq += mono * mono;
+      count++;
+    }
+    const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+    rawEnv[i] = rms;
+    if (rms > peakRms) peakRms = rms;
+  }
+
+  // Smooth attack/release envelope at 8,000 Hz so biped jaw opens/closes naturally
+  const out = Buffer.alloc(mouthLen);
+  let smoothed = 0;
+  const attackAlpha = 0.35;
+  const releaseAlpha = 0.08;
+  for (let i = 0; i < mouthLen; i++) {
+    const norm = Math.min(1, rawEnv[i] / peakRms);
+    // Slight gamma boost for clear mid-speech articulation
+    const target = Math.pow(norm, 0.75);
+    smoothed += (target - smoothed) * (target > smoothed ? attackAlpha : releaseAlpha);
+    out[i] = Math.max(0, Math.min(255, Math.round(smoothed * 255)));
+  }
+
+  return out;
+}
+
+/**
  * Replaces a sound permutation's audio data and internalizes the tag definition into the map if external.
  */
 export function replaceSoundPermutationData(
@@ -662,6 +744,7 @@ export function replaceSoundPermutationData(
   newSamples: Uint8Array | Buffer,
   newFormat: number,
   externalSoundsBuffer?: Buffer,
+  mouthData?: Buffer,
 ): Buffer {
   const entryIdx = soundTagId & 0xffff;
   const entry = tagIndex.entries[entryIdx];
@@ -759,6 +842,17 @@ export function replaceSoundPermutationData(
 
         audioPayloads.push({ offset: curAudioOffset, data: payloadBytes });
         audioCursor = (audioCursor + payloadBytes.length + 3) & ~3;
+
+        if (isTarget && mouthData && mouthData.length > 0) {
+          const curMouthOffset = audioCursor;
+          const mouthVirtPtr = tagIndex.baseMemoryAddress + (curMouthOffset - header.tagDataOffset);
+          tagCopy.writeUInt32LE(mouthData.length, mOffset + 0x54);
+          tagCopy.writeUInt32LE(0, mOffset + 0x58);
+          tagCopy.writeUInt32LE(0, mOffset + 0x5c);
+          tagCopy.writeUInt32LE(mouthVirtPtr, mOffset + 0x60);
+          audioPayloads.push({ offset: curMouthOffset, data: mouthData });
+          audioCursor = (audioCursor + mouthData.length + 3) & ~3;
+        }
       }
     }
 
@@ -827,6 +921,19 @@ export function replaceSoundPermutationData(
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 0x34); // Set tag id 0
   outputBuffer.writeUInt32LE(soundTagId, mOffset + 0x3c); // Set tag id 1
   outputBuffer.fill(0, mOffset + 0x54, mOffset + 0x7c); // Clear mouth/subtitle data on replaced permutation
+
+  if (mouthData && mouthData.length > 0) {
+    const mouthAppendOffset = (outputBuffer.length + 3) & ~3;
+    const expandedWithMouth = Buffer.alloc((mouthAppendOffset + mouthData.length + 3) & ~3);
+    outputBuffer.copy(expandedWithMouth, 0);
+    mouthData.copy(expandedWithMouth, mouthAppendOffset);
+    const mouthVirtPtr = tagIndex.baseMemoryAddress + (mouthAppendOffset - header.tagDataOffset);
+    expandedWithMouth.writeUInt32LE(mouthData.length, mOffset + 0x54);
+    expandedWithMouth.writeUInt32LE(0, mOffset + 0x58);
+    expandedWithMouth.writeUInt32LE(0, mOffset + 0x5c);
+    expandedWithMouth.writeUInt32LE(mouthVirtPtr, mOffset + 0x60);
+    outputBuffer = expandedWithMouth;
+  }
 
   // Also internalize any remaining external sibling permutations on this sound tag
   if (externalSoundsBuffer && pitchCount > 0 && pitchCount < 32) {

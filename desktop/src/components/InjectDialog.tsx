@@ -245,7 +245,13 @@ export default function InjectDialog({ onClose, log }: Props) {
   // phase === 'review'
   const hasBlocking = plan.refusedRoots.length > 0;
   const hasMismatch = plan.externalRefStatuses.some((r) => r.status === 'mismatch');
-  const needsAck = hasBlocking || plan.blockedEmbedded.length > 0 || plan.blockedOther.length > 0 || hasMismatch;
+  const hasClassConflict = (plan.classConflicts?.length ?? 0) > 0;
+  const needsAck =
+    hasBlocking ||
+    plan.blockedEmbedded.length > 0 ||
+    plan.blockedOther.length > 0 ||
+    hasMismatch ||
+    hasClassConflict;
   const nothingToAdd = plan.counts.added === 0 && plan.counts.reused === 0 && plan.counts.swapped === 0;
 
   let confirmDisabledReason = '';
@@ -285,6 +291,14 @@ export default function InjectDialog({ onClose, log }: Props) {
             title="Blocked - other"
             severity="blocking"
             items={plan.blockedOther.map((b, i) => ({ key: `oth-${i}`, text: `"${b.path}" (${b.group})`, detail: b.reasons }))}
+          />
+          <WarningGroup
+            title="Same-path / different-class conflicts in target map"
+            severity="blocking"
+            items={(plan.classConflicts ?? []).map((c, i) => ({
+              key: `cls-${i}`,
+              text: `"${c.path}" is (${c.containerGroup}) in container, but already exists as (${c.targetGroup}) in target`,
+            }))}
           />
           <WarningGroup
             title="External resource map references"

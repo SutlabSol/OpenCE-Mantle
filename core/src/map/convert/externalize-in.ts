@@ -1,8 +1,8 @@
 import type { CacheFileHeader } from '../header';
 import type { TagIndex } from '../tag-index';
 import { resolveTagDataPointer } from '../tag-index';
-import { decodeStruct, getBitfieldDefinition, getGroupStructName, isRangeInBuffer, resolvePointer, resolveStruct } from '../definitions/engine';
-import type { ResolvedStruct } from '../definitions/engine';
+import { decodeStruct, getGroupStructName, isRangeInBuffer, resolvePointer, resolveStruct } from '../definitions/engine';
+
 import { findEmbeddedDataFields, validateBitmapAssetSize, flagLocation } from '../embedded-data-fields';
 import { appendToRawDataRegion, rawDataRegionLayoutOf } from '../raw-data-region';
 import type { RawDataChunk } from '../raw-data-region';

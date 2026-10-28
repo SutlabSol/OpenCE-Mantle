@@ -199,7 +199,7 @@ describe('TagEditorDialog', () => {
     const onClose = vi.fn();
     render(<TagEditorDialog tag={FOCUSED_TAG} allTags={ALL_TAGS} onClose={onClose} />);
 
-    const dialog = screen.getByRole('dialog');
+    screen.getByRole('dialog');
     await userEvent.keyboard('[Escape]');
 
     expect(onClose).toHaveBeenCalledTimes(1);

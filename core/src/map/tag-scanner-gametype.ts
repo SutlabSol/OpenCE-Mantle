@@ -26,6 +26,26 @@ export interface GlobalTagReplaceResult {
   affectedTags: Array<{ tagIndex: number; tagPath: string; tagGroup: string; fieldPath: string }>;
 }
 
+export interface GlobalFieldReplaceOptions {
+  fieldNameQuery: string;
+  tagGroupFilter?: string;
+  matchValue?: string;
+  newValue: string;
+}
+
+export interface GlobalFieldReplaceResult {
+  buffer: Buffer;
+  replacedCount: number;
+  affectedFields: Array<{
+    tagIndex: number;
+    tagPath: string;
+    tagGroup: string;
+    fieldPath: string;
+    oldValue: string;
+    newValue: string;
+  }>;
+}
+
 export type HaloGameMode = 'ctf' | 'slayer' | 'oddball' | 'king' | 'race';
 
 export interface HaloGametypeConfig {
@@ -87,11 +107,23 @@ const CODE_TO_STARTING_WEAPON: Record<number, HaloGametypeConfig['startingEquipm
 export function scanMapTagsForErrors(view: Buffer): MapTagScanReport {
   const header = parseCacheFileHeader(view);
   const tagIndex = parseTagIndex(view, header);
-  const validTagIds = new Set<number>(tagIndex.entries.map((e) => e.tagId));
+  const validTagIds = new Set<number>(
+    tagIndex.entries
+      .filter((e) => e.tagId !== NULL_TAG_ID && e.primaryClassFourCC !== 0xffffffff && !e.path.startsWith('~'))
+      .map((e) => e.tagId),
+  );
   const findings: TagErrorFinding[] = [];
 
   for (const entry of tagIndex.entries) {
-    if (entry.isExternal || !entry.primaryClassName) continue;
+    if (
+      entry.isExternal ||
+      !entry.primaryClassName ||
+      entry.tagId === NULL_TAG_ID ||
+      entry.primaryClassFourCC === 0xffffffff ||
+      entry.path.startsWith('~')
+    ) {
+      continue;
+    }
     const groupName = entry.primaryClassName;
     const structName = getGroupStructName(groupName);
     if (!structName) continue;
@@ -239,14 +271,43 @@ export function globalReplaceTagReference(
           const childStruct = resolveStruct(childStructName);
           const childAt = resolvePointer(ptr, header.tagDataOffset, tagIndex.baseMemoryAddress);
           if (isRangeInBuffer(childAt, count * childStruct.totalSize, out.length)) {
-            for (let i = 0; i < count; i++) {
-              scanStructRecursive(
-                childStructName,
-                childAt + i * childStruct.totalSize,
-                `${fieldPath}[${i}]`,
-                owner,
-                depth + 1,
-              );
+            if (childStructName === 'PredictedResource' && childStruct.totalSize === 8) {
+              const kept: Buffer[] = [];
+              let modifiedPred = false;
+              for (let i = 0; i < count; i++) {
+                const elemOff = childAt + i * 8;
+                const predTagId = out.readUInt32LE(elemOff + 4);
+                if (predTagId === (fromTagId >>> 0)) {
+                  modifiedPred = true;
+                  if (toTagId !== NULL_TAG_ID) {
+                    const copy = Buffer.from(out.subarray(elemOff, elemOff + 8));
+                    copy.writeUInt32LE(toTagId >>> 0, 4);
+                    kept.push(copy);
+                  }
+                } else {
+                  kept.push(Buffer.from(out.subarray(elemOff, elemOff + 8)));
+                }
+              }
+              if (modifiedPred) {
+                out.fill(0, childAt, childAt + count * 8);
+                for (let i = 0; i < kept.length; i++) {
+                  kept[i]!.copy(out, childAt + i * 8);
+                }
+                out.writeInt32LE(kept.length, fAt);
+                if (kept.length === 0) {
+                  out.writeUInt32LE(0, fAt + 4);
+                }
+              }
+            } else {
+              for (let i = 0; i < count; i++) {
+                scanStructRecursive(
+                  childStructName,
+                  childAt + i * childStruct.totalSize,
+                  `${fieldPath}[${i}]`,
+                  owner,
+                  depth + 1,
+                );
+              }
             }
           }
         }
@@ -255,7 +316,7 @@ export function globalReplaceTagReference(
   };
 
   for (const entry of tagIndex.entries) {
-    if (entry.isExternal || !entry.primaryClassName) continue;
+    if (entry.isExternal || !entry.primaryClassName || entry.path.startsWith('~')) continue;
     const structName = getGroupStructName(entry.primaryClassName);
     if (!structName) continue;
     const baseAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
@@ -348,3 +409,166 @@ export function parseHaloGametypeBlamLst(buf: Buffer): HaloGametypeConfig {
     vehicleRespawnSeconds: Math.round(vehicleRespawnTicks / 30),
   };
 }
+
+/**
+ * Globally searches all tags in the open map for scalar/string fields matching `fieldNameQuery`
+ * (optionally filtered by `tagGroupFilter` and `matchValue`) and writes `newValue` in-place.
+ */
+export function globalReplaceTagFieldValue(
+  view: Buffer,
+  options: GlobalFieldReplaceOptions,
+): GlobalFieldReplaceResult {
+  const query = options.fieldNameQuery.trim().toLowerCase();
+  if (!query) {
+    throw new Error('Field name query is required.');
+  }
+  const groupFilter = options.tagGroupFilter?.trim().toLowerCase() || '';
+  const matchRaw = options.matchValue?.trim() ?? '';
+  const hasMatchFilter = matchRaw.length > 0;
+  const matchNum = hasMatchFilter ? Number.parseFloat(matchRaw) : NaN;
+  const newRaw = options.newValue.trim();
+  const newNum = Number.parseFloat(newRaw);
+
+  const out = Buffer.from(view);
+  const header = parseCacheFileHeader(out);
+  const tagIndex = parseTagIndex(out, header);
+  const affectedFields: GlobalFieldReplaceResult['affectedFields'] = [];
+
+  const scanStruct = (
+    structName: string,
+    baseAt: number,
+    pathPrefix: string,
+    owner: (typeof tagIndex.entries)[number],
+    depth: number,
+  ) => {
+    if (depth > 4) return;
+    const resolved = resolveStruct(structName);
+    if (!isRangeInBuffer(baseAt, resolved.totalSize, out.length)) return;
+
+    for (const field of resolved.fields) {
+      const fAt = baseAt + field.offset;
+      const fieldPath = pathPrefix ? `${pathPrefix}.${field.name}` : field.name;
+      const fType = field.def.type;
+
+      if (fType === 'TagReflexive' && field.def.struct) {
+        const count = out.readInt32LE(fAt);
+        const ptr = out.readUInt32LE(fAt + 4);
+        if (count > 0 && count <= 4096 && ptr > 0) {
+          const childStruct = resolveStruct(field.def.struct);
+          const childAt = resolvePointer(ptr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          if (isRangeInBuffer(childAt, count * childStruct.totalSize, out.length)) {
+            for (let i = 0; i < count; i++) {
+              scanStruct(
+                field.def.struct,
+                childAt + i * childStruct.totalSize,
+                `${fieldPath}[${i}]`,
+                owner,
+                depth + 1,
+              );
+            }
+          }
+        }
+        continue;
+      }
+
+      if (!field.name.toLowerCase().includes(query) && !fieldPath.toLowerCase().includes(query)) {
+        continue;
+      }
+
+      if (fType === 'float' || fType === 'Fraction' || fType === 'Angle') {
+        if (!Number.isFinite(newNum)) continue;
+        const curVal = out.readFloatLE(fAt);
+        if (hasMatchFilter && (!Number.isFinite(matchNum) || Math.abs(curVal - matchNum) > 1e-3)) {
+          continue;
+        }
+        out.writeFloatLE(newNum, fAt);
+        affectedFields.push({
+          tagIndex: owner.index,
+          tagPath: owner.path,
+          tagGroup: owner.primaryClassName ?? 'unknown',
+          fieldPath,
+          oldValue: Number(curVal.toFixed(4)).toString(),
+          newValue: Number(newNum.toFixed(4)).toString(),
+        });
+      } else if (
+        fType === 'int16' ||
+        fType === 'uint16' ||
+        fType === 'Index' ||
+        fType === 'int32' ||
+        fType === 'uint32' ||
+        fType === 'int8' ||
+        fType === 'uint8'
+      ) {
+        if (!Number.isFinite(newNum)) continue;
+        const intTarget = Math.round(newNum);
+        const curInt =
+          fType === 'int8'
+            ? out.readInt8(fAt)
+            : fType === 'uint8'
+              ? out.readUInt8(fAt)
+              : fType === 'int16' || fType === 'Index'
+                ? out.readInt16LE(fAt)
+                : fType === 'uint16'
+                  ? out.readUInt16LE(fAt)
+                  : fType === 'int32'
+                    ? out.readInt32LE(fAt)
+                    : out.readUInt32LE(fAt);
+        if (hasMatchFilter && (!Number.isFinite(matchNum) || curInt !== Math.round(matchNum))) {
+          continue;
+        }
+        if (fType === 'int8') out.writeInt8(Math.max(-128, Math.min(127, intTarget)), fAt);
+        else if (fType === 'uint8') out.writeUInt8(Math.max(0, Math.min(255, intTarget)), fAt);
+        else if (fType === 'int16' || fType === 'Index') out.writeInt16LE(Math.max(-32768, Math.min(32767, intTarget)), fAt);
+        else if (fType === 'uint16') out.writeUInt16LE(Math.max(0, Math.min(65535, intTarget)), fAt);
+        else if (fType === 'int32') out.writeInt32LE(intTarget, fAt);
+        else out.writeUInt32LE(intTarget >>> 0, fAt);
+
+        affectedFields.push({
+          tagIndex: owner.index,
+          tagPath: owner.path,
+          tagGroup: owner.primaryClassName ?? 'unknown',
+          fieldPath,
+          oldValue: String(curInt),
+          newValue: String(intTarget),
+        });
+      } else if (fType === 'TagString') {
+        const z = out.indexOf(0, fAt);
+        const curStr = out.toString('latin1', fAt, z >= fAt && z < fAt + 32 ? z : fAt + 32).trim();
+        if (hasMatchFilter && !curStr.toLowerCase().includes(matchRaw.toLowerCase())) {
+          continue;
+        }
+        out.fill(0, fAt, fAt + 32);
+        out.write(newRaw.slice(0, 31), fAt, 'latin1');
+        affectedFields.push({
+          tagIndex: owner.index,
+          tagPath: owner.path,
+          tagGroup: owner.primaryClassName ?? 'unknown',
+          fieldPath,
+          oldValue: curStr,
+          newValue: newRaw.slice(0, 31),
+        });
+      }
+    }
+  };
+
+  for (const entry of tagIndex.entries) {
+    if (entry.isExternal || !entry.primaryClassName || entry.path.startsWith('~')) continue;
+    if (
+      groupFilter &&
+      entry.primaryClassName.toLowerCase() !== groupFilter
+    ) {
+      continue;
+    }
+    const structName = getGroupStructName(entry.primaryClassName);
+    if (!structName) continue;
+    const baseAt = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    scanStruct(structName, baseAt, '', entry, 0);
+  }
+
+  return {
+    buffer: out,
+    replacedCount: affectedFields.length,
+    affectedFields,
+  };
+}
+

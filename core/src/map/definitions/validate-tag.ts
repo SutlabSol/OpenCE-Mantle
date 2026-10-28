@@ -231,11 +231,12 @@ export function validateStructInstance(
  */
 export function locateStructureBsp(
   buffer: Buffer,
-  tagIndex: TagIndex,
+  _tagIndex: TagIndex,
   scenarioFileOffset: number,
   scenarioFileOffsetAnchor: number,
   scenarioBaseMemoryAddress: number,
   targetTagId: number,
+  bspIndex?: number,
 ): { fileOffset: number; fileOffsetAnchor: number; baseMemoryAddress: number } | null {
   const decodedScenario = decodeStruct(buffer, scenarioFileOffset, 'Scenario');
   const bspsField = decodedScenario.get('structure bsps');
@@ -245,6 +246,16 @@ export function locateStructureBsp(
 
   const childSize = resolveStruct('ScenarioBSP').totalSize;
   const arrayOffset = scenarioFileOffsetAnchor + (pointerLow - scenarioBaseMemoryAddress);
+
+  if (bspIndex !== undefined && bspIndex >= 0 && bspIndex < count) {
+    const entryOffset = arrayOffset + bspIndex * childSize;
+    const decoded = decodeStruct(buffer, entryOffset, 'ScenarioBSP');
+    const bspStart = (decoded.get('bsp start') as { kind: 'basic'; value: number }).value;
+    const bspAddress = (decoded.get('bsp address') as { kind: 'basic'; value: number }).value;
+    if (bspStart + 24 > buffer.length) return null;
+    const metaPointer = buffer.readUInt32LE(bspStart + 0);
+    return { fileOffset: bspStart + (metaPointer - bspAddress), fileOffsetAnchor: bspStart, baseMemoryAddress: bspAddress };
+  }
 
   for (let i = 0; i < count; i++) {
     const entryOffset = arrayOffset + i * childSize;

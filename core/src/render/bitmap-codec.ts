@@ -7,9 +7,6 @@ import { CorruptMapError } from '../map/errors';
 import {
   BitmapFormat,
   BitmapTextureError,
-  readBitmapImageDescriptor,
-  decodeBitmapTagImage,
-  type BitmapImageDescriptor,
 } from './bitmap-textures';
 
 export interface BitmapSequenceInfo {
@@ -300,7 +297,6 @@ export function decodePngToRgba(pngBuffer: Buffer): { width: number; height: num
 
   let width = 0;
   let height = 0;
-  let bitDepth = 8;
   let colorType = 6;
   const idatChunks: Buffer[] = [];
 
@@ -313,7 +309,6 @@ export function decodePngToRgba(pngBuffer: Buffer): { width: number; height: num
     if (chunkType === 'IHDR') {
       width = chunkData.readUInt32BE(0);
       height = chunkData.readUInt32BE(4);
-      bitDepth = chunkData[8];
       colorType = chunkData[9];
     } else if (chunkType === 'IDAT') {
       idatChunks.push(chunkData);
@@ -453,17 +448,10 @@ export function encodeToDds(
   return Buffer.concat([header, Buffer.from(imageData)]);
 }
 
-/* ---------------------------------- Fast DXT1 / DXT5 Encoder ---------------------------------- */
+/* ---------------------------------- Fast Zero-Allocation DXT1 / DXT5 Encoder ---------------------------------- */
 
 function packRgb565(r: number, g: number, b: number): number {
   return (((r >> 3) & 0x1f) << 11) | (((g >> 2) & 0x3f) << 5) | ((b >> 3) & 0x1f);
-}
-
-function unpackRgb565Fast(c: number): [number, number, number] {
-  const r = ((c >> 11) & 0x1f) * 255 / 31;
-  const g = ((c >> 5) & 0x3f) * 255 / 63;
-  const b = (c & 0x1f) * 255 / 31;
-  return [Math.round(r), Math.round(g), Math.round(b)];
 }
 
 function colorDistSq(r1: number, g1: number, b1: number, r2: number, g2: number, b2: number): number {
@@ -473,31 +461,45 @@ function colorDistSq(r1: number, g1: number, b1: number, r2: number, g2: number,
   return dr * dr * 2 + dg * dg * 4 + db * db * 3;
 }
 
+// Reusable scratch buffers (zero heap allocation inside block loops)
+const _dxtBlockRgba = new Uint8Array(64);
+const _dxtPalR = new Int32Array(4);
+const _dxtPalG = new Int32Array(4);
+const _dxtPalB = new Int32Array(4);
+const _dxtAlphaPal = new Int32Array(8);
+
 /**
- * Encodes RGBA8888 pixels into DXT1 (BC1) compressed blocks.
+ * Encodes RGBA8888 pixels into DXT1 (BC1) compressed blocks with zero inner-loop heap allocations.
  */
 export function encodeRgbaToDxt1(rgba: Uint8Array, width: number, height: number): Uint8Array {
   const blocksX = Math.ceil(width / 4);
   const blocksY = Math.ceil(height / 4);
   const out = new Uint8Array(blocksX * blocksY * 8);
+  const maxX = width - 1;
+  const maxY = height - 1;
 
   let dst = 0;
   for (let by = 0; by < blocksY; by++) {
+    const baseY = by * 4;
     for (let bx = 0; bx < blocksX; bx++) {
+      const baseX = bx * 4;
       let minR = 255, minG = 255, minB = 255;
       let maxR = 0, maxG = 0, maxB = 0;
 
-      // Scan 4x4 block bounding box
-      const blockPixels: [number, number, number][] = [];
+      let pOff = 0;
       for (let py = 0; py < 4; py++) {
+        const y = baseY + py <= maxY ? baseY + py : maxY;
+        const rowOff = y * width;
         for (let px = 0; px < 4; px++) {
-          const x = Math.min(width - 1, bx * 4 + px);
-          const y = Math.min(height - 1, by * 4 + py);
-          const idx = (y * width + x) * 4;
-          const r = rgba[idx + 0];
+          const x = baseX + px <= maxX ? baseX + px : maxX;
+          const idx = (rowOff + x) << 2;
+          const r = rgba[idx];
           const g = rgba[idx + 1];
           const b = rgba[idx + 2];
-          blockPixels.push([r, g, b]);
+          _dxtBlockRgba[pOff] = r;
+          _dxtBlockRgba[pOff + 1] = g;
+          _dxtBlockRgba[pOff + 2] = b;
+          pOff += 4;
           if (r < minR) minR = r;
           if (g < minG) minG = g;
           if (b < minB) minB = b;
@@ -507,10 +509,27 @@ export function encodeRgbaToDxt1(rgba: Uint8Array, width: number, height: number
         }
       }
 
+      // Inset bounding box slightly (1/16th range) to reduce outlier error (stb_dxt technique)
+      const insetR = (maxR - minR) >> 4;
+      const insetG = (maxG - minG) >> 4;
+      const insetB = (maxB - minB) >> 4;
+      if (maxR - insetR > minR + insetR) { maxR -= insetR; minR += insetR; }
+      if (maxG - insetG > minG + insetG) { maxG -= insetG; minG += insetG; }
+      if (maxB - insetB > minB + insetB) { maxB -= insetB; minB += insetB; }
+
       let c0 = packRgb565(maxR, maxG, maxB);
       let c1 = packRgb565(minR, minG, minB);
       if (c0 === c1) {
-        c0 = packRgb565(Math.min(255, maxR + 4), maxG, maxB);
+        out[dst] = c0 & 0xff;
+        out[dst + 1] = (c0 >> 8) & 0xff;
+        out[dst + 2] = c1 & 0xff;
+        out[dst + 3] = (c1 >> 8) & 0xff;
+        out[dst + 4] = 0;
+        out[dst + 5] = 0;
+        out[dst + 6] = 0;
+        out[dst + 7] = 0;
+        dst += 8;
+        continue;
       }
       if (c0 < c1) {
         const tmp = c0;
@@ -518,39 +537,47 @@ export function encodeRgbaToDxt1(rgba: Uint8Array, width: number, height: number
         c1 = tmp;
       }
 
-      const [r0, g0, b0] = unpackRgb565Fast(c0);
-      const [r1, g1, b1] = unpackRgb565Fast(c1);
+      const r0 = (((c0 >> 11) & 0x1f) * 527 + 23) >> 6;
+      const g0 = (((c0 >> 5) & 0x3f) * 259 + 33) >> 6;
+      const b0 = ((c0 & 0x1f) * 527 + 23) >> 6;
+      const r1 = (((c1 >> 11) & 0x1f) * 527 + 23) >> 6;
+      const g1 = (((c1 >> 5) & 0x3f) * 259 + 33) >> 6;
+      const b1 = ((c1 & 0x1f) * 527 + 23) >> 6;
 
-      const palette: [number, number, number][] = [
-        [r0, g0, b0],
-        [r1, g1, b1],
-        [Math.round((2 * r0 + r1) / 3), Math.round((2 * g0 + g1) / 3), Math.round((2 * b0 + b1) / 3)],
-        [Math.round((r0 + 2 * r1) / 3), Math.round((g0 + 2 * g1) / 3), Math.round((b0 + 2 * b1) / 3)],
-      ];
+      _dxtPalR[0] = r0; _dxtPalG[0] = g0; _dxtPalB[0] = b0;
+      _dxtPalR[1] = r1; _dxtPalG[1] = g1; _dxtPalB[1] = b1;
+      _dxtPalR[2] = ((2 * r0 + r1 + 1) / 3) | 0;
+      _dxtPalG[2] = ((2 * g0 + g1 + 1) / 3) | 0;
+      _dxtPalB[2] = ((2 * b0 + b1 + 1) / 3) | 0;
+      _dxtPalR[3] = ((r0 + 2 * r1 + 1) / 3) | 0;
+      _dxtPalG[3] = ((g0 + 2 * g1 + 1) / 3) | 0;
+      _dxtPalB[3] = ((b0 + 2 * b1 + 1) / 3) | 0;
 
       let code = 0;
       for (let i = 0; i < 16; i++) {
-        const [pr, pg, pb] = blockPixels[i];
-        let bestDist = Infinity;
+        const bOff = i << 2;
+        const pr = _dxtBlockRgba[bOff];
+        const pg = _dxtBlockRgba[bOff + 1];
+        const pb = _dxtBlockRgba[bOff + 2];
+        let bestDist = colorDistSq(pr, pg, pb, _dxtPalR[0], _dxtPalG[0], _dxtPalB[0]);
         let bestIdx = 0;
-        for (let p = 0; p < 4; p++) {
-          const d = colorDistSq(pr, pg, pb, palette[p][0], palette[p][1], palette[p][2]);
-          if (d < bestDist) {
-            bestDist = d;
-            bestIdx = p;
-          }
-        }
+        const d1 = colorDistSq(pr, pg, pb, _dxtPalR[1], _dxtPalG[1], _dxtPalB[1]);
+        if (d1 < bestDist) { bestDist = d1; bestIdx = 1; }
+        const d2 = colorDistSq(pr, pg, pb, _dxtPalR[2], _dxtPalG[2], _dxtPalB[2]);
+        if (d2 < bestDist) { bestDist = d2; bestIdx = 2; }
+        const d3 = colorDistSq(pr, pg, pb, _dxtPalR[3], _dxtPalG[3], _dxtPalB[3]);
+        if (d3 < bestDist) { bestIdx = 3; }
         code |= bestIdx << (i * 2);
       }
 
-      out[dst + 0] = c0 & 0xff;
+      out[dst] = c0 & 0xff;
       out[dst + 1] = (c0 >> 8) & 0xff;
       out[dst + 2] = c1 & 0xff;
       out[dst + 3] = (c1 >> 8) & 0xff;
       out[dst + 4] = code & 0xff;
-      out[dst + 5] = (code >> 8) & 0xff;
-      out[dst + 6] = (code >> 16) & 0xff;
-      out[dst + 7] = (code >> 24) & 0xff;
+      out[dst + 5] = (code >>> 8) & 0xff;
+      out[dst + 6] = (code >>> 16) & 0xff;
+      out[dst + 7] = (code >>> 24) & 0xff;
       dst += 8;
     }
   }
@@ -559,31 +586,40 @@ export function encodeRgbaToDxt1(rgba: Uint8Array, width: number, height: number
 }
 
 /**
- * Encodes RGBA8888 pixels into DXT5 (BC3) compressed blocks.
+ * Encodes RGBA8888 pixels into DXT5 (BC3) compressed blocks with zero inner-loop heap or BigInt allocations.
  */
 export function encodeRgbaToDxt5(rgba: Uint8Array, width: number, height: number): Uint8Array {
   const blocksX = Math.ceil(width / 4);
   const blocksY = Math.ceil(height / 4);
   const out = new Uint8Array(blocksX * blocksY * 16);
+  const maxX = width - 1;
+  const maxY = height - 1;
 
   let dst = 0;
   for (let by = 0; by < blocksY; by++) {
+    const baseY = by * 4;
     for (let bx = 0; bx < blocksX; bx++) {
+      const baseX = bx * 4;
       let minA = 255, maxA = 0;
       let minR = 255, minG = 255, minB = 255;
       let maxR = 0, maxG = 0, maxB = 0;
 
-      const blockPixels: [number, number, number, number][] = [];
+      let pOff = 0;
       for (let py = 0; py < 4; py++) {
+        const y = baseY + py <= maxY ? baseY + py : maxY;
+        const rowOff = y * width;
         for (let px = 0; px < 4; px++) {
-          const x = Math.min(width - 1, bx * 4 + px);
-          const y = Math.min(height - 1, by * 4 + py);
-          const idx = (y * width + x) * 4;
-          const r = rgba[idx + 0];
+          const x = baseX + px <= maxX ? baseX + px : maxX;
+          const idx = (rowOff + x) << 2;
+          const r = rgba[idx];
           const g = rgba[idx + 1];
           const b = rgba[idx + 2];
           const a = rgba[idx + 3];
-          blockPixels.push([r, g, b, a]);
+          _dxtBlockRgba[pOff] = r;
+          _dxtBlockRgba[pOff + 1] = g;
+          _dxtBlockRgba[pOff + 2] = b;
+          _dxtBlockRgba[pOff + 3] = a;
+          pOff += 4;
           if (a < minA) minA = a;
           if (a > maxA) maxA = a;
           if (r < minR) minR = r;
@@ -595,53 +631,82 @@ export function encodeRgbaToDxt5(rgba: Uint8Array, width: number, height: number
         }
       }
 
-      // --- 1. Encode 8 bytes alpha ---
-      let a0 = maxA;
-      let a1 = minA;
+      // --- 1. Encode 8 bytes alpha (using two 24-bit integer words instead of BigInt) ---
+      const a0 = maxA;
+      const a1 = minA;
       if (a0 === a1) {
-        a0 = Math.min(255, maxA + 1);
-      }
-      out[dst + 0] = a0;
-      out[dst + 1] = a1;
+        out[dst] = a0;
+        out[dst + 1] = a1;
+        out[dst + 2] = 0;
+        out[dst + 3] = 0;
+        out[dst + 4] = 0;
+        out[dst + 5] = 0;
+        out[dst + 6] = 0;
+        out[dst + 7] = 0;
+      } else {
+        out[dst] = a0;
+        out[dst + 1] = a1;
+        _dxtAlphaPal[0] = a0;
+        _dxtAlphaPal[1] = a1;
+        _dxtAlphaPal[2] = ((6 * a0 + 1 * a1 + 3) / 7) | 0;
+        _dxtAlphaPal[3] = ((5 * a0 + 2 * a1 + 3) / 7) | 0;
+        _dxtAlphaPal[4] = ((4 * a0 + 3 * a1 + 3) / 7) | 0;
+        _dxtAlphaPal[5] = ((3 * a0 + 4 * a1 + 3) / 7) | 0;
+        _dxtAlphaPal[6] = ((2 * a0 + 5 * a1 + 3) / 7) | 0;
+        _dxtAlphaPal[7] = ((1 * a0 + 6 * a1 + 3) / 7) | 0;
 
-      const alphaPalette = [
-        a0,
-        a1,
-        Math.round((6 * a0 + 1 * a1) / 7),
-        Math.round((5 * a0 + 2 * a1) / 7),
-        Math.round((4 * a0 + 3 * a1) / 7),
-        Math.round((3 * a0 + 4 * a1) / 7),
-        Math.round((2 * a0 + 5 * a1) / 7),
-        Math.round((1 * a0 + 6 * a1) / 7),
-      ];
-
-      let aBits = 0n;
-      for (let i = 0; i < 16; i++) {
-        const aVal = blockPixels[i][3];
-        let bestDist = Infinity;
-        let bestIdx = 0;
-        for (let p = 0; p < 8; p++) {
-          const d = Math.abs(aVal - alphaPalette[p]);
-          if (d < bestDist) {
-            bestDist = d;
-            bestIdx = p;
+        let lo24 = 0;
+        for (let i = 0; i < 8; i++) {
+          const aVal = _dxtBlockRgba[(i << 2) + 3];
+          let bestDist = 999;
+          let bestIdx = 0;
+          for (let p = 0; p < 8; p++) {
+            const d = Math.abs(aVal - _dxtAlphaPal[p]);
+            if (d < bestDist) { bestDist = d; bestIdx = p; }
           }
+          lo24 |= bestIdx << (i * 3);
         }
-        aBits |= BigInt(bestIdx) << BigInt(i * 3);
-      }
+        let hi24 = 0;
+        for (let i = 0; i < 8; i++) {
+          const aVal = _dxtBlockRgba[((i + 8) << 2) + 3];
+          let bestDist = 999;
+          let bestIdx = 0;
+          for (let p = 0; p < 8; p++) {
+            const d = Math.abs(aVal - _dxtAlphaPal[p]);
+            if (d < bestDist) { bestDist = d; bestIdx = p; }
+          }
+          hi24 |= bestIdx << (i * 3);
+        }
 
-      out[dst + 2] = Number(aBits & 0xffn);
-      out[dst + 3] = Number((aBits >> 8n) & 0xffn);
-      out[dst + 4] = Number((aBits >> 16n) & 0xffn);
-      out[dst + 5] = Number((aBits >> 24n) & 0xffn);
-      out[dst + 6] = Number((aBits >> 32n) & 0xffn);
-      out[dst + 7] = Number((aBits >> 40n) & 0xffn);
+        out[dst + 2] = lo24 & 0xff;
+        out[dst + 3] = (lo24 >>> 8) & 0xff;
+        out[dst + 4] = (lo24 >>> 16) & 0xff;
+        out[dst + 5] = hi24 & 0xff;
+        out[dst + 6] = (hi24 >>> 8) & 0xff;
+        out[dst + 7] = (hi24 >>> 16) & 0xff;
+      }
 
       // --- 2. Encode 8 bytes RGB DXT1 ---
+      const insetR = (maxR - minR) >> 4;
+      const insetG = (maxG - minG) >> 4;
+      const insetB = (maxB - minB) >> 4;
+      if (maxR - insetR > minR + insetR) { maxR -= insetR; minR += insetR; }
+      if (maxG - insetG > minG + insetG) { maxG -= insetG; minG += insetG; }
+      if (maxB - insetB > minB + insetB) { maxB -= insetB; minB += insetB; }
+
       let c0 = packRgb565(maxR, maxG, maxB);
       let c1 = packRgb565(minR, minG, minB);
       if (c0 === c1) {
-        c0 = packRgb565(Math.min(255, maxR + 4), maxG, maxB);
+        out[dst + 8] = c0 & 0xff;
+        out[dst + 9] = (c0 >> 8) & 0xff;
+        out[dst + 10] = c1 & 0xff;
+        out[dst + 11] = (c1 >> 8) & 0xff;
+        out[dst + 12] = 0;
+        out[dst + 13] = 0;
+        out[dst + 14] = 0;
+        out[dst + 15] = 0;
+        dst += 16;
+        continue;
       }
       if (c0 < c1) {
         const tmp = c0;
@@ -649,28 +714,36 @@ export function encodeRgbaToDxt5(rgba: Uint8Array, width: number, height: number
         c1 = tmp;
       }
 
-      const [r0, g0, b0] = unpackRgb565Fast(c0);
-      const [r1, g1, b1] = unpackRgb565Fast(c1);
+      const r0 = (((c0 >> 11) & 0x1f) * 527 + 23) >> 6;
+      const g0 = (((c0 >> 5) & 0x3f) * 259 + 33) >> 6;
+      const b0 = ((c0 & 0x1f) * 527 + 23) >> 6;
+      const r1 = (((c1 >> 11) & 0x1f) * 527 + 23) >> 6;
+      const g1 = (((c1 >> 5) & 0x3f) * 259 + 33) >> 6;
+      const b1 = ((c1 & 0x1f) * 527 + 23) >> 6;
 
-      const colorPalette: [number, number, number][] = [
-        [r0, g0, b0],
-        [r1, g1, b1],
-        [Math.round((2 * r0 + r1) / 3), Math.round((2 * g0 + g1) / 3), Math.round((2 * b0 + b1) / 3)],
-        [Math.round((r0 + 2 * r1) / 3), Math.round((g0 + 2 * g1) / 3), Math.round((b0 + 2 * b1) / 3)],
-      ];
+      _dxtPalR[0] = r0; _dxtPalG[0] = g0; _dxtPalB[0] = b0;
+      _dxtPalR[1] = r1; _dxtPalG[1] = g1; _dxtPalB[1] = b1;
+      _dxtPalR[2] = ((2 * r0 + r1 + 1) / 3) | 0;
+      _dxtPalG[2] = ((2 * g0 + g1 + 1) / 3) | 0;
+      _dxtPalB[2] = ((2 * b0 + b1 + 1) / 3) | 0;
+      _dxtPalR[3] = ((r0 + 2 * r1 + 1) / 3) | 0;
+      _dxtPalG[3] = ((g0 + 2 * g1 + 1) / 3) | 0;
+      _dxtPalB[3] = ((b0 + 2 * b1 + 1) / 3) | 0;
 
       let code = 0;
       for (let i = 0; i < 16; i++) {
-        const [pr, pg, pb] = blockPixels[i];
-        let bestDist = Infinity;
+        const bOff = i << 2;
+        const pr = _dxtBlockRgba[bOff];
+        const pg = _dxtBlockRgba[bOff + 1];
+        const pb = _dxtBlockRgba[bOff + 2];
+        let bestDist = colorDistSq(pr, pg, pb, _dxtPalR[0], _dxtPalG[0], _dxtPalB[0]);
         let bestIdx = 0;
-        for (let p = 0; p < 4; p++) {
-          const d = colorDistSq(pr, pg, pb, colorPalette[p][0], colorPalette[p][1], colorPalette[p][2]);
-          if (d < bestDist) {
-            bestDist = d;
-            bestIdx = p;
-          }
-        }
+        const d1 = colorDistSq(pr, pg, pb, _dxtPalR[1], _dxtPalG[1], _dxtPalB[1]);
+        if (d1 < bestDist) { bestDist = d1; bestIdx = 1; }
+        const d2 = colorDistSq(pr, pg, pb, _dxtPalR[2], _dxtPalG[2], _dxtPalB[2]);
+        if (d2 < bestDist) { bestDist = d2; bestIdx = 2; }
+        const d3 = colorDistSq(pr, pg, pb, _dxtPalR[3], _dxtPalG[3], _dxtPalB[3]);
+        if (d3 < bestDist) { bestIdx = 3; }
         code |= bestIdx << (i * 2);
       }
 
@@ -679,9 +752,9 @@ export function encodeRgbaToDxt5(rgba: Uint8Array, width: number, height: number
       out[dst + 10] = c1 & 0xff;
       out[dst + 11] = (c1 >> 8) & 0xff;
       out[dst + 12] = code & 0xff;
-      out[dst + 13] = (code >> 8) & 0xff;
-      out[dst + 14] = (code >> 16) & 0xff;
-      out[dst + 15] = (code >> 24) & 0xff;
+      out[dst + 13] = (code >>> 8) & 0xff;
+      out[dst + 14] = (code >>> 16) & 0xff;
+      out[dst + 15] = (code >>> 24) & 0xff;
 
       dst += 16;
     }
@@ -847,7 +920,66 @@ export function replaceBitmapImageData(
       throw new BitmapTextureError(`Image index ${imageIndex} out of range (count=${imgCount}).`);
     }
 
-    // Align append offset for tag struct
+    // Insert pixel payload at modelDataFileOffset (raw data partition) so tagDataSize only grows by tagCopy.length (~156 bytes)!
+    const insertAt = tagIndex.modelDataFileOffset;
+    if (insertAt > 0 && insertAt <= header.tagDataOffset) {
+      const pixelShift = (newPixels.length + 3) & ~3;
+      const newTagDataOffset = header.tagDataOffset + pixelShift;
+      const newModelDataFileOffset = insertAt + pixelShift;
+      const tagStartAfterShift = (mapBuffer.length + pixelShift + 3) & ~3;
+      const tagVirtualAddr = tagIndex.baseMemoryAddress + (tagStartAfterShift - newTagDataOffset);
+
+      const seqCount = tagCopy.readUInt32LE(0x54);
+      const seqPtrRel = tagCopy.readUInt32LE(0x58);
+      if (seqCount > 0) {
+        tagCopy.writeUInt32LE(tagVirtualAddr + seqPtrRel, 0x58);
+      }
+      tagCopy.writeUInt32LE(tagVirtualAddr + imgPtrRel, 0x64);
+
+      const rowOffset = imgPtrRel + imageIndex * 48;
+      tagCopy.writeUInt16LE(newWidth, rowOffset + 0x04);
+      tagCopy.writeUInt16LE(newHeight, rowOffset + 0x06);
+      tagCopy.writeUInt16LE(newFormat, rowOffset + 0x0c);
+      tagCopy.writeUInt16LE(Math.floor(newWidth / 2), rowOffset + 0x10);
+      tagCopy.writeUInt16LE(Math.floor(newHeight / 2), rowOffset + 0x12);
+      if (newMipmapCount !== undefined) {
+        tagCopy.writeUInt16LE(newMipmapCount, rowOffset + 0x14);
+      }
+      const oldFlags = tagCopy.readUInt16LE(rowOffset + 0x0e);
+      tagCopy.writeUInt16LE(computeBitmapFlags(oldFlags), rowOffset + 0x0e);
+      tagCopy.writeUInt32LE(insertAt, rowOffset + 0x18);
+      tagCopy.writeUInt32LE(newPixels.length, rowOffset + 0x1c);
+
+      const totalNewLength = tagStartAfterShift + tagCopy.length;
+      const outBuffer = Buffer.alloc(totalNewLength, 0);
+      mapBuffer.copy(outBuffer, 0, 0, insertAt);
+      Buffer.from(newPixels).copy(outBuffer, insertAt);
+      mapBuffer.copy(outBuffer, insertAt + pixelShift, insertAt);
+      tagCopy.copy(outBuffer, tagStartAfterShift);
+
+      const tagArrayOffset = newTagDataOffset + (header.engine === 5 ? 0x24 : 0x28);
+      const entryOffset = tagArrayOffset + entryIdx * 32;
+      outBuffer.writeUInt32LE(tagVirtualAddr, entryOffset + 0x14);
+      outBuffer.writeUInt32LE(0, entryOffset + 0x18); // isExternal = false
+
+      entry.tagDataPointerOrResourceIndex = tagVirtualAddr;
+      entry.isExternal = false;
+
+      const newTagDataSize = totalNewLength - newTagDataOffset;
+      outBuffer.writeUInt32LE(totalNewLength, 0x08);
+      outBuffer.writeUInt32LE(newTagDataOffset, 0x10);
+      outBuffer.writeUInt32LE(newTagDataSize, 0x14);
+      outBuffer.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 0x14);
+
+      header.decompressedFileSize = totalNewLength;
+      header.tagDataOffset = newTagDataOffset;
+      header.tagDataSize = newTagDataSize;
+      tagIndex.modelDataFileOffset = newModelDataFileOffset;
+
+      return outBuffer;
+    }
+
+    // Fallback: Align append offset for tag struct
     const tagStartInMap = (mapBuffer.length + 3) & ~3;
     const tagVirtualAddress = tagIndex.baseMemoryAddress + (tagStartInMap - header.tagDataOffset);
 
@@ -943,12 +1075,7 @@ export function replaceBitmapImageData(
     // If so, insert the new pixel bytes at `modelDataFileOffset` (end of raw-data region)
     // so `tagDataSize` is never inflated with raw pixel bytes and future tag injections succeed.
     const insertAt = tagIndex.modelDataFileOffset;
-    const modelDataSize = tagIndex.modelDataSize;
-    if (
-      insertAt > 0 &&
-      insertAt + modelDataSize === header.tagDataOffset &&
-      header.tagDataOffset + header.tagDataSize === mapBuffer.length
-    ) {
+    if (insertAt > 0 && insertAt <= header.tagDataOffset) {
       const shift = (newPixels.length + 3) & ~3;
       const newBuf = Buffer.alloc(mapBuffer.length + shift, 0);
       mapBuffer.copy(newBuf, 0, 0, insertAt);

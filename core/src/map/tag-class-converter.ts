@@ -74,6 +74,192 @@ export function extractCollisionModelGeometry(view: Buffer, collTagIndex: number
   const nodePtr = view.readUInt32LE(collAt + 656);
   const nodesAt = nodeCount > 0 ? resolvePointer(nodePtr, header.tagDataOffset, tagIndex.baseMemoryAddress) : -1;
 
+  // Locate matching gbxmodel / model tag so we can transform each node's collision BSP vertices
+  // from bone-local space into model-root space (matching rendered gbxmodel vertices).
+  let modEntry = tagIndex.entries.find(
+    (e) =>
+      e.path === entry.path &&
+      (e.primaryClassName === 'gbxmodel' || e.primaryClassName === 'model' || e.primaryClassFourCC === 0x6d6f6432 || e.primaryClassFourCC === 0x6d6f6465),
+  );
+  if (!modEntry) {
+    // Search object tags whose +0x44 collision_model dependency references this collTagIndex
+    for (const cand of tagIndex.entries) {
+      if (!cand.primaryClassName || !OBJECT_SUBCLASS_SPECS[cand.primaryClassName]) continue;
+      const objAt = resolveTagDataPointer(cand.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+      if (!isRangeInBuffer(objAt, 128, view.length)) continue;
+      const collDepId = view.readUInt32LE(objAt + 0x44 + 12);
+      if (collDepId === entry.tagId) {
+        const modDepId = view.readUInt32LE(objAt + 0x24 + 12);
+        const foundMod = tagIndex.entries.find((e) => e.tagId === modDepId);
+        if (foundMod) {
+          modEntry = foundMod;
+          break;
+        }
+      }
+    }
+  }
+  if (!modEntry) {
+    // Fallback prefix match (e.g. vehicles\scorpion\scorpion vs vehicles\scorpion\scorpion_mp)
+    modEntry = tagIndex.entries.find(
+      (e) =>
+        (e.primaryClassName === 'gbxmodel' || e.primaryClassName === 'model') &&
+        (e.path.startsWith(entry.path) || entry.path.startsWith(e.path)),
+    );
+  }
+
+  interface NodeTransform {
+    name: string;
+    invScale: number;
+    rot: [number, number, number, number, number, number, number, number, number];
+    tr: [number, number, number];
+    hasInverseMatrix: boolean;
+    worldPos: [number, number, number];
+    worldMat: [number, number, number, number, number, number, number, number, number];
+  }
+
+  const modNodeTransforms: NodeTransform[] = [];
+  const modNodeByName = new Map<string, NodeTransform>();
+
+  if (modEntry && !modEntry.isExternal) {
+    const modAt = resolveTagDataPointer(modEntry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+    if (isRangeInBuffer(modAt, 200, view.length)) {
+      const mNodeCount = view.readInt32LE(modAt + 184);
+      const mNodePtr = view.readUInt32LE(modAt + 188);
+      const mNodesAt = mNodeCount > 0 ? resolvePointer(mNodePtr, header.tagDataOffset, tagIndex.baseMemoryAddress) : -1;
+      if (mNodesAt >= 0 && isRangeInBuffer(mNodesAt, mNodeCount * 156, view.length)) {
+        const rawNodes: Array<{
+          name: string;
+          parent: number;
+          dt: [number, number, number];
+          dq: [number, number, number, number];
+          scale: number;
+          rot: [number, number, number, number, number, number, number, number, number];
+          tr: [number, number, number];
+        }> = [];
+
+        for (let i = 0; i < mNodeCount; i++) {
+          const o = mNodesAt + i * 156;
+          const name = view.toString('ascii', o, o + 32).replace(/\0.*/g, '').trim().toLowerCase();
+          const parent = view.readInt16LE(o + 36);
+          const dt: [number, number, number] = [
+            view.readFloatLE(o + 40),
+            view.readFloatLE(o + 44),
+            view.readFloatLE(o + 48),
+          ];
+          const dq: [number, number, number, number] = [
+            view.readFloatLE(o + 52),
+            view.readFloatLE(o + 56),
+            view.readFloatLE(o + 60),
+            view.readFloatLE(o + 64),
+          ];
+          const scale = view.readFloatLE(o + 104);
+          const rot: [number, number, number, number, number, number, number, number, number] = [
+            view.readFloatLE(o + 108),
+            view.readFloatLE(o + 112),
+            view.readFloatLE(o + 116),
+            view.readFloatLE(o + 120),
+            view.readFloatLE(o + 124),
+            view.readFloatLE(o + 128),
+            view.readFloatLE(o + 132),
+            view.readFloatLE(o + 136),
+            view.readFloatLE(o + 140),
+          ];
+          const tr: [number, number, number] = [
+            view.readFloatLE(o + 144),
+            view.readFloatLE(o + 148),
+            view.readFloatLE(o + 152),
+          ];
+          rawNodes.push({ name, parent, dt, dq, scale, rot, tr });
+        }
+
+        const quatToMat3 = (q: [number, number, number, number]): [number, number, number, number, number, number, number, number, number] => {
+          const [x, y, z, w] = q;
+          const n = x * x + y * y + z * z + w * w;
+          const s = n > 1e-8 ? 2.0 / n : 0;
+          const wx = s * w * x, wy = s * w * y, wz = s * w * z;
+          const xx = s * x * x, xy = s * x * y, xz = s * x * z;
+          const yy = s * y * y, yz = s * y * z, zz = s * z * z;
+          return [
+            1 - (yy + zz), xy - wz, xz + wy,
+            xy + wz, 1 - (xx + zz), yz - wx,
+            xz - wy, yz + wx, 1 - (xx + yy),
+          ];
+        };
+
+        const mulMat3 = (
+          a: [number, number, number, number, number, number, number, number, number],
+          b: [number, number, number, number, number, number, number, number, number],
+        ): [number, number, number, number, number, number, number, number, number] => [
+          a[0] * b[0] + a[1] * b[3] + a[2] * b[6],
+          a[0] * b[1] + a[1] * b[4] + a[2] * b[7],
+          a[0] * b[2] + a[1] * b[5] + a[2] * b[8],
+          a[3] * b[0] + a[4] * b[3] + a[5] * b[6],
+          a[3] * b[1] + a[4] * b[4] + a[5] * b[7],
+          a[3] * b[2] + a[4] * b[5] + a[5] * b[8],
+          a[6] * b[0] + a[7] * b[3] + a[8] * b[6],
+          a[6] * b[1] + a[7] * b[4] + a[8] * b[7],
+          a[6] * b[2] + a[7] * b[5] + a[8] * b[8],
+        ];
+
+        for (let i = 0; i < rawNodes.length; i++) {
+          const rn = rawNodes[i]!;
+          const rotNorm = Math.abs(rn.rot[0]) + Math.abs(rn.rot[4]) + Math.abs(rn.rot[8]) + Math.abs(rn.rot[1]) + Math.abs(rn.rot[2]);
+          const hasInverseMatrix = Number.isFinite(rn.scale) && Math.abs(rn.scale) > 1e-5 && rotNorm > 1e-4;
+
+          let worldMat = quatToMat3(rn.dq);
+          let worldPos: [number, number, number] = [...rn.dt];
+          let pIdx = rn.parent;
+          let depth = 0;
+          while (pIdx >= 0 && pIdx < rawNodes.length && depth < 64) {
+            const pn = rawNodes[pIdx]!;
+            const pMat = quatToMat3(pn.dq);
+            const rx = pMat[0] * worldPos[0] + pMat[1] * worldPos[1] + pMat[2] * worldPos[2] + pn.dt[0];
+            const ry = pMat[3] * worldPos[0] + pMat[4] * worldPos[1] + pMat[5] * worldPos[2] + pn.dt[1];
+            const rz = pMat[6] * worldPos[0] + pMat[7] * worldPos[1] + pMat[8] * worldPos[2] + pn.dt[2];
+            worldPos = [rx, ry, rz];
+            worldMat = mulMat3(pMat, worldMat);
+            pIdx = pn.parent;
+            depth++;
+          }
+
+          const tf: NodeTransform = {
+            name: rn.name,
+            invScale: hasInverseMatrix ? 1.0 / rn.scale : 1.0,
+            rot: rn.rot,
+            tr: rn.tr,
+            hasInverseMatrix,
+            worldPos,
+            worldMat,
+          };
+          modNodeTransforms.push(tf);
+          if (rn.name && !modNodeByName.has(rn.name)) {
+            modNodeByName.set(rn.name, tf);
+          }
+        }
+      }
+    }
+  }
+
+  const transformNodeVertex = (nIndex: number, nName: string, vx: number, vy: number, vz: number): [number, number, number] => {
+    const tf = modNodeTransforms[nIndex] ?? (nName ? modNodeByName.get(nName) : undefined);
+    if (!tf) return [vx, vy, vz];
+    if (tf.hasInverseMatrix) {
+      const dx = (vx - tf.tr[0]) * tf.invScale;
+      const dy = (vy - tf.tr[1]) * tf.invScale;
+      const dz = (vz - tf.tr[2]) * tf.invScale;
+      return [
+        tf.rot[0] * dx + tf.rot[1] * dy + tf.rot[2] * dz,
+        tf.rot[3] * dx + tf.rot[4] * dy + tf.rot[5] * dz,
+        tf.rot[6] * dx + tf.rot[7] * dy + tf.rot[8] * dz,
+      ];
+    }
+    return [
+      tf.worldMat[0] * vx + tf.worldMat[1] * vy + tf.worldMat[2] * vz + tf.worldPos[0],
+      tf.worldMat[3] * vx + tf.worldMat[4] * vy + tf.worldMat[5] * vz + tf.worldPos[1],
+      tf.worldMat[6] * vx + tf.worldMat[7] * vy + tf.worldMat[8] * vz + tf.worldPos[2],
+    ];
+  };
+
   const linePositions: number[] = [];
   const objLines: string[] = [`# Collision model extracted from ${entry.path}`];
   let globalVertOffset = 1;
@@ -84,6 +270,7 @@ export function extractCollisionModelGeometry(view: Buffer, collTagIndex: number
   if (nodesAt >= 0 && isRangeInBuffer(nodesAt, nodeCount * 64, view.length)) {
     for (let n = 0; n < nodeCount; n++) {
       const nOff = nodesAt + n * 64;
+      const collNodeName = view.toString('ascii', nOff, nOff + 32).replace(/\0.*/g, '').trim().toLowerCase();
       const bspCount = view.readInt32LE(nOff + 52);
       const bspPtr = view.readUInt32LE(nOff + 56);
       if (bspCount <= 0 || bspPtr === 0) continue;
@@ -113,9 +300,10 @@ export function extractCollisionModelGeometry(view: Buffer, collTagIndex: number
         const localVerts: [number, number, number][] = [];
         for (let v = 0; v < vertCount; v++) {
           const vAt = vertsAt + v * 16;
-          const x = view.readFloatLE(vAt + 0);
-          const y = view.readFloatLE(vAt + 4);
-          const z = view.readFloatLE(vAt + 8);
+          const rawX = view.readFloatLE(vAt + 0);
+          const rawY = view.readFloatLE(vAt + 4);
+          const rawZ = view.readFloatLE(vAt + 8);
+          const [x, y, z] = transformNodeVertex(n, collNodeName, rawX, rawY, rawZ);
           localVerts.push([x, y, z]);
           objLines.push(`v ${x.toFixed(5)} ${y.toFixed(5)} ${z.toFixed(5)}`);
         }

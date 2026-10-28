@@ -3,7 +3,6 @@ import type { KeyboardEvent } from 'react';
 import type {
   TagEntrySummary,
   SoundTagSummary,
-  SoundPermutationInfo,
   GetSoundInfoResult,
   GetSoundWavResult,
 } from '../../electron/shared-types';
@@ -184,17 +183,23 @@ export default function SoundAuditorDialog({ tag, onClose }: Props) {
     const step = Math.ceil(channelData.length / width);
     const amp = height / 2;
 
-    // Draw waveform bars
+    // Draw waveform bars + 8,000 Hz lip-sync mouth_data envelope curve
     ctx.fillStyle = '#38bdf8';
+    let smoothedMouth = 0;
+    ctx.strokeStyle = 'rgba(250, 204, 21, 0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
     for (let i = 0; i < width; i++) {
       let min = 1.0;
       let max = -1.0;
+      let sumSq = 0;
       const start = i * step;
       const end = Math.min(start + step, channelData.length);
       for (let j = start; j < end; j++) {
         const datum = channelData[j];
         if (datum < min) min = datum;
         if (datum > max) max = datum;
+        sumSq += datum * datum;
       }
       if (max < min) {
         min = 0;
@@ -203,7 +208,15 @@ export default function SoundAuditorDialog({ tag, onClose }: Props) {
       const yMin = (1 + min) * amp;
       const yMax = Math.max((1 + max) * amp, yMin + 1);
       ctx.fillRect(i, yMin, 1, yMax - yMin);
+
+      const rms = end > start ? Math.sqrt(sumSq / (end - start)) : 0;
+      const targetEnv = Math.min(1, Math.pow(rms * 2.2, 0.75));
+      smoothedMouth += (targetEnv - smoothedMouth) * (targetEnv > smoothedMouth ? 0.35 : 0.12);
+      const envY = height - 4 - smoothedMouth * (height * 0.42);
+      if (i === 0) ctx.moveTo(i, envY);
+      else ctx.lineTo(i, envY);
     }
+    ctx.stroke();
 
     // Draw playhead
     if (buffer.duration > 0) {
@@ -408,7 +421,9 @@ export default function SoundAuditorDialog({ tag, onClose }: Props) {
       if (!res.ok) {
         setStatusMsg({ text: res.message || 'Replacement failed.', isError: true });
       } else {
-        setStatusMsg({ text: 'Permutation replaced & internalized successfully!' });
+        setStatusMsg({
+          text: 'Permutation replaced & internalized with Lookahead Xbox ADPCM + 8,000 Hz Lip-Sync (mouth_data) envelope!',
+        });
         await loadSummary();
         await loadAudioPermutation(true);
       }
@@ -421,7 +436,6 @@ export default function SoundAuditorDialog({ tag, onClose }: Props) {
 
   const currentPitchRange = summary?.pitchRanges[selectedPitchRangeIndex];
   const currentPermutations = currentPitchRange?.permutations ?? [];
-  const selectedPerm = currentPermutations[selectedPermutationIndex];
 
   const formatTime = (secs: number) => {
     const mins = Math.floor(secs / 60);
@@ -631,8 +645,24 @@ export default function SoundAuditorDialog({ tag, onClose }: Props) {
                   gap: 8,
                 }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8' }}>
-                  <span>Waveform Display (Click to Seek)</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: '#94a3b8' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span>Waveform Display (Click to Seek)</span>
+                    <span
+                      style={{
+                        padding: '1px 7px',
+                        borderRadius: 4,
+                        background: 'rgba(250, 204, 21, 0.14)',
+                        border: '1px solid rgba(250, 204, 21, 0.4)',
+                        color: '#fde047',
+                        fontSize: 10,
+                        fontWeight: 600,
+                      }}
+                      title="Gold curve previews the 8,000 Hz mouth_data lip-sync envelope generated automatically on WAV replacement"
+                    >
+                      👄 8,000 Hz Lip-Sync Envelope (mouth_data) + Lookahead ADPCM
+                    </span>
+                  </div>
                   <span>
                     {formatTime(currentTime)} / {formatTime(duration)}
                   </span>

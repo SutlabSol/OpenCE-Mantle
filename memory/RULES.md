@@ -46,3 +46,7 @@
   (fixed struct-layout byte offsets, sentinel values like 0xFFFFFFFF) are fine - they
   apply to every v609 map. A check or branch that only fires for one named map/tag or
   one observed size is not.
+- Version numbering on every build release (Standard SemVer `MAJOR.MINOR.PATCH`):
+  - Every new feature increments the 2nd number (`MINOR`: `0.1.0` -> `0.2.0` -> `0.3.0`) in both `core/package.json` and `desktop/package.json`.
+  - Every bugfix, optimization, or UI change increments the 3rd number (`PATCH`: `0.2.0` -> `0.2.1` -> `0.2.2`) in both `core/package.json` and `desktop/package.json`.
+  - Every fresh build via `desktop/build-dist.js` automatically renames and updates the user's Desktop shortcut (`OpenCE Mantle <version>.lnk`) in-place so its icon position is preserved and it always launches the latest `OpenCE Mantle <version>.exe`.

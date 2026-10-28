@@ -4,6 +4,7 @@ import type {
   BatchExtractPreflightResult,
   BatchExtractResult,
   BatchExtractMode,
+  BatchExtractFormat,
   BatchExtractSummary,
   ProgressEvent,
 } from '../../electron/shared-types';
@@ -25,6 +26,7 @@ function formatBytes(bytes: number): string {
 export default function BatchExtractDialog({ open, onClose, preflight }: Props) {
   const [step, setStep] = useState<Step>('preflight');
   const [mode, setMode] = useState<BatchExtractMode>('skip');
+  const [extractFormat, setExtractFormat] = useState<BatchExtractFormat>('ocetags');
   const [progressText, setProgressText] = useState('Preparing extraction...');
   const [percent, setPercent] = useState(0);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -69,6 +71,7 @@ export default function BatchExtractDialog({ open, onClose, preflight }: Props) 
     const result: BatchExtractResult = await window.opence.startBatchExtract({
       parentDir: preflight.parentDir,
       mode,
+      extractFormat,
     });
 
     if (result.ok) {
@@ -227,6 +230,41 @@ export default function BatchExtractDialog({ open, onClose, preflight }: Props) 
 
                   <span style={{ color: 'var(--text-secondary)' }}>Drive free space:</span>
                   <span>{preflight.freeSpaceBytes !== null ? formatBytes(preflight.freeSpaceBytes) : 'Unknown'}</span>
+                </div>
+              </div>
+
+              {/* Item 4 (Milestone 16.2): Dual-Mode Batch Extract Format Selector */}
+              <div style={{ background: 'var(--bg-main)', border: '1px solid var(--border)', borderRadius: 3, padding: 12 }}>
+                <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>
+                  Extraction Output Format
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="batchExtractFormat"
+                      value="ocetags"
+                      data-testid="batch-format-ocetags"
+                      checked={extractFormat === 'ocetags'}
+                      onChange={() => setExtractFormat('ocetags')}
+                    />
+                    <span>
+                      <strong>.ocetags Tag Containers (tags/)</strong> — portable self-contained tag closures ready for cross-map injection.
+                    </span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="batchExtractFormat"
+                      value="data_source"
+                      data-testid="batch-format-data-source"
+                      checked={extractFormat === 'data_source'}
+                      onChange={() => setExtractFormat('data_source')}
+                    />
+                    <span>
+                      <strong>Editable Source Tree (data/ — Refinery style)</strong> — decompiles models (.jms), animations (.jma), physics (.physics.jms), bitmaps (.png), sounds (.wav), strings (.txt), and HaloScript (.hsc).
+                    </span>
+                  </label>
                 </div>
               </div>
 

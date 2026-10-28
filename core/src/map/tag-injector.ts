@@ -56,15 +56,180 @@ import type { TagIndex, TagIndexEntry } from './tag-index';
 import { collectTagDataPointers, applyPointerShift, tagDataLayoutOf, UnwalkableTagError } from './pointer-rebase';
 import type { RebaseCounts } from './pointer-rebase';
 import { ceStructureBspRegions } from './cache-crc';
-import { resolveStruct, decodeStruct, resolvePointer, isRangeInBuffer } from './definitions/engine';
-import { decodeReflexive, decodeDependency, encodeDependency } from './definitions/codec';
+import { resolveStruct, decodeStruct, isRangeInBuffer } from './definitions/engine';
+import { decodeDependency, encodeDependency } from './definitions/codec';
 import type { OceContainer, OceContainerTag, ExternalResourceRef } from './container';
 import { OCETAGS_FORMAT_VERSION } from './container';
 import type { ExtractedDependencyRef } from './tag-extractor';
 import { childFieldPath, reflexiveElementPath, isRelocatedTagDataField } from './tag-extractor';
 import type { ResourceMapIdentity } from './resource-map';
 import { resourceMapIdentitiesMatch } from './resource-map';
+import { readResourceTable } from './convert/resource-files';
 import type { RandomAccessFile } from './convert/resource-files';
+
+/**
+ * Automatically detects any `bitmap` or `sound` tags (or `'external'` dependencies) in `container`
+ * whose tag path exists in Custom Edition's `bitmaps.map` or `sounds.map`.
+ * Instead of internalizing their pixel/audio bytes into the target map (e.g. when bringing
+ * Singleplayer assets into a Multiplayer map), links them directly as native Custom Edition
+ * external resource-map tags (`isExternal = 1`), saving megabytes of map space!
+ */
+export function autoLinkExternalResourceMapsInContainer(
+  container: OceContainer,
+  ceResourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile },
+): { linkedBitmaps: number; linkedSounds: number } {
+  let linkedBitmaps = 0;
+  let linkedSounds = 0;
+  if (!ceResourceFiles?.bitmaps && !ceResourceFiles?.sounds) {
+    return { linkedBitmaps, linkedSounds };
+  }
+
+  // Build path -> odd resource index maps for CE bitmaps.map and sounds.map
+  // (In CE resource maps, even index 2k is `<path>__pixels` / `<path>__permutations`, odd index 2k+1 is `<path>`)
+  const ceBitmapIndexByPath = new Map<string, number>();
+  if (ceResourceFiles.bitmaps) {
+    const res = readResourceTable(ceResourceFiles.bitmaps, 'bitmaps');
+    if (res.ok) {
+      const hasCePairs = res.table.entries.some((e) => e.name.endsWith('__pixels'));
+      if (hasCePairs) {
+        for (const entry of res.table.entries) {
+          if ((entry.index & 1) === 1 && !entry.name.endsWith('__pixels')) {
+            ceBitmapIndexByPath.set(normalizeTagPath(entry.name), entry.index);
+          }
+        }
+      }
+    }
+  }
+
+  const ceSoundEntryByPath = new Map<string, { index: number; dataOffset: number; size: number }>();
+  if (ceResourceFiles.sounds) {
+    const res = readResourceTable(ceResourceFiles.sounds, 'sounds');
+    if (res.ok) {
+      const hasCePairs = res.table.entries.some((e) => e.name.endsWith('__permutations'));
+      if (hasCePairs) {
+        for (const entry of res.table.entries) {
+          if ((entry.index & 1) === 1 && !entry.name.endsWith('__permutations')) {
+            ceSoundEntryByPath.set(normalizeTagPath(entry.name), {
+              index: entry.index,
+              dataOffset: entry.dataOffset,
+              size: entry.size,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  if (ceBitmapIndexByPath.size === 0 && ceSoundEntryByPath.size === 0) {
+    return { linkedBitmaps, linkedSounds };
+  }
+
+  const convertedOrigIndices = new Set<number>();
+
+  for (const t of container.tags) {
+    const normPath = normalizeTagPath(t.path);
+    if (t.group === 'bitmap') {
+      const resIdx = ceBitmapIndexByPath.get(normPath);
+      if (resIdx !== undefined) {
+        t.ceExternalResourceIndex = resIdx;
+        t.data = Buffer.alloc(0).toString('base64');
+        t.embeddedRawDataAssets = [];
+        t.embeddedRawDataPatches = [];
+        t.dependencies = [];
+        convertedOrigIndices.add(t.originalIndex);
+        linkedBitmaps++;
+      }
+    } else if (t.group === 'sound') {
+      const sndEntry = ceSoundEntryByPath.get(normPath);
+      if (sndEntry !== undefined) {
+        const dataBuf = Buffer.from(t.data, 'base64');
+        const rootSound = Buffer.alloc(164, 0);
+        dataBuf.copy(rootSound, 0, 0, Math.min(164, dataBuf.length));
+        // Clear pitch_ranges reflexive pointer (+0x9c) while keeping count (+0x98)
+        rootSound.writeUInt32LE(0, 0x9c);
+        rootSound.writeUInt32LE(0, 0xa0);
+        t.ceExternalSound = true;
+        t.data = rootSound.toString('base64');
+        t.embeddedRawDataAssets = [];
+        t.embeddedRawDataPatches = [];
+        t.dependencies = (t.dependencies ?? []).filter((d) => !d.fieldPath.includes('pitch ranges'));
+        convertedOrigIndices.add(t.originalIndex);
+        linkedSounds++;
+      }
+    }
+  }
+
+  // Strip 'embeddedRawData' warnings for any tags that were linked to external CE resource maps
+  if (convertedOrigIndices.size > 0 && container.warnings) {
+    container.warnings = container.warnings.filter(
+      (w) => !(w.kind === 'embeddedRawData' && convertedOrigIndices.has(w.originalIndex)),
+    );
+  }
+
+  // Also resolve any `dep.kind === 'external'` on container tags where the external bitmap/sound exists in CE resource maps
+  const localIndexByKey = new Map<string, number>();
+  container.tags.forEach((t, idx) => localIndexByKey.set(`${normalizeTagPath(t.path)}|${t.group}`, idx));
+
+  for (const t of container.tags) {
+    for (const dep of t.dependencies ?? []) {
+      if (dep.kind !== 'external') continue;
+      const normDepPath = normalizeTagPath(dep.path);
+      const key = `${normDepPath}|${dep.group}`;
+      const existingLocal = localIndexByKey.get(key);
+      if (existingLocal !== undefined) {
+        dep.kind = 'internal';
+        dep.localTagIndex = existingLocal;
+        continue;
+      }
+      if (dep.group === 'bitmap') {
+        const resIdx = ceBitmapIndexByPath.get(normDepPath);
+        if (resIdx !== undefined) {
+          const newLocalIdx = container.tags.length;
+          container.tags.push({
+            originalIndex: 900000 + newLocalIdx,
+            group: 'bitmap',
+            path: dep.path,
+            structName: 'Bitmap',
+            data: Buffer.alloc(0).toString('base64'),
+            dependencies: [],
+            ceExternalResourceIndex: resIdx,
+          });
+          localIndexByKey.set(key, newLocalIdx);
+          dep.kind = 'internal';
+          dep.localTagIndex = newLocalIdx;
+          linkedBitmaps++;
+        }
+      } else if (dep.group === 'sound' && ceResourceFiles.sounds) {
+        const sndEntry = ceSoundEntryByPath.get(normDepPath);
+        if (sndEntry !== undefined && sndEntry.size >= 164) {
+          const rawSnd = ceResourceFiles.sounds.read(sndEntry.dataOffset, 164);
+          const rootSound = Buffer.from(rawSnd);
+          rootSound.writeUInt32LE(0, 0x9c);
+          rootSound.writeUInt32LE(0, 0xa0);
+          // Clear any non-null dependency fields in the 164-byte root Sound struct (promotion sound @ 0x70)
+          rootSound.fill(0, 0x70, 0x7c);
+          rootSound.writeUInt32LE(0xffffffff, 0x7c);
+          const newLocalIdx = container.tags.length;
+          container.tags.push({
+            originalIndex: 900000 + newLocalIdx,
+            group: 'sound',
+            path: dep.path,
+            structName: 'Sound',
+            data: rootSound.toString('base64'),
+            dependencies: [],
+            ceExternalSound: true,
+          });
+          localIndexByKey.set(key, newLocalIdx);
+          dep.kind = 'internal';
+          dep.localTagIndex = newLocalIdx;
+          linkedSounds++;
+        }
+      }
+    }
+  }
+
+  return { linkedBitmaps, linkedSounds };
+}
 
 /**
  * Hydrates any un-internalized Retail PC / HaloMD `in data file` bitmap or sound sub-entries
@@ -79,6 +244,7 @@ export function hydrateExternalRawDataInContainer(
   if (!resourceFiles?.bitmaps && !resourceFiles?.sounds) return;
   for (const t of container.tags) {
     if (t.group !== 'bitmap' && t.group !== 'sound') continue;
+    if (t.ceExternalResourceIndex !== undefined || t.ceExternalSound) continue;
     const dataBuf = Buffer.from(t.data, 'base64');
     let mutated = false;
 
@@ -221,6 +387,13 @@ export interface InjectionCounts {
   externalReferenced: number;
 }
 
+export interface ClassConflictInfo {
+  localIndex: number;
+  path: string;
+  group: string;
+  existingGroups: string[];
+}
+
 export interface InjectionPlan {
   kind: 'ok';
   mode: InjectionMode;
@@ -237,6 +410,8 @@ export interface InjectionPlan {
   blockedOther: BlockedTagInfo[];
   externalRefStatuses: ExternalRefStatusInfo[];
   refusedRoots: RefusedRootInfo[];
+  /** Container tags whose path already exists in the target map under a different tag group/class. */
+  classConflicts?: ClassConflictInfo[];
   counts: InjectionCounts;
 }
 
@@ -321,15 +496,38 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
   }
 
   const targetByKey = new Map<string, TagIndexEntry>();
-  for (const e of targetTagIndex.entries) targetByKey.set(tagKey(e.path, e.primaryClassName ?? ''), e);
+  const targetGroupsByPath = new Map<string, Set<string>>();
+  for (const e of targetTagIndex.entries) {
+    targetByKey.set(tagKey(e.path, e.primaryClassName ?? ''), e);
+    const normP = normalizeTagPath(e.path);
+    let gSet = targetGroupsByPath.get(normP);
+    if (!gSet) {
+      gSet = new Set();
+      targetGroupsByPath.set(normP, gSet);
+    }
+    if (e.primaryClassName) gSet.add(e.primaryClassName);
+  }
 
   const matchedByLocalIndex = new Map<number, TagIndexEntry>();
   const candidateAdd = new Set<number>();
+  const classConflicts: ClassConflictInfo[] = [];
   for (let li = 0; li < container.tags.length; li++) {
     const t = container.tags[li];
     const existing = targetByKey.get(tagKey(t.path, t.group));
-    if (existing) matchedByLocalIndex.set(li, existing);
-    else candidateAdd.add(li);
+    if (existing) {
+      matchedByLocalIndex.set(li, existing);
+    } else {
+      candidateAdd.add(li);
+      const otherGroups = targetGroupsByPath.get(normalizeTagPath(t.path));
+      if (otherGroups && otherGroups.size > 0) {
+        classConflicts.push({
+          localIndex: li,
+          path: t.path,
+          group: t.group,
+          existingGroups: [...otherGroups],
+        });
+      }
+    }
   }
 
   const embeddedWarningsByOriginal = embeddedWarningMessages(container);
@@ -475,7 +673,7 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
     }
     const t = container.tags[li];
     const reasons: string[] = [];
-    if (existing.isExternal) {
+    if (existing.isExternal && !options.allowEmbeddedRelocation) {
       reasons.push(`The existing "${t.path}" (${t.group}) in the target is an external (resource map) entry; swapping into those isn't supported. Left unchanged.`);
     }
     const structuralBlockMsg = structuralBlockReason(t);
@@ -576,6 +774,7 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
     blockedOther,
     externalRefStatuses,
     refusedRoots,
+    classConflicts,
     counts: {
       totalInClosure: container.tags.length,
       reused: reusedByLocalIndex.size,
@@ -623,9 +822,9 @@ function collectDependencyFields(data: Buffer, structName: string, localOffset: 
     }
     if (value.kind === 'dependency') {
       sites.push({ fieldPath: path, tagId: value.value.tagId >>> 0 });
-    } else if (value.kind === 'reflexive' && value.value.count > 0) {
+    } else if (value.kind === 'reflexive' && value.value.count > 0 && value.value.pointerLow > 0) {
       const childStructName = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
-      if (!childStructName) continue;
+      if (!childStructName || childStructName === 'PredictedResource') continue;
       const childSize = resolveStruct(childStructName).totalSize;
       const base = value.value.pointerLow;
       if (!isRangeInBuffer(base, value.value.count * childSize, data.length)) {
@@ -653,6 +852,9 @@ function collectDependencyFields(data: Buffer, structName: string, localOffset: 
  * checks too. Works on every container version - `fieldPath` has been stored since v1.
  */
 function checkDependencyMap(t: OceContainerTag): { reason: string | null; ignoredPaths: Set<string> } {
+  if (t.ceExternalResourceIndex !== undefined) {
+    return { reason: null, ignoredPaths: new Set() };
+  }
   const sites: DependencyFieldSite[] = [];
   const nonCachedPaths = new Set<string>();
   try {
@@ -722,9 +924,15 @@ function rewriteAddedTagData(
         const decodedDep = decodeDependency(data, absFieldOffset);
         encodeDependency(data, absFieldOffset, { ...decodedDep, pathPointer: pathPointerOfTagId(newTagId), pathSize: 0, tagId: newTagId });
       }
-    } else if (value.kind === 'reflexive' && value.value.count > 0) {
+    } else if (value.kind === 'reflexive' && value.value.count > 0 && value.value.pointerLow > 0) {
       const childStructName = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
       if (!childStructName) continue;
+      if (childStructName === 'PredictedResource') {
+        data.writeUInt32LE(0, absFieldOffset + 0);
+        data.writeUInt32LE(0, absFieldOffset + 4);
+        data.writeUInt32LE(0, absFieldOffset + 8);
+        continue;
+      }
       const childSize = resolveStruct(childStructName).totalSize;
       const oldLocalChildBase = value.value.pointerLow; // offset relative to the tag's OWN extracted buffer (0-based)
       const newPointer = (oldLocalChildBase + translation) >>> 0;
@@ -760,6 +968,9 @@ function padToAlignment(length: number): number {
  * `planInjection` has already checked every block lies inside `data` (`collectDependencyFields`).
  */
 function alignTagData(data: Buffer, structName: string): { data: Buffer; mapOffset: (oldOffset: number) => number } {
+  if (data.length === 0) {
+    return { data: Buffer.alloc(0), mapOffset: (oldOffset: number) => oldOffset };
+  }
   const copies: { from: number; to: number; length: number }[] = [];
   const pointerWrites: { at: number; value: number }[] = [];
   let length = 0;
@@ -777,7 +988,7 @@ function alignTagData(data: Buffer, structName: string): { data: Buffer; mapOffs
       const value = decoded.get(field.name);
       if (!value || field.def.nonCached) continue;
       const childStruct = field.def.type === 'TagReflexive' ? field.def.struct : undefined;
-      if (value.kind === 'reflexive' && value.value.count > 0 && childStruct) {
+      if (value.kind === 'reflexive' && value.value.count > 0 && value.value.pointerLow > 0 && childStruct) {
         const size = resolveStruct(childStruct).totalSize;
         const newBase = place(value.value.pointerLow, value.value.count * size);
         pointerWrites.push({ at: newAt + field.offset + 4, value: newBase });
@@ -1118,9 +1329,14 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
     out.writeUInt32LE(tagId, entryOffset + 0x0c);
     const pathPointer = baseMemoryAddress + (pathOffsets[i] - newTagDataOffset);
     out.writeUInt32LE(pathPointer >>> 0, entryOffset + 0x10);
-    const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
-    out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
-    out.writeUInt32LE(0, entryOffset + 0x18); // isExternal = false, this module never adds resource-map-indexed entries
+    if (t.ceExternalResourceIndex !== undefined) {
+      out.writeUInt32LE(t.ceExternalResourceIndex >>> 0, entryOffset + 0x14);
+      out.writeUInt32LE(1, entryOffset + 0x18); // isExternal = true (CE resource-map index)
+    } else {
+      const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
+      out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
+      out.writeUInt32LE(t.ceExternalSound ? 1 : 0, entryOffset + 0x18);
+    }
     pathBuffers[i].copy(out, pathOffsets[i]);
   }
 
@@ -1133,9 +1349,14 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
     const tertiary = t.tertiaryClassFourCC ?? 0xffffffff;
     out.writeUInt32LE(secondary === null ? 0xffffffff : secondary, entryOffset + 0x04);
     out.writeUInt32LE(tertiary === null ? 0xffffffff : tertiary, entryOffset + 0x08);
-    const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
-    out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
-    out.writeUInt32LE(0, entryOffset + 0x18); // Swapped tag is now internal
+    if (t.ceExternalResourceIndex !== undefined) {
+      out.writeUInt32LE(t.ceExternalResourceIndex >>> 0, entryOffset + 0x14);
+      out.writeUInt32LE(1, entryOffset + 0x18);
+    } else {
+      const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
+      out.writeUInt32LE(dataPointer >>> 0, entryOffset + 0x14);
+      out.writeUInt32LE(t.ceExternalSound ? 1 : 0, entryOffset + 0x18);
+    }
   }
 
   // Tag data is written only after EVERY tag array entry above is final, so a dependency on any
@@ -1143,6 +1364,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   const pathPointerOfTagId = (tagId: number): number => out.readUInt32LE(newArrayOffset + (tagId & 0xffff) * TAG_ENTRY_SIZE + 0x10);
   for (let i = 0; i < writeTags.length; i++) {
     const t = writeTags[i];
+    if (t.ceExternalResourceIndex !== undefined || dataBuffers[i].length === 0) continue;
     dataBuffers[i].copy(out, structOffsets[i]);
     const translation = (baseMemoryAddress - newTagDataOffset + structOffsets[i]) >>> 0;
     rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex), pathPointerOfTagId);

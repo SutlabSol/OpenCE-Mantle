@@ -54,6 +54,7 @@ const api: OpenceApi = {
   setUnicodeString: (tagIndex: number, stringIndex: number, newText: string) => ipcRenderer.invoke('tags:setUnicodeString', tagIndex, stringIndex, newText),
   renameTag: (tagIndex: number, newPath: string) => ipcRenderer.invoke('tags:renameTag', tagIndex, newPath),
   duplicateTag: (tagIndex: number, newPath: string) => ipcRenderer.invoke('tags:duplicateTag', tagIndex, newPath),
+  deleteTag: (tagIndex: number) => ipcRenderer.invoke('tags:deleteTag', tagIndex),
   pickBspSourceMap: () => ipcRenderer.invoke('dialog:pickBspSourceMap'),
   pickBspResource: (kind: 'bitmaps' | 'sounds') => ipcRenderer.invoke('dialog:pickBspResource', kind),
   bspSwapPreflight: (sourceFilePath: string, sourceBspIndex?: number, targetBspIndex?: number, sourceBspIndices?: number[]) =>
@@ -127,6 +128,34 @@ const api: OpenceApi = {
   scanMapTagErrors: () => ipcRenderer.invoke('map:scanTagErrors'),
   globalReplaceTagReference: (fromTagId: number, toTagId: number) =>
     ipcRenderer.invoke('map:globalReplaceTagReference', fromTagId, toTagId),
+  exportOpenCeModFolder: (options) => ipcRenderer.invoke('mod:exportOpenCeModFolder', options),
+  importLegacyTags: (sourceMode: 'file' | 'folder', injectMode?: 'add' | 'swap') =>
+    ipcRenderer.invoke('mod:importLegacyTags', sourceMode, injectMode),
+  replaceBitmapFromDataUrl: (tagIndex: number, imageIndex: number, pngDataUrl: string, targetFormat?: number) =>
+    ipcRenderer.invoke('bitmap:replaceFromDataUrl', tagIndex, imageIndex, pngDataUrl, targetFormat),
+  getCustomBrushTextures: () => ipcRenderer.invoke('bitmap:getCustomBrushTextures'),
+  openCustomTexturesFolder: () => ipcRenderer.invoke('bitmap:openCustomTexturesFolder'),
+  updateBspVertices: (
+    bspIndex: number,
+    submeshUpdates: Array<{
+      submeshIndex: number;
+      positions: Float32Array | number[];
+      normals?: Float32Array | number[];
+      uvs?: Float32Array | number[];
+      shaderTagId?: number;
+    }>,
+  ) => ipcRenderer.invoke('render:updateBspVertices', bspIndex, submeshUpdates),
+  updateModelVertices: (
+    modelTagId: number,
+    submeshUpdates: Array<{
+      submeshIndex: number;
+      positions: Float32Array | number[];
+      normals?: Float32Array | number[];
+      uvs?: Float32Array | number[];
+      shaderTagId?: number;
+    }>,
+    lod?: number,
+  ) => ipcRenderer.invoke('render:updateModelVertices', modelTagId, submeshUpdates, lod),
   exportModel3d: (modelTagId: number, lod: number | undefined, format: 'obj' | 'glb', outputPath: string) =>
     ipcRenderer.invoke('3d:exportModel', modelTagId, lod, format, outputPath),
   exportBsp3d: (bspIndex: number, format: 'obj' | 'glb', outputPath: string) =>
@@ -181,6 +210,11 @@ const api: OpenceApi = {
     ipcRenderer.on('tagTest:status', listener);
     return () => ipcRenderer.removeListener('tagTest:status', listener);
   },
+  onTagTestHotkeyAction: (cb: (evt: { action: string; value?: boolean }) => void) => {
+    const listener = (_: unknown, data: { action: string; value?: boolean }) => cb(data);
+    ipcRenderer.on('tagTest:hotkeyAction', listener);
+    return () => ipcRenderer.removeListener('tagTest:hotkeyAction', listener);
+  },
   pickOpenCeDirectory: () => ipcRenderer.invoke('tagTest:pickDir'),
   getOpenCeConfig: () => ipcRenderer.invoke('tagTest:getConfig'),
   setOpenCeDirectory: (dir: string | null) => ipcRenderer.invoke('tagTest:setDir', dir),
@@ -190,6 +224,27 @@ const api: OpenceApi = {
   setAlwaysOnTop: (flag: boolean) => ipcRenderer.invoke('window:setAlwaysOnTop', flag),
   isAlwaysOnTop: () => ipcRenderer.invoke('window:isAlwaysOnTop'),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
+  pickWrlOrToolLog: () => ipcRenderer.invoke('wrl:pickAndParse'),
+  compareWithAnotherMap: () => ipcRenderer.invoke('map:compareWithAnother'),
+  discoverSteamMcc: () => ipcRenderer.invoke('mcc:discover'),
+  deployMccMod: (options) => ipcRenderer.invoke('mcc:deployMod', options),
+  globalReplaceTagFieldValue: (options) => ipcRenderer.invoke('map:globalReplaceTagFieldValue', options),
+  compileJmaAnimation: (targetAntrTagIndex: number, animName?: string) =>
+    ipcRenderer.invoke('map:compileJmaAnimation', targetAntrTagIndex, animName),
+  compileJmsPhysics: (targetPhysTagIndex: number, totalMass?: number) =>
+    ipcRenderer.invoke('map:compileJmsPhysics', targetPhysTagIndex, totalMass),
+  decompileTagToSource: (tagIndex: number, animationIndex?: number) =>
+    ipcRenderer.invoke('map:decompileTagToSource', tagIndex, animationIndex),
+  compileStringsTag: (targetTagIndex: number, textContent?: string) =>
+    ipcRenderer.invoke('map:compileStringsTag', targetTagIndex, textContent),
+  inspectMeterTag: (meterTagIndex: number) =>
+    ipcRenderer.invoke('map:inspectMeterTag', meterTagIndex),
+  compileFontFromGlyphAtlas: (targetFontTagIndex: number, glyphSpec) =>
+    ipcRenderer.invoke('map:compileFontFromGlyphAtlas', targetFontTagIndex, glyphSpec),
+  injectProceduralWorldBsp: (options) =>
+    ipcRenderer.invoke('map:injectProceduralWorldBsp', options),
+  scaleCoupledPhysics: (objectTagId: number, scaleFactor: number) =>
+    ipcRenderer.invoke('map:scaleCoupledPhysics', objectTagId, scaleFactor),
 };
 
 contextBridge.exposeInMainWorld('opence', api);

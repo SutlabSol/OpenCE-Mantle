@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { TagTestStatus, TagTestLogEntry } from '../../electron/shared-types';
 
 interface Props {
@@ -43,6 +43,20 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
       setStatus(newStatus);
     });
 
+    const unsubHotkey = (
+      window.opence as { onTagTestHotkeyAction?: (cb: (e: { action: string; value?: boolean }) => void) => () => void }
+    ).onTagTestHotkeyAction?.((evt) => {
+      if (evt.action === 'godMode' && evt.value !== undefined) {
+        setCheats((prev) => ({ ...prev, godMode: evt.value! }));
+      } else if (evt.action === 'infiniteAmmo' && evt.value !== undefined) {
+        setCheats((prev) => ({ ...prev, infiniteAmmo: evt.value!, bottomlessClip: evt.value! }));
+      } else if (evt.action === 'wireframe' && evt.value !== undefined) {
+        setCheats((prev) => ({ ...prev, wireframe: evt.value!, portals: evt.value! }));
+      } else if (evt.action === 'aiDebug' && evt.value !== undefined) {
+        setCheats((prev) => ({ ...prev, aiPerception: evt.value!, objectBounds: evt.value! }));
+      }
+    });
+
     const unsubLog = window.opence.onTagTestLog((entry) => {
       setLogs((prev) => {
         const next = [...prev, entry];
@@ -53,6 +67,7 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
 
     return () => {
       unsubStatus();
+      unsubHotkey?.();
       unsubLog();
     };
   }, []);
@@ -271,6 +286,24 @@ export default function TagTestPanel({ onOpenTagEditor }: Props) {
           {/* Quick Cheats & Toggles */}
           <div>
             <SectionHeader title="Developer Cheats & Toggles" />
+            <div
+              data-testid="tag-test-hotkey-banner"
+              style={{
+                marginTop: 6,
+                marginBottom: 8,
+                padding: '6px 8px',
+                borderRadius: 4,
+                background: 'rgba(56, 189, 248, 0.12)',
+                border: '1px solid rgba(56, 189, 248, 0.35)',
+                fontSize: 10.5,
+                color: '#38bdf8',
+                lineHeight: 1.45,
+              }}
+            >
+              <strong>In-Game Global Hotkeys:</strong>
+              <br />
+              • <strong>F7</strong>: God Mode | <strong>F8</strong>: Infinite Ammo | <strong>F9</strong>: Wireframe | <strong>F10</strong>: AI Debug
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
               <ToggleCheckbox
                 testid="tag-test-cheat-god"

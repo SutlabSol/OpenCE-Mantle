@@ -19,7 +19,6 @@ export class TagTestRunner {
   private lastError: string | undefined;
   private stagedMapIndex = 0; // Ping-pong 0 = a, 1 = b
   private currentMapName: string | undefined;
-  private initBackupPath: string | null = null;
   private activeOpenCeDir: string | null = null;
   private debugTxtWatcher: NodeJS.Timeout | null = null;
   private debugTxtLastSize = 0;
@@ -226,7 +225,7 @@ if ($wshell.AppActivate('Halo')) {
           bitmapsPath: settings.resourceMaps.bitmaps ?? undefined,
           soundsPath: settings.resourceMaps.sounds ?? undefined,
         },
-        (level, msg) => this.emitLog('stdout', `[Worker] ${msg}`),
+        (_level, msg) => this.emitLog('stdout', `[Worker] ${msg}`),
       ).promise;
 
       if (!stageResult || !stageResult.ok) {
@@ -440,7 +439,7 @@ if ($wshell.AppActivate('Halo')) {
           bitmapsPath: settings.resourceMaps.bitmaps ?? undefined,
           soundsPath: settings.resourceMaps.sounds ?? undefined,
         },
-        (level, msg) => this.emitLog('stdout', `[Worker] ${msg}`),
+        (_level, msg) => this.emitLog('stdout', `[Worker] ${msg}`),
       ).promise;
 
       if (!stageResult || !stageResult.ok) {

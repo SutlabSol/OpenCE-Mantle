@@ -1,6 +1,5 @@
-import type { CacheFileHeader } from './header';
-import type { TagIndex } from './tag-index';
-import { resolveTagDataPointer } from './tag-index';
+import { parseCacheFileHeader, type CacheFileHeader } from './header';
+import { parseTagIndex, resolveTagDataPointer, type TagIndex } from './tag-index';
 import {
   getGroupDefinition,
   getEnumDefinition,
@@ -13,7 +12,6 @@ import {
   type ResolvedStruct,
   type ResolvedField,
 } from './definitions/engine';
-import type { DefinitionValueField } from './definitions/types';
 import type { DecodedReflexive } from './definitions/codec';
 import { TAG_ENTRY_SIZE, TAG_DATA_HEADER_PC_SIZE } from '../constants/cache-file';
 import { NULL_TAG_ID } from '../constants/tag-classes';
@@ -100,6 +98,82 @@ export class TagFieldEditorError extends Error {
     super(message);
     this.name = 'TagFieldEditorError';
   }
+}
+
+/**
+ * Ensures an external `loc.map` resource tag (such as `font`, `unicode_string_list`, or `hud_message_text`)
+ * has an allocated in-map base struct so its fields, reflexives, and dependencies can be inspected and edited
+ * directly without throwing an external-resource error.
+ */
+export function ensureExternalTagInternalized(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  tagEntryIndex: number,
+): { buffer: Buffer; header: CacheFileHeader; tagIndex: TagIndex; changed: boolean } {
+  const entry = tagIndex.entries[tagEntryIndex];
+  if (!entry || !entry.isExternal) {
+    return { buffer, header, tagIndex, changed: false };
+  }
+  const group = entry.primaryClassName;
+  if (!group || group === 'sound' || group === 'bitmap') {
+    return { buffer, header, tagIndex, changed: false };
+  }
+
+  let structDef: ResolvedStruct;
+  try {
+    structDef = getGroupDefinition(group);
+  } catch {
+    return { buffer, header, tagIndex, changed: false };
+  }
+
+  const prePad = (4 - ((buffer.length - header.tagDataOffset) % 4)) % 4;
+  const structBytes = (structDef.totalSize + 15) & ~15;
+  const totalAlloc = prePad + structBytes;
+  const newRootFileOffset = buffer.length + prePad;
+  const newVirtualPtr = (tagIndex.baseMemoryAddress + (newRootFileOffset - header.tagDataOffset)) >>> 0;
+
+  const out = Buffer.alloc(buffer.length + totalAlloc);
+  buffer.copy(out, 0, 0, buffer.length);
+  out.fill(0, newRootFileOffset, newRootFileOffset + structBytes);
+
+  // Initialize any TagDependency slots on the root struct to NULL_TAG_ID
+  for (const f of structDef.fields) {
+    if (f.def.type === 'TagDependency') {
+      const fccStr = (f.def.classes && f.def.classes[0]) ? 'font' : '    ';
+      const fcc =
+        ((fccStr.charCodeAt(0) & 0xff) << 24) |
+        ((fccStr.charCodeAt(1) & 0xff) << 16) |
+        ((fccStr.charCodeAt(2) & 0xff) << 8) |
+        (fccStr.charCodeAt(3) & 0xff);
+      out.writeUInt32LE(fcc >>> 0, newRootFileOffset + f.offset + 0);
+      out.writeUInt32LE(0, newRootFileOffset + f.offset + 4);
+      out.writeUInt32LE(0, newRootFileOffset + f.offset + 8);
+      out.writeUInt32LE(NULL_TAG_ID, newRootFileOffset + f.offset + 12);
+    }
+  }
+
+  // Provide sensible default font metrics for newly internalized .font tags
+  if (group === 'font' && structDef.totalSize >= 16) {
+    out.writeInt16LE(14, newRootFileOffset + 0x04); // ascending height
+    out.writeInt16LE(4, newRootFileOffset + 0x06);  // descending height
+    out.writeInt16LE(2, newRootFileOffset + 0x08);  // leading height
+    out.writeInt16LE(1, newRootFileOffset + 0x0a);  // leading width
+  }
+
+  const tagHeaderSize = header.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE;
+  const entryPos = header.tagDataOffset + tagHeaderSize + tagEntryIndex * TAG_ENTRY_SIZE;
+  out.writeUInt32LE(newVirtualPtr, entryPos + 0x14);
+  out.writeUInt32LE(0, entryPos + 0x18); // isExternal = 0 (now in-map!)
+
+  const newFileSize = out.length;
+  const newTagDataSize = header.tagDataSize + totalAlloc;
+  out.writeUInt32LE(newFileSize, 0x08);
+  out.writeUInt32LE(newTagDataSize, 0x14);
+
+  const newHeader = parseCacheFileHeader(out);
+  const newTagIndex = parseTagIndex(out, newHeader);
+  return { buffer: out, header: newHeader, tagIndex: newTagIndex, changed: true };
 }
 
 /**
@@ -303,6 +377,38 @@ export function readTagFieldValues(
   tagEntryIndex: number,
 ): TagFieldsResult {
   const entry = tagIndex.entries[tagEntryIndex];
+  if (entry && entry.isExternal && entry.primaryClassName && entry.primaryClassName !== 'sound') {
+    const group = entry.primaryClassName;
+    const structDef = getGroupDefinition(group);
+    const synthBuf = Buffer.alloc(structDef.totalSize, 0);
+    for (const f of structDef.fields) {
+      if (f.def.type === 'TagDependency') {
+        synthBuf.writeUInt32LE(NULL_TAG_ID, f.offset + 12);
+      }
+    }
+    if (group === 'font' && structDef.totalSize >= 16) {
+      synthBuf.writeInt16LE(14, 0x04);
+      synthBuf.writeInt16LE(4, 0x06);
+      synthBuf.writeInt16LE(2, 0x08);
+      synthBuf.writeInt16LE(1, 0x0a);
+    }
+    const tagByTagId = new Map<number, (typeof tagIndex.entries)[0]>();
+    for (const e of tagIndex.entries) {
+      tagByTagId.set(e.tagId, e);
+    }
+    const fields = buildStructFields(
+      synthBuf,
+      tagIndex,
+      structDef,
+      0,
+      0,
+      tagIndex.baseMemoryAddress,
+      tagByTagId,
+      0,
+    );
+    return { tagIndex: tagEntryIndex, tagId: entry.tagId, tagPath: entry.path, group, structName: structDef.name, fields };
+  }
+
   const { structDef, rootFileOffset, group } = resolveTagRootOffset(buffer, header, tagIndex, tagEntryIndex);
 
   // Map tagId -> TagIndexEntry for quick dependency lookups
@@ -470,6 +576,7 @@ export function writeTagFieldValue(
         tagId: targetEntry.tagId,
       },
     });
+    postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, fieldName);
 
     return { fieldName, newValue: targetEntry.tagId, fieldOffset: absOffset };
   }
@@ -522,6 +629,7 @@ export function writeTagFieldValue(
       type: field.def.type,
       value: newValue.map(Number),
     });
+    postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, fieldName);
     return { fieldName, newValue, fieldOffset: absOffset };
   }
 

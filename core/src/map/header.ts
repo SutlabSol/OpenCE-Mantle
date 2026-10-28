@@ -36,6 +36,8 @@ export interface CacheFileHeader {
   buildString: string;
   mapType: ScenarioType;
   crc32: number;
+  /** True when a legacy Demo-to-PC / Pearl export stored whole-file size in tagDataSize and was repaired. */
+  legacyTagSizeRepair?: boolean;
 }
 
 export function hasValidMagic(buffer: Buffer): boolean {
@@ -79,21 +81,39 @@ export function parseCacheFileHeader(buffer: Buffer): CacheFileHeader {
   if (
     engine !== CacheFileEngine.CUSTOM_EDITION &&
     engine !== CacheFileEngine.RETAIL &&
-    engine !== CacheFileEngine.MCC_CEA && engine !== CacheFileEngine.XBOX
+    engine !== CacheFileEngine.MCC_CEA &&
+    engine !== CacheFileEngine.XBOX
   ) {
     throw new UnsupportedMapVersionError(engine);
   }
 
+  const decompressedFileSize = buffer.readUInt32LE(0x8);
+  const tagDataOffset = buffer.readUInt32LE(0x10);
+  let tagDataSize = buffer.readUInt32LE(0x14);
+
+  // Some historical Demo-to-PC/Pearl exports wrote whole-file length into tagDataSize (0x14).
+  // Recognize that exact self-consistent signature and repair tagDataSize = decompressedFileSize - tagDataOffset.
+  const legacyTagSizeRepair =
+    engine === CacheFileEngine.RETAIL &&
+    decompressedFileSize === buffer.length &&
+    tagDataSize === decompressedFileSize &&
+    tagDataOffset >= CACHE_FILE_HEADER_SIZE &&
+    tagDataOffset < decompressedFileSize;
+  if (legacyTagSizeRepair) {
+    tagDataSize = decompressedFileSize - tagDataOffset;
+  }
+
   return {
     engine,
-    decompressedFileSize: buffer.readUInt32LE(0x8),
+    decompressedFileSize,
     compressedPadding: buffer.readUInt32LE(0xc),
-    tagDataOffset: buffer.readUInt32LE(0x10),
-    tagDataSize: buffer.readUInt32LE(0x14),
+    tagDataOffset,
+    tagDataSize,
     scenarioName: readFixedString(buffer, 0x20, TAG_STRING_SIZE),
     buildString: readFixedString(buffer, 0x40, TAG_STRING_SIZE),
     mapType: buffer.readUInt16LE(0x60),
     crc32: buffer.readUInt32LE(0x64),
+    ...(legacyTagSizeRepair ? { legacyTagSizeRepair: true } : {}),
   };
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type { TagEntrySummary, UnicodeStringItem, UnicodeStringListResult } from '../../electron/shared-types';
+import type { TagEntrySummary, UnicodeStringListResult } from '../../electron/shared-types';
 
 interface Props {
   tag: TagEntrySummary;

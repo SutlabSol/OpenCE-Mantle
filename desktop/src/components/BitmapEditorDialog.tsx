@@ -27,6 +27,7 @@ export default function BitmapEditorDialog({ tag, onClose }: Props) {
   const [channelG, setChannelG] = useState(true);
   const [channelB, setChannelB] = useState(true);
   const [channelA, setChannelA] = useState(true);
+  const [showColorPlateBorder, setShowColorPlateBorder] = useState(false);
 
   // Canvas pan & zoom state
   const [zoom, setZoom] = useState(1);
@@ -142,7 +143,21 @@ export default function BitmapEditorDialog({ tag, onClose }: Props) {
     }
 
     ctx.putImageData(imgData, 0, 0);
-  }, [rawImage, channelR, channelG, channelB, channelA]);
+
+    if (showColorPlateBorder) {
+      ctx.save();
+      ctx.strokeStyle = '#0000ff';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(1, 1, rawImage.width - 2, rawImage.height - 2);
+      ctx.strokeStyle = '#ff00ff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, 0.5);
+      ctx.lineTo(rawImage.width, 0.5);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }, [rawImage, channelR, channelG, channelB, channelA, showColorPlateBorder]);
 
   useEffect(() => {
     shellRef.current?.focus();
@@ -219,6 +234,92 @@ export default function BitmapEditorDialog({ tag, onClose }: Props) {
       } else {
         setStatusMsg({ text: res.message || 'Export failed', isError: true });
       }
+    } catch (err) {
+      setStatusMsg({ text: err instanceof Error ? err.message : String(err), isError: true });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Export all plates as a composite Halo CE Color-Plate Sprite Sheet (.PNG)
+  const handleExportColorPlateSheet = async () => {
+    if (!summary || summary.images.length === 0 || isProcessing) return;
+    try {
+      setIsProcessing(true);
+      setStatusMsg({ text: `Compositing ${summary.images.length} plate(s) into Halo CE Color-Plate Sprite Sheet...` });
+
+      const loadedPlates: Array<{ width: number; height: number; img: HTMLImageElement }> = [];
+      for (let i = 0; i < summary.images.length; i++) {
+        const res: GetBitmapRgbaResult = await window.opence.getBitmapRgba(tag.index, i);
+        if (!res.ok || !res.dataUrl) continue;
+        const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const el = new Image();
+          el.onload = () => resolve(el);
+          el.onerror = () => reject(new Error(`Failed to decode plate #${i + 1}`));
+          el.src = res.dataUrl!;
+        });
+        loadedPlates.push({
+          width: res.width ?? img.width,
+          height: res.height ?? img.height,
+          img,
+        });
+      }
+
+      if (loadedPlates.length === 0) {
+        setStatusMsg({ text: 'No bitmap plates could be decoded.', isError: true });
+        return;
+      }
+
+      // Layout plates in a Halo CE Color-Plate grid (pure blue #0000FF background, #FF00FF magenta sequence header bar)
+      const cols = Math.min(4, loadedPlates.length);
+      const rows = Math.ceil(loadedPlates.length / cols);
+      const pad = 8;
+      const headerBarH = 12;
+      const maxCellW = Math.max(...loadedPlates.map((p) => p.width));
+      const maxCellH = Math.max(...loadedPlates.map((p) => p.height));
+
+      const sheetW = pad + cols * (maxCellW + pad);
+      const sheetH = headerBarH + pad + rows * (maxCellH + pad);
+
+      const sheetCanvas = document.createElement('canvas');
+      sheetCanvas.width = sheetW;
+      sheetCanvas.height = sheetH;
+      const sCtx = sheetCanvas.getContext('2d');
+      if (!sCtx) throw new Error('Could not create 2D canvas context for color-plate sheet.');
+
+      // Pure Blue (#0000FF) Halo Tool.exe color-plate background
+      sCtx.fillStyle = '#0000ff';
+      sCtx.fillRect(0, 0, sheetW, sheetH);
+
+      // Top Magenta (#FF00FF) sequence strip + Cyan (#00FFFF) dummy pixel markers
+      sCtx.fillStyle = '#ff00ff';
+      sCtx.fillRect(0, 0, sheetW, headerBarH);
+      sCtx.fillStyle = '#00ffff';
+      sCtx.fillRect(0, 0, 4, headerBarH);
+
+      for (let idx = 0; idx < loadedPlates.length; idx++) {
+        const plate = loadedPlates[idx]!;
+        const col = idx % cols;
+        const row = Math.floor(idx / cols);
+        const x = pad + col * (maxCellW + pad);
+        const y = headerBarH + pad + row * (maxCellH + pad);
+        // Clear plate rectangle to transparent black before drawing sprite RGBA
+        sCtx.clearRect(x, y, plate.width, plate.height);
+        sCtx.drawImage(plate.img, x, y, plate.width, plate.height);
+      }
+
+      const dataUrl = sheetCanvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      const baseName = tag.path.split(/[\\/]/).pop() || `bitmap_${tag.index}`;
+      a.href = dataUrl;
+      a.download = `${baseName}.colorplate.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      setStatusMsg({
+        text: `Exported ${loadedPlates.length}-plate Halo Color-Plate Sprite Sheet (${sheetW}×${sheetH}px) as "${baseName}.colorplate.png"!`,
+      });
     } catch (err) {
       setStatusMsg({ text: err instanceof Error ? err.message : String(err), isError: true });
     } finally {
@@ -476,6 +577,17 @@ export default function BitmapEditorDialog({ tag, onClose }: Props) {
             <label style={{ display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer', color: '#e2e8f0' }}>
               <input type="checkbox" checked={channelA} onChange={(e) => setChannelA(e.target.checked)} /> A
             </label>
+            <label
+              title="Overlay Halo Tool.exe Color-Plate blue (#0000FF) & magenta (#FF00FF) sequence frame border"
+              style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', color: '#e879f9', marginLeft: 6 }}
+            >
+              <input
+                type="checkbox"
+                checked={showColorPlateBorder}
+                onChange={(e) => setShowColorPlateBorder(e.target.checked)}
+              />{' '}
+              Color-Plate Border
+            </label>
           </div>
 
           {/* Zoom Controls */}
@@ -674,6 +786,24 @@ export default function BitmapEditorDialog({ tag, onClose }: Props) {
               }}
             >
               Export DDS...
+            </button>
+            <button
+              data-testid="bitmap-export-colorplate-sheet"
+              onClick={handleExportColorPlateSheet}
+              disabled={isProcessing || !summary}
+              title="Composite all bitmap plates into a single Halo CE Tool.exe Color-Plate Sprite Sheet (.colorplate.png) with #0000FF blue borders & #FF00FF sequence strip"
+              style={{
+                padding: '6px 14px',
+                background: 'rgba(192, 132, 252, 0.18)',
+                border: '1px solid rgba(192, 132, 252, 0.5)',
+                color: '#f0abfc',
+                borderRadius: 4,
+                cursor: 'pointer',
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >
+              🎞 Export Color-Plate Sheet (.PNG)
             </button>
           </div>
 

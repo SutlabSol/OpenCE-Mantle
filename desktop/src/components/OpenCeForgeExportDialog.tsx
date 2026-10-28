@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import type { TagEntrySummary, ExtractTagsResult, ProgressEvent } from '../../electron/shared-types';
 
 interface Props {

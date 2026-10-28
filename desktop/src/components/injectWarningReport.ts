@@ -16,6 +16,9 @@ export function buildInjectWarningReport(plan: InjectPlanSummary): string {
   for (const b of plan.blockedOther) {
     lines.push(`BLOCKED (other): "${b.path}" (${b.group}) - ${b.reasons.join('; ')}`);
   }
+  for (const c of plan.classConflicts ?? []) {
+    lines.push(`CLASS CONFLICT: "${c.path}" is (${c.containerGroup}) in container, but exists as (${c.targetGroup}) in target map`);
+  }
   for (const r of plan.externalRefStatuses) {
     lines.push(`EXTERNAL REFERENCE (${r.status}): "${r.path}" needs ${r.resourceMap}`);
   }

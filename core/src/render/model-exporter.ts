@@ -6,8 +6,8 @@
  *
  * Fully zero-dependency, self-contained, and compliant with Blender / 3ds Max / glTF 2.0 loaders.
  */
-import type { ModelRenderGeometry, ModelSubmesh } from './model-geometry';
-import type { BspRenderMesh, BspSubmesh } from './bsp-geometry';
+import type { ModelRenderGeometry } from './model-geometry';
+import type { BspRenderMesh } from './bsp-geometry';
 
 export interface ObjExportOptions {
   /** Optional MTL file name referenced in obj `mtllib <filename>`. Defaults to `${name}.mtl`. */

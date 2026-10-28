@@ -83,6 +83,10 @@ export interface OceContainerTag {
   injectionBlockers?: InjectionBlocker[];
   /** Added in v5; undefined when read from a v1-v4 container or non-gbxmodel tags. */
   gbxmodelGeometryParts?: OceContainerGbxmodelPart[];
+  /** Runtime-linked Custom Edition external resource index (for `bitmap` tags present in CE `bitmaps.map`). */
+  ceExternalResourceIndex?: number;
+  /** Runtime-linked Custom Edition external sound flag (for `sound` tags present in CE `sounds.map`). */
+  ceExternalSound?: boolean;
 }
 
 export interface OceContainerNotExtracted {

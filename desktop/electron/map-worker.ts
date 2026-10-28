@@ -17,12 +17,13 @@ import {
   applyAddInjection,
   applySwapInjection,
   hydrateExternalRawDataInContainer,
+  autoLinkExternalResourceMapsInContainer,
+  reclaimOrphanedScriptSyntaxBlocks,
   computeResourceMapIdentity,
   getGroupDefinition,
   validateAllDefinitions,
   verifyEmbeddedData,
   formatEmbeddedDataReport,
-  finalizeForSave,
   classifyMapLayout,
   describeUnsupportedLayout,
   isConvertibleRetailLayout,
@@ -39,17 +40,22 @@ import {
   readTagFieldValues,
   writeTagFieldValue,
   addReflexiveChunk,
+  ensureExternalTagInternalized,
   TagFieldEditorError,
   listTagDependencySlots,
   setTagDependencySlot,
   TagDependencySwapError,
   extractBspRenderMesh,
+  updateBspVerticesInMap,
   decodeBitmapTagImage,
   resolveShaderBaseBitmapTagId,
   BITM_FOURCC,
   extractScenarioPlacements,
   extractModelRenderGeometry,
+  updateModelVerticesInMap,
   updateScenarioPlacement,
+  updateScenarioWorldBounds,
+  type ScenarioWorldBounds,
   duplicateScenarioPlacement,
   addScenarioPlacement,
   swapScenarioPlacement,
@@ -60,6 +66,7 @@ import {
   UnicodeStringEditorError,
   renameTagInMap,
   duplicateTagInMap,
+  deleteTagInMap,
   TagIndexEditorError,
   CacheFileEngine,
   bspSwapPreflight,
@@ -71,8 +78,6 @@ import {
   encodeRgbaToPng,
   decodePngToRgba,
   encodeToDds,
-  encodeRgbaToDxt1,
-  encodeRgbaToDxt5,
   BitmapFormat,
   inspectSoundTag,
   decodeSoundPermutationPcm,
@@ -82,6 +87,7 @@ import {
   encodeXboxAdpcmMono,
   encodeXboxAdpcmStereo,
   conformPcmToSoundTag,
+  computeMouthDataEnvelope,
   SoundFormat,
   exportModelToObj,
   exportBspToObj,
@@ -111,7 +117,24 @@ import {
   cleanOpenSauceYeloScenario,
   scanMapTagsForErrors,
   globalReplaceTagReference,
+  globalReplaceTagFieldValue,
+  convertJmsToObjText,
+  convertColladaDaeToObjText,
+  compileJmaIntoModelAnimationsTag,
+  compileJmsMassPointsIntoPhysicsTag,
+  decompileGbxmodelToJmsText,
+  decompileModelAnimationsToJmaText,
+  decompilePhysicsToJmsText,
+  compileStringsIntoTag,
+  inspectMeterTag,
+  compileCanvasAtlasIntoFontTag,
+  exportOpenCeModPackageFromMap,
+  importLegacyTagsIntoMap,
+  compareMaps,
+  injectProceduralWorldIntoMapBsp,
+  scaleObjectAndCoupledPhysicsInMap,
 } from '../../core/src/index';
+import { deployMccModPackage } from './mcc-deploy';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
 import { writeFinalizedMap as writeFinalizedMapWith } from '../../core/src/map/write-map';
 export { describeMapWriteError } from '../../core/src/map/write-map';
@@ -165,6 +188,7 @@ import type {
   SetUnicodeStringResult,
   RenameTagResult,
   DuplicateTagResult,
+  DeleteTagResult,
   HaloBitmapVersion,
   Export3dResult,
   InspectDeprotectResult,
@@ -358,14 +382,16 @@ export function summarizeOpenMap(map: LoadedMap): OpenMapSummary {
       engine,
       mapEdition,
     },
-    tags: map.tagIndex.entries.map((e) => ({
-      index: e.index,
-      tagId: e.tagId,
-      primaryClassName: e.primaryClassName ?? '?',
-      path: e.path,
-      isExternal: e.isExternal,
-      estimatedSize: sizes.get(e.index) ?? null,
-    })),
+    tags: map.tagIndex.entries
+      .filter((e) => e.tagId !== 0xffffffff && e.primaryClassFourCC !== 0xffffffff && !e.path.startsWith('~'))
+      .map((e) => ({
+        index: e.index,
+        tagId: e.tagId,
+        primaryClassName: e.primaryClassName ?? '?',
+        path: e.path,
+        isExternal: e.isExternal,
+        estimatedSize: sizes.get(e.index) ?? null,
+      })),
   };
 }
 
@@ -593,6 +619,7 @@ export function runBatchExtract(task: {
   parentDir: string;
   sourceMapName: string;
   mode: BatchExtractMode;
+  extractFormat?: 'ocetags' | 'data_source';
   resourceMapPaths: Partial<Record<ResourceMapKind, string>>;
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
@@ -733,6 +760,103 @@ export function runBatchExtract(task: {
       }
 
       try {
+        if (task.extractFormat === 'data_source') {
+          let outBuf: Buffer | null = null;
+          let outExt = `.${candidate.group}.json`;
+          const baseRelWithoutOcetags = candidate.fullRelativePath.replace(/\.ocetags$/i, '');
+
+          if (candidate.group === 'gbxmodel' || candidate.group === 'model') {
+            const jmsRes = decompileGbxmodelToJmsText(currentMap.buffer, candidate.index);
+            outBuf = Buffer.from(jmsRes.jmsText, 'utf8');
+            outExt = '.jms';
+          } else if (candidate.group === 'model_animations') {
+            const jmaRes = decompileModelAnimationsToJmaText(currentMap.buffer, candidate.index, 0);
+            outBuf = Buffer.from(jmaRes.jmaText, 'utf8');
+            outExt = '.jma';
+          } else if (candidate.group === 'physics') {
+            const physRes = decompilePhysicsToJmsText(currentMap.buffer, candidate.index);
+            outBuf = Buffer.from(physRes.jmsText, 'utf8');
+            outExt = '.physics.jms';
+          } else if (candidate.group === 'bitmap') {
+            const extBitmaps = getBitmapsBuffer(task.resourceMapPaths?.bitmaps);
+            const decoded = decodeBitmapTagImage(
+              currentMap.buffer,
+              currentMap.header,
+              currentMap.tagIndex,
+              candidate.entry.tagId,
+              0,
+              extBitmaps,
+            );
+            if (decoded) {
+              outBuf = encodeRgbaToPng(decoded.rgbaData, decoded.width, decoded.height);
+              outExt = '.png';
+            }
+          } else if (candidate.group === 'sound') {
+            const extSounds = getSoundsBuffer(task.resourceMapPaths?.sounds);
+            const audio = decodeSoundPermutationPcm(
+              currentMap.buffer,
+              currentMap.header,
+              currentMap.tagIndex,
+              candidate.entry.tagId,
+              0,
+              0,
+              extSounds,
+            );
+            outBuf = encodePcmToWav(audio.pcmSamples, audio.sampleRate, audio.channels);
+            outExt = '.wav';
+          } else if (candidate.group === 'unicode_string_list' || candidate.group === 'string_list') {
+            const strList = readUnicodeStringList(
+              currentMap.buffer,
+              currentMap.header,
+              currentMap.tagIndex,
+              candidate.index,
+            );
+            const txt = strList.strings.map((s) => `${s.text}\r\n###END-STRING###`).join('\r\n');
+            outBuf = Buffer.from(txt, 'utf8');
+            outExt = '.txt';
+          } else if (candidate.group === 'scenario') {
+            const hscRes = decompileScenarioScripts(currentMap.buffer);
+            outBuf = Buffer.from(hscRes.hscSource, 'utf8');
+            outExt = '.hsc';
+          }
+
+          if (!outBuf) {
+            const fields = readTagFieldValues(
+              currentMap.buffer,
+              currentMap.header,
+              currentMap.tagIndex,
+              candidate.index,
+            );
+            outBuf = Buffer.from(JSON.stringify(fields, null, 2), 'utf8');
+            outExt = `.${candidate.group}.fields.json`;
+          }
+
+          const dataRelPath = path.join('data', `${baseRelWithoutOcetags}${outExt}`);
+          const stagedDest = path.join(stagingDir, dataRelPath);
+          const finalDataDest = path.join(targetDir, dataRelPath);
+          fs.mkdirSync(path.dirname(stagedDest), { recursive: true });
+          fs.writeFileSync(stagedDest, outBuf);
+
+          extractedCount++;
+          totalBytesWritten += outBuf.length;
+          manifestFiles.push({
+            path: candidate.entry.path,
+            group: candidate.group,
+            relativePath: dataRelPath,
+            sizeBytes: outBuf.length,
+            tagCount: 1,
+          });
+          reports.push({
+            path: candidate.entry.path,
+            group: candidate.group,
+            status: 'extracted',
+            outputPath: finalDataDest,
+            sizeBytes: outBuf.length,
+            tagCount: 1,
+          });
+          continue;
+        }
+
         const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, [candidate.index], {
           signal: cancelCtl.signal,
           resourceFiles: batchResources.files,
@@ -880,6 +1004,7 @@ function summarizePlan(containerPath: string, container: OceContainer, plan: Inj
     blockedOther: plan.blockedOther.map((b) => ({ path: b.path, group: b.group, reasons: b.reasons })),
     externalRefStatuses: plan.externalRefStatuses.map((r) => ({ path: r.path, group: container.tags[r.localIndex]?.group ?? '', resourceMap: r.resourceMap, status: r.status })),
     refusedRoots: plan.refusedRoots.map((r) => ({ path: r.path, reasons: r.reasons })),
+    classConflicts: plan.classConflicts ?? [],
   };
 }
 
@@ -895,6 +1020,65 @@ export function runPlanInject(task: {
     progress(task.requestId, 'Reading container file', 10);
     const containerBuffer = fs.readFileSync(task.containerPath);
     const container = deserializeContainer(containerBuffer);
+
+    // Automatically reclaim any orphaned 380,076-byte script syntax blocks in the target map before planning injection
+    if (currentMap.header.engine === 609) {
+      const compactedBuf = reclaimOrphanedScriptSyntaxBlocks(currentMap.buffer);
+      if (compactedBuf.length < currentMap.buffer.length) {
+        reloadCurrentMapFromBuffer(compactedBuf);
+      }
+    }
+
+    // Auto-detect any bitmaps or sounds in the injected container that already exist in Custom Edition's
+    // bitmaps.map / sounds.map so we link them as external resource tags (isExternal = 1) instead of internalizing them!
+    if (currentMap.header.engine === 609) {
+      const mapDir = path.dirname(currentMap.filePath);
+      const findCeResourceFile = (kind: 'bitmaps' | 'sounds'): string | undefined => {
+        const candidates = [
+          task.resourceMapPaths?.[kind],
+          path.join(mapDir, `${kind}.map`),
+          path.resolve(mapDir, '..', `${kind}.map`),
+          path.resolve(process.cwd(), 'sample_maps', `${kind}.map`),
+          path.resolve(process.cwd(), '..', 'sample_maps', `${kind}.map`),
+        ].filter((p): p is string => !!p && fs.existsSync(p));
+        for (const cand of candidates) {
+          try {
+            const res = openConversionResources({ [kind]: cand });
+            try {
+              const file = res.files[kind];
+              if (file) {
+                const probe = Buffer.alloc(0);
+                void probe;
+                // Check if this resource map has Custom Edition `__pixels` / `__permutations` entry pairs
+                const hdr = file.read(0, 16);
+                const pathsOff = hdr.readUInt32LE(4);
+                const tableOff = hdr.readUInt32LE(8);
+                if (pathsOff >= 16 && tableOff > pathsOff && tableOff <= file.size) {
+                  const samplePaths = file.read(pathsOff, Math.min(4096, tableOff - pathsOff)).toString('latin1');
+                  if (samplePaths.includes('__pixels') || samplePaths.includes('__permutations')) {
+                    return cand;
+                  }
+                }
+              }
+            } finally {
+              res.close();
+            }
+          } catch {
+            /* ignore unreadable candidate */
+          }
+        }
+        return undefined;
+      };
+      const ceRes = openConversionResources({
+        bitmaps: findCeResourceFile('bitmaps'),
+        sounds: findCeResourceFile('sounds'),
+      });
+      try {
+        autoLinkExternalResourceMapsInContainer(container, ceRes.files);
+      } finally {
+        ceRes.close();
+      }
+    }
 
     const hydrateRes = openConversionResources({
       bitmaps: task.fallbackPcResourcePaths?.bitmaps ?? task.resourceMapPaths?.bitmaps,
@@ -1248,10 +1432,21 @@ export function runVerifyEmbeddedData(task: { requestId: string }) {
   }
 }
 
+function ensureMapTagInternalized(tagIndex: number) {
+  if (!currentMap) return;
+  const res = ensureExternalTagInternalized(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagIndex);
+  if (res.changed) {
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+  }
+}
+
 /** M7a: Decodes all root-struct fields for the specified tag in the open map. */
 export function runGetTagFields(task: { requestId: string; tagIndex: number }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    ensureMapTagInternalized(task.tagIndex);
     const data = readTagFieldValues(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
     sendResult(task.requestId, { ok: true, data } satisfies GetTagFieldsResult);
   } catch (err) {
@@ -1266,6 +1461,7 @@ export function runGetTagFields(task: { requestId: string; tagIndex: number }) {
 export function runUpdateTagField(task: { requestId: string; tagIndex: number; fieldName: string; newValue: unknown }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    ensureMapTagInternalized(task.tagIndex);
     const res = writeTagFieldValue(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.fieldName, task.newValue);
     currentMap.modified = true;
     sendResult(task.requestId, {
@@ -1291,6 +1487,7 @@ export function runAddReflexiveChunk(task: {
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    ensureMapTagInternalized(task.tagIndex);
     const res = addReflexiveChunk(
       currentMap.buffer,
       currentMap.header,
@@ -1323,6 +1520,7 @@ export function runAddReflexiveChunk(task: {
 export function runGetDependencySlots(task: { requestId: string; tagIndex: number }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    ensureMapTagInternalized(task.tagIndex);
     const slots = listTagDependencySlots(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
     sendResult(task.requestId, { ok: true, slots } satisfies GetDependencySlotsResult);
   } catch (err) {
@@ -1335,6 +1533,7 @@ export function runGetDependencySlots(task: { requestId: string; tagIndex: numbe
 export function runSetDependencySlot(task: { requestId: string; tagIndex: number; fieldPath: string; newTagId: number | null }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
+    ensureMapTagInternalized(task.tagIndex);
     const res = setTagDependencySlot(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex, task.fieldPath, task.newTagId);
     currentMap.modified = true;
     sendResult(task.requestId, { ok: true, fieldPath: res.fieldPath, newTagId: res.newTagId, map: summarizeOpenMap(currentMap) } satisfies SetDependencySlotResult);
@@ -1346,11 +1545,40 @@ export function runSetDependencySlot(task: { requestId: string; tagIndex: number
 
 let cachedBitmapsMap: { filePath: string; mtimeMs: number; buffer: Buffer } | null = null;
 function getBitmapsBuffer(bitmapsPath?: string): Buffer | undefined {
-  let resolved = bitmapsPath;
+  const isCeMap = currentMap?.header?.engine === 609;
+  const isCompatibleBitmaps = (p: string): boolean => {
+    try {
+      if (!fs.existsSync(p)) return false;
+      const sz = fs.statSync(p).size;
+      if (isCeMap && sz > 240 * 1024 * 1024) return false; // Reject 317 MB PC/HaloMD bitmaps.map for Custom Edition maps
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  let resolved = bitmapsPath && isCompatibleBitmaps(bitmapsPath) ? bitmapsPath : undefined;
   if (!resolved && currentMap?.filePath) {
-    const candidate = path.join(path.dirname(currentMap.filePath), 'bitmaps.map');
-    if (fs.existsSync(candidate)) {
-      resolved = candidate;
+    const mapDir = path.dirname(currentMap.filePath);
+    const parentDir = path.dirname(mapDir);
+    const candidates = [
+      path.join(mapDir, 'bitmaps.map'),
+      path.join(mapDir, 'custom edition', 'bitmaps.map'),
+      path.join(parentDir, 'custom edition', 'bitmaps.map'),
+      path.join(parentDir, 'bitmaps.map'),
+      'C:\\Users\\LeviB\\Projects\\OpenCE-Mantle\\sample_maps\\custom edition\\bitmaps.map',
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE\\custom_maps\\bitmaps.map',
+      'C:\\Users\\LeviB\\Projects\\OpenCE-MapExp\\build\\windows\\custom_maps\\bitmaps.map',
+      'D:\\custom_maps\\bitmaps.map',
+      'C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map',
+      path.join(mapDir, 'PC', 'bitmaps.map'),
+      path.join(parentDir, 'PC', 'bitmaps.map'),
+      'C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map',
+    ];
+    for (const candidate of candidates) {
+      if (isCompatibleBitmaps(candidate)) {
+        resolved = candidate;
+        break;
+      }
     }
   }
   if (!resolved || !fs.existsSync(resolved)) return undefined;
@@ -1370,10 +1598,25 @@ function getBitmapsBuffer(bitmapsPath?: string): Buffer | undefined {
 let cachedSoundsMap: { filePath: string; mtimeMs: number; buffer: Buffer } | null = null;
 function getSoundsBuffer(soundsPath?: string): Buffer | undefined {
   let resolved = soundsPath;
-  if (!resolved && currentMap?.filePath) {
-    const candidate = path.join(path.dirname(currentMap.filePath), 'sounds.map');
-    if (fs.existsSync(candidate)) {
-      resolved = candidate;
+  if ((!resolved || !fs.existsSync(resolved)) && currentMap?.filePath) {
+    const mapDir = path.dirname(currentMap.filePath);
+    const parentDir = path.dirname(mapDir);
+    const candidates = [
+      path.join(mapDir, 'sounds.map'),
+      path.join(mapDir, 'custom edition', 'sounds.map'),
+      path.join(mapDir, 'PC', 'sounds.map'),
+      path.join(parentDir, 'custom edition', 'sounds.map'),
+      path.join(parentDir, 'PC', 'sounds.map'),
+      path.join(parentDir, 'sounds.map'),
+      'D:\\custom_maps\\sounds.map',
+      'C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\sounds.map',
+      'C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\sounds.map',
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        resolved = candidate;
+        break;
+      }
     }
   }
   if (!resolved || !fs.existsSync(resolved)) return undefined;
@@ -1717,6 +1960,8 @@ export function runReplaceSound(task: {
       newSamples = new Uint8Array(conformedPcm.buffer, conformedPcm.byteOffset, conformedPcm.byteLength);
     }
 
+    const mouthData = computeMouthDataEnvelope(conformedPcm, tagSummary.sampleRate, tagSummary.channelCount);
+
     const updatedBuffer = replaceSoundPermutationData(
       currentMap.buffer,
       currentMap.header,
@@ -1727,6 +1972,7 @@ export function runReplaceSound(task: {
       newSamples,
       chosenFormat,
       externalSounds,
+      mouthData,
     );
 
     currentMap.buffer = updatedBuffer;
@@ -1843,17 +2089,25 @@ export function runUpdateScenarioPlacement(task: {
   teamIndex?: number;
   multiplayerSpawnFlags?: number;
   forceSpawn?: boolean;
+  extents?: [number, number, number];
+  name?: string;
+  worldBounds?: ScenarioWorldBounds;
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
-    const summary = updateScenarioPlacement(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.placementId, {
-      position: task.position,
-      rotation: task.rotation,
-      paletteIndex: task.paletteIndex,
-      teamIndex: task.teamIndex,
-      multiplayerSpawnFlags: task.multiplayerSpawnFlags,
-      forceSpawn: task.forceSpawn,
-    });
+    const summary =
+      task.placementId === '__world_bounds__' && task.worldBounds
+        ? updateScenarioWorldBounds(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.worldBounds)
+        : updateScenarioPlacement(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.placementId, {
+            position: task.position,
+            rotation: task.rotation,
+            paletteIndex: task.paletteIndex,
+            teamIndex: task.teamIndex,
+            multiplayerSpawnFlags: task.multiplayerSpawnFlags,
+            forceSpawn: task.forceSpawn,
+            extents: task.extents,
+            name: task.name,
+          });
     currentMap.modified = true;
     sendResult(task.requestId, {
       ok: true,
@@ -2063,6 +2317,33 @@ export function runDuplicateTag(task: { requestId: string; tagIndex: number; new
   }
 }
 
+/** Delete a tag from the open map and scrub all incoming references to NULL_TAG_ID. */
+export function runDeleteTag(task: { requestId: string; tagIndex: number }) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    modelGeometryCache.clear();
+    const res = deleteTagInMap(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.tagIndex);
+    currentMap.buffer = res.buffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== 'ok') {
+      return sendError(task.requestId, 'TAG_INDEX_ERROR', 'Failed to inspect map after deleting tag.');
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      deletedPath: res.deletedPath,
+      deletedGroup: res.deletedGroup,
+      scrubbedReferencesCount: res.scrubbedReferencesCount,
+      map: summarizeOpenMap(currentMap),
+    } satisfies DeleteTagResult);
+  } catch (err) {
+    if (err instanceof TagIndexEditorError) return sendError(task.requestId, 'TAG_INDEX_ERROR', err.message);
+    handleTaskError(task.requestId, err);
+  }
+}
+
 /** Milestone 10: Preflight BSP Swap. */
 /** Milestone 10.2: Extract 3D Structure BSP render mesh from an external source map. */
 export async function runGetSourceBspMesh(task: {
@@ -2110,12 +2391,63 @@ export async function runPerformBspSwap(task: {
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
-    const resources = openConversionResources(task.resourceMapPaths ?? {});
+    const mapDir = path.dirname(currentMap.filePath);
+    const srcDir = path.dirname(task.sourceFilePath);
+    const findResourceCandidate = (kind: 'bitmaps' | 'sounds', requireCeFormat: boolean): string | undefined => {
+      const customOpt = kind === 'bitmaps' ? (task.options as any)?.customBitmapsPath : (task.options as any)?.customSoundsPath;
+      const candidates = [
+        customOpt,
+        task.resourceMapPaths?.[kind],
+        path.join(srcDir, `${kind}.map`),
+        path.resolve(srcDir, '..', `${kind}.map`),
+        path.join(mapDir, `${kind}.map`),
+        path.resolve(mapDir, '..', `${kind}.map`),
+        path.resolve(process.cwd(), 'sample_maps', `${kind}.map`),
+        path.resolve(process.cwd(), '..', 'sample_maps', `${kind}.map`),
+        `C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\${kind}.map`,
+        `C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\${kind}.map`,
+      ].filter((p): p is string => !!p && fs.existsSync(p));
+      for (const cand of candidates) {
+        if (!requireCeFormat) return cand;
+        try {
+          const res = openConversionResources({ [kind]: cand });
+          try {
+            const file = res.files[kind];
+            if (file) {
+              const hdr = file.read(0, 16);
+              const pathsOff = hdr.readUInt32LE(4);
+              const tableOff = hdr.readUInt32LE(8);
+              if (pathsOff >= 16 && tableOff > pathsOff && tableOff <= file.size) {
+                const samplePaths = file.read(pathsOff, Math.min(4096, tableOff - pathsOff)).toString('latin1');
+                if (samplePaths.includes('__pixels') || samplePaths.includes('__permutations')) {
+                  return cand;
+                }
+              }
+            }
+          } finally {
+            res.close();
+          }
+        } catch {
+          /* ignore unreadable candidate */
+        }
+      }
+      return undefined;
+    };
+
+    const resources = openConversionResources({
+      bitmaps: findResourceCandidate('bitmaps', false),
+      sounds: findResourceCandidate('sounds', false),
+    });
+    const ceResources = openConversionResources({
+      bitmaps: findResourceCandidate('bitmaps', true),
+      sounds: findResourceCandidate('sounds', true),
+    });
     try {
       const sourceBuffer = ensureXboxMapDecompressed(await fs.promises.readFile(task.sourceFilePath));
       const optionsWithResources: BspSwapOptions = {
         ...task.options,
         resourceFiles: resources.files,
+        ceResourceFiles: ceResources.files,
       };
       const result = performBspSwap(sourceBuffer, currentMap.buffer, optionsWithResources);
       if (!result.ok) {
@@ -2136,6 +2468,7 @@ export async function runPerformBspSwap(task: {
       });
     } finally {
       resources.close();
+      ceResources.close();
     }
   } catch (err) {
     handleTaskError(task.requestId, err);
@@ -2158,18 +2491,36 @@ export function runBuildCustomObjectTag(task: {
     sounds: task.resourceMapPaths?.sounds,
   });
   try {
-    progress(task.requestId, 'Reading 3D mesh (.obj)...', 10);
-    if (!fs.existsSync(req.objFilePath)) {
-      return sendError(task.requestId, 'FILE_NOT_FOUND', `3D model file not found: ${req.objFilePath}`);
+    progress(task.requestId, 'Reading 3D mesh (.obj / .jms / .dae)...', 10);
+    const readMeshAsObj = (filePath: string): string => {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const low = filePath.toLowerCase();
+      if (low.endsWith('.jms')) {
+        return convertJmsToObjText(raw).objText;
+      }
+      if (low.endsWith('.dae')) {
+        return convertColladaDaeToObjText(raw).objText;
+      }
+      return raw;
+    };
+    let objText = req.objSourceText;
+    if (!objText) {
+      if (!req.objFilePath || !fs.existsSync(req.objFilePath)) {
+        return sendError(task.requestId, 'FILE_NOT_FOUND', `3D model file not found: ${req.objFilePath}`);
+      }
+      objText = readMeshAsObj(req.objFilePath);
     }
-    const objText = fs.readFileSync(req.objFilePath, 'utf8');
     let collisionObjText: string | undefined;
     if (req.collisionObjFilePath && fs.existsSync(req.collisionObjFilePath)) {
-      collisionObjText = fs.readFileSync(req.collisionObjFilePath, 'utf8');
+      collisionObjText = readMeshAsObj(req.collisionObjFilePath);
     }
 
     let textureRgba: { rgba: Uint8Array; width: number; height: number } | undefined;
-    if (req.textureFilePath && fs.existsSync(req.textureFilePath)) {
+    if (req.texturePngDataUrl && req.texturePngDataUrl.startsWith('data:image/png;base64,')) {
+      progress(task.requestId, 'Decoding painted UV texture...', 25);
+      const b64 = req.texturePngDataUrl.slice('data:image/png;base64,'.length);
+      textureRgba = decodePngToRgba(Buffer.from(b64, 'base64'));
+    } else if (req.textureFilePath && fs.existsSync(req.textureFilePath)) {
       progress(task.requestId, 'Decoding UV texture...', 25);
       const texBuf = fs.readFileSync(req.textureFilePath);
       if (texBuf.length > 128 && texBuf.readUInt32LE(0) === 0x20534444) {
@@ -2313,6 +2664,37 @@ export function runBuildCustomObjectTag(task: {
       currentMap.tagIndex = reInspected.tagIndex;
       currentMap.modified = true;
       injectedIntoMap = true;
+
+      if (req.placeAtPosition) {
+        const scnrSummary = extractScenarioPlacements(currentMap.buffer, currentMap.header, currentMap.tagIndex);
+        const palList =
+          req.tagGroup === 'vehicle'
+            ? scnrSummary.palettes.vehicles
+            : req.tagGroup === 'weapon'
+              ? scnrSummary.palettes.weapons
+              : req.tagGroup === 'equipment'
+                ? scnrSummary.palettes.equipment
+                : scnrSummary.palettes.scenery;
+        const palIdx = palList.findIndex(
+          (p) => p.path.toLowerCase() === built.rootTagPath.toLowerCase(),
+        );
+        if (palIdx >= 0) {
+          const placed = addScenarioPlacement(
+            currentMap.buffer,
+            currentMap.header,
+            currentMap.tagIndex,
+            req.tagGroup,
+            palIdx,
+            req.placeAtPosition,
+            req.placeAtRotation ?? [0, 0, 0],
+          );
+          currentMap.buffer = placed.buffer;
+          currentMap.header = placed.header;
+          if (placed.tagIndex) {
+            currentMap.tagIndex = placed.tagIndex;
+          }
+        }
+      }
     }
 
     progress(task.requestId, 'Done', 100);
@@ -2418,6 +2800,8 @@ function runDecompileHaloScript(task: Extract<WorkerRequest, { type: 'decompileH
       globalCount: res.globalCount,
       syntaxNodeCount: res.syntaxNodeCount,
       scenarioEntities: res.scenarioEntities,
+      scripts: res.scripts,
+      globals: res.globals,
     });
   } catch (err) {
     sendResult(task.requestId, { ok: false, message: (err as Error).message });
@@ -2594,6 +2978,529 @@ function runGlobalReplaceTagReference(task: Extract<WorkerRequest, { type: 'glob
   }
 }
 
+function runExportOpenCeModFolder(task: Extract<WorkerRequest, { type: 'exportOpenCeModFolder' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  const resources = openConversionResources({
+    bitmaps: task.bitmapsPath,
+    sounds: task.soundsPath,
+    loc: task.locPath,
+  });
+  try {
+    const pkg = exportOpenCeModPackageFromMap(
+      currentMap.buffer,
+      task.rootTagIndices,
+      {
+        name: task.modName,
+        version: task.version,
+        author: task.author,
+        description: task.description,
+      },
+      {
+        includeDependencies: task.includeDependencies ?? false,
+        replaceTargetTagIndex: task.replaceTargetTagIndex,
+        resourceFiles: resources.files,
+      },
+    );
+    const modDir = path.join(task.parentOutputDir, pkg.modFolderName);
+    fs.mkdirSync(modDir, { recursive: true });
+    const modTomlPath = path.join(modDir, 'mod.toml');
+    fs.writeFileSync(modTomlPath, pkg.modToml, 'utf8');
+    const writtenFiles: string[] = [modTomlPath];
+    for (const tf of pkg.tagFiles) {
+      const fullPath = path.join(modDir, ...tf.relativePath.split(/[\\/]+/));
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, tf.bytes);
+      writtenFiles.push(fullPath);
+    }
+    sendResult(task.requestId, {
+      ok: true,
+      outputDir: modDir,
+      modFolderName: pkg.modFolderName,
+      tagCount: pkg.tagFiles.length,
+      writtenFiles,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  } finally {
+    resources.close();
+  }
+}
+
+function runImportLegacyTags(task: Extract<WorkerRequest, { type: 'importLegacyTags' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  const resources = openConversionResources({
+    bitmaps: task.bitmapsPath,
+    sounds: task.soundsPath,
+    loc: task.locPath,
+  });
+  try {
+    const res = importLegacyTagsIntoMap(
+      currentMap.buffer,
+      task.inputPaths,
+      resources.files,
+      task.mode ?? 'add',
+    );
+    refreshCurrentMapBuffer(res.buffer);
+    const summary = summarizeOpenMap(currentMap);
+    sendResult(task.requestId, {
+      ok: true,
+      formatDetected: res.formatDetected,
+      addedCount: res.addedCount,
+      swappedCount: res.swappedCount,
+      reusedCount: res.reusedCount,
+      importedPaths: res.importedPaths,
+      warnings: res.warnings,
+      map: summary,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: (err as Error).message });
+  } finally {
+    resources.close();
+  }
+}
+
+function runReplaceBitmapFromPngBytes(task: Extract<WorkerRequest, { type: 'replaceBitmapFromPngBytes' }>): void {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) return sendError(task.requestId, 'TAG_NOT_FOUND', `Tag #${task.tagIndex} not found.`);
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+    const fileBuf = Buffer.from(task.pngBytes);
+    const decoded = decodePngToRgba(fileBuf);
+    const cleanedRgba = stripUvWireframeOverlayFromRgba(decoded.rgba, decoded.width, decoded.height);
+    const pot = resizeRgbaToPowerOfTwo(cleanedRgba, decoded.width, decoded.height, 2048);
+    const width = pot.width;
+    const height = pot.height;
+
+    let chosenFormat = task.targetFormat;
+    if (chosenFormat === undefined) {
+      let hasAlpha = false;
+      for (let i = 3; i < pot.rgba.length; i += 4) {
+        if (pot.rgba[i] < 250) {
+          hasAlpha = true;
+          break;
+        }
+      }
+      chosenFormat = hasAlpha ? BitmapFormat.DXT5 : BitmapFormat.DXT1;
+    }
+
+    const encoded = encodeBitmapWithMipmaps(pot.rgba, width, height, chosenFormat, true);
+    const updatedBuffer = replaceBitmapImageData(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      entry.tagId,
+      task.imageIndex,
+      encoded.pixelData,
+      width,
+      height,
+      chosenFormat,
+      externalBitmaps,
+      encoded.mipmapCount,
+    );
+
+    currentMap.buffer = updatedBuffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== 'ok') {
+      return sendError(task.requestId, 'REINSPECT_FAILED', 'Failed to inspect map after replacing bitmap.');
+    }
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+
+    sendResult(task.requestId, {
+      ok: true,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendError(task.requestId, 'BITMAP_REPLACE_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+export function runUpdateBspVertices(task: {
+  requestId: string;
+  bspIndex: number;
+  submeshUpdates: Array<{
+    submeshIndex: number;
+    positions: Float32Array | number[];
+    normals?: Float32Array | number[];
+    uvs?: Float32Array | number[];
+    shaderTagId?: number;
+    indices?: Uint16Array | Uint32Array | number[];
+  }>;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const packedUpdates = task.submeshUpdates.map((u) => {
+      const vCount = Math.floor(u.positions.length / 3);
+      const vertices = new Float32Array(vCount * 8);
+      for (let v = 0; v < vCount; v++) {
+        const base = v * 8;
+        vertices[base] = u.positions[v * 3] ?? 0;
+        vertices[base + 1] = u.positions[v * 3 + 1] ?? 0;
+        vertices[base + 2] = u.positions[v * 3 + 2] ?? 0;
+        vertices[base + 3] = u.normals?.[v * 3] ?? 0;
+        vertices[base + 4] = u.normals?.[v * 3 + 1] ?? 0;
+        vertices[base + 5] = u.normals?.[v * 3 + 2] ?? 1;
+        vertices[base + 6] = u.uvs?.[v * 2] ?? 0;
+        vertices[base + 7] = u.uvs?.[v * 2 + 1] ?? 0;
+      }
+      return {
+        submeshIndex: u.submeshIndex,
+        vertices,
+        shaderTagId: u.shaderTagId,
+        indices: u.indices,
+      };
+    });
+    const res = updateBspVerticesInMap(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.bspIndex,
+      packedUpdates,
+    );
+    currentMap.modified = true;
+    modelGeometryCache.clear();
+    sendResult(task.requestId, {
+      ok: true,
+      updatedVertices: res.updatedVertices,
+      updatedCollisionVertices: res.updatedCollisionVertices,
+      updatedShaders: res.updatedShaders,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendError(task.requestId, 'BSP_UPDATE_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+export function runUpdateModelVertices(task: {
+  requestId: string;
+  modelTagId: number;
+  lod?: number;
+  submeshUpdates: Array<{
+    submeshIndex: number;
+    positions: Float32Array | number[];
+    normals?: Float32Array | number[];
+    uvs?: Float32Array | number[];
+    shaderTagId?: number;
+  }>;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const packedUpdates = task.submeshUpdates.map((u) => {
+      const vCount = Math.floor(u.positions.length / 3);
+      const vertices = new Float32Array(vCount * 8);
+      for (let v = 0; v < vCount; v++) {
+        const base = v * 8;
+        vertices[base] = u.positions[v * 3] ?? 0;
+        vertices[base + 1] = u.positions[v * 3 + 1] ?? 0;
+        vertices[base + 2] = u.positions[v * 3 + 2] ?? 0;
+        vertices[base + 3] = u.normals?.[v * 3] ?? 0;
+        vertices[base + 4] = u.normals?.[v * 3 + 1] ?? 0;
+        vertices[base + 5] = u.normals?.[v * 3 + 2] ?? 1;
+        vertices[base + 6] = u.uvs?.[v * 2] ?? 0;
+        vertices[base + 7] = u.uvs?.[v * 2 + 1] ?? 0;
+      }
+      return {
+        partIndex: u.submeshIndex,
+        vertices,
+        shaderTagId: u.shaderTagId,
+      };
+    });
+    const res = updateModelVerticesInMap(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.modelTagId,
+      packedUpdates,
+      task.lod ?? 4,
+    );
+    currentMap.modified = true;
+    modelGeometryCache.clear();
+    sendResult(task.requestId, {
+      ok: true,
+      updatedVertices: res.updatedVertices,
+      updatedShaders: res.updatedShaders,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendError(task.requestId, 'MODEL_UPDATE_ERROR', err instanceof Error ? err.message : String(err));
+  }
+}
+
+export function runCompareMaps(task: Extract<WorkerRequest, { type: 'compareMaps' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open to compare against.' });
+  }
+  try {
+    progress(task.requestId, 'Reading comparison map', 20);
+    const otherBuf = ensureXboxMapDecompressed(fs.readFileSync(task.otherFilePath));
+    progress(task.requestId, 'Computing semantic map diff', 60);
+    const report = compareMaps(currentMap.buffer, otherBuf);
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      leftFileName: path.basename(currentMap.filePath),
+      rightFileName: path.basename(task.otherFilePath),
+      report,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export function runDeployMccMod(task: Extract<WorkerRequest, { type: 'deployMccMod' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open to deploy.' });
+  }
+  try {
+    progress(task.requestId, 'Packaging Steam MCC Mod & ModManifest.txt', 40);
+    const scenarioName = currentMap.header.scenarioName || path.basename(currentMap.filePath, '.map');
+    const result = deployMccModPackage(currentMap.buffer, scenarioName, {
+      title: task.title,
+      description: task.description,
+      author: task.author,
+      isMultiplayer: task.isMultiplayer ?? (currentMap.header.mapType === 1),
+      targetRootDir: task.parentOutputDir,
+      registerInModManifest: task.registerInModManifest,
+      customManifestPath: task.modManifestPath,
+    });
+    progress(task.requestId, 'Done', 100);
+    sendResult(task.requestId, result);
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runGlobalReplaceTagFieldValue(task: Extract<WorkerRequest, { type: 'globalReplaceTagFieldValue' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = globalReplaceTagFieldValue(currentMap.buffer, {
+      fieldNameQuery: task.fieldNameQuery,
+      tagGroupFilter: task.tagGroupFilter,
+      matchValue: task.matchValue,
+      newValue: task.newValue,
+    });
+    if (res.replacedCount > 0) {
+      refreshCurrentMapBuffer(res.buffer);
+    }
+    sendResult(task.requestId, {
+      ok: true,
+      replacedCount: res.replacedCount,
+      affectedFields: res.affectedFields,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runCompileJmaAnimation(task: Extract<WorkerRequest, { type: 'compileJmaAnimation' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = compileJmaIntoModelAnimationsTag(
+      currentMap.buffer,
+      task.targetAntrTagIndex,
+      task.jmaText,
+      task.animName,
+    );
+    refreshCurrentMapBuffer(res.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      animationName: res.animationName,
+      frameCount: res.frameCount,
+      nodeCount: res.nodeCount,
+      frameSize: res.frameSize,
+      replacedExisting: res.replacedExisting,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runCompileJmsPhysics(task: Extract<WorkerRequest, { type: 'compileJmsPhysics' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = compileJmsMassPointsIntoPhysicsTag(
+      currentMap.buffer,
+      task.targetPhysTagIndex,
+      task.jmsText,
+      task.totalMass,
+    );
+    refreshCurrentMapBuffer(res.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      massPointCount: res.massPointCount,
+      totalMass: res.totalMass,
+      centerOfMass: res.centerOfMass,
+      moments: res.moments,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runDecompileTagToSource(task: Extract<WorkerRequest, { type: 'decompileTagToSource' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const entry = currentMap.tagIndex.entries[task.tagIndex];
+    if (!entry) {
+      return sendResult(task.requestId, { ok: false, message: `Tag #${task.tagIndex} not found.` });
+    }
+    const cls = entry.primaryClassName;
+    if (cls === 'gbxmodel' || cls === 'model') {
+      const res = decompileGbxmodelToJmsText(currentMap.buffer, task.tagIndex);
+      sendResult(task.requestId, {
+        ok: true,
+        kind: 'gbxmodel_jms',
+        sourceText: res.jmsText,
+        defaultExt: 'jms',
+        tagPath: res.tagPath,
+        summary: `${res.vertexCount} vertices, ${res.triangleCount} triangles, ${res.nodeCount} nodes, ${res.markerCount} markers`,
+      });
+    } else if (cls === 'model_animations') {
+      const res = decompileModelAnimationsToJmaText(currentMap.buffer, task.tagIndex, task.animationIndex ?? 0);
+      sendResult(task.requestId, {
+        ok: true,
+        kind: 'animations_jma',
+        sourceText: res.jmaText,
+        defaultExt: 'jma',
+        tagPath: res.tagPath,
+        animationName: res.animationName,
+        summary: `Animation "${res.animationName}" (${res.frameCount} frames, ${res.nodeCount} nodes)`,
+      });
+    } else if (cls === 'physics') {
+      const res = decompilePhysicsToJmsText(currentMap.buffer, task.tagIndex);
+      sendResult(task.requestId, {
+        ok: true,
+        kind: 'physics_jms',
+        sourceText: res.jmsText,
+        defaultExt: 'jms',
+        tagPath: res.tagPath,
+        summary: `${res.massPointCount} #mass_* sphere markers (${res.totalMass} kg total mass)`,
+      });
+    } else {
+      sendResult(task.requestId, {
+        ok: false,
+        message: `Tag "${entry.path}" (${cls}) cannot be decompiled to .jms/.jma source.`,
+      });
+    }
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runCompileStringsTag(task: Extract<WorkerRequest, { type: 'compileStringsTag' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = compileStringsIntoTag(currentMap.buffer, task.targetTagIndex, task.textContent);
+    refreshCurrentMapBuffer(res.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      tagPath: res.tagPath,
+      tagGroup: res.tagGroup,
+      entryCount: res.entryCount,
+      messageNames: res.messageNames,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runInspectMeterTag(task: Extract<WorkerRequest, { type: 'inspectMeterTag' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = inspectMeterTag(currentMap.buffer, task.meterTagIndex);
+    sendResult(task.requestId, { ok: true, ...res });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runCompileFontFromGlyphAtlas(task: Extract<WorkerRequest, { type: 'compileFontFromGlyphAtlas' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = compileCanvasAtlasIntoFontTag(currentMap.buffer, task.targetFontTagIndex, task.glyphSpec);
+    refreshCurrentMapBuffer(res.buffer);
+    sendResult(task.requestId, {
+      ok: true,
+      tagPath: res.tagPath,
+      glyphCount: res.glyphCount,
+      totalPixelBytes: res.totalPixelBytes,
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runInjectProceduralWorldBsp(task: Extract<WorkerRequest, { type: 'injectProceduralWorldBsp' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = injectProceduralWorldIntoMapBsp(currentMap.buffer, task.worldMesh, {
+      bspIndex: task.bspIndex,
+      shaderBindings: task.shaderBindings as any,
+      collisionMode: task.collisionMode,
+    });
+    refreshCurrentMapBuffer(res.mapBuffer);
+    sendResult(task.requestId, {
+      ok: true,
+      addedVertices: res.addedVertices,
+      addedTriangles: res.addedTriangles,
+      addedSubmeshes: res.addedSubmeshes,
+      addedCollisionSurfaces: res.addedCollisionSurfaces,
+      addedCollisionNodes3d: res.addedCollisionNodes3d,
+      newBspSize: res.newBspSize,
+      newBspAddress: res.newBspAddress,
+      worldBounds: res.worldBounds,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runScaleCoupledPhysics(task: Extract<WorkerRequest, { type: 'scaleCoupledPhysics' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const summary = scaleObjectAndCoupledPhysicsInMap(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.objectTagId,
+      task.scaleFactor,
+    );
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      summary,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -2631,6 +3538,7 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'setUnicodeString') runSetUnicodeString(task);
     else if (task.type === 'renameTag') runRenameTag(task);
     else if (task.type === 'duplicateTag') runDuplicateTag(task);
+    else if (task.type === 'deleteTag') runDeleteTag(task);
     else if (task.type === 'getSourceBspMesh') await runGetSourceBspMesh(task);
     else if (task.type === 'bspSwapPreflight') await runBspSwapPreflight(task);
     else if (task.type === 'performBspSwap') await runPerformBspSwap(task);
@@ -2659,6 +3567,22 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'cleanOpenSauceYelo') runCleanOpenSauceYelo(task);
     else if (task.type === 'scanMapTagErrors') runScanMapTagErrors(task);
     else if (task.type === 'globalReplaceTagReference') runGlobalReplaceTagReference(task);
+    else if (task.type === 'exportOpenCeModFolder') runExportOpenCeModFolder(task);
+    else if (task.type === 'importLegacyTags') runImportLegacyTags(task);
+    else if (task.type === 'replaceBitmapFromPngBytes') runReplaceBitmapFromPngBytes(task);
+    else if (task.type === 'updateBspVertices') runUpdateBspVertices(task);
+    else if (task.type === 'updateModelVertices') runUpdateModelVertices(task);
+    else if (task.type === 'compareMaps') runCompareMaps(task);
+    else if (task.type === 'deployMccMod') runDeployMccMod(task);
+    else if (task.type === 'globalReplaceTagFieldValue') runGlobalReplaceTagFieldValue(task);
+    else if (task.type === 'compileJmaAnimation') runCompileJmaAnimation(task);
+    else if (task.type === 'compileJmsPhysics') runCompileJmsPhysics(task);
+    else if (task.type === 'decompileTagToSource') runDecompileTagToSource(task);
+    else if (task.type === 'compileStringsTag') runCompileStringsTag(task);
+    else if (task.type === 'inspectMeterTag') runInspectMeterTag(task);
+    else if (task.type === 'compileFontFromGlyphAtlas') runCompileFontFromGlyphAtlas(task);
+    else if (task.type === 'injectProceduralWorldBsp') runInjectProceduralWorldBsp(task);
+    else if (task.type === 'scaleCoupledPhysics') runScaleCoupledPhysics(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

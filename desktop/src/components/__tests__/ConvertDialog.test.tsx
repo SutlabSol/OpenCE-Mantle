@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import ConvertDialog from '../ConvertDialog';
-import type { OpenceApi, ConvertMapResult, ConvertPreflightResult, ConvertResourcePaths, RetailConversionReport } from '../../../electron/shared-types';
+import type { OpenceApi, ConvertMapResult, ConvertPreflightResult, RetailConversionReport } from '../../../electron/shared-types';
 import { buildMockAlignConvertReport, buildMockConvertReport, buildMockModelPartsConvertReport, buildMockRepairConvertReport } from '../../test-fixtures/dependency-fixtures';
 
 const EXTERNAL_RESOURCE_REPORT: RetailConversionReport = {

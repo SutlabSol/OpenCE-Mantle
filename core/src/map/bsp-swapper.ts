@@ -1,17 +1,25 @@
 import { decodeStruct, resolveStruct } from './definitions/engine';
 import { locateStructureBsp } from './definitions/validate-tag';
 import { inspectCustomEditionMap } from './open-map';
-import type { CacheFileHeader } from './header';
 import type { TagIndex } from './tag-index';
 import { extractBspRenderMesh } from '../render/bsp-geometry';
 import { extractTagSet } from './tag-extractor';
 import type { RandomAccessFile } from './convert/resource-files';
 import { serializeContainer, deserializeContainer } from './container';
-import { planAddInjection, applyAddInjection, type InjectionPlan } from './tag-injector';
+import {
+  planAddInjection,
+  applyAddInjection,
+  autoLinkExternalResourceMapsInContainer,
+  hydrateExternalRawDataInContainer,
+  normalizeTagPath,
+  type InjectionPlan,
+} from './tag-injector';
 import { mergeStructureBsps, rebaseStructureBspPointers } from './bsp-merger';
 import { decodeReflexive } from './definitions/codec';
 import { resolveTagDataPointer } from './tag-index';
 import { ensurePaletteEntry, appendReflexiveElements } from '../render/scenario-objects';
+import { compileHaloScriptIntoScenario } from './hs-compiler';
+import { duplicateTagInMap } from './tag-index-editor';
 
 export interface BspInfo {
   index: number;
@@ -55,13 +63,22 @@ export interface BspSwapOptions {
   relocateGroundObjects?: boolean;
   newScenarioName?: string;
   harvestShaders?: boolean;
+  importScenery?: boolean;
+  importMachines?: boolean;
   importSceneryAndMachines?: boolean;
   importVehicles?: boolean;
   makeDoorsAutomatic?: boolean;
   filterObjectsToBspBounds?: boolean;
   clearExistingPlacements?: boolean;
   clearPlayerSpawns?: boolean;
+  mergeMultipleBsps?: boolean;
+  useExpandedEngineLimits?: boolean;
+  removeOverlappingPortalCaps?: boolean;
+  removeBspEndBlockWalls?: boolean;
+  addBspActivationScript?: boolean;
+  bspScriptMode?: 'none' | 'switch' | 'activate_all';
   resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile };
+  ceResourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile };
   customBitmapsPath?: string | null;
   customSoundsPath?: string | null;
 }
@@ -83,6 +100,9 @@ export interface BspSwapResult {
     importedScenery?: number;
     importedVehicles?: number;
     importedMachines?: number;
+    removedDuplicateTriangles?: number;
+    removedPortalBlockerTriangles?: number;
+    createdTriggerVolumes?: number;
   };
   error?: string;
 }
@@ -147,6 +167,7 @@ export function getMapBsps(buffer: Buffer): BspInfo[] {
       header.tagDataOffset,
       tagIndex.baseMemoryAddress,
       depTagId,
+      i,
     );
 
     if (bspLoc && bspLoc.fileOffset + 0x260 <= buffer.length) {
@@ -388,6 +409,9 @@ function rewriteBspDependencies(
             buffer.writeUInt32LE(0, fieldOffset + 8);
             buffer.writeUInt32LE(0xffffffff, fieldOffset + 12);
           }
+        } else {
+          buffer.writeUInt32LE(0, fieldOffset + 4);
+          buffer.writeUInt32LE(0, fieldOffset + 8);
         }
       }
     } else if (field.def.type === 'TagReflexive') {
@@ -707,32 +731,85 @@ export function performBspSwap(
     };
   }
 
-  // Determine whether this is a single BSP swap or a multi-BSP merger
+  // Determine whether this is a multi-BSP merge into 1 BSP or separate multiple BSPs, and the script mode.
+  // When merging all selected BSPs into 1 combined BSP (`shouldMergeMultiBsp === true`), BSP 0 is natively
+  // active in Halo CE at all times without needing any activation script.
+  const shouldMergeMultiBsp = options.mergeMultipleBsps !== false;
+  const effectiveScriptMode: 'none' | 'switch' | 'activate_all' = shouldMergeMultiBsp
+    ? 'none'
+    : options.bspScriptMode ??
+      (options.addBspActivationScript ? 'switch' : srcIndices.length > 1 ? 'switch' : 'none');
   let srcBspData: Buffer;
   let srcBspSize: number;
   let srcBspAddress: number;
   let srcBspName: string;
   let srcWorldBounds: [number, number, number, number, number, number];
+  let removedDuplicateTriangles = 0;
+  let removedPortalBlockerTriangles = 0;
+  let createdTriggerVolumes = 0;
+  let donorLightmapTagIds: number[] = [];
 
-  if (srcIndices.length > 1) {
-    const merged = mergeStructureBsps(sourceBuffer, srcIndices);
+  if (srcIndices.length > 1 && shouldMergeMultiBsp) {
+    const useExpandedEngineLimits = options.useExpandedEngineLimits === true;
+    const CE_TAG_SPACE_BYTES = useExpandedEngineLimits
+      ? 128 * 1024 * 1024 // 128 MiB OpenCE extended tag/BSP cache
+      : 23 * 1024 * 1024; // 23 MiB Standard Halo CE tag/BSP cache
+    const safeMaxBspBytes = useExpandedEngineLimits
+      ? Math.min(
+          116 * 1024 * 1024,
+          Math.max(16 * 1024 * 1024, CE_TAG_SPACE_BYTES - targetInspected.header.tagDataSize - 2 * 1024 * 1024),
+        )
+      : Math.min(
+          15_500_000,
+          Math.max(8 * 1024 * 1024, CE_TAG_SPACE_BYTES - targetInspected.header.tagDataSize - 4_500_000),
+        );
+    const merged = mergeStructureBsps(sourceBuffer, srcIndices, {
+      removeOverlappingPortalCaps: options.removeOverlappingPortalCaps === true,
+      removeBspEndBlockWalls: options.removeBspEndBlockWalls !== false,
+      mergeLightmapPlates: options.harvestShaders !== false,
+      maxBspBytes: safeMaxBspBytes,
+      useExpandedEngineLimits,
+    });
     srcBspData = merged.bspBuffer;
     srcBspSize = merged.bspSize;
     srcBspAddress = merged.bspAddress;
     srcBspName = merged.mergedBspNames.join(' + ');
     srcWorldBounds = merged.worldBounds;
+    removedDuplicateTriangles = merged.removedDuplicateTriangles ?? 0;
+    removedPortalBlockerTriangles = merged.removedPortalBlockerTriangles ?? 0;
+    donorLightmapTagIds = merged.donorLightmapTagIds ?? [];
   } else {
     srcBspData = Buffer.from(sourceBuffer.subarray(srcBsp.bspStart, srcBsp.bspStart + srcBsp.bspSize));
     srcBspSize = srcBsp.bspSize;
     srcBspAddress = srcBsp.bspAddress;
-    const CE_BSP_CACHE_CEILING = 0x41b40000;
+    const CE_BSP_CACHE_CEILING =
+      options.useExpandedEngineLimits === true &&
+      (srcBspSize > 17_616_076 || targetInspected.header.tagDataSize + srcBspSize + 1_500_000 > 23 * 1024 * 1024)
+        ? 0x48440000
+        : 0x41b40000;
+    let rebasedAddr = srcBspAddress;
     if (srcBspAddress + srcBspSize > CE_BSP_CACHE_CEILING) {
-      const rebasedAddr = (CE_BSP_CACHE_CEILING - srcBspSize) & ~511;
-      rebaseStructureBspPointers(srcBspData, srcBspAddress, rebasedAddr);
-      srcBspAddress = rebasedAddr;
+      rebasedAddr = (CE_BSP_CACHE_CEILING - srcBspSize) & ~511;
     }
-    srcBspName = srcBsp.path;
-    srcWorldBounds = srcBsp.worldBounds;
+    rebaseStructureBspPointers(srcBspData, srcBspAddress, rebasedAddr);
+    srcBspAddress = rebasedAddr;
+    srcBspName =
+      srcIndices.length > 1
+        ? srcIndices.map((idx) => sourceBsps[idx]?.path || `bsp_${idx}`).join(', ')
+        : srcBsp.path;
+    srcWorldBounds = [...srcBsp.worldBounds] as [number, number, number, number, number, number];
+    if (srcIndices.length > 1) {
+      for (const bIdx of srcIndices.slice(1)) {
+        const b = sourceBsps[bIdx];
+        if (!b) continue;
+        srcWorldBounds[0] = Math.min(srcWorldBounds[0], b.worldBounds[0]);
+        srcWorldBounds[1] = Math.min(srcWorldBounds[1], b.worldBounds[1]);
+        srcWorldBounds[2] = Math.min(srcWorldBounds[2], b.worldBounds[2]);
+        srcWorldBounds[3] = Math.max(srcWorldBounds[3], b.worldBounds[3]);
+        srcWorldBounds[4] = Math.max(srcWorldBounds[4], b.worldBounds[4]);
+        srcWorldBounds[5] = Math.max(srcWorldBounds[5], b.worldBounds[5]);
+      }
+    }
   }
 
   // 1. Perform geometry swap FIRST so modelDataFileOffset and tagDataOffset are at their final positions.
@@ -762,7 +839,7 @@ export function performBspSwap(
   out.writeUInt32LE(oldModelDataOffset + delta, newTagDataOffset + 0x14);
 
   // Update ScenarioBSP in target Scenario tag
-  const { header, tagIndex } = targetInspected;
+  const { tagIndex } = targetInspected;
   const scnrEntry = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];
   const scnrOffset = newTagDataOffset + (scnrEntry.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
   const decodedScnr = decodeStruct(out, scnrOffset, 'Scenario');
@@ -828,9 +905,33 @@ export function performBspSwap(
     }
 
     const shouldHarvestShaders = options.harvestShaders !== false;
-    const shouldImportObjects = Boolean(options.importSceneryAndMachines);
+    const shouldImportScenery =
+      options.importScenery !== undefined
+        ? Boolean(options.importScenery)
+        : Boolean(options.importSceneryAndMachines);
+    const shouldImportMachines =
+      options.importMachines !== undefined
+        ? Boolean(options.importMachines)
+        : Boolean(options.importSceneryAndMachines);
+    const shouldImportObjects = shouldImportScenery || shouldImportMachines;
     const shouldImportVehicles = Boolean(options.importVehicles);
     const srcTagIndex = sourceInspected.tagIndex;
+
+    // Pre-populate tagIdMap for any donor tags that already exist by normalized path + group in the target map
+    const existingTargetByKey = new Map<string, number>();
+    for (const te of reinspected.tagIndex.entries) {
+      if (te.path && te.primaryClassName) {
+        existingTargetByKey.set(`${normalizeTagPath(te.path)}|${te.primaryClassName}`, te.tagId);
+      }
+    }
+    for (const se of srcTagIndex.entries) {
+      if (!se.path || !se.primaryClassName) continue;
+      const existingId = existingTargetByKey.get(`${normalizeTagPath(se.path)}|${se.primaryClassName}`);
+      if (existingId !== undefined) {
+        tagIdMap.set(se.tagId, existingId);
+        tagIdMap.set(se.index, existingId);
+      }
+    }
     let srcScnrOffset = 0;
     const srcScnrEntry = srcTagIndex.entries[srcTagIndex.scenarioTagId & 0xffff];
     if (srcScnrEntry) {
@@ -853,11 +954,15 @@ export function performBspSwap(
       if (shouldHarvestShaders) {
         for (const dep of bspDeps) {
           const idx = dep.tagId & 0xffff;
+          const entry = srcTagIndex.entries[idx];
           if (
-            idx < srcTagIndex.entries.length &&
-            srcTagIndex.entries[idx].primaryClassName !== '' &&
-            srcTagIndex.entries[idx].primaryClassName !== 'sbsp' &&
-            srcTagIndex.entries[idx].primaryClassName !== 'scenario_structure_bsp'
+            entry &&
+            entry.tagId === dep.tagId &&
+            entry.primaryClassName !== '' &&
+            entry.primaryClassName !== 'sbsp' &&
+            entry.primaryClassName !== 'scenario_structure_bsp' &&
+            entry.primaryClassName !== 'scnr' &&
+            entry.primaryClassName !== 'scenario'
           ) {
             rootIndicesSet.add(idx);
           }
@@ -880,26 +985,56 @@ export function performBspSwap(
       let srcPlacedMachinesCount = 0;
       let srcPlacedMachinesOffset = 0;
 
+      const bspRootIndices = Array.from(rootIndicesSet);
+      const scenRootSet = new Set<number>();
+      const vehRootSet = new Set<number>();
+      const machRootSet = new Set<number>();
+      const doorMachRootSet = new Set<number>();
+
+      const selectedBspBoundsForHarvest = srcIndices
+        .map((idx) => sourceBsps[idx]?.worldBounds)
+        .filter((b): b is [number, number, number, number, number, number] => Boolean(b));
+      if (selectedBspBoundsForHarvest.length === 0) {
+        selectedBspBoundsForHarvest.push(srcWorldBounds);
+      }
+      const isPosInSelectedBsps = (posX: number, posY: number, posZ: number, margin = 20.0): boolean =>
+        !options.filterObjectsToBspBounds ||
+        selectedBspBoundsForHarvest.some(
+          ([bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ]) =>
+            posX >= bMinX - margin &&
+            posX <= bMaxX + margin &&
+            posY >= bMinY - margin &&
+            posY <= bMaxY + margin &&
+            posZ >= bMinZ - margin &&
+            posZ <= bMaxZ + margin,
+        );
+
       if (shouldImportObjects || shouldImportVehicles) {
         if (srcScnrOffset > 0) {
-          if (shouldImportObjects) {
+          if (shouldImportScenery) {
             // Scenery palette (0x21c) and scenery placements (0x210)
             const scenPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x21c);
             srcSceneryPalCount = scenPalRefl.count;
             if (scenPalRefl.count > 0) {
               srcSceneryPalOffset = sourceInspected.header.tagDataOffset + (scenPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-              for (let i = 0; i < scenPalRefl.count; i++) {
-                const tagId = sourceBuffer.readUInt32LE(srcSceneryPalOffset + i * 48 + 12);
-                if (tagId !== 0xffffffff && (tagId & 0xffff) < srcTagIndex.entries.length) {
-                  rootIndicesSet.add(tagId & 0xffff);
-                }
-              }
             }
-
             const scenRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x210);
             srcPlacedSceneryCount = scenRefl.count;
             if (scenRefl.count > 0) {
               srcPlacedSceneryOffset = sourceInspected.header.tagDataOffset + (scenRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+              for (let i = 0; i < scenRefl.count; i++) {
+                const sOff = srcPlacedSceneryOffset + i * 72;
+                const palIdx = sourceBuffer.readInt16LE(sOff + 0);
+                if (palIdx < 0 || palIdx >= srcSceneryPalCount) continue;
+                const posX = sourceBuffer.readFloatLE(sOff + 8);
+                const posY = sourceBuffer.readFloatLE(sOff + 12);
+                const posZ = sourceBuffer.readFloatLE(sOff + 16);
+                if (!isPosInSelectedBsps(posX, posY, posZ)) continue;
+                const tagId = sourceBuffer.readUInt32LE(srcSceneryPalOffset + palIdx * 48 + 12);
+                if (tagId !== 0xffffffff && srcTagIndex.entries[tagId & 0xffff]?.tagId === tagId) {
+                  scenRootSet.add(tagId & 0xffff);
+                }
+              }
             }
           }
 
@@ -909,53 +1044,90 @@ export function performBspSwap(
             srcVehiclePalCount = vehPalRefl.count;
             if (vehPalRefl.count > 0) {
               srcVehiclePalOffset = sourceInspected.header.tagDataOffset + (vehPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-              for (let i = 0; i < vehPalRefl.count; i++) {
-                const tagId = sourceBuffer.readUInt32LE(srcVehiclePalOffset + i * 48 + 12);
-                if (tagId !== 0xffffffff && (tagId & 0xffff) < srcTagIndex.entries.length) {
-                  rootIndicesSet.add(tagId & 0xffff);
-                }
-              }
             }
-
             const vehRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x240);
             srcPlacedVehiclesCount = vehRefl.count;
             if (vehRefl.count > 0) {
               srcPlacedVehiclesOffset = sourceInspected.header.tagDataOffset + (vehRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+              for (let i = 0; i < vehRefl.count; i++) {
+                const vOff = srcPlacedVehiclesOffset + i * 120;
+                const palIdx = sourceBuffer.readInt16LE(vOff + 0);
+                const flags = sourceBuffer.readUInt16LE(vOff + 4);
+                if (palIdx < 0 || palIdx >= srcVehiclePalCount) continue;
+                const posX = sourceBuffer.readFloatLE(vOff + 8);
+                const posY = sourceBuffer.readFloatLE(vOff + 12);
+                const posZ = sourceBuffer.readFloatLE(vOff + 16);
+                if (!isPosInSelectedBsps(posX, posY, posZ)) continue;
+                const tagId = sourceBuffer.readUInt32LE(srcVehiclePalOffset + palIdx * 48 + 12);
+                const vPath = srcTagIndex.entries[tagId & 0xffff]?.path ?? '';
+                if ((flags & 1) !== 0 && /lifepod|c_dropship|pelican/i.test(vPath)) continue;
+                if (tagId !== 0xffffffff && srcTagIndex.entries[tagId & 0xffff]?.tagId === tagId) {
+                  vehRootSet.add(tagId & 0xffff);
+                }
+              }
             }
           }
 
-          if (shouldImportObjects) {
+          if (shouldImportMachines) {
             // Machine palette (0x2a0) and machine placements (0x294)
             const machPalRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x2a0);
             srcMachinePalCount = machPalRefl.count;
             if (machPalRefl.count > 0) {
               srcMachinePalOffset = sourceInspected.header.tagDataOffset + (machPalRefl.pointerLow - srcTagIndex.baseMemoryAddress);
-              for (let i = 0; i < machPalRefl.count; i++) {
-                const tagId = sourceBuffer.readUInt32LE(srcMachinePalOffset + i * 48 + 12);
-                if (tagId !== 0xffffffff && (tagId & 0xffff) < srcTagIndex.entries.length) {
-                  rootIndicesSet.add(tagId & 0xffff);
-                }
-              }
             }
-
             const machRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x294);
             srcPlacedMachinesCount = machRefl.count;
             if (machRefl.count > 0) {
               srcPlacedMachinesOffset = sourceInspected.header.tagDataOffset + (machRefl.pointerLow - srcTagIndex.baseMemoryAddress);
+              for (let i = 0; i < machRefl.count; i++) {
+                const mOff = srcPlacedMachinesOffset + i * 64;
+                const palIdx = sourceBuffer.readInt16LE(mOff + 0);
+                if (palIdx < 0 || palIdx >= srcMachinePalCount) continue;
+                const posX = sourceBuffer.readFloatLE(mOff + 8);
+                const posY = sourceBuffer.readFloatLE(mOff + 12);
+                const posZ = sourceBuffer.readFloatLE(mOff + 16);
+                if (!isPosInSelectedBsps(posX, posY, posZ)) continue;
+                const tagId = sourceBuffer.readUInt32LE(srcMachinePalOffset + palIdx * 48 + 12);
+                if (tagId !== 0xffffffff && srcTagIndex.entries[tagId & 0xffff]?.tagId === tagId) {
+                  const mIdx = tagId & 0xffff;
+                  machRootSet.add(mIdx);
+                  const mPath = srcTagIndex.entries[mIdx]?.path ?? '';
+                  if (/door|airlock|gate|shutter|hatch/i.test(mPath)) {
+                    doorMachRootSet.add(mIdx);
+                  }
+                }
+              }
             }
           }
         }
       }
 
-      const rootIndices = Array.from(rootIndicesSet);
-      if (rootIndices.length > 0) {
+      const candidateRootTiers: number[][] = [
+        Array.from(new Set([...bspRootIndices, ...machRootSet, ...vehRootSet, ...scenRootSet])),
+        Array.from(new Set([...bspRootIndices, ...doorMachRootSet, ...vehRootSet])),
+        Array.from(new Set([...bspRootIndices, ...doorMachRootSet])),
+        bspRootIndices,
+      ].filter((tier, idx, arr) => tier.length > 0 && (idx === 0 || tier.length < arr[idx - 1].length));
+
+      if (candidateRootTiers.length > 0) {
         try {
-          const extracted = extractTagSet(sourceBuffer, sourceInspected.header, srcTagIndex, rootIndices, {
-            resourceFiles: options.resourceFiles,
-          });
-          if (extracted.tags.length > 0) {
+          let chosenContainer: ReturnType<typeof deserializeContainer> | null = null;
+          let chosenPlan: InjectionPlan | null = null;
+
+          for (const tierRoots of candidateRootTiers) {
+            const extracted = extractTagSet(sourceBuffer, sourceInspected.header, srcTagIndex, tierRoots, {
+              resourceFiles: options.resourceFiles,
+            });
+            if (extracted.tags.length === 0) continue;
             const containerBuf = serializeContainer(extracted, 'harvested_bsp_assets');
             const container = deserializeContainer(containerBuf);
+
+            if (options.ceResourceFiles) {
+              autoLinkExternalResourceMapsInContainer(container, options.ceResourceFiles);
+            }
+            if (options.resourceFiles) {
+              hydrateExternalRawDataInContainer(container, options.resourceFiles);
+            }
 
             const planResult = planAddInjection(
               { buffer: out, header: reinspected.header, tagIndex: reinspected.tagIndex },
@@ -963,9 +1135,17 @@ export function performBspSwap(
               {},
               { allowEmbeddedRelocation: true, allowGbxmodelGeometryRelocation: true },
             );
-
             if (planResult.kind !== 'refused') {
-              const plan = planResult as InjectionPlan;
+              chosenContainer = container;
+              chosenPlan = planResult as InjectionPlan;
+              break;
+            }
+          }
+
+          if (chosenContainer && chosenPlan) {
+            const container = chosenContainer;
+            const plan = chosenPlan;
+            {
               out = applyAddInjection(
                 out,
                 reinspected.header,
@@ -992,14 +1172,79 @@ export function performBspSwap(
                   tagIdMap.set(cTag.originalIndex, targetTagId);
                 }
               }
+
+              // If multiple BSPs were merged into 1 combined BSP, append the 48-byte BitmapData plates
+              // from secondary BSPs' lightmap bitmap tags (k = 1..N-1) into Base BSP 0's lightmap bitmap tag
+              // so every merged BSP's `ScenarioStructureBSPLightmap.bitmap` index resolves to its true lightmap texture!
+              if (srcIndices.length > 1 && shouldMergeMultiBsp && donorLightmapTagIds.length > 1) {
+                const targetLmTagId0 =
+                  tagIdMap.get(donorLightmapTagIds[0]) ?? tagIdMap.get(donorLightmapTagIds[0] & 0xffff);
+                if (targetLmTagId0 !== undefined && targetLmTagId0 !== 0xffffffff) {
+                  const extraPlateBuffers: Buffer[] = [];
+                  for (let k = 1; k < donorLightmapTagIds.length; k++) {
+                    const dLmId = donorLightmapTagIds[k];
+                    const tLmId = tagIdMap.get(dLmId) ?? tagIdMap.get(dLmId & 0xffff);
+                    if (tLmId === undefined || tLmId === 0xffffffff) continue;
+                    const tEntry = reinspected.tagIndex.entries[tLmId & 0xffff];
+                    if (!tEntry || tEntry.isExternal) continue;
+                    const bitmOff = resolveTagDataPointer(
+                      tEntry.tagDataPointerOrResourceIndex,
+                      reinspected.header,
+                      reinspected.tagIndex.baseMemoryAddress,
+                    );
+                    if (bitmOff < 0 || bitmOff + 0x6c > out.length) continue;
+                    const bdCount = out.readUInt32LE(bitmOff + 0x60);
+                    const bdPtr = out.readUInt32LE(bitmOff + 0x64);
+                    if (bdCount <= 0 || bdPtr === 0) continue;
+                    const bdArrOff = resolvePointer(
+                      bdPtr,
+                      reinspected.header.tagDataOffset,
+                      reinspected.tagIndex.baseMemoryAddress,
+                    );
+                    if (bdArrOff < 0 || bdArrOff + bdCount * 48 > out.length) continue;
+                    for (let p = 0; p < bdCount; p++) {
+                      const plateBuf = Buffer.alloc(48);
+                      out.copy(plateBuf, 0, bdArrOff + p * 48, bdArrOff + (p + 1) * 48);
+                      plateBuf.writeUInt32LE(targetLmTagId0 >>> 0, 0x20); // update owner bitmap_tag_id to base lightmap tag
+                      extraPlateBuffers.push(plateBuf);
+                    }
+                    // Clear secondary lightmap tag's bitmap_data reflexive count so pixel offsets are never double-shifted
+                    out.writeUInt32LE(0, bitmOff + 0x60);
+                    out.writeUInt32LE(0, bitmOff + 0x64);
+                  }
+                  if (extraPlateBuffers.length > 0) {
+                    const entry0 = reinspected.tagIndex.entries[targetLmTagId0 & 0xffff];
+                    if (entry0 && !entry0.isExternal) {
+                      const bitm0Off = resolveTagDataPointer(
+                        entry0.tagDataPointerOrResourceIndex,
+                        reinspected.header,
+                        reinspected.tagIndex.baseMemoryAddress,
+                      );
+                      const lmAppendRes = appendReflexiveElements(
+                        out,
+                        reinspected.header,
+                        reinspected.tagIndex,
+                        bitm0Off + 0x60,
+                        Buffer.concat(extraPlateBuffers),
+                        extraPlateBuffers.length,
+                      );
+                      out = lmAppendRes.buffer;
+                      reinspected.header = lmAppendRes.header;
+                      const afterLmMerge = inspectCustomEditionMap(out);
+                      if (afterLmMerge.status === 'ok') reinspected = afterLmMerge;
+                    }
+                  }
+                }
+              }
             }
           }
-        } catch {
-          // If harvesting encounters an issue with any one tag, proceed with geometry swap
+        } catch (err) {
+          console.warn('[bsp-swapper] harvest catch:', err);
         }
       }
 
       // Optionally clear existing placements from target map (scenery, vehicles, equipment, weapons, etc.)
+      // Do NOT clear 0x378 (netgame flags) here unless clearPlayerSpawns is also enabled, so CTF/Oddball/KOTH/Race flags remain valid.
       if (options.clearExistingPlacements) {
         const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
         if (targetScnrEntry) {
@@ -1008,7 +1253,7 @@ export function performBspSwap(
             reinspected.header,
             reinspected.tagIndex.baseMemoryAddress,
           );
-          const clearOffsets = [0x210, 0x228, 0x240, 0x258, 0x270, 0x294, 0x2ac, 0x2c4, 0x2dc, 0x360, 0x378, 0x384, 0x3a8, 0x42c];
+          const clearOffsets = [0x210, 0x228, 0x240, 0x258, 0x270, 0x294, 0x2ac, 0x2c4, 0x2dc, 0x360, 0x384, 0x3a8, 0x42c];
           for (const off of clearOffsets) {
             out.writeUInt32LE(0, curScnrOff + off);
             out.writeUInt32LE(0, curScnrOff + off + 4);
@@ -1025,7 +1270,7 @@ export function performBspSwap(
             reinspected.header,
             reinspected.tagIndex.baseMemoryAddress,
           );
-          const spawnClearOffsets = [0x348, 0x354, 0x390];
+          const spawnClearOffsets = [0x348, 0x354, 0x378, 0x390];
           for (const off of spawnClearOffsets) {
             out.writeUInt32LE(0, curScnrOff + off);
             out.writeUInt32LE(0, curScnrOff + off + 4);
@@ -1033,7 +1278,7 @@ export function performBspSwap(
         }
       }
 
-      // Import donor player starting locations (or ensure at least one valid spawn in new BSP)
+      // Import donor player starting locations (or ensure at least 8 valid spawns: 4 Team 0 + 4 Team 1 in new BSP)
       const targetScnrEntryForSpawns = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
       if (targetScnrEntryForSpawns) {
         let curScnrOff = resolveTagDataPointer(
@@ -1045,7 +1290,7 @@ export function performBspSwap(
 
         if (options.clearPlayerSpawns || curSpawnsCount === 0) {
           const importedSpawns: Buffer[] = [];
-          const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+          const [minX, minY, minZ, maxX, maxY] = srcWorldBounds;
 
           if (srcScnrOffset > 0) {
             const donorPslRefl = decodeReflexive(sourceBuffer, srcScnrOffset + 0x354);
@@ -1062,10 +1307,10 @@ export function performBspSwap(
                 if (matchesBsp) {
                   const spawnBuf = Buffer.alloc(52);
                   sourceBuffer.copy(spawnBuf, 0, sOff, sOff + 52);
+                  // Normalize team_index (+16) to 0 (Red/FFA) or 1 (Blue) so Campaign spawns (which often have team=100) never cause MP blue-screen
+                  spawnBuf.writeInt16LE(importedSpawns.length % 2, 16);
                   spawnBuf.writeInt16LE(dstIdx, 18); // Map to target BSP index
-                  if (spawnBuf.readInt16LE(20) === 0) {
-                    spawnBuf.writeInt16LE(12, 20); // type 0 = 12 (all games) so campaign spawns work in MP
-                  }
+                  spawnBuf.writeInt16LE(12, 20); // type 0 = 12 (all games) so spawns work in all MP & SP modes
                   importedSpawns.push(spawnBuf);
                 }
               }
@@ -1073,18 +1318,46 @@ export function performBspSwap(
           }
 
           if (importedSpawns.length === 0) {
-            const fallback = Buffer.alloc(52);
             const midX = (minX + maxX) / 2;
             const midY = (minY + maxY) / 2;
             const groundZ = minZ + 1.0;
-            fallback.writeFloatLE(midX, 0);
-            fallback.writeFloatLE(midY, 4);
-            fallback.writeFloatLE(groundZ, 8);
-            fallback.writeFloatLE(0, 12); // facing
-            fallback.writeInt16LE(0, 16); // team
-            fallback.writeInt16LE(dstIdx, 18); // bsp index
-            fallback.writeInt16LE(12, 20); // type 0 = 12 (all games)
-            importedSpawns.push(fallback);
+            for (let s = 0; s < 8; s++) {
+              const fallback = Buffer.alloc(52);
+              const team = s % 2;
+              const idxInTeam = Math.floor(s / 2);
+              fallback.writeFloatLE(midX + (team === 0 ? -4.0 : 4.0) + (idxInTeam % 2) * 1.5, 0);
+              fallback.writeFloatLE(midY + Math.floor(idxInTeam / 2) * 1.5, 4);
+              fallback.writeFloatLE(groundZ, 8);
+              fallback.writeFloatLE(team === 0 ? 0 : Math.PI, 12); // facing
+              fallback.writeInt16LE(team, 16); // team 0 and team 1
+              fallback.writeInt16LE(dstIdx, 18); // bsp index
+              fallback.writeInt16LE(12, 20); // type 0 = 12 (all games)
+              importedSpawns.push(fallback);
+            }
+          } else {
+            // Ensure at least 8 spawns (4 Team 0 Red + 4 Team 1 Blue) for full Multiplayer compatibility
+            const offsets: Array<[number, number]> = [
+              [1.2, 0.0],
+              [-1.2, 0.0],
+              [0.0, 1.2],
+              [0.0, -1.2],
+              [1.2, 1.2],
+              [-1.2, -1.2],
+            ];
+            let nextIdx = 0;
+            while (importedSpawns.length < 8) {
+              const baseSpawn = importedSpawns[nextIdx % importedSpawns.length];
+              const clone = Buffer.from(baseSpawn);
+              const [dx, dy] = offsets[nextIdx % offsets.length];
+              const team = importedSpawns.length % 2;
+              clone.writeFloatLE(baseSpawn.readFloatLE(0) + dx + (team === 1 ? 2.5 : 0), 0);
+              clone.writeFloatLE(baseSpawn.readFloatLE(4) + dy, 4);
+              clone.writeInt16LE(team, 16);
+              clone.writeInt16LE(dstIdx, 18);
+              clone.writeInt16LE(12, 20);
+              importedSpawns.push(clone);
+              nextIdx++;
+            }
           }
 
           if (importedSpawns.length > 0) {
@@ -1103,33 +1376,71 @@ export function performBspSwap(
               reinspected.header,
               reinspected.tagIndex.baseMemoryAddress,
             );
+          }
+        }
 
-            // Also ensure multiplayer netgame flags (0x36c) has spawn points if cleared/empty
-            const netgameFlagsCount = out.readUInt32LE(curScnrOff + 0x36c);
-            if (netgameFlagsCount === 0) {
-              const importedFlags: Buffer[] = [];
-              for (const sp of importedSpawns) {
-                const flag = Buffer.alloc(148);
-                sp.copy(flag, 0, 0, 12); // position
-                sp.copy(flag, 12, 12, 16); // facing
-                flag.writeInt16LE(0, 16); // type 0 = mp spawn point
-                flag.writeInt16LE(0, 18); // team
-                importedFlags.push(flag);
-              }
-              if (importedFlags.length > 0) {
-                const flagRes = appendReflexiveElements(
-                  out,
-                  reinspected.header,
-                  reinspected.tagIndex,
-                  curScnrOff + 0x36c,
-                  Buffer.concat(importedFlags),
-                  importedFlags.length,
-                );
-                out = flagRes.buffer;
-                reinspected.header = flagRes.header;
-              }
+        // Ensure multiplayer netgame flags (0x378) has valid CTF (Red=0, Blue=1), Oddball, KOTH, and Race flags
+        const netgameFlagsCount = out.readUInt32LE(curScnrOff + 0x378);
+        if (netgameFlagsCount === 0) {
+          const pslRefl = decodeReflexive(out, curScnrOff + 0x354);
+          let redX = (srcWorldBounds[0] + srcWorldBounds[3]) / 2 - 4.0;
+          let redY = (srcWorldBounds[1] + srcWorldBounds[4]) / 2;
+          let redZ = srcWorldBounds[2] + 0.5;
+          let blueX = (srcWorldBounds[0] + srcWorldBounds[3]) / 2 + 4.0;
+          let blueY = redY;
+          let blueZ = redZ;
+          if (pslRefl.count > 0) {
+            const pslOff = resolvePointer(
+              pslRefl.pointerLow,
+              reinspected.header.tagDataOffset,
+              reinspected.tagIndex.baseMemoryAddress,
+            );
+            redX = out.readFloatLE(pslOff + 0) + 1.5;
+            redY = out.readFloatLE(pslOff + 4);
+            redZ = out.readFloatLE(pslOff + 8);
+            const secondIdx = pslRefl.count > 1 ? 1 : 0;
+            const bOff = pslOff + secondIdx * 52;
+            blueX = out.readFloatLE(bOff + 0) - 1.5;
+            blueY = out.readFloatLE(bOff + 4) + (secondIdx === 0 ? 4.0 : 0);
+            blueZ = out.readFloatLE(bOff + 8);
+            if (Math.hypot(blueX - redX, blueY - redY) < 2.0) {
+              blueX = redX + 4.0;
             }
           }
+          const midX = (redX + blueX) / 2;
+          const midY = (redY + blueY) / 2;
+          const midZ = (redZ + blueZ) / 2;
+          const makeNetgameFlag = (x: number, y: number, z: number, type: number, team: number): Buffer => {
+            const flag = Buffer.alloc(148);
+            flag.writeFloatLE(x, 0);
+            flag.writeFloatLE(y, 4);
+            flag.writeFloatLE(z, 8);
+            flag.writeFloatLE(0, 12);
+            flag.writeInt16LE(type, 16);
+            flag.writeInt16LE(team, 18);
+            return flag;
+          };
+          const generatedFlags: Buffer[] = [
+            makeNetgameFlag(redX, redY, redZ, 0, 0), // CTF Flag - Red Team (0)
+            makeNetgameFlag(blueX, blueY, blueZ, 0, 1), // CTF Flag - Blue Team (1)
+            makeNetgameFlag(midX, midY, midZ, 2, 0), // Oddball Spawn (type 2, team 0)
+            makeNetgameFlag(midX - 2.0, midY - 2.0, midZ, 3, 0), // Hill Flag 0
+            makeNetgameFlag(midX + 2.0, midY - 2.0, midZ, 3, 0), // Hill Flag 1
+            makeNetgameFlag(midX + 2.0, midY + 2.0, midZ, 3, 0), // Hill Flag 2
+            makeNetgameFlag(midX - 2.0, midY + 2.0, midZ, 3, 0), // Hill Flag 3
+            makeNetgameFlag(redX, redY, redZ, 4, 0), // Race Track 0
+            makeNetgameFlag(blueX, blueY, blueZ, 4, 1), // Race Track 1
+          ];
+          const flagRes = appendReflexiveElements(
+            out,
+            reinspected.header,
+            reinspected.tagIndex,
+            curScnrOff + 0x378,
+            Buffer.concat(generatedFlags),
+            generatedFlags.length,
+          );
+          out = flagRes.buffer;
+          reinspected.header = flagRes.header;
         }
       }
 
@@ -1137,9 +1448,25 @@ export function performBspSwap(
       if (shouldImportObjects || shouldImportVehicles) {
         const targetScnrEntry = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
         if (targetScnrEntry) {
-          const [minX, minY, minZ, maxX, maxY, maxZ] = srcWorldBounds;
+          const selectedBspBoundsList = srcIndices
+            .map((idx) => sourceBsps[idx]?.worldBounds)
+            .filter((b): b is [number, number, number, number, number, number] => Boolean(b));
+          if (selectedBspBoundsList.length === 0) {
+            selectedBspBoundsList.push(srcWorldBounds);
+          }
+          const isWithinSelectedBspBounds = (posX: number, posY: number, posZ: number, margin = 20.0): boolean =>
+            selectedBspBoundsList.some(
+              ([bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ]) =>
+                posX >= bMinX - margin &&
+                posX <= bMaxX + margin &&
+                posY >= bMinY - margin &&
+                posY <= bMaxY + margin &&
+                posZ >= bMinZ - margin &&
+                posZ <= bMaxZ + margin,
+            );
+
           // 1. Scenery Palette & Placed Scenery
-          if (shouldImportObjects && srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
+          if (shouldImportScenery && srcSceneryPalCount > 0 && srcPlacedSceneryCount > 0) {
             const donorToTargetScenPal = new Map<number, number>();
             for (let i = 0; i < srcSceneryPalCount; i++) {
               const entryOff = srcSceneryPalOffset + i * 48;
@@ -1162,33 +1489,39 @@ export function performBspSwap(
             }
 
             const validPlaced: Buffer[] = [];
+            const seenScenKeys = new Set<string>();
             for (let i = 0; i < srcPlacedSceneryCount; i++) {
               const sOff = srcPlacedSceneryOffset + i * 72;
               const donorPalIdx = sourceBuffer.readInt16LE(sOff + 0);
               const targetPalIdx = donorToTargetScenPal.get(donorPalIdx);
               if (targetPalIdx !== undefined) {
-                if (options.filterObjectsToBspBounds) {
-                  const posX = sourceBuffer.readFloatLE(sOff + 8);
-                  const posY = sourceBuffer.readFloatLE(sOff + 12);
-                  const posZ = sourceBuffer.readFloatLE(sOff + 16);
-                  const margin = 20.0;
-                  if (
-                    posX < minX - margin || posX > maxX + margin ||
-                    posY < minY - margin || posY > maxY + margin ||
-                    posZ < minZ - margin || posZ > maxZ + margin
-                  ) {
-                    continue;
-                  }
+                const posX = sourceBuffer.readFloatLE(sOff + 8);
+                const posY = sourceBuffer.readFloatLE(sOff + 12);
+                const posZ = sourceBuffer.readFloatLE(sOff + 16);
+                if (options.filterObjectsToBspBounds && !isWithinSelectedBspBounds(posX, posY, posZ, 20.0)) {
+                  continue;
                 }
+                const dedupeKey = `${targetPalIdx}:${Math.round(posX * 10)}:${Math.round(posY * 10)}:${Math.round(posZ * 10)}`;
+                if (seenScenKeys.has(dedupeKey)) continue;
+                seenScenKeys.add(dedupeKey);
+
                 const sBytes = Buffer.alloc(72);
                 sourceBuffer.copy(sBytes, 0, sOff, sOff + 72);
                 sBytes.writeInt16LE(targetPalIdx, 0);
                 sBytes.writeInt16LE(-1, 2);
+                sBytes.writeUInt16LE(0, 4); // not placed = 0 (spawn immediately)
+                sBytes.writeUInt16LE(0, 30); // bsp policy = 0 (auto from leaves)
+                sBytes.writeUInt16LE(0, 32); // manual bsp flags = 0
                 validPlaced.push(sBytes);
               }
             }
 
             if (validPlaced.length > 0) {
+              // In multi-BSP merge mode, cap imported scenery to 600 items so Cluster 0's active object pool never overflows
+              const cappedScenery =
+                srcIndices.length > 1 && shouldMergeMultiBsp && validPlaced.length > 600
+                  ? validPlaced.slice(0, 600)
+                  : validPlaced;
               const curScnrOff = resolveTagDataPointer(
                 targetScnrEntry.tagDataPointerOrResourceIndex,
                 reinspected.header,
@@ -1199,21 +1532,26 @@ export function performBspSwap(
                 reinspected.header,
                 reinspected.tagIndex,
                 curScnrOff + 0x210,
-                Buffer.concat(validPlaced),
-                validPlaced.length,
+                Buffer.concat(cappedScenery),
+                cappedScenery.length,
               );
               out = appendRes.buffer;
               reinspected.header = appendRes.header;
-              importedScenery = validPlaced.length;
+              importedScenery = cappedScenery.length;
             }
           }
 
           // 2. Vehicle Palette & Placed Vehicles
           if (shouldImportVehicles && srcVehiclePalCount > 0 && srcPlacedVehiclesCount > 0) {
             const donorToTargetVehPal = new Map<number, number>();
+            const donorVehIsScriptedDropship = new Set<number>();
             for (let i = 0; i < srcVehiclePalCount; i++) {
               const entryOff = srcVehiclePalOffset + i * 48;
               const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
+              const donorPath = srcTagIndex.entries[donorTagId & 0xffff]?.path ?? '';
+              if (/lifepod|c_dropship|pelican/i.test(donorPath)) {
+                donorVehIsScriptedDropship.add(i);
+              }
               const targetTagId = tagIdMap.get(donorTagId) ?? tagIdMap.get(donorTagId & 0xffff);
               if (targetTagId !== undefined && targetTagId !== 0xffffffff) {
                 const palRes = ensurePaletteEntry(
@@ -1232,29 +1570,34 @@ export function performBspSwap(
             }
 
             const validVehPlaced: Buffer[] = [];
+            const seenVehKeys = new Set<string>();
             for (let i = 0; i < srcPlacedVehiclesCount; i++) {
               const vOff = srcPlacedVehiclesOffset + i * 120;
               const donorPalIdx = sourceBuffer.readInt16LE(vOff + 0);
+              const donorFlags = sourceBuffer.readUInt16LE(vOff + 4);
+              // Skip non-placed scripted campaign dropships/lifepods (`not placed automatically` flag bit 0)
+              if ((donorFlags & 1) !== 0 && donorVehIsScriptedDropship.has(donorPalIdx)) {
+                continue;
+              }
               const targetPalIdx = donorToTargetVehPal.get(donorPalIdx);
               if (targetPalIdx !== undefined) {
-                if (options.filterObjectsToBspBounds) {
-                  const posX = sourceBuffer.readFloatLE(vOff + 8);
-                  const posY = sourceBuffer.readFloatLE(vOff + 12);
-                  const posZ = sourceBuffer.readFloatLE(vOff + 16);
-                  const margin = 20.0;
-                  if (
-                    posX < minX - margin || posX > maxX + margin ||
-                    posY < minY - margin || posY > maxY + margin ||
-                    posZ < minZ - margin || posZ > maxZ + margin
-                  ) {
-                    continue;
-                  }
+                const posX = sourceBuffer.readFloatLE(vOff + 8);
+                const posY = sourceBuffer.readFloatLE(vOff + 12);
+                const posZ = sourceBuffer.readFloatLE(vOff + 16);
+                if (options.filterObjectsToBspBounds && !isWithinSelectedBspBounds(posX, posY, posZ, 20.0)) {
+                  continue;
                 }
+                const dedupeKey = `${targetPalIdx}:${Math.round(posX * 10)}:${Math.round(posY * 10)}:${Math.round(posZ * 10)}`;
+                if (seenVehKeys.has(dedupeKey)) continue;
+                seenVehKeys.add(dedupeKey);
+
                 const vBytes = Buffer.alloc(120);
                 sourceBuffer.copy(vBytes, 0, vOff, vOff + 120);
                 vBytes.writeInt16LE(targetPalIdx, 0);
                 vBytes.writeInt16LE(-1, 2);
                 vBytes.writeUInt16LE(0, 4); // not placed = 0 (spawn immediately)
+                vBytes.writeUInt16LE(0, 30); // bsp policy = 0
+                vBytes.writeUInt16LE(0, 32); // manual bsp flags = 0
                 vBytes.writeUInt16LE(0x0f0f, 90); // multiplayer spawn flags = all gametypes
                 validVehPlaced.push(vBytes);
               }
@@ -1281,8 +1624,9 @@ export function performBspSwap(
           }
 
           // 3. Machine Palette & Placed Machines (Doors, Bridges)
-          if (shouldImportObjects && srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
+          if (shouldImportMachines && srcMachinePalCount > 0 && srcPlacedMachinesCount > 0) {
             const donorToTargetMachPal = new Map<number, number>();
+            const makeAutomatic = options.makeDoorsAutomatic !== false;
             for (let i = 0; i < srcMachinePalCount; i++) {
               const entryOff = srcMachinePalOffset + i * 48;
               const donorTagId = sourceBuffer.readUInt32LE(entryOff + 12);
@@ -1300,42 +1644,123 @@ export function performBspSwap(
                 out = palRes.buffer;
                 reinspected.header = palRes.header;
                 donorToTargetMachPal.set(i, palRes.paletteIndex);
+
+                // Ensure harvested door device_machine tags have machine_type = 0 (door), automatic_activation_radius >= 2.25,
+                // positive door_open_time, and responsive position velocity/acceleration for proximity operation in OpenCE
+                if (makeAutomatic) {
+                  const machEntry = reinspected.tagIndex.entries[targetTagId & 0xffff];
+                  if (machEntry && !machEntry.isExternal) {
+                    try {
+                      const machOff = resolveTagDataPointer(
+                        machEntry.tagDataPointerOrResourceIndex,
+                        reinspected.header,
+                        reinspected.tagIndex.baseMemoryAddress,
+                      );
+                      const lowerPath = machEntry.path.toLowerCase();
+                      const isDoorLike =
+                        /door|airlock|gate|shutter|hatch/i.test(lowerPath) &&
+                        !/closed|half|bashed|holo|casket|display|light|button|switch/i.test(lowerPath);
+                      const hasAnimGraph =
+                        machOff >= 0 &&
+                        machOff + 804 <= out.length &&
+                        out.readUInt32LE(machOff + 56 + 12) !== 0xffffffff;
+                      if (machOff >= 0 && machOff + 804 <= out.length && (isDoorLike || out.readInt16LE(machOff + 656) === 0)) {
+                        if (hasAnimGraph) {
+                          out.writeInt16LE(0, machOff + 656); // machine type = 0 (_machine_type_door)
+                          const curRad = out.readFloatLE(machOff + 540);
+                          if (!(curRad >= 2.25)) {
+                            out.writeFloatLE(2.25, machOff + 540); // automatic activation radius
+                          }
+                          const posTrans = out.readFloatLE(machOff + 392);
+                          const rtPosVel = out.readFloatLE(machOff + 648);
+                          if (!(posTrans >= 0.1 && posTrans <= 2.5) || !(rtPosVel >= 0.013)) {
+                            out.writeFloatLE(0.65, machOff + 392); // position transition time (s)
+                            out.writeFloatLE(0.15, machOff + 396); // position acceleration time (s)
+                            out.writeFloatLE(0.2222222, machOff + 644); // runtime max powered position acceleration
+                            out.writeFloatLE(1.0 / (0.65 * 30.0), machOff + 648); // runtime max powered position velocity
+                          }
+                          if (!(out.readFloatLE(machOff + 632) > 0)) {
+                            out.writeFloatLE(1.0, machOff + 628);
+                            out.writeFloatLE(1.0, machOff + 632);
+                          }
+                        }
+                        const openTime = out.readFloatLE(machOff + 660);
+                        if (!(openTime >= 3.0)) {
+                          out.writeFloatLE(3.0, machOff + 660);
+                          out.writeUInt32LE(90, machOff + 800);
+                        }
+                      }
+                    } catch {
+                      // non-fatal
+                    }
+                  }
+                }
+              }
+            }
+
+            // Ensure a powered ScenarioDeviceGroup (initial value = 1.0) exists so imported doors have power in-game
+            let powerGroupIdx = -1;
+            if (makeAutomatic) {
+              const scnrOffForDg = resolveTagDataPointer(
+                targetScnrEntry.tagDataPointerOrResourceIndex,
+                reinspected.header,
+                reinspected.tagIndex.baseMemoryAddress,
+              );
+              const scnrDef = resolveStruct('Scenario');
+              const dgField = scnrDef.fields.find((f) => f.name === 'device groups');
+              if (dgField) {
+                const dgReflOff = scnrOffForDg + dgField.offset;
+                const dgRefl = decodeReflexive(out, dgReflOff);
+                if (dgRefl.count > 0) {
+                  const dgBase = resolvePointer(dgRefl.pointerLow, reinspected.header.tagDataOffset, reinspected.tagIndex.baseMemoryAddress);
+                  for (let i = 0; i < dgRefl.count; i++) {
+                    if (out.readFloatLE(dgBase + i * 52 + 32) >= 0.99) {
+                      powerGroupIdx = i;
+                      break;
+                    }
+                  }
+                }
+                if (powerGroupIdx < 0) {
+                  const dgBytes = Buffer.alloc(52, 0);
+                  dgBytes.write('auto_door_power', 0, 'ascii');
+                  dgBytes.writeFloatLE(1.0, 32);
+                  const dgApp = appendReflexiveElements(out, reinspected.header, reinspected.tagIndex, dgReflOff, dgBytes, 1);
+                  out = dgApp.buffer;
+                  reinspected.header = dgApp.header;
+                  powerGroupIdx = dgApp.startIndex;
+                }
               }
             }
 
             const validMachPlaced: Buffer[] = [];
-            const makeAutomatic = options.makeDoorsAutomatic !== false;
+            const seenMachKeys = new Set<string>();
             for (let i = 0; i < srcPlacedMachinesCount; i++) {
               const mOff = srcPlacedMachinesOffset + i * 64;
               const donorPalIdx = sourceBuffer.readInt16LE(mOff + 0);
               const targetPalIdx = donorToTargetMachPal.get(donorPalIdx);
               if (targetPalIdx !== undefined) {
-                if (options.filterObjectsToBspBounds) {
-                  const posX = sourceBuffer.readFloatLE(mOff + 8);
-                  const posY = sourceBuffer.readFloatLE(mOff + 12);
-                  const posZ = sourceBuffer.readFloatLE(mOff + 16);
-                  const margin = 20.0;
-                  if (
-                    posX < minX - margin || posX > maxX + margin ||
-                    posY < minY - margin || posY > maxY + margin ||
-                    posZ < minZ - margin || posZ > maxZ + margin
-                  ) {
-                    continue;
-                  }
+                const posX = sourceBuffer.readFloatLE(mOff + 8);
+                const posY = sourceBuffer.readFloatLE(mOff + 12);
+                const posZ = sourceBuffer.readFloatLE(mOff + 16);
+                if (options.filterObjectsToBspBounds && !isWithinSelectedBspBounds(posX, posY, posZ, 20.0)) {
+                  continue;
                 }
+                const dedupeKey = `${targetPalIdx}:${Math.round(posX * 10)}:${Math.round(posY * 10)}:${Math.round(posZ * 10)}`;
+                if (seenMachKeys.has(dedupeKey)) continue;
+                seenMachKeys.add(dedupeKey);
+
                 const mBytes = Buffer.alloc(64);
                 sourceBuffer.copy(mBytes, 0, mOff, mOff + 64);
                 mBytes.writeInt16LE(targetPalIdx, 0);
                 mBytes.writeInt16LE(-1, 2);
-                mBytes.writeInt16LE(-1, 40);
+                mBytes.writeUInt16LE(0, 4); // not placed = 0 (spawn immediately)
+                mBytes.writeUInt16LE(0, 30); // bsp policy = 0
+                mBytes.writeUInt16LE(0, 32); // manual bsp flags = 0
+                mBytes.writeInt16LE(makeAutomatic ? powerGroupIdx : -1, 40);
                 mBytes.writeInt16LE(-1, 42);
                 if (makeAutomatic) {
-                  let devFlags = mBytes.readUInt32LE(44);
-                  devFlags &= ~1;
-                  mBytes.writeUInt32LE(devFlags, 44);
-                  let machFlags = mBytes.readUInt32LE(48);
-                  machFlags &= ~1;
-                  mBytes.writeUInt32LE(machFlags, 48);
+                  mBytes.writeUInt32LE(0, 44); // device flags = 0 (powered & ready)
+                  mBytes.writeUInt32LE(4, 48); // machine flags = 4 (never appears locked, operates automatically)
                 }
                 validMachPlaced.push(mBytes);
               }
@@ -1414,6 +1839,16 @@ export function performBspSwap(
       // runtime decals reflexive at 0x258: count = 0, pointerLow = 0
       out.writeUInt32LE(0, bspRootFileOffset + 0x258);
       out.writeUInt32LE(0, bspRootFileOffset + 0x25c);
+      // Also reset first_runtime_decal_index = -1 and runtime_decal_count = 0 on all clusters (at root + 0x134)
+      const clCount = out.readUInt32LE(bspRootFileOffset + 0x134);
+      const clPtr = out.readUInt32LE(bspRootFileOffset + 0x138);
+      const clBase = dstBsp.bspStart + (clPtr - srcBspAddress);
+      if (clCount > 0 && clBase >= dstBsp.bspStart && clBase + clCount * 104 <= dstBsp.bspStart + srcBspSize) {
+        for (let c = 0; c < clCount; c++) {
+          out.writeInt16LE(-1, clBase + c * 104 + 0x0c);
+          out.writeInt16LE(0, clBase + c * 104 + 0x0e);
+        }
+      }
       strippedDecals = true;
     }
   }
@@ -1421,12 +1856,14 @@ export function performBspSwap(
   // 6. Relocate player spawns and netgame equipment if requested
   let relocatedSpawns = 0;
   if (options.relocateGroundObjects ?? true) {
-    const minX = srcWorldBounds[0];
-    const minY = srcWorldBounds[1];
-    const minZ = srcWorldBounds[2];
-    const maxX = srcWorldBounds[3];
-    const maxY = srcWorldBounds[4];
-    const maxZ = srcWorldBounds[5];
+    // Use the first BSP's bounds in separate multi-BSP mode so spawns sit inside BSP #0 on startup
+    const spawnBounds = srcIndices.length > 1 && !shouldMergeMultiBsp ? srcBsp.worldBounds : srcWorldBounds;
+    const minX = spawnBounds[0];
+    const minY = spawnBounds[1];
+    const minZ = spawnBounds[2];
+    const maxX = spawnBounds[3];
+    const maxY = spawnBounds[4];
+    const maxZ = spawnBounds[5];
     const defaultGroundZ = minZ + 0.5;
 
     const latestTagDataOffset = reinspected.header.tagDataOffset;
@@ -1493,8 +1930,398 @@ export function performBspSwap(
         if (changed) relocatedSpawns++;
       }
     }
+
+    // Netgame flags at 0x378 (CTF flags, Oddball, Hill, Race points)
+    const flagsReflexive = decodeReflexive(out, latestScnrOffset + 0x378);
+    if (flagsReflexive.count > 0) {
+      const flagSize = 148; // ScenarioNetgameFlag struct
+      const flagsOffset = latestTagDataOffset + (flagsReflexive.pointerLow - latestBaseAddr);
+      let ctfCount = 0;
+      for (let f = 0; f < flagsReflexive.count; f++) {
+        const fOff = flagsOffset + f * flagSize;
+        let curX = out.readFloatLE(fOff + 0);
+        let curY = out.readFloatLE(fOff + 4);
+        let curZ = out.readFloatLE(fOff + 8);
+        if (curX < minX || curX > maxX) {
+          curX = Math.min(Math.max(curX, minX + 2), maxX - 2);
+          out.writeFloatLE(curX, fOff + 0);
+        }
+        if (curY < minY || curY > maxY) {
+          curY = Math.min(Math.max(curY, minY + 2), maxY - 2);
+          out.writeFloatLE(curY, fOff + 4);
+        }
+        if (curZ < minZ || curZ > maxZ) {
+          curZ = defaultGroundZ;
+          out.writeFloatLE(curZ, fOff + 8);
+        }
+        const flagType = out.readInt16LE(fOff + 16);
+        if (flagType === 0) {
+          // Ensure first CTF flag is Red (0), second is Blue (1), and any extras become Hill flags (3)
+          if (ctfCount === 0) {
+            out.writeInt16LE(0, fOff + 18);
+          } else if (ctfCount === 1) {
+            out.writeInt16LE(1, fOff + 18);
+          } else {
+            out.writeInt16LE(3, fOff + 16); // Hill flag
+            out.writeInt16LE(0, fOff + 18);
+          }
+          ctfCount++;
+        }
+      }
+    }
   }
 
+  // 7. If multiple BSPs were selected with `mergeMultipleBsps === false`, append each additional donor BSP sequentially in `scnr.structure_bsps`
+  if (srcIndices.length > 1 && !shouldMergeMultiBsp) {
+    const CE_BSP_CACHE_CEILING = 0x41b40000;
+    let cumulativeBspEnd = dstBsp.bspStart + srcBspSize;
+
+    for (let extraIdx = 1; extraIdx < srcIndices.length; extraIdx++) {
+      const donorBspInfo = sourceBsps[srcIndices[extraIdx]];
+      if (!donorBspInfo) continue;
+
+      let extraBspBytes = Buffer.from(
+        sourceBuffer.subarray(donorBspInfo.bspStart, donorBspInfo.bspStart + donorBspInfo.bspSize),
+      );
+      const extraPad = (512 - (extraBspBytes.length % 512)) % 512;
+      if (extraPad > 0) {
+        extraBspBytes = Buffer.concat([extraBspBytes, Buffer.alloc(extraPad, 0)]);
+      }
+      const extraBspSize = extraBspBytes.length;
+      const extraCeiling =
+        extraBspSize <= 17_616_076 && targetInspected.header.tagDataSize + extraBspSize + 1_500_000 <= 23 * 1024 * 1024
+          ? 0x41b40000
+          : 0x48440000;
+      let extraBspAddress = donorBspInfo.bspAddress;
+      let rebasedExtraAddr = extraBspAddress;
+      if (extraBspAddress + extraBspSize > extraCeiling) {
+        rebasedExtraAddr = (extraCeiling - extraBspSize) & ~511;
+      }
+      rebaseStructureBspPointers(extraBspBytes, extraBspAddress, rebasedExtraAddr);
+      extraBspAddress = rebasedExtraAddr;
+
+      const extraMetaPtr = extraBspBytes.readUInt32LE(0);
+      const extraRootRel = extraMetaPtr - extraBspAddress;
+      if (extraRootRel >= 0 && extraRootRel + 0x260 <= extraBspSize) {
+        if (shouldStripDobc) {
+          extraBspBytes.writeUInt32LE(0, extraRootRel + 0x24c);
+          extraBspBytes.writeUInt32LE(0, extraRootRel + 0x250);
+        }
+        if (shouldStripDecals) {
+          extraBspBytes.writeUInt32LE(0, extraRootRel + 0x258);
+          extraBspBytes.writeUInt32LE(0, extraRootRel + 0x25c);
+          const clCount = extraBspBytes.readUInt32LE(extraRootRel + 0x134);
+          const clPtr = extraBspBytes.readUInt32LE(extraRootRel + 0x138);
+          const clRel = clPtr - extraBspAddress;
+          if (clCount > 0 && clRel >= 0 && clRel + clCount * 104 <= extraBspSize) {
+            for (let c = 0; c < clCount; c++) {
+              extraBspBytes.writeInt16LE(-1, clRel + c * 104 + 0x0c);
+              extraBspBytes.writeInt16LE(0, clRel + c * 104 + 0x0e);
+            }
+          }
+        }
+      }
+
+      // Insert extraBspBytes sequentially at cumulativeBspEnd (before tagDataOffset)
+      const insertAt = cumulativeBspEnd;
+      cumulativeBspEnd += extraBspSize;
+      const curTagDataOffset = out.readUInt32LE(0x10);
+      const nextTagDataOffset = curTagDataOffset + extraBspSize;
+      const expanded = Buffer.concat([
+        out.subarray(0, insertAt),
+        extraBspBytes,
+        out.subarray(insertAt),
+      ]);
+      expanded.writeUInt32LE(expanded.length >>> 0, 0x08);
+      expanded.writeUInt32LE(nextTagDataOffset >>> 0, 0x10);
+      const curModelDataOff = expanded.readUInt32LE(nextTagDataOffset + 0x14);
+      expanded.writeUInt32LE((curModelDataOff + extraBspSize) >>> 0, nextTagDataOffset + 0x14);
+
+      const reAfterInsert = inspectCustomEditionMap(expanded);
+      if (reAfterInsert.status === 'ok') {
+        shiftExistingRawDataOffsets(expanded, nextTagDataOffset, reAfterInsert.tagIndex, insertAt, extraBspSize);
+        reinspected = reAfterInsert;
+      }
+      out = expanded;
+
+      // Rewrite TagDependencies directly in `out` at `insertAt` using the real `nextTagDataOffset`
+      if (extraRootRel >= 0 && extraRootRel < extraBspSize) {
+        rewriteBspDependencies(
+          out,
+          'ScenarioStructureBSP',
+          insertAt + extraRootRel,
+          insertAt,
+          extraBspSize,
+          extraBspAddress,
+          tagIdMap,
+          new Set<number>(),
+          nextTagDataOffset,
+        );
+      }
+
+      // Allocate a distinct sbsp TagIndex entry so each ScenarioBSP[extraIdx] has a unique tagId and path
+      let newSbspTagId = dstBsp.tagId;
+      try {
+        const baseCandidatePath = donorBspInfo.path || `levels\\bsp_${extraIdx}`;
+        const uniquePath = reinspected.tagIndex.entries.some((e) => e.path === baseCandidatePath)
+          ? `${baseCandidatePath}_bsp_${extraIdx}`
+          : baseCandidatePath;
+        const dupRes = duplicateTagInMap(
+          out,
+          reinspected.header,
+          reinspected.tagIndex,
+          dstBsp.tagId & 0xffff,
+          uniquePath,
+        );
+        out = dupRes.buffer;
+        newSbspTagId = dupRes.newTagId;
+        const reAfterSlot = inspectCustomEditionMap(out);
+        if (reAfterSlot.status === 'ok') reinspected = reAfterSlot;
+      } catch {
+        // Fallback to existing sbsp tagId if slot allocation fails
+      }
+
+      // Append a 32-byte ScenarioBSP entry to scnr.structure_bsps (offset 0x5a4)
+      const scnrEntryNow = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+      if (scnrEntryNow) {
+        const scnrOffNow = resolveTagDataPointer(
+          scnrEntryNow.tagDataPointerOrResourceIndex,
+          reinspected.header,
+          reinspected.tagIndex.baseMemoryAddress,
+        );
+        const curTagOff = out.readUInt32LE(0x10);
+        const sbspEntryOff = curTagOff + 0x28 + (newSbspTagId & 0xffff) * 32;
+        const sbspPathPtr = sbspEntryOff + 0x14 <= out.length ? out.readUInt32LE(sbspEntryOff + 0x10) : 0;
+
+        const elemBuf = Buffer.alloc(32, 0);
+        elemBuf.writeUInt32LE(insertAt >>> 0, 0); // bsp start
+        elemBuf.writeUInt32LE(extraBspSize >>> 0, 4); // bsp size
+        elemBuf.writeUInt32LE(extraBspAddress >>> 0, 8); // bsp address
+        elemBuf.writeUInt32LE(0x73627370, 16); // 'sbsp' fourCC
+        elemBuf.writeUInt32LE(sbspPathPtr >>> 0, 20); // path pointer
+        elemBuf.writeUInt32LE(0, 24);
+        elemBuf.writeUInt32LE(newSbspTagId >>> 0, 28); // tagId
+        const appendBspRes = appendReflexiveElements(
+          out,
+          reinspected.header,
+          reinspected.tagIndex,
+          scnrOffNow + 0x5a4,
+          elemBuf,
+          1,
+        );
+        out = appendBspRes.buffer;
+        const reAfterAppend = inspectCustomEditionMap(out);
+        if (reAfterAppend.status === 'ok') reinspected = reAfterAppend;
+      }
+    }
+  }
+
+  // 8. Auto-add directional transition trigger volumes & HaloScript to activate/switch BSPs based on `effectiveScriptMode`
+  const shouldGenerateBspScript = !shouldMergeMultiBsp && effectiveScriptMode !== 'none';
+  if (shouldGenerateBspScript) {
+    const finalBsps = getMapBsps(out);
+    const totalBspCount = Math.max(1, finalBsps.length);
+    const transitionPairs: Array<{ a: number; b: number; trigAtoB: string; trigBtoA: string }> = [];
+
+    if ((effectiveScriptMode === 'switch' || effectiveScriptMode === 'activate_all') && totalBspCount > 1) {
+      // Analyze shared 3D transition corridor geometry between BSPs to place non-overlapping directional trigger volumes
+      const q20 = (v: number) => Math.round(v * 5);
+      const bspCells: Array<Map<string, { x: number; y: number; z: number }>> = [];
+      const bspCentroids: Array<{ x: number; y: number; z: number }> = [];
+
+      for (let b = 0; b < totalBspCount; b++) {
+        const cellMap = new Map<string, { x: number; y: number; z: number }>();
+        let sumX = 0, sumY = 0, sumZ = 0, cnt = 0;
+        try {
+          const mesh = extractBspRenderMesh(out, reinspected.header, reinspected.tagIndex, b);
+          for (const sm of mesh.submeshes) {
+            for (let v = 0; v < sm.vertexCount; v++) {
+              const x = sm.vertices[v * 8 + 0]!;
+              const y = sm.vertices[v * 8 + 1]!;
+              const z = sm.vertices[v * 8 + 2]!;
+              sumX += x; sumY += y; sumZ += z; cnt++;
+              const key = `${q20(x)},${q20(y)},${q20(z)}`;
+              if (!cellMap.has(key)) cellMap.set(key, { x, y, z });
+            }
+          }
+        } catch {
+          // fallback to worldBounds center
+        }
+        const wb = finalBsps[b]?.worldBounds ?? [0, 0, 0, 0, 0, 0];
+        bspCells.push(cellMap);
+        bspCentroids.push(
+          cnt > 0
+            ? { x: sumX / cnt, y: sumY / cnt, z: sumZ / cnt }
+            : { x: 0.5 * (wb[0] + wb[3]), y: 0.5 * (wb[1] + wb[4]), z: 0.5 * (wb[2] + wb[5]) },
+        );
+      }
+
+      const trigBuffers: Buffer[] = [];
+      const createTriggerVolumeBytes = (name: string, cx: number, cy: number, cz: number, extX = 2.6, extY = 2.6, extZ = 2.4): Buffer => {
+        const buf = Buffer.alloc(96, 0);
+        buf.writeUInt16LE(1, 0); // initialized flag = 1
+        buf.write(name.slice(0, 31), 4, 'ascii');
+        buf.writeFloatLE(1.0, 48); // forward.i
+        buf.writeFloatLE(0.0, 52); // forward.j
+        buf.writeFloatLE(0.0, 56); // forward.k
+        buf.writeFloatLE(0.0, 60); // up.i
+        buf.writeFloatLE(0.0, 64); // up.j
+        buf.writeFloatLE(1.0, 68); // up.k
+        buf.writeFloatLE(cx - extX * 0.5, 72); // corner.x
+        buf.writeFloatLE(cy - extY * 0.5, 76); // corner.y
+        buf.writeFloatLE(cz - 0.4, 80);        // corner.z (slightly below floor level)
+        buf.writeFloatLE(extX, 84);            // extents.x
+        buf.writeFloatLE(extY, 88);            // extents.y
+        buf.writeFloatLE(extZ, 92);            // extents.z
+        return buf;
+      };
+
+      for (let a = 0; a < totalBspCount; a++) {
+        for (let b = a + 1; b < totalBspCount; b++) {
+          const sharedPts: Array<{ x: number; y: number; z: number }> = [];
+          for (const [k, pt] of bspCells[b]!) {
+            if (bspCells[a]!.has(k)) sharedPts.push(pt);
+          }
+          if (sharedPts.length < 10 && b !== a + 1) continue;
+
+          const cA = bspCentroids[a]!;
+          const cB = bspCentroids[b]!;
+          let dx = cB.x - cA.x;
+          let dy = cB.y - cA.y;
+          let dz = cB.z - cA.z;
+          const dLen = Math.hypot(dx, dy, dz) || 1;
+          dx /= dLen; dy /= dLen; dz /= dLen;
+
+          let ptBtoA: { x: number; y: number; z: number };
+          let ptAtoB: { x: number; y: number; z: number };
+
+          if (sharedPts.length >= 2) {
+            let mX = 0, mY = 0, mZ = 0;
+            for (const p of sharedPts) { mX += p.x; mY += p.y; mZ += p.z; }
+            mX /= sharedPts.length; mY /= sharedPts.length; mZ /= sharedPts.length;
+
+            const sorted = sharedPts
+              .map((p) => ({
+                ...p,
+                proj: (p.x - mX) * dx + (p.y - mY) * dy + (p.z - mZ) * dz,
+              }))
+              .sort((p1, p2) => p1.proj - p2.proj);
+
+            // Pick floor-level points near the 30% quantile (side A) and 70% quantile (side B)
+            const sliceA = sorted.slice(Math.floor(sorted.length * 0.22), Math.max(1, Math.floor(sorted.length * 0.38)));
+            const sliceB = sorted.slice(Math.floor(sorted.length * 0.62), Math.max(1, Math.floor(sorted.length * 0.78)));
+            const pickFloorPoint = (arr: typeof sorted, fallback: { x: number; y: number; z: number }) => {
+              if (arr.length === 0) return fallback;
+              const byZ = [...arr].sort((u, v) => u.z - v.z);
+              const floorZ = byZ[Math.floor(byZ.length * 0.15)]!.z;
+              let sx = 0, sy = 0, cnt = 0;
+              for (const p of arr) {
+                if (Math.abs(p.z - floorZ) <= 1.2) { sx += p.x; sy += p.y; cnt++; }
+              }
+              return cnt > 0 ? { x: sx / cnt, y: sy / cnt, z: floorZ } : arr[Math.floor(arr.length / 2)]!;
+            };
+            ptBtoA = pickFloorPoint(sliceA, sorted[Math.floor(sorted.length * 0.3)]!);
+            ptAtoB = pickFloorPoint(sliceB, sorted[Math.floor(sorted.length * 0.7)]!);
+          } else {
+            const midX = 0.5 * (cA.x + cB.x);
+            const midY = 0.5 * (cA.y + cB.y);
+            const midZ = 0.5 * (cA.z + cB.z);
+            ptBtoA = { x: midX - dx * 2.2, y: midY - dy * 2.2, z: midZ };
+            ptAtoB = { x: midX + dx * 2.2, y: midY + dy * 2.2, z: midZ };
+          }
+
+          // Guarantee >= 4.0 world units separation between trig_bsp_B_to_A and trig_bsp_A_to_B so they never overlap
+          const sep = Math.hypot(ptAtoB.x - ptBtoA.x, ptAtoB.y - ptBtoA.y);
+          if (sep < 4.0) {
+            const midX = 0.5 * (ptBtoA.x + ptAtoB.x);
+            const midY = 0.5 * (ptBtoA.y + ptAtoB.y);
+            const xyLen = Math.hypot(dx, dy) || 1;
+            const ux = dx / xyLen;
+            const uy = dy / xyLen;
+            ptBtoA = { x: midX - ux * 2.1, y: midY - uy * 2.1, z: ptBtoA.z };
+            ptAtoB = { x: midX + ux * 2.1, y: midY + uy * 2.1, z: ptAtoB.z };
+          }
+
+          const trigAtoB = `trig_bsp_${a}_to_${b}`;
+          const trigBtoA = `trig_bsp_${b}_to_${a}`;
+          trigBuffers.push(createTriggerVolumeBytes(trigAtoB, ptAtoB.x, ptAtoB.y, ptAtoB.z));
+          trigBuffers.push(createTriggerVolumeBytes(trigBtoA, ptBtoA.x, ptBtoA.y, ptBtoA.z));
+          transitionPairs.push({ a, b, trigAtoB, trigBtoA });
+        }
+      }
+
+      if (trigBuffers.length > 0) {
+        const scnrEntryTrig = reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+        const trigFieldDef = resolveStruct('Scenario').fields.find((f) => f.name === 'trigger volumes');
+        if (scnrEntryTrig && trigFieldDef) {
+          const scnrOffTrig = resolveTagDataPointer(
+            scnrEntryTrig.tagDataPointerOrResourceIndex,
+            reinspected.header,
+            reinspected.tagIndex.baseMemoryAddress,
+          );
+          const appendTrigRes = appendReflexiveElements(
+            out,
+            reinspected.header,
+            reinspected.tagIndex,
+            scnrOffTrig + trigFieldDef.offset,
+            Buffer.concat(trigBuffers),
+            trigBuffers.length,
+          );
+          out = appendTrigRes.buffer;
+          createdTriggerVolumes = trigBuffers.length;
+          const reAfterTrig = inspectCustomEditionMap(out);
+          if (reAfterTrig.status === 'ok') reinspected = reAfterTrig;
+        }
+      }
+    }
+
+    let hsc = `; ============================================================================\n`;
+    hsc += `; Auto-Generated Multi-BSP Activation & Directional Transition Script\n`;
+    hsc += `; ============================================================================\n`;
+    hsc += `(global short active_bsp_index 0)\n\n`;
+    for (let b = 0; b < totalBspCount; b++) {
+      hsc += `; Manually switch to Structure BSP #${b} (${finalBsps[b]?.path ?? `bsp_${b}`})\n`;
+      hsc += `(script static void activate_bsp_${b}\n  (switch_bsp ${b})\n  (set active_bsp_index ${b})\n  (sv_say "Activated Structure BSP #${b}!")\n)\n\n`;
+    }
+    if (effectiveScriptMode === 'activate_all' && totalBspCount > 1) {
+      hsc += `; Static helper: sequentially activates all ${totalBspCount} separate Structure BSPs in the scenario\n`;
+      hsc += `(script static void activate_all_bsps\n`;
+      for (let b = 0; b < totalBspCount; b++) {
+        hsc += `  (switch_bsp ${b})\n`;
+      }
+      hsc += `  (switch_bsp 0)\n  (set active_bsp_index 0)\n  (sv_say "Initialized all ${totalBspCount} Structure BSPs!")\n)\n\n`;
+      hsc += `; Startup script: activates all ${totalBspCount} Structure BSPs on map load\n`;
+      hsc += `(script startup init_activate_all_bsps\n  (activate_all_bsps)\n)\n\n`;
+    } else if (effectiveScriptMode === 'switch' && totalBspCount > 1) {
+      hsc += `; Startup script: initializes Structure BSP #0 on map load\n`;
+      hsc += `(script startup init_multi_bsp_manager\n  (switch_bsp 0)\n  (set active_bsp_index 0)\n  (sv_say "Multi-BSP Map Loaded (${totalBspCount} BSPs)! Walk through transition corridors to switch BSP zones.")\n)\n\n`;
+    }
+    if (transitionPairs.length > 0) {
+      hsc += `; Continuous directional BSP transition monitor:\n`;
+      hsc += `; Each pair of connected BSPs (A <-> B) has two non-overlapping corridor triggers:\n`;
+      hsc += `;   - trig_bsp_A_to_B (placed on B's side of the shared transition corridor)\n`;
+      hsc += `;   - trig_bsp_B_to_A (placed on A's side of the shared transition corridor)\n`;
+      hsc += `; Guards each switch with (= (structure_bsp_index) A) so standing inside a trigger never loops!\n`;
+      hsc += `(script continuous monitor_bsp_transitions\n`;
+      for (const pair of transitionPairs) {
+        hsc += `  (if (and (= (structure_bsp_index) ${pair.a}) (volume_test_objects ${pair.trigAtoB} (players)))\n`;
+        hsc += `    (begin\n      (switch_bsp ${pair.b})\n      (set active_bsp_index ${pair.b})\n      (sv_say "Transitioned to Structure BSP #${pair.b}!")\n      (sleep 30)\n    )\n  )\n`;
+        hsc += `  (if (and (= (structure_bsp_index) ${pair.b}) (volume_test_objects ${pair.trigBtoA} (players)))\n`;
+        hsc += `    (begin\n      (switch_bsp ${pair.a})\n      (set active_bsp_index ${pair.a})\n      (sv_say "Transitioned to Structure BSP #${pair.a}!")\n      (sleep 30)\n    )\n  )\n`;
+      }
+      hsc += `  (sleep 5)\n)\n`;
+    }
+    try {
+      const compiled = compileHaloScriptIntoScenario(out, hsc);
+      if (!compiled.diagnostics.some((d) => d.severity === 'error')) {
+        out = compiled.buffer;
+      }
+    } catch {
+      // Keep swapped map even if script compile encounters an unexpected edge case
+    }
+  }
+
+  const finalDelta = out.length - targetBuffer.length;
   return {
     ok: true,
     buffer: out,
@@ -1503,7 +2330,7 @@ export function performBspSwap(
       targetBspName: dstBsp.path,
       oldSize: targetBuffer.length,
       newSize: out.length,
-      delta,
+      delta: finalDelta,
       strippedDobc,
       strippedDecals,
       relocatedSpawns,
@@ -1512,6 +2339,9 @@ export function performBspSwap(
       importedScenery,
       importedVehicles,
       importedMachines,
+      removedDuplicateTriangles,
+      removedPortalBlockerTriangles,
+      createdTriggerVolumes,
     },
   };
 }

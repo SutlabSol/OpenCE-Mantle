@@ -12,7 +12,7 @@ import type {
   ResourceMapKind,
   ResourceMapStatus,
   ResourceMapPickResult,
-  PlanInjectResult,
+
   ApplyInjectResult,
   SaveMapAsResult,
   InjectionMode,
@@ -33,7 +33,7 @@ import type {
   DeleteScenarioPlacementResult,
   ScenarioPlacementsSummary,
   ScenarioObjectPlacement,
-  ScenarioObjectKind,
+
   GetReferencingTagsResult,
   GetUnicodeStringsResult,
   SetUnicodeStringResult,
@@ -330,6 +330,7 @@ export function installDevMock() {
       pc: 'C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map',
       demo: 'C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map',
       mcc: 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
+      xbox: null,
     }),
     getVersionSettings: async () => ({}),
     setVersionSettings: async () => ({ ok: true }),
@@ -679,7 +680,7 @@ export function installDevMock() {
         ],
       },
     }),
-    getReferencingTags: async (tagIndex: number): Promise<GetReferencingTagsResult> => ({
+    getReferencingTags: async (_tagIndex: number): Promise<GetReferencingTagsResult> => ({
       ok: true,
       referencingTags: [
         {
@@ -711,7 +712,7 @@ export function installDevMock() {
         ],
       },
     }),
-    setUnicodeString: async (tagIndex: number, stringIndex: number, newText: string): Promise<SetUnicodeStringResult> => {
+    setUnicodeString: async (_tagIndex: number, _stringIndex: number, newText: string): Promise<SetUnicodeStringResult> => {
       if (currentMock) {
         currentMock = { ...currentMock, modified: true };
         updatedListeners.forEach((cb) => cb(currentMock!));

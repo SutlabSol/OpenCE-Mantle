@@ -10,8 +10,6 @@ interface Props {
   onExtract: () => void;
   onExtractWholeMap: () => void;
   onInject: () => void;
-  onDeprotect?: () => void;
-  progress: { stage: string; percent: number } | null;
 }
 
 export default function Toolbar({
@@ -22,8 +20,6 @@ export default function Toolbar({
   onExtract,
   onExtractWholeMap,
   onInject,
-  onDeprotect,
-  progress,
 }: Props) {
   const [tagTestStatus, setTagTestStatus] = useState<TagTestStatus>({ state: 'stopped', telnetConnected: false });
 
@@ -59,12 +55,6 @@ export default function Toolbar({
       <ToolbarButton testid="toolbar-extract-button" label="Extract Tags" onClick={onExtract} disabled={!canExtract} />
       <ToolbarButton testid="toolbar-extract-whole-button" label="Extract Whole Map" onClick={onExtractWholeMap} disabled={!canExtractWholeMap} />
       <ToolbarButton testid="toolbar-inject-button" label="Inject Tags" onClick={onInject} disabled={!canInject} />
-      {onDeprotect && (
-        <>
-          <Divider />
-          <ToolbarButton testid="toolbar-deprotect-button" label="Deprotect / CRC32" onClick={onDeprotect} disabled={!canExtract} />
-        </>
-      )}
 
       {/* Spacer to push Play in OpenCE all the way to the right side */}
       <div style={{ flex: 1 }} />

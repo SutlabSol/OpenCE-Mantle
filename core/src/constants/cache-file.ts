@@ -103,4 +103,5 @@ export const XBOX_TAG_ARRAY_ADDRESS = XBOX_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER
  * at base + tag space - bsp size), so tag data size + the largest BSP must fit. 23 MiB on PC/CE
  * and demo (`memory/demo-converter.md`, Invader `gbx-custom`).
  */
-export const CE_TAG_SPACE_SIZE = 23 * 1024 * 1024;
+export const CE_STOCK_TAG_SPACE_SIZE = 23 * 1024 * 1024;
+export const CE_TAG_SPACE_SIZE = 128 * 1024 * 1024;

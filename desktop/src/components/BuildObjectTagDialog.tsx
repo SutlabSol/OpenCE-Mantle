@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type {
   BuildCustomObjectResult,
   CustomObjectTagGroup,
-  MapInspectionState,
+  LoadMapResult,
   TagEntrySummary,
 } from '../../electron/shared-types';
 
@@ -14,7 +14,7 @@ interface Props {
   onSelectInjectedTag?: (
     tagPath: string,
     group: CustomObjectTagGroup,
-    updatedMap?: Extract<MapInspectionState, { status: 'ok' }>,
+    updatedMap?: Extract<LoadMapResult, { status: 'ok' }>,
   ) => void;
 }
 
@@ -135,11 +135,29 @@ export default function BuildObjectTagDialog({
   const [centerOrigin, setCenterOrigin] = useState<boolean>(true);
   const [forceAutoUv, setForceAutoUv] = useState<boolean>(false);
   const [uvUnwrapMode, setUvUnwrapMode] = useState<'box' | 'per_triangle' | 'smart'>('box');
-  const [multiBoxCollision, setMultiBoxCollision] = useState<boolean>(true);
   const [collisionMode, setCollisionMode] = useState<'auto' | 'exact' | 'box'>('exact');
   const [targetCollisionFaces, setTargetCollisionFaces] = useState<number>(4096);
   const [materialType, setMaterialType] = useState<number>(7); // 7 = metal thick (for Scenery)
   const [slotMaterialTypes, setSlotMaterialTypes] = useState<number[]>([7]);
+  const [materialSymbolFlags, setMaterialSymbolFlags] = useState<{
+    twoSided: boolean;       // %
+    renderOnly: boolean;     // !
+    collisionOnly: boolean;  // @
+    largeCollideable: boolean; // *
+    climbable: boolean;      // ^
+    breakable: boolean;      // -
+    fogPlane: boolean;       // $
+    skySurface: boolean;     // +sky
+  }>({
+    twoSided: false,
+    renderOnly: false,
+    collisionOnly: false,
+    largeCollideable: false,
+    climbable: false,
+    breakable: false,
+    fogPlane: false,
+    skySurface: false,
+  });
 
   // Output options
   const [outputMode, setOutputMode] = useState<'inject' | 'ocetags' | 'both'>(
@@ -176,7 +194,7 @@ export default function BuildObjectTagDialog({
       objFilePath
         .split(/[\\/]/)
         .pop()
-        ?.replace(/\.obj$/i, '')
+        ?.replace(/\.(?:obj|jms|dae)$/i, '')
         .replace(/[^a-z0-9_-]+/gi, '_')
         .toLowerCase() || 'custom_object';
     setTagPath(`${opt.folderPrefix}\\${leaf}\\${leaf}`);
@@ -259,7 +277,7 @@ export default function BuildObjectTagDialog({
       picked.path
         .split(/[\\/]/)
         .pop()
-        ?.replace(/\.obj$/i, '') || 'custom_object';
+        ?.replace(/\.(?:obj|jms|dae)$/i, '') || 'custom_object';
     const cleanSlug = rawBase.replace(/[^a-z0-9_-]+/gi, '_').toLowerCase() || 'custom_object';
     const opt = TAG_TYPE_OPTIONS.find((o) => o.group === tagGroup)!;
     setTagPath(`${opt.folderPrefix}\\${cleanSlug}\\${cleanSlug}`);
@@ -595,6 +613,22 @@ export default function BuildObjectTagDialog({
                       </span>
                     </>
                   )}
+                  {meshSummary.meshIntegrity && (
+                    <>
+                      <span style={{ color: '#64748b' }}>|</span>
+                      <span
+                        title={`Boundary: ${meshSummary.meshIntegrity.boundaryEdges}, Non-Manifold: ${meshSummary.meshIntegrity.nonManifoldEdges}, Winding Conflicts: ${meshSummary.meshIntegrity.windingConflicts}, T-Junctions: ${meshSummary.meshIntegrity.tJunctionEdges}, Degenerate: ${meshSummary.meshIntegrity.degenerateTriangles}`}
+                        style={{
+                          color: meshSummary.meshIntegrity.isWaterTightManifold ? '#4ade80' : '#fbbf24',
+                          fontWeight: 700,
+                        }}
+                      >
+                        {meshSummary.meshIntegrity.isWaterTightManifold
+                          ? '✓ Water-Tight 2-Manifold'
+                          : `⚠ Open/T-Junctions (${meshSummary.meshIntegrity.boundaryEdges} open, ${meshSummary.meshIntegrity.tJunctionEdges} T-junc)`}
+                      </span>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -708,7 +742,6 @@ export default function BuildObjectTagDialog({
                   onChange={(e) => {
                     const next = e.target.value as 'auto' | 'exact' | 'box';
                     setCollisionMode(next);
-                    setMultiBoxCollision(next !== 'box');
                   }}
                   style={{
                     padding: '4px 8px',
@@ -825,7 +858,7 @@ export default function BuildObjectTagDialog({
                 }}
               >
                 <div style={{ fontSize: 11, fontWeight: 600, color: '#38bdf8', marginBottom: 6 }}>
-                  Blender Material Slots (<code>usemtl</code>) → Halo CE Collision Surface Materials
+                  3D Mesh Material Slots (<code>usemtl</code>) → Halo CE Collision Surface Materials
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {(meshSummary?.materialSlots?.length ? meshSummary.materialSlots : ['default (hull)']).map(
@@ -877,12 +910,121 @@ export default function BuildObjectTagDialog({
                   )}
                 </div>
                 <div style={{ fontSize: 10, color: '#71717a', marginTop: 6 }}>
-                  Assign multiple materials in Blender (e.g. <code>hull_metal</code>, <code>windshield_glass</code>,{' '}
+                  Assign multiple materials in your 3D modeling tool (e.g. <code>hull_metal</code>, <code>windshield_glass</code>,{' '}
                   <code>tire_rubber</code>) before exporting <code>.obj</code> — each triangle surface receives its own
                   Halo CE physics/impact material!
                 </div>
               </div>
             )}
+
+            {/* Milestone 21: Material Symbol Automation Checkboxes (% ! @ * ^ - $ +sky) */}
+            <div
+              style={{
+                marginTop: 10,
+                padding: '8px 10px',
+                backgroundColor: '#141923',
+                border: '1px solid #2b3c54',
+                borderRadius: 5,
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#7dd3fc' }}>
+                  Halo Surface & Shader Material Flags (Automatic Symbol Rules)
+                </span>
+                <span style={{ fontSize: 10, color: '#94a3b8', fontFamily: 'monospace' }}>
+                  {[
+                    materialSymbolFlags.twoSided && '%',
+                    materialSymbolFlags.renderOnly && '!',
+                    materialSymbolFlags.collisionOnly && '@',
+                    materialSymbolFlags.largeCollideable && '*',
+                    materialSymbolFlags.climbable && '^',
+                    materialSymbolFlags.breakable && '-',
+                    materialSymbolFlags.fogPlane && '$',
+                    materialSymbolFlags.skySurface && '+sky',
+                  ]
+                    .filter(Boolean)
+                    .join('') || 'Standard Collideable + Render'}
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 6, fontSize: 10.5, color: '#cbd5e1' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }} title="Appends % rule: renders and collides on both front and back faces (foliage, grates, thin fins)">
+                  <input
+                    type="checkbox"
+                    checked={materialSymbolFlags.twoSided}
+                    onChange={(e) => setMaterialSymbolFlags((p) => ({ ...p, twoSided: e.target.checked }))}
+                  />
+                  <span><code>%</code> Two-Sided</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }} title="Appends ! rule: visible in 3D render mesh only; ignored by collision BSP">
+                  <input
+                    type="checkbox"
+                    checked={materialSymbolFlags.renderOnly}
+                    onChange={(e) =>
+                      setMaterialSymbolFlags((p) => ({
+                        ...p,
+                        renderOnly: e.target.checked,
+                        collisionOnly: e.target.checked ? false : p.collisionOnly,
+                      }))
+                    }
+                  />
+                  <span><code>!</code> Render-Only</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }} title="Appends @ rule: invisible player/projectile collision wall">
+                  <input
+                    type="checkbox"
+                    checked={materialSymbolFlags.collisionOnly}
+                    onChange={(e) =>
+                      setMaterialSymbolFlags((p) => ({
+                        ...p,
+                        collisionOnly: e.target.checked,
+                        renderOnly: e.target.checked ? false : p.renderOnly,
+                      }))
+                    }
+                  />
+                  <span><code>@</code> Collision-Only</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }} title="Appends * rule: blocks players & vehicles while allowing projectiles through">
+                  <input
+                    type="checkbox"
+                    checked={materialSymbolFlags.largeCollideable}
+                    onChange={(e) => setMaterialSymbolFlags((p) => ({ ...p, largeCollideable: e.target.checked }))}
+                  />
+                  <span><code>*</code> Player Clip</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }} title="Appends ^ rule: marks surface as a climbable ladder plane in the collision BSP">
+                  <input
+                    type="checkbox"
+                    checked={materialSymbolFlags.climbable}
+                    onChange={(e) => setMaterialSymbolFlags((p) => ({ ...p, climbable: e.target.checked }))}
+                  />
+                  <span><code>^</code> Climbable Ladder</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }} title="Appends - rule: marks surface as breakable glass / destructible pane">
+                  <input
+                    type="checkbox"
+                    checked={materialSymbolFlags.breakable}
+                    onChange={(e) => setMaterialSymbolFlags((p) => ({ ...p, breakable: e.target.checked }))}
+                  />
+                  <span><code>-</code> Breakable Glass</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }} title="Appends $ rule: volumetric fog plane surface">
+                  <input
+                    type="checkbox"
+                    checked={materialSymbolFlags.fogPlane}
+                    onChange={(e) => setMaterialSymbolFlags((p) => ({ ...p, fogPlane: e.target.checked }))}
+                  />
+                  <span><code>$</code> Fog Plane</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer' }} title="Marks surface as +sky portal for skybox rendering">
+                  <input
+                    type="checkbox"
+                    checked={materialSymbolFlags.skySurface}
+                    onChange={(e) => setMaterialSymbolFlags((p) => ({ ...p, skySurface: e.target.checked }))}
+                  />
+                  <span><code>+sky</code> Sky Portal</span>
+                </label>
+              </div>
+            </div>
 
             {/* Optional Custom Collision Proxy OBJ */}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>

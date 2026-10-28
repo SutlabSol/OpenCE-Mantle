@@ -21,6 +21,8 @@ interface Props {
   onRenameTag?: (tag: TagEntrySummary) => void;
   /** Right-click "Duplicate Tag..." */
   onDuplicateTag?: (tag: TagEntrySummary) => void;
+  /** Right-click "Delete Tag..." */
+  onDeleteTag?: (tag: TagEntrySummary) => void;
   onOpenBitmapEditor?: (tag: TagEntrySummary) => void;
   onOpenSoundAuditor?: (tag: TagEntrySummary) => void;
   onOpenHudPreviewer?: (tag: TagEntrySummary) => void;
@@ -69,6 +71,7 @@ export default function TagBrowser({
   onFindReferences,
   onRenameTag,
   onDuplicateTag,
+  onDeleteTag,
   onOpenBitmapEditor,
   onOpenSoundAuditor,
   onOpenHudPreviewer,
@@ -704,6 +707,40 @@ export default function TagBrowser({
             style={menuItemStyle(!!contextMenuTag?.isExternal)}
           >
             Duplicate Tag...
+          </button>
+          <button
+            data-testid="tag-row-context-delete"
+            disabled={
+              contextMenuTag?.primaryClassName === 'scenario' ||
+              contextMenuTag?.primaryClassName === 'scenario_structure_bsp'
+            }
+            title={
+              contextMenuTag?.primaryClassName === 'scenario' ||
+              contextMenuTag?.primaryClassName === 'scenario_structure_bsp'
+                ? 'Cannot delete root scenario or structure BSP tag'
+                : 'Delete tag from map and null out all incoming references'
+            }
+            onClick={() => {
+              const t = contextMenuTag;
+              setContextMenu(null);
+              if (t) {
+                focusRow(t);
+                onDeleteTag?.(t);
+              }
+            }}
+            style={{
+              ...menuItemStyle(
+                contextMenuTag?.primaryClassName === 'scenario' ||
+                  contextMenuTag?.primaryClassName === 'scenario_structure_bsp',
+              ),
+              color:
+                contextMenuTag?.primaryClassName === 'scenario' ||
+                contextMenuTag?.primaryClassName === 'scenario_structure_bsp'
+                  ? 'var(--text-dim)'
+                  : '#f87171',
+            }}
+          >
+            Delete Tag...
           </button>
           <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
           <button

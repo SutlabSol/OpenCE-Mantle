@@ -1,6 +1,6 @@
 import { classifyMapLayout } from '../../core/src/map/convert/classify';
 import { CacheFileEngine } from '../../core/src/constants/cache-file';
-import { app, BrowserWindow, Menu, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, Menu, dialog, globalShortcut, ipcMain, screen, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import {
@@ -13,8 +13,14 @@ import {
   readResourceTable,
   parseAndAnalyzeObj,
   renderObjUvTemplatePng,
+  convertJmsToObjText,
+  convertColladaDaeToObjText,
+  encodeRgbaToPng,
+  parseHaloWrl,
+  analyzeHaloToolLog,
   type RandomAccessFile,
 } from '../../core/src/index';
+import { discoverSteamMccInstallations, decodeMccModManifest } from './mcc-deploy';
 import { getRecentMaps, addRecentMap } from './recent-maps';
 import { getSettings, setLastExtractDir, setResourceMapPath, setVersionResourceMaps, setOpenCeDirectory } from './settings';
 import { tagTestRunner } from './tag-test-runner';
@@ -57,6 +63,7 @@ import type {
   HaloBitmapVersion,
   BitmapIdentificationResult,
   BatchExtractMode,
+  BatchExtractFormat,
   BatchExtractPreflightResult,
   BatchExtractResult,
   FinalizeBatchExtractRequest,
@@ -81,6 +88,7 @@ import type {
   SetUnicodeStringResult,
   RenameTagResult,
   DuplicateTagResult,
+  DeleteTagResult,
   BspSwapPreflightResult,
   BspSwapOptions,
   BspSwapResult,
@@ -581,7 +589,11 @@ async function batchExtractPreflightFlow(): Promise<BatchExtractPreflightResult 
   };
 }
 
-async function startBatchExtractFlow(options: { parentDir: string; mode: BatchExtractMode }): Promise<BatchExtractResult> {
+async function startBatchExtractFlow(options: {
+  parentDir: string;
+  mode: BatchExtractMode;
+  extractFormat?: BatchExtractFormat;
+}): Promise<BatchExtractResult> {
   if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
   if (!currentMapPath || currentMapCompressed) {
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
@@ -598,7 +610,10 @@ async function startBatchExtractFlow(options: { parentDir: string; mode: BatchEx
   }
 
   const sourceMapName = currentMapScenarioName ?? path.basename(currentMapPath, '.map');
-  sendLog('info', `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode})...`);
+  sendLog(
+    'info',
+    `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode}, format: ${options.extractFormat ?? 'ocetags'})...`,
+  );
 
   const { requestId, promise } = sendWorkerRequest<BatchExtractResult>(
     {
@@ -606,6 +621,7 @@ async function startBatchExtractFlow(options: { parentDir: string; mode: BatchEx
       parentDir: options.parentDir,
       sourceMapName,
       mode: options.mode,
+      extractFormat: options.extractFormat,
       resourceMapPaths,
     },
     sendLog,
@@ -968,7 +984,9 @@ function detectDefaultResourceMapPathsFlow(): Record<HaloBitmapVersion, string |
     ],
     ce: [
       ...searchRoots.map((r) => path.join(r, 'sample_maps/custom edition/bitmaps.map')),
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE\\custom_maps\\bitmaps.map',
       'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE\\custom_maps\\bitmaps.map',
+      'C:\\Users\\LeviB\\Projects\\OpenCE-MapExp\\build\\windows\\custom_maps\\bitmaps.map',
       'C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\CUSTOM EDITION DEFAULT MAPS\\bitmaps.map',
       'C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map',
       'C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map',
@@ -995,6 +1013,7 @@ function detectDefaultResourceMapPathsFlow(): Record<HaloBitmapVersion, string |
       'D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
       'E:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map',
     ],
+    xbox: [],
   };
 
   const result: Record<HaloBitmapVersion, string | null> = {
@@ -1003,6 +1022,7 @@ function detectDefaultResourceMapPathsFlow(): Record<HaloBitmapVersion, string |
     pc: null,
     demo: null,
     mcc: null,
+    xbox: null,
   };
 
   for (const ver of Object.keys(candidates) as HaloBitmapVersion[]) {
@@ -1233,7 +1253,8 @@ async function getBitmapTextureFlow(bitmapTagId: number, imageIndex?: number): P
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const bitmapsPath =
+    resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? undefined;
   const { promise } = sendWorkerRequest<GetBitmapTextureResult>(
     { type: 'getBitmapTexture', bitmapTagId, imageIndex, bitmapsPath },
     sendLog,
@@ -1292,7 +1313,8 @@ async function getBitmapInfoFlow(tagIndex: number): Promise<GetBitmapInfoResult>
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const bitmapsPath =
+    resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? undefined;
   const { promise } = sendWorkerRequest<GetBitmapInfoResult>(
     { type: 'getBitmapInfo', tagIndex, bitmapsPath },
     sendLog,
@@ -1305,7 +1327,8 @@ async function getBitmapRgbaFlow(tagIndex: number, imageIndex: number): Promise<
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const bitmapsPath =
+    resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? undefined;
   const { promise } = sendWorkerRequest<GetBitmapRgbaResult>(
     { type: 'getBitmapRgba', tagIndex, imageIndex, bitmapsPath },
     sendLog,
@@ -1318,7 +1341,8 @@ async function exportBitmapFlow(tagIndex: number, imageIndex: number, format: 'p
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const bitmapsPath =
+    resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? undefined;
   const { promise } = sendWorkerRequest<ExportBitmapResult>(
     { type: 'exportBitmap', tagIndex, imageIndex, format, outputPath, bitmapsPath },
     sendLog,
@@ -1331,7 +1355,8 @@ async function replaceBitmapFlow(tagIndex: number, imageIndex: number, inputPath
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? undefined;
+  const bitmapsPath =
+    resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? undefined;
   const { promise } = sendWorkerRequest<ReplaceBitmapResult>(
     { type: 'replaceBitmap', tagIndex, imageIndex, inputPath, targetFormat, bitmapsPath },
     sendLog,
@@ -1369,7 +1394,8 @@ async function getSoundInfoFlow(tagIndex: number): Promise<GetSoundInfoResult> {
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const soundsPath = settings.resourceMaps.sounds ?? undefined;
+  const soundsPath =
+    resolveResourceMapsForSource(currentMapPath).soundsPath ?? settings.resourceMaps.sounds ?? undefined;
   const { promise } = sendWorkerRequest<GetSoundInfoResult>(
     { type: 'getSoundInfo', tagIndex, soundsPath },
     sendLog,
@@ -1382,7 +1408,8 @@ async function getSoundWavFlow(tagIndex: number, pitchRangeIndex: number, permut
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const soundsPath = settings.resourceMaps.sounds ?? undefined;
+  const soundsPath =
+    resolveResourceMapsForSource(currentMapPath).soundsPath ?? settings.resourceMaps.sounds ?? undefined;
   const { promise } = sendWorkerRequest<GetSoundWavResult>(
     { type: 'getSoundWav', tagIndex, pitchRangeIndex, permutationIndex, soundsPath },
     sendLog,
@@ -1400,7 +1427,8 @@ async function exportSoundFlow(
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const soundsPath = settings.resourceMaps.sounds ?? undefined;
+  const soundsPath =
+    resolveResourceMapsForSource(currentMapPath).soundsPath ?? settings.resourceMaps.sounds ?? undefined;
   const { promise } = sendWorkerRequest<ExportSoundResult>(
     { type: 'exportSound', tagIndex, pitchRangeIndex, permutationIndex, outputPath, soundsPath },
     sendLog,
@@ -1419,7 +1447,8 @@ async function replaceSoundFlow(
     return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
   }
   const settings = getSettings();
-  const soundsPath = settings.resourceMaps.sounds ?? undefined;
+  const soundsPath =
+    resolveResourceMapsForSource(currentMapPath).soundsPath ?? settings.resourceMaps.sounds ?? undefined;
   const { promise } = sendWorkerRequest<ReplaceSoundResult>(
     { type: 'replaceSound', tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat, soundsPath },
     sendLog,
@@ -1471,12 +1500,27 @@ async function pickExportDirectoryFlow(): Promise<{ path: string | null }> {
   return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
 
+function read3dMeshSourceAsObjText(filePath: string): string {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const low = filePath.toLowerCase();
+  if (low.endsWith('.jms')) {
+    return convertJmsToObjText(raw).objText;
+  }
+  if (low.endsWith('.dae')) {
+    return convertColladaDaeToObjText(raw).objText;
+  }
+  return raw;
+}
+
 async function pickObjFileFlow(): Promise<{ path: string | null }> {
   if (!mainWindow) return { path: null };
   const res = await dialog.showOpenDialog(mainWindow, {
-    title: 'Select Wavefront OBJ Mesh for Collision Analysis',
+    title: 'Select 3D Model (.obj / .jms / .dae)',
     filters: [
+      { name: '3D Models (*.obj;*.jms;*.dae)', extensions: ['obj', 'jms', 'dae'] },
       { name: 'Wavefront OBJ (*.obj)', extensions: ['obj'] },
+      { name: 'Halo CE JMS (*.jms)', extensions: ['jms'] },
+      { name: 'COLLADA DAE (*.dae)', extensions: ['dae'] },
       { name: 'All Files (*.*)', extensions: ['*'] },
     ],
     properties: ['openFile'],
@@ -1495,7 +1539,7 @@ async function analyzeCollisionObjFlow(
       if (!picked.path) return { ok: false, error: 'Cancelled' };
       p = picked.path;
     }
-    const text = fs.readFileSync(p, 'utf8');
+    const text = read3dMeshSourceAsObjText(p);
     const summary = parseAndAnalyzeObj(text, options);
     return { ok: true, summary, filePath: p };
   } catch (err) {
@@ -1515,9 +1559,9 @@ async function exportUvTemplateFlow(options: {
 }): Promise<ExportUvTemplateResult> {
   try {
     if (!options.objFilePath || !fs.existsSync(options.objFilePath)) {
-      return { ok: false, error: 'Select a valid .obj model file first.' };
+      return { ok: false, error: 'Select a valid .obj / .jms / .dae model file first.' };
     }
-    const objText = fs.readFileSync(options.objFilePath, 'utf8');
+    const objText = read3dMeshSourceAsObjText(options.objFilePath);
     const size = options.size ?? (options.previewOnly ? 512 : 1024);
     const { pngBuffer, usedAutoUv } = renderObjUvTemplatePng(objText, size, {
       scale: options.scale,
@@ -1862,6 +1906,32 @@ async function duplicateTagFlow(tagIndex: number, newPath: string): Promise<Dupl
   }
 }
 
+/** Delete a tag from the open map and scrub all incoming references to NULL_TAG_ID. */
+async function deleteTagFlow(tagIndex: number): Promise<DeleteTagResult> {
+  if (!currentMapPath) return { ok: false, code: 'NO_MAP_LOADED', message: 'No map is open.' };
+  if (currentMapCompressed) return { ok: false, code: 'COMPRESSED', message: COMPRESSED_MAP_MESSAGE };
+
+  const { promise } = sendWorkerRequest<DeleteTagResult>(
+    { type: 'deleteTag', tagIndex },
+    sendLog,
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog(
+        'info',
+        `Deleted tag #${tagIndex} "${result.deletedPath}" (${result.deletedGroup}) and scrubbed ${result.scrubbedReferencesCount} incoming reference(s) to NULL_TAG_ID (in memory). Use File > Save to write changes.`,
+      );
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Failed to delete tag: ${e.message}`);
+    return { ok: false, code: e.code ?? 'UNEXPECTED_ERROR', message: e.message };
+  }
+}
+
 async function pickBspSourceMapFlow(): Promise<{ path: string | null }> {
   if (!mainWindow) return { path: null };
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -1906,7 +1976,31 @@ const EDITION_DISPLAY_NAMES: Record<HaloBitmapVersion, string> = {
   demo: 'Halo Mac Demo (v6)',
   halomd: 'HaloMD (v7)',
   mcc: 'Halo MCC (CEA)',
+  xbox: 'Halo Xbox Retail (v5)',
 };
+
+function isResourceMapCompatibleWithEdition(
+  filePath: string | null | undefined,
+  edition: HaloBitmapVersion,
+  kind: 'bitmaps' | 'sounds',
+): boolean {
+  if (!filePath || !fs.existsSync(filePath)) return false;
+  try {
+    const stat = fs.statSync(filePath);
+    if (kind === 'bitmaps') {
+      // Custom Edition bitmaps.map is ~123 MB (1706 entries); PC/HaloMD bitmaps.map is ~317 MB (4099 entries)
+      if (edition === 'ce' && stat.size > 240 * 1024 * 1024) return false;
+      if ((edition === 'pc' || edition === 'halomd') && stat.size < 240 * 1024 * 1024) return false;
+    } else if (kind === 'sounds') {
+      // Custom Edition sounds.map is ~41 MB (752 entries); PC/HaloMD sounds.map is ~218 MB (11102 entries)
+      if (edition === 'ce' && stat.size > 120 * 1024 * 1024) return false;
+      if ((edition === 'pc' || edition === 'halomd') && stat.size < 120 * 1024 * 1024) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function resolveResourceMapsForSource(sourceFilePath: string, options?: BspSwapOptions): {
   edition: HaloBitmapVersion;
@@ -1926,49 +2020,49 @@ function resolveResourceMapsForSource(sourceFilePath: string, options?: BspSwapO
   // 1. Check user configured versionResourceMaps
   if (!bitmapsPath) {
     const userVer = settings.versionResourceMaps?.[edition];
-    if (userVer?.bitmaps && fs.existsSync(userVer.bitmaps)) {
-      bitmapsPath = userVer.bitmaps;
+    if (isResourceMapCompatibleWithEdition(userVer?.bitmaps, edition, 'bitmaps')) {
+      bitmapsPath = userVer!.bitmaps!;
     }
   }
   if (!soundsPath) {
     const userVer = settings.versionResourceMaps?.[edition];
-    if (userVer?.sounds && fs.existsSync(userVer.sounds)) {
-      soundsPath = userVer.sounds;
+    if (isResourceMapCompatibleWithEdition(userVer?.sounds, edition, 'sounds')) {
+      soundsPath = userVer!.sounds!;
     }
   }
 
-  // 2. If CE, check general resourceMaps
+  // 2. If CE, check general resourceMaps (only if actually a CE resource map!)
   if (edition === 'ce') {
-    if (!bitmapsPath && settings.resourceMaps.bitmaps && fs.existsSync(settings.resourceMaps.bitmaps)) {
+    if (!bitmapsPath && isResourceMapCompatibleWithEdition(settings.resourceMaps.bitmaps, 'ce', 'bitmaps')) {
       bitmapsPath = settings.resourceMaps.bitmaps;
     }
-    if (!soundsPath && settings.resourceMaps.sounds && fs.existsSync(settings.resourceMaps.sounds)) {
+    if (!soundsPath && isResourceMapCompatibleWithEdition(settings.resourceMaps.sounds, 'ce', 'sounds')) {
       soundsPath = settings.resourceMaps.sounds;
     }
   }
 
-  // 3. Check alongside sourceFilePath
+  // 3. Check alongside sourceFilePath (only if compatible with sourceFilePath's edition!)
   const donorDir = path.dirname(sourceFilePath);
   if (!bitmapsPath) {
     const localBmp = path.join(donorDir, 'bitmaps.map');
-    if (fs.existsSync(localBmp)) bitmapsPath = localBmp;
+    if (isResourceMapCompatibleWithEdition(localBmp, edition, 'bitmaps')) bitmapsPath = localBmp;
   }
   if (!soundsPath) {
     const localSnd = path.join(donorDir, 'sounds.map');
-    if (fs.existsSync(localSnd)) soundsPath = localSnd;
+    if (isResourceMapCompatibleWithEdition(localSnd, edition, 'sounds')) soundsPath = localSnd;
   }
 
   // 4. Check detectDefaultResourceMapPathsFlow
-  if (!bitmapsPath && defaults[edition] && fs.existsSync(defaults[edition]!)) {
+  if (!bitmapsPath && isResourceMapCompatibleWithEdition(defaults[edition], edition, 'bitmaps')) {
     bitmapsPath = defaults[edition];
   }
   // If PC edition and still not found, check HaloMD (uses identical PC bitmaps format)
-  if (!bitmapsPath && edition === 'pc' && defaults.halomd && fs.existsSync(defaults.halomd)) {
+  if (!bitmapsPath && edition === 'pc' && isResourceMapCompatibleWithEdition(defaults.halomd, 'pc', 'bitmaps')) {
     bitmapsPath = defaults.halomd;
   }
   if (!soundsPath && bitmapsPath) {
     const siblingSnd = path.join(path.dirname(bitmapsPath), 'sounds.map');
-    if (fs.existsSync(siblingSnd)) soundsPath = siblingSnd;
+    if (isResourceMapCompatibleWithEdition(siblingSnd, edition, 'sounds')) soundsPath = siblingSnd;
   }
   if (!soundsPath && edition === 'pc') {
     const pcSoundsCandidates = [
@@ -1977,7 +2071,7 @@ function resolveResourceMapsForSource(sourceFilePath: string, options?: BspSwapO
       'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\sounds.map',
     ];
     for (const p of pcSoundsCandidates) {
-      if (fs.existsSync(p)) { soundsPath = p; break; }
+      if (isResourceMapCompatibleWithEdition(p, 'pc', 'sounds')) { soundsPath = p; break; }
     }
   }
 
@@ -2273,6 +2367,24 @@ async function verifyEmbeddedDataFlow(): Promise<VerifyEmbeddedDataResult> {
   }
 }
 
+function getAppDisplayVersion(): string {
+  try {
+    const pkgPath = path.join(__dirname, '../package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      if (typeof pkg.displayVersion === 'string' && pkg.displayVersion.trim()) {
+        return pkg.displayVersion.trim();
+      }
+      if (typeof pkg.version === 'string' && pkg.version.trim()) {
+        return pkg.version.trim();
+      }
+    }
+  } catch {
+    // fallback to electron app.getVersion()
+  }
+  return app.getVersion();
+}
+
 function showAboutDialog() {
   if (!mainWindow) return;
   const pngIcon = path.join(__dirname, '../build/icon.png');
@@ -2280,7 +2392,7 @@ function showAboutDialog() {
     type: 'info',
     title: 'About',
     icon: fs.existsSync(pngIcon) ? pngIcon : undefined,
-    message: `OpenCE Mantle v${app.getVersion()}`,
+    message: `OpenCE Mantle v${getAppDisplayVersion()}`,
     detail:
       'A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\n' +
       'Format references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\n' +
@@ -2330,6 +2442,7 @@ function buildMenu() {
         { label: 'Inject Tags...', click: () => mainWindow?.webContents.send('menu:action', 'inject-tags') },
         { label: 'Verify Embedded Data...', click: () => mainWindow?.webContents.send('menu:action', 'verify-embedded-data') },
         { label: 'Swap BSP...', click: () => mainWindow?.webContents.send('menu:action', 'swap-bsp') },
+        { label: 'Compare With Another .map File...', click: () => mainWindow?.webContents.send('menu:action', 'compare-maps') },
         { type: 'separator' },
         {
           label: 'Identify Resource Maps',
@@ -2422,6 +2535,7 @@ app.whenReady().then(() => {
   ipcMain.handle('tags:setUnicodeString', (_e, tagIndex: number, stringIndex: number, newText: string) => setUnicodeStringFlow(tagIndex, stringIndex, newText));
   ipcMain.handle('tags:renameTag', (_e, tagIndex: number, newPath: string) => renameTagFlow(tagIndex, newPath));
   ipcMain.handle('tags:duplicateTag', (_e, tagIndex: number, newPath: string) => duplicateTagFlow(tagIndex, newPath));
+  ipcMain.handle('tags:deleteTag', (_e, tagIndex: number) => deleteTagFlow(tagIndex));
   ipcMain.handle('dialog:pickBspSourceMap', () => pickBspSourceMapFlow());
   ipcMain.handle('dialog:pickBspResource', async (_e, kind: 'bitmaps' | 'sounds') => {
     if (!mainWindow) return { path: null };
@@ -2575,6 +2689,8 @@ app.whenReady().then(() => {
         encounters: string[];
         recordedAnimations: string[];
       };
+      scripts?: Array<{ name: string; scriptType: string; returnType: string; rootNodeIndex: number; bodySource: string }>;
+      globals?: Array<{ name: string; type: string; initNodeIndex: number; valueSource: string }>;
     } | { ok: false; message: string }>({ type: 'decompileHaloScript' }, sendLog);
     return promise;
   });
@@ -2743,6 +2859,367 @@ app.whenReady().then(() => {
     }
     return res;
   });
+
+  ipcMain.handle(
+    'mod:exportOpenCeModFolder',
+    async (
+      _e,
+      options: {
+        rootTagIndices: number[];
+        modName: string;
+        version?: string;
+        author?: string;
+        description?: string;
+        includeDependencies?: boolean;
+        replaceTargetTagIndex?: number;
+      },
+    ) => {
+      if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+      if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+      if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+      const pick = await dialog.showOpenDialog(mainWindow, {
+        title: 'Select Output Parent Directory for OpenCE Mod Folder (creates <mod_name>/mod.toml + tags/...)',
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { ok: false, message: 'Cancelled.' };
+      }
+      const parentOutputDir = pick.filePaths[0];
+      const settings = getSettings();
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            outputDir: string;
+            modFolderName: string;
+            tagCount: number;
+            writtenFiles: string[];
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'exportOpenCeModFolder',
+          rootTagIndices: options.rootTagIndices,
+          modName: options.modName,
+          version: options.version,
+          author: options.author,
+          description: options.description,
+          includeDependencies: options.includeDependencies ?? false,
+          replaceTargetTagIndex: options.replaceTargetTagIndex,
+          parentOutputDir,
+          bitmapsPath: settings.resourceMaps.bitmaps ?? undefined,
+          soundsPath: settings.resourceMaps.sounds ?? undefined,
+          locPath: settings.resourceMaps.loc ?? undefined,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok) {
+        sendLog(
+          'info',
+          `Exported OpenCE mod folder "${res.modFolderName}" (${res.tagCount} loose tag files + mod.toml) to ${res.outputDir}`,
+        );
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'mod:importLegacyTags',
+    async (_e, sourceMode: 'file' | 'folder', injectMode: 'add' | 'swap' = 'add') => {
+      if (!currentMapPath) return { ok: false, message: 'No map is open.' };
+      if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+      if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+
+      let sourcePathLabel = '';
+      let inputPaths: string[] = [];
+
+      if (sourceMode === 'folder') {
+        const pick = await dialog.showOpenDialog(mainWindow, {
+          title: 'Select Legacy Tag Folder (legacy_tags, sample_mods, or HMT Extract folder)',
+          properties: ['openDirectory'],
+        });
+        if (pick.canceled || !pick.filePaths[0]) {
+          return { ok: false, message: 'Cancelled.' };
+        }
+        sourcePathLabel = pick.filePaths[0];
+        inputPaths = pick.filePaths;
+      } else {
+        const pick = await dialog.showOpenDialog(mainWindow, {
+          title: 'Select Legacy Tag File(s) (HEK loose tags or HMT .meta / .xml files)',
+          properties: ['openFile', 'multiSelections'],
+        });
+        if (pick.canceled || pick.filePaths.length === 0) {
+          return { ok: false, message: 'Cancelled.' };
+        }
+        sourcePathLabel = pick.filePaths[0];
+        inputPaths = pick.filePaths;
+      }
+
+      const settings = getSettings();
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            formatDetected: 'hek_loose' | 'hmt_meta_xml';
+            addedCount: number;
+            swappedCount: number;
+            reusedCount: number;
+            importedPaths: string[];
+            warnings: string[];
+            map: OpenMapSummary;
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'importLegacyTags',
+          inputPaths,
+          mode: injectMode,
+          bitmapsPath: settings.resourceMaps.bitmaps ?? undefined,
+          soundsPath: settings.resourceMaps.sounds ?? undefined,
+          locPath: settings.resourceMaps.loc ?? undefined,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send('map:updated', res.map);
+        sendLog(
+          'info',
+          `Imported legacy tags (${res.formatDetected}): +${res.addedCount} added, ${res.swappedCount} swapped, ${res.reusedCount} reused from ${sourcePathLabel}.`,
+        );
+        return { ...res, sourcePath: sourcePathLabel };
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'bitmap:replaceFromDataUrl',
+    async (_e, tagIndex: number, imageIndex: number, pngDataUrl: string, targetFormat?: number) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, code: 'NO_MAP_LOADED', message: 'No uncompressed map is open.' };
+      }
+      try {
+        const base64 = pngDataUrl.replace(/^data:image\/\w+;base64,/, '');
+        const pngBytes = new Uint8Array(Buffer.from(base64, 'base64'));
+        const settings = getSettings();
+        const { promise } = sendWorkerRequest< { ok: true; map: OpenMapSummary } | { ok: false; code: string; message: string } >(
+          {
+            type: 'replaceBitmapFromPngBytes',
+            tagIndex,
+            imageIndex,
+            pngBytes,
+            targetFormat,
+            bitmapsPath: settings.resourceMaps.bitmaps ?? undefined,
+          },
+          sendLog,
+        );
+        const res = await promise;
+        if (res.ok) {
+          setOpenMapState(res.map);
+          mainWindow?.webContents.send('map:updated', res.map);
+          sendLog('info', `Applied 3D painted texture to bitmap tag #${tagIndex} (image ${imageIndex}).`);
+        }
+        return res;
+      } catch (err) {
+        const e = err as Error & { code?: string };
+        return { ok: false, code: e.code ?? 'BITMAP_REPLACE_ERROR', message: e.message };
+      }
+    },
+  );
+
+  const resolveCustomTexturesDirectory = (): string => {
+    const baseDir = process.env.PORTABLE_EXECUTABLE_DIR
+      ? process.env.PORTABLE_EXECUTABLE_DIR
+      : app.isPackaged
+        ? path.dirname(process.execPath)
+        : process.cwd();
+    const texturesDir = path.join(baseDir, 'textures');
+    fs.mkdirSync(texturesDir, { recursive: true });
+
+    // Seed starter PNG textures if folder has no PNG/JPG files yet
+    try {
+      const existing = fs.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+      if (existing.length === 0) {
+        const presets: Array<{ name: string; fn: (x: number, y: number) => [number, number, number, number] }> = [
+          {
+            name: 'unsc_olive_armor.png',
+            fn: (x, y) => {
+              const n = ((x * 37 + y * 57) ^ (x * 13)) & 15;
+              const seam = x % 32 === 0 || y % 32 === 0 ? -18 : 0;
+              return [Math.max(0, 74 + n + seam), Math.max(0, 88 + n + seam), Math.max(0, 58 + n + seam), 255];
+            },
+          },
+          {
+            name: 'covenant_hex_plate.png',
+            fn: (x, y) => {
+              const hx = (x + ((y >> 3) & 1) * 8) % 16;
+              const hy = y % 16;
+              const edge = hx === 0 || hy === 0 ? 30 : 0;
+              return [92 + edge, 52 + edge, 148 + edge, 255];
+            },
+          },
+          {
+            name: 'forerunner_circuit_panel.png',
+            fn: (x, y) => {
+              const grid = x % 16 === 0 || y % 16 === 0 || (x + y) % 32 === 0;
+              return grid ? [56, 189, 248, 255] : [68, 78, 92, 255];
+            },
+          },
+          {
+            name: 'hazard_warning_stripes.png',
+            fn: (x, y) => {
+              const stripe = ((x + y) >> 4) & 1;
+              return stripe ? [234, 179, 8, 255] : [30, 32, 36, 255];
+            },
+          },
+          {
+            name: 'weathered_steel_grunge.png',
+            fn: (x, y) => {
+              const scratch = ((x * 73 + y * 19) ^ (y * 29)) & 31;
+              const v = 110 + scratch;
+              return [v, v + 2, v + 6, 255];
+            },
+          },
+          {
+            name: 'desert_camo_plate.png',
+            fn: (x, y) => {
+              const cell = (((x >> 4) * 7 + (y >> 4) * 13) ^ ((x >> 3) + (y >> 3))) & 3;
+              if (cell === 0) return [194, 168, 120, 255];
+              if (cell === 1) return [156, 126, 84, 255];
+              if (cell === 2) return [118, 96, 66, 255];
+              return [176, 148, 102, 255];
+            },
+          },
+        ];
+        for (const p of presets) {
+          const rgba = new Uint8Array(64 * 64 * 4);
+          for (let y = 0; y < 64; y++) {
+            for (let x = 0; x < 64; x++) {
+              const [r, g, b, a] = p.fn(x, y);
+              const idx = (y * 64 + x) * 4;
+              rgba[idx] = r;
+              rgba[idx + 1] = g;
+              rgba[idx + 2] = b;
+              rgba[idx + 3] = a;
+            }
+          }
+          const png = encodeRgbaToPng(rgba, 64, 64);
+          fs.writeFileSync(path.join(texturesDir, p.name), png);
+        }
+      }
+    } catch {
+      // best effort seed
+    }
+    return texturesDir;
+  };
+
+  ipcMain.handle('bitmap:getCustomBrushTextures', async () => {
+    const texturesDir = resolveCustomTexturesDirectory();
+    const textures: Array<{ name: string; filePath: string; dataUrl: string }> = [];
+    try {
+      const files = fs.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+      for (const file of files) {
+        const fullPath = path.join(texturesDir, file);
+        const ext = path.extname(file).toLowerCase();
+        const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : 'image/png';
+        const buf = fs.readFileSync(fullPath);
+        const cleanName = path.basename(file, ext).replace(/[_-]+/g, ' ');
+        textures.push({
+          name: cleanName,
+          filePath: fullPath,
+          dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+        });
+      }
+    } catch {
+      // ignore
+    }
+    return { ok: true as const, texturesDir, textures };
+  });
+
+  ipcMain.handle('bitmap:openCustomTexturesFolder', async () => {
+    const texturesDir = resolveCustomTexturesDirectory();
+    await shell.openPath(texturesDir);
+    return { ok: true, texturesDir };
+  });
+
+  ipcMain.handle(
+    'render:updateBspVertices',
+    async (
+      _e,
+      bspIndex: number,
+      submeshUpdates: Array<{
+        submeshIndex: number;
+        positions: Float32Array | number[];
+        normals?: Float32Array | number[];
+        uvs?: Float32Array | number[];
+        shaderTagId?: number;
+      }>,
+    ) => {
+      try {
+        const { promise } = sendWorkerRequest<{
+          ok: true;
+          updatedVertices: number;
+          updatedCollisionVertices: number;
+          map: OpenMapSummary;
+        }>(
+          {
+            type: 'updateBspVertices',
+            bspIndex,
+            submeshUpdates,
+          },
+          sendLog,
+        );
+        const res = await promise;
+        if (res.ok) {
+          setOpenMapState(res.map);
+          mainWindow?.webContents.send('map:updated', res.map);
+        }
+        return res;
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    'render:updateModelVertices',
+    async (
+      _e,
+      modelTagId: number,
+      submeshUpdates: Array<{
+        submeshIndex: number;
+        positions: Float32Array | number[];
+        normals?: Float32Array | number[];
+        uvs?: Float32Array | number[];
+      }>,
+      lod?: number,
+    ) => {
+      try {
+        const { promise } = sendWorkerRequest<{
+          ok: true;
+          updatedVertices: number;
+          map: OpenMapSummary;
+        }>(
+          {
+            type: 'updateModelVertices',
+            modelTagId,
+            submeshUpdates,
+            lod,
+          },
+          sendLog,
+        );
+        const res = await promise;
+        if (res.ok) {
+          setOpenMapState(res.map);
+          mainWindow?.webContents.send('map:updated', res.map);
+        }
+        return res;
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
   ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(ipcMain, saveMapAsDeps, afterSaveAs);
   ipcMain.handle('map:discard', () => discardChangesFlow());
@@ -2755,14 +3232,99 @@ app.whenReady().then(() => {
     if (typeof filePath === 'string' && filePath) shell.showItemInFolder(filePath);
   });
   ipcMain.handle('app:getSettings', () => getSettings());
-  ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:version', () => getAppDisplayVersion());
   ipcMain.handle('app:recentMaps', () => getRecentMaps());
   ipcMain.on('app:notImplemented', (_e, feature: string) => sendLog('warn', `${feature} is not implemented yet (coming in a later milestone).`));
   ipcMain.handle('app:showAbout', () => showAboutDialog());
 
-  // M12: OpenCE Tag Test IPC
+  // M12: OpenCE Tag Test IPC + Global In-Game Developer Toggles Hotkeys (F6-F10)
+  let devOverlayWindow: BrowserWindow | null = null;
+  const inGameHotkeysState = {
+    overlayPinned: false,
+    godMode: false,
+    infiniteAmmo: false,
+    wireframe: false,
+    aiDebug: false,
+    superJump: false,
+    medusa: false,
+    bumpPossession: false,
+  };
+
+  const registerTagTestGlobalHotkeys = () => {
+    try {
+      // F6 shortcut removed per user request so it never switches focus to the Mantle app window.
+      // F7: Toggle God Mode in-game
+      if (!globalShortcut.isRegistered('F7')) {
+        globalShortcut.register('F7', () => {
+          inGameHotkeysState.godMode = !inGameHotkeysState.godMode;
+          const v = inGameHotkeysState.godMode ? 1 : 0;
+          tagTestRunner.sendCommand(`cheat_deathless_player ${v}`);
+          tagTestRunner.sendCommand(`sv_say "[OpenCE Dev] God Mode: ${v ? 'ON' : 'OFF'} (F7)"`);
+          mainWindow?.webContents.send('tagTest:hotkeyAction', { action: 'godMode', value: inGameHotkeysState.godMode });
+        });
+      }
+      // F8: Toggle Infinite Ammo & Bottomless Clip in-game
+      if (!globalShortcut.isRegistered('F8')) {
+        globalShortcut.register('F8', () => {
+          inGameHotkeysState.infiniteAmmo = !inGameHotkeysState.infiniteAmmo;
+          const v = inGameHotkeysState.infiniteAmmo ? 1 : 0;
+          tagTestRunner.sendCommand(`cheat_infinite_ammo ${v}`);
+          tagTestRunner.sendCommand(`cheat_bottomless_clip ${v}`);
+          tagTestRunner.sendCommand(`sv_say "[OpenCE Dev] Infinite Ammo & Bottomless Clip: ${v ? 'ON' : 'OFF'} (F8)"`);
+          mainWindow?.webContents.send('tagTest:hotkeyAction', { action: 'infiniteAmmo', value: inGameHotkeysState.infiniteAmmo });
+        });
+      }
+      // F9: Toggle Wireframe & Portals Debug in-game
+      if (!globalShortcut.isRegistered('F9')) {
+        globalShortcut.register('F9', () => {
+          inGameHotkeysState.wireframe = !inGameHotkeysState.wireframe;
+          const v = inGameHotkeysState.wireframe ? 1 : 0;
+          tagTestRunner.sendCommand(`rasterizer_wireframe ${v}`);
+          tagTestRunner.sendCommand(`debug_portals ${v}`);
+          tagTestRunner.sendCommand(`sv_say "[OpenCE Dev] Wireframe & BSP Portals: ${v ? 'ON' : 'OFF'} (F9)"`);
+          mainWindow?.webContents.send('tagTest:hotkeyAction', { action: 'wireframe', value: inGameHotkeysState.wireframe });
+        });
+      }
+      // F10: Toggle AI Perception & Object Collision Debug in-game
+      if (!globalShortcut.isRegistered('F10')) {
+        globalShortcut.register('F10', () => {
+          inGameHotkeysState.aiDebug = !inGameHotkeysState.aiDebug;
+          const v = inGameHotkeysState.aiDebug ? 1 : 0;
+          tagTestRunner.sendCommand(`ai_render ${v}`);
+          tagTestRunner.sendCommand(`debug_objects ${v}`);
+          tagTestRunner.sendCommand(`sv_say "[OpenCE Dev] AI Perception & Object Bounds: ${v ? 'ON' : 'OFF'} (F10)"`);
+          mainWindow?.webContents.send('tagTest:hotkeyAction', { action: 'aiDebug', value: inGameHotkeysState.aiDebug });
+        });
+      }
+    } catch {
+      /* best effort global shortcut registration */
+    }
+  };
+
+  const unregisterTagTestGlobalHotkeys = () => {
+    try {
+      for (const key of ['F6', 'F7', 'F8', 'F9', 'F10']) {
+        if (globalShortcut.isRegistered(key)) {
+          globalShortcut.unregister(key);
+        }
+      }
+      if (devOverlayWindow && !devOverlayWindow.isDestroyed()) {
+        devOverlayWindow.close();
+        devOverlayWindow = null;
+      }
+      inGameHotkeysState.overlayPinned = false;
+    } catch {
+      /* ignore */
+    }
+  };
+
   tagTestRunner.onStatusChange((status) => {
     mainWindow?.webContents.send('tagTest:status', status);
+    if (status.state === 'running' || status.state === 'launching') {
+      registerTagTestGlobalHotkeys();
+    } else if (status.state === 'stopped') {
+      unregisterTagTestGlobalHotkeys();
+    }
   });
   tagTestRunner.onLog((entry) => {
     mainWindow?.webContents.send('tagTest:log', entry);
@@ -2806,6 +3368,563 @@ app.whenReady().then(() => {
   ipcMain.handle('window:isAlwaysOnTop', () => {
     return mainWindow?.isAlwaysOnTop() ?? false;
   });
+
+  // Guilty Spark Item 1: Pick and parse a .wrl (VRML 1.0) error file or tool.exe log
+  ipcMain.handle('wrl:pickAndParse', async () => {
+    if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+    const pick = await dialog.showOpenDialog(mainWindow, {
+      title: 'Load .WRL (VRML 1.0 Error Geometry) or tool.exe / debug.txt Build Log',
+      filters: [
+        { name: 'Halo WRL & Tool Logs (*.wrl, *.txt, *.log)', extensions: ['wrl', 'txt', 'log'] },
+        { name: 'VRML 1.0 Error Geometry (*.wrl)', extensions: ['wrl'] },
+        { name: 'Tool Log / debug.txt (*.txt, *.log)', extensions: ['txt', 'log'] },
+      ],
+      properties: ['openFile'],
+    });
+    if (pick.canceled || !pick.filePaths[0]) {
+      return { ok: false, cancelled: true, message: 'Cancelled.' };
+    }
+    const filePath = pick.filePaths[0];
+    const fileName = path.basename(filePath);
+    try {
+      const text = fs.readFileSync(filePath, 'utf8');
+      if (filePath.toLowerCase().endsWith('.wrl') || text.trimStart().startsWith('#VRML')) {
+        const wrl = parseHaloWrl(text);
+        sendLog(
+          'info',
+          `Loaded WRL diagnostic "${fileName}": ${wrl.faces.length} error face(s), ${wrl.segments.length} error edge(s), ${wrl.points.length} vertex(es).`,
+        );
+        return { ok: true as const, kind: 'wrl' as const, fileName, wrl };
+      } else {
+        const logReview = analyzeHaloToolLog(text);
+        sendLog(
+          'info',
+          `Analyzed tool.exe log "${fileName}": ${logReview.errorCount} error(s), ${logReview.warningCount} warning(s).`,
+        );
+        return { ok: true as const, kind: 'log' as const, fileName, logReview };
+      }
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // Guilty Spark Item 7: Semantic Map Diffing against another .map file
+  ipcMain.handle('map:compareWithAnother', async () => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first before comparing.' };
+    }
+    if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+    const pick = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Second .map File to Compare Against Open Map',
+      filters: [{ name: 'Halo Map (*.map, *.bak)', extensions: ['map', 'bak'] }],
+      properties: ['openFile'],
+    });
+    if (pick.canceled || !pick.filePaths[0]) {
+      return { ok: false, cancelled: true, message: 'Cancelled.' };
+    }
+    const otherFilePath = pick.filePaths[0];
+    const { promise } = sendWorkerRequest<
+      | { ok: true; leftFileName: string; rightFileName: string; report: any }
+      | { ok: false; message: string }
+    >({ type: 'compareMaps', otherFilePath }, sendLog, (stage, percent) =>
+      mainWindow?.webContents.send('map:progress', { taskId: 'compareMaps', stage, percent }),
+    );
+    const res = await promise;
+    if (res.ok) {
+      sendLog(
+        'info',
+        `Compared "${res.leftFileName}" vs "${res.rightFileName}": ${res.report.changedTags} changed, +${res.report.addedTags} added, -${res.report.removedTags} removed.`,
+      );
+    }
+    return res;
+  });
+
+  // Guilty Spark Item 8: Steam MCC Mod Discovery & Transactional ModManifest.txt Deployment
+  ipcMain.handle('mcc:discover', async () => {
+    const info = discoverSteamMccInstallations();
+    return {
+      ok: true as const,
+      mccInstallPaths: info.mccInstallPaths,
+      defaultModManifestPath: info.defaultModManifestPath,
+      manifestExists: info.manifestExists,
+      registeredRoots: info.registeredRoots,
+    };
+  });
+
+  ipcMain.handle(
+    'mcc:deployMod',
+    async (
+      _e,
+      options: {
+        title: string;
+        description?: string;
+        author?: string;
+        isMultiplayer?: boolean;
+        registerInModManifest?: boolean;
+      },
+    ) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map before deploying to Steam MCC.' };
+      }
+      if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+      const pick = await dialog.showOpenDialog(mainWindow, {
+        title: 'Select Output Parent Directory for Steam MCC Mod Package',
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { ok: false, cancelled: true, message: 'Cancelled.' };
+      }
+      const parentOutputDir = pick.filePaths[0];
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            modFolderPath: string;
+            mapOutputPath: string;
+            modInfoPath: string;
+            manifestRegistered: boolean;
+            manifestPath?: string;
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'deployMccMod',
+          parentOutputDir,
+          title: options.title,
+          description: options.description,
+          author: options.author,
+          isMultiplayer: options.isMultiplayer,
+          registerInModManifest: options.registerInModManifest,
+        },
+        sendLog,
+        (stage, percent) =>
+          mainWindow?.webContents.send('map:progress', { taskId: 'deployMccMod', stage, percent }),
+      );
+      const res = await promise;
+      if (res.ok) {
+        sendLog(
+          'info',
+          `Deployed Steam MCC Mod Package to ${res.modFolderPath}${res.manifestRegistered ? ` and registered in ${res.manifestPath}` : ''}.`,
+        );
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'map:globalReplaceTagFieldValue',
+    async (
+      _evt,
+      options: { fieldNameQuery: string; tagGroupFilter?: string; matchValue?: string; newValue: string },
+    ) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            replacedCount: number;
+            affectedFields: Array<{
+              tagIndex: number;
+              tagPath: string;
+              tagGroup: string;
+              fieldPath: string;
+              oldValue: string;
+              newValue: string;
+            }>;
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'globalReplaceTagFieldValue',
+          fieldNameQuery: options.fieldNameQuery,
+          tagGroupFilter: options.tagGroupFilter,
+          matchValue: options.matchValue,
+          newValue: options.newValue,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok && res.replacedCount > 0) {
+        currentMapModified = true;
+        sendLog('info', `Globally updated ${res.replacedCount} field(s) matching "${options.fieldNameQuery}" -> "${options.newValue}".`);
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'map:compileJmaAnimation',
+    async (_evt, targetAntrTagIndex: number, animName?: string) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+      const pick = await dialog.showOpenDialog(mainWindow, {
+        title: 'Select Halo CE Skeletal Animation (.jma / .jmm / .jmo / .jmr)',
+        filters: [
+          { name: 'Halo Animation Source (*.jma;*.jmm;*.jmo;*.jmr;*.jmw;*.jmz)', extensions: ['jma', 'jmm', 'jmo', 'jmr', 'jmw', 'jmz'] },
+          { name: 'All Files (*.*)', extensions: ['*'] },
+        ],
+        properties: ['openFile'],
+      });
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { ok: false, cancelled: true, message: 'Cancelled.' };
+      }
+      const filePath = pick.filePaths[0];
+      const fileName = path.basename(filePath);
+      const inferredAnimName = animName?.trim() || path.basename(filePath, path.extname(filePath));
+      const jmaText = fs.readFileSync(filePath, 'utf8');
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            animationName: string;
+            frameCount: number;
+            nodeCount: number;
+            frameSize: number;
+            replacedExisting: boolean;
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'compileJmaAnimation',
+          targetAntrTagIndex,
+          jmaText,
+          animName: inferredAnimName,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          'info',
+          `Compiled .JMA animation "${res.animationName}" (${res.frameCount} frames, ${res.nodeCount} nodes) into model_animations tag #${targetAntrTagIndex}.`,
+        );
+        return { ...res, fileName };
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'map:compileJmsPhysics',
+    async (_evt, targetPhysTagIndex: number, totalMass?: number) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+      const pick = await dialog.showOpenDialog(mainWindow, {
+        title: 'Select Halo CE .JMS File with Mass Points / Markers',
+        filters: [
+          { name: 'Halo CE JMS (*.jms)', extensions: ['jms'] },
+          { name: 'All Files (*.*)', extensions: ['*'] },
+        ],
+        properties: ['openFile'],
+      });
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { ok: false, cancelled: true, message: 'Cancelled.' };
+      }
+      const filePath = pick.filePaths[0];
+      const fileName = path.basename(filePath);
+      const jmsText = fs.readFileSync(filePath, 'utf8');
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            massPointCount: number;
+            totalMass: number;
+            centerOfMass: [number, number, number];
+            moments: [number, number, number];
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'compileJmsPhysics',
+          targetPhysTagIndex,
+          jmsText,
+          totalMass,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          'info',
+          `Compiled ${res.massPointCount} mass points (mass ${res.totalMass} kg) from ${fileName} into physics tag #${targetPhysTagIndex}.`,
+        );
+        return { ...res, fileName };
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'map:decompileTagToSource',
+    async (_evt, tagIndex: number, animationIndex?: number) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            kind: 'gbxmodel_jms' | 'animations_jma' | 'physics_jms';
+            sourceText: string;
+            defaultExt: 'jms' | 'jma';
+            tagPath: string;
+            animationName?: string;
+            summary: string;
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'decompileTagToSource',
+          tagIndex,
+          animationIndex,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (!res.ok) return res;
+
+      const leaf = (res.tagPath.split('\\').pop() || 'exported').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const suggestedName =
+        res.kind === 'physics_jms'
+          ? 'physics.jms'
+          : res.kind === 'animations_jma'
+            ? `${res.animationName || leaf}.jma`
+            : `${leaf}.jms`;
+
+      const save = await dialog.showSaveDialog(mainWindow, {
+        title: `Save Decompiled Source File (${suggestedName})`,
+        defaultPath: suggestedName,
+        filters: [
+          res.defaultExt === 'jma'
+            ? { name: 'Halo Skeletal Animation (*.jma)', extensions: ['jma'] }
+            : { name: 'Halo Jointed Model Skeleton (*.jms)', extensions: ['jms'] },
+          { name: 'All Files (*.*)', extensions: ['*'] },
+        ],
+      });
+      if (save.canceled || !save.filePath) {
+        return { ok: false, cancelled: true, message: 'Save cancelled.' };
+      }
+      fs.writeFileSync(save.filePath, res.sourceText, 'utf8');
+      sendLog('info', `Decompiled "${res.tagPath}" -> ${save.filePath} (${res.summary}).`);
+      return {
+        ok: true,
+        outputPath: save.filePath,
+        kind: res.kind,
+        tagPath: res.tagPath,
+        summary: res.summary,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    'map:compileStringsTag',
+    async (_evt, targetTagIndex: number, textContent?: string) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      let finalContent = textContent;
+      let fileName: string | undefined;
+      if (!finalContent || !finalContent.trim()) {
+        if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+        const pick = await dialog.showOpenDialog(mainWindow, {
+          title: 'Select Halo String Source File (.txt / .hmt)',
+          filters: [
+            { name: 'Halo String Source (*.txt;*.hmt)', extensions: ['txt', 'hmt'] },
+            { name: 'All Files (*.*)', extensions: ['*'] },
+          ],
+          properties: ['openFile'],
+        });
+        if (pick.canceled || !pick.filePaths[0]) {
+          return { ok: false, cancelled: true, message: 'Cancelled.' };
+        }
+        const fp = pick.filePaths[0];
+        fileName = path.basename(fp);
+        const rawBuf = fs.readFileSync(fp);
+        // Handle UTF-16LE BOM (0xFF 0xFE) which Halo CE tool.exe .txt files often use
+        if (rawBuf.length >= 2 && rawBuf[0] === 0xff && rawBuf[1] === 0xfe) {
+          finalContent = rawBuf.subarray(2).toString('utf16le');
+        } else {
+          finalContent = rawBuf.toString('utf8');
+        }
+      }
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            tagPath: string;
+            tagGroup: string;
+            entryCount: number;
+            messageNames: string[];
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'compileStringsTag',
+          targetTagIndex,
+          textContent: finalContent,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          'info',
+          `Compiled ${res.entryCount} string(s) into ${res.tagGroup} "${res.tagPath}".`,
+        );
+        return { ...res, fileName };
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle('map:inspectMeterTag', async (_evt, meterTagIndex: number) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<
+      | {
+          ok: true;
+          tagPath: string;
+          width: number;
+          height: number;
+          interpolateColors: number;
+          anchorColors: number;
+          emptyColorHex: string;
+          fullColorHex: string;
+          unmaskDistance: number;
+          maskDistance: number;
+          encodedBytes: number;
+          previewRgba: number[];
+        }
+      | { ok: false; message: string }
+    >(
+      {
+        type: 'inspectMeterTag',
+        meterTagIndex,
+      },
+      sendLog,
+    );
+    return promise;
+  });
+
+  ipcMain.handle(
+    'map:compileFontFromGlyphAtlas',
+    async (
+      _evt,
+      targetFontTagIndex: number,
+      glyphSpec: {
+        ascendingHeight: number;
+        descendingHeight: number;
+        leadingHeight: number;
+        leadingWidth: number;
+        glyphs: Array<{
+          charCode: number;
+          characterWidth: number;
+          bitmapWidth: number;
+          bitmapHeight: number;
+          bitmapOriginX: number;
+          bitmapOriginY: number;
+          alphaPixels: number[];
+        }>;
+      },
+    ) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      const { promise } = sendWorkerRequest<
+        | {
+            ok: true;
+            tagPath: string;
+            glyphCount: number;
+            totalPixelBytes: number;
+          }
+        | { ok: false; message: string }
+      >(
+        {
+          type: 'compileFontFromGlyphAtlas',
+          targetFontTagIndex,
+          glyphSpec,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          'info',
+          `Compiled ${res.glyphCount} glyphs (${res.totalPixelBytes} pixel bytes) into font tag "${res.tagPath}".`,
+        );
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'map:injectProceduralWorldBsp',
+    async (
+      _evt,
+      options: {
+        worldMesh: any;
+        bspIndex?: number;
+        shaderBindings?: Record<string, { tagId: number; path: string; classFourCC: string }>;
+        collisionMode?: 'auto' | 'exact';
+      },
+    ) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      const { promise } = sendWorkerRequest<any>(
+        {
+          type: 'injectProceduralWorldBsp',
+          worldMesh: options.worldMesh,
+          bspIndex: options.bspIndex,
+          shaderBindings: options.shaderBindings,
+          collisionMode: options.collisionMode,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok && res.map) {
+        setOpenMapState(res.map);
+        sendLog(
+          'info',
+          `Injected procedural world geometry into Structure BSP (+${res.addedTriangles} triangles, +${res.addedCollisionSurfaces} collision surfaces, +${res.addedSubmeshes} shader submeshes).`,
+        );
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'map:scaleCoupledPhysics',
+    async (_evt, objectTagId: number, scaleFactor: number) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      const { promise } = sendWorkerRequest<any>(
+        {
+          type: 'scaleCoupledPhysics',
+          objectTagId,
+          scaleFactor,
+        },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok && res.map) {
+        setOpenMapState(res.map);
+        const s = res.summary;
+        sendLog(
+          'info',
+          `Coupled Physics Resizer (${s.scaleFactor.toFixed(2)}x) applied to "${s.objectPath}" (${s.objectClass}): ${s.scaledGbxmodelVertices} model verts, ${s.scaledCollisionVertices} collision verts, ${s.scaledPhysicsMassPoints} mass points, ${s.scaledVehicleSuspensions} suspensions.`,
+        );
+      }
+      return res;
+    },
+  );
 
   // Ensure any previous uncleaned init.txt from crashes is restored to normal
   try {

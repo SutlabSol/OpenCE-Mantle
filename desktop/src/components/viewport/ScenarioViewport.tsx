@@ -5,10 +5,20 @@ import type {
   MapHeaderSummary,
   BspRenderMesh,
   ScenarioPlacementsSummary,
-  ScenarioObjectPlacement,
   ScenarioObjectKind,
   ModelRenderGeometry,
+  WrlDiagnostics,
+  ToolLogReview,
 } from '../../../electron/shared-types';
+import {
+  createSourceCollisionWorld,
+  stepSourceWalk,
+  WALK_EYE_HEIGHT,
+  WALK_JUMP_VELOCITY,
+  type SourceCollisionWorld,
+  type SourceWalkState,
+} from '../../../../core/src/render/live-collision';
+import { matchWrlToSubmeshes, type WrlSubmeshMatch } from '../../../../core/src/render/wrl-diagnostics';
 
 export type RenderMode = 'textured' | 'textured-wireframe' | 'wireframe' | 'flat';
 export type GizmoMode = 'translate' | 'rotate';
@@ -17,6 +27,7 @@ export interface VisibleLayers {
   bsp: boolean;
   vehicles: boolean;
   scenery: boolean;
+  machines: boolean;
   spawns: boolean;
   items: boolean;
   encounters: boolean;
@@ -24,11 +35,13 @@ export interface VisibleLayers {
   triggerVolumes: boolean;
   cutsceneCameras: boolean;
   netgameFlags: boolean;
+  worldBounds: boolean;
 }
 
 export interface ScenarioViewportProps {
   header: MapHeaderSummary;
   bspIndex?: number;
+  tagCount?: number;
   onSelectObjectTag?: (tagId: number, objectPath: string) => void;
   onOpenTagEditor?: (tagIndexOrPath: number | string) => void;
 }
@@ -70,7 +83,6 @@ class LocalBoxHelper extends THREE.LineSegments {
 
     super(geometry, material);
     this.targetObject = object;
-    this.type = 'LocalBoxHelper';
     this.matrixAutoUpdate = false;
     this.update();
   }
@@ -134,7 +146,7 @@ class LocalBoxHelper extends THREE.LineSegments {
   }
 }
 
-export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectTag, onOpenTagEditor }: ScenarioViewportProps) {
+export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSelectObjectTag }: ScenarioViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +155,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     bsp: true,
     vehicles: true,
     scenery: true,
+    machines: true,
     spawns: true,
     items: true,
     encounters: true,
@@ -150,6 +163,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     triggerVolumes: true,
     cutsceneCameras: true,
     netgameFlags: true,
+    worldBounds: false,
   });
   const [renderMode, setRenderMode] = useState<RenderMode>('textured');
   const [cameraSpeed, setCameraSpeed] = useState<number>(60);
@@ -259,6 +273,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     bsp: THREE.Group;
     vehicles: THREE.Group;
     scenery: THREE.Group;
+    machines: THREE.Group;
     spawns: THREE.Group;
     items: THREE.Group;
     encounters: THREE.Group;
@@ -266,6 +281,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     triggerVolumes: THREE.Group;
     cutsceneCameras: THREE.Group;
     netgameFlags: THREE.Group;
+    worldBounds: THREE.Group;
   } | null>(null);
   const submeshMeshesRef = useRef<{ mesh: THREE.Mesh; lines: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial; bspIndex?: number }[]>([]);
   const objectMeshesRef = useRef<{ mesh: THREE.Mesh; lines?: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial; shaderTagId?: number }[]>([]);
@@ -290,6 +306,33 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
   const isRightMouseDownRef = useRef<boolean>(false);
   const speedRef = useRef<number>(cameraSpeed);
   speedRef.current = cameraSpeed;
+
+  // Guilty Spark Item 2: First-Person Collision Walk Sandbox (Master Chief 3-sphere capsule + gravity)
+  const [walkMode, setWalkMode] = useState<boolean>(false);
+  const walkModeRef = useRef<boolean>(false);
+  walkModeRef.current = walkMode;
+  const collisionWorldRef = useRef<SourceCollisionWorld | null>(null);
+  const walkStateRef = useRef<SourceWalkState>({
+    position: [0, 0, 5],
+    verticalVelocity: 0,
+    grounded: false,
+  });
+
+  // Guilty Spark Item 1: 3D .WRL Error Overlay & tool.exe Log Triage
+  const [wrlData, setWrlData] = useState<WrlDiagnostics | null>(null);
+  const [wrlSubmeshMatches, setWrlSubmeshMatches] = useState<WrlSubmeshMatch[]>([]);
+  const [toolLogReview, setToolLogReview] = useState<ToolLogReview | null>(null);
+  const [diagFileName, setDiagFileName] = useState<string>('');
+  const [showDiagPanel, setShowDiagPanel] = useState<boolean>(false);
+  const wrlOverlayGroupRef = useRef<THREE.Group | null>(null);
+
+  // Option 1 (Milestone 18.2): 3D Collision Hitbox (`coll`) Wireframe Overlay
+  const [showCollHitboxOverlay, setShowCollHitboxOverlay] = useState<boolean>(false);
+  const collOverlayGroupRef = useRef<THREE.Group | null>(null);
+
+  // Item 3 (Milestone 18.2): 3D BSP Cluster Portals, Fog Planes & Weather Polyhedra Overlay
+  const [showBspDiagOverlay, setShowBspDiagOverlay] = useState<boolean>(false);
+  const bspDiagOverlayGroupRef = useRef<THREE.Group | null>(null);
 
   const hasInitialFramedRef = useRef<boolean>(false);
   const isLeftPanDraggingRef = useRef<boolean>(false);
@@ -487,6 +530,14 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
         teamIndex?: number;
         multiplayerSpawnFlags?: number;
         forceSpawn?: boolean;
+        extents?: [number, number, number];
+        name?: string;
+        worldBounds?: {
+          min: [number, number, number];
+          max: [number, number, number];
+          vehicleFloor: number;
+          vehicleCeiling: number;
+        };
       },
     ) => {
       try {
@@ -676,6 +727,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
           const allGroups = [
             ...(layerGroupsRef.current?.vehicles.children || []),
             ...(layerGroupsRef.current?.scenery.children || []),
+            ...(layerGroupsRef.current?.machines.children || []),
             ...(layerGroupsRef.current?.spawns.children || []),
             ...(layerGroupsRef.current?.items.children || []),
             ...(layerGroupsRef.current?.encounters.children || []),
@@ -947,54 +999,6 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     [],
   );
 
-  // Snap all player spawns and netgame equipment to the nearest ground BSP surface
-  const snapAllSpawnsToGround = useCallback(async () => {
-    if (!scenarioData || submeshMeshesRef.current.length === 0) return;
-    const bspMeshesList = submeshMeshesRef.current
-      .filter((s) => s.mesh.parent?.visible !== false)
-      .map((s) => s.mesh);
-    if (bspMeshesList.length === 0) return;
-
-    sceneRef.current?.updateMatrixWorld(true);
-
-    const targets = scenarioData.objects.filter((o) => o.kind === 'spawn' || o.kind === 'equipment');
-    let snappedCount = 0;
-
-    for (const obj of targets) {
-      const [curX, curY, curZ] = obj.position;
-      // World space: Halo (X, Y, Z) is Three.js World (X, Z, -Y)
-      // Cast a vertical downward ray along World -Y (Halo -Z)
-      const rayOrigin = new THREE.Vector3(curX, Math.max(curZ + 100, 200), -curY);
-      const raycaster = new THREE.Raycaster(rayOrigin, new THREE.Vector3(0, -1, 0), 0.001, 2000);
-      const hits = raycaster.intersectObjects(bspMeshesList, false);
-
-      // Filter for upward-facing ground surfaces (Halo vertex normal Z >= 0.2) to exclude ceilings and walls
-      const groundHits = hits.filter((h) => {
-        if (!h.face) return true;
-        const normAttr = h.object.geometry.getAttribute('normal');
-        if (!normAttr) return true;
-        const vnz = (normAttr.getZ(h.face.a) + normAttr.getZ(h.face.b) + normAttr.getZ(h.face.c)) / 3;
-        return vnz >= 0.2;
-      });
-
-      if (groundHits.length > 0) {
-        // Prefer ground at or below the object (with 3 unit tolerance for sunken objects)
-        const belowHits = groundHits.filter((h) => h.point.y <= curZ + 3.0);
-        const bestHit = (belowHits.length > 0 ? belowHits : groundHits)
-          .sort((a, b) => Math.abs(a.point.y - curZ) - Math.abs(b.point.y - curZ))[0];
-
-        const groundZ = bestHit.point.y + 0.02;
-        const targetGroup = sceneRef.current?.getObjectByName(obj.id);
-        if (targetGroup) {
-          targetGroup.position.z = groundZ;
-        }
-        await handleUpdatePlacement(obj.id, { position: [curX, curY, groundZ] });
-        snappedCount++;
-      }
-    }
-    selectionBoxHelperRef.current?.update();
-  }, [scenarioData, handleUpdatePlacement]);
-
   // Ground Snapping: casts a ray straight down from above the object onto the BSP ground geometry
   // Can snap upwards (for objects sunken into terrain) or downwards (for hovering objects), while ignoring ceilings
   const snapSelectedToGround = useCallback(async () => {
@@ -1028,7 +1032,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       // Filter for upward-facing ground surfaces (Halo vertex normal Z >= 0.2) to exclude ceilings and steep walls
       const groundHits = hits.filter((h) => {
         if (!h.face) return true;
-        const normAttr = h.object.geometry.getAttribute('normal');
+        const normAttr = (h.object as THREE.Mesh).geometry?.getAttribute('normal');
         if (!normAttr) return true;
         const vnz = (normAttr.getZ(h.face.a) + normAttr.getZ(h.face.b) + normAttr.getZ(h.face.c)) / 3;
         return vnz >= 0.2;
@@ -1124,6 +1128,11 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     };
   }, [visibleBspIndices, bspMeshes, header.scenarioName, header.crc32]);
 
+  // Clear cached shader->texture lookups whenever the map or BSP changes (e.g. after BSP swap)
+  useEffect(() => {
+    textureCacheRef.current.clear();
+  }, [header.scenarioName, header.crc32, bspMeshes]);
+
   // Texture loader helper
   const loadTexture = useCallback((shaderTagId: number): Promise<THREE.Texture | null> => {
     if (shaderTagId === 0xffffffff || shaderTagId === 0) return Promise.resolve(null);
@@ -1180,23 +1189,59 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     return () => window.removeEventListener('opence:bitmap-updated', onBitmapUpdated);
   }, [loadTexture]);
 
-  // Load Scenario Objects
-  useEffect(() => {
-    let active = true;
+  // Full 3D Viewport Refresh (reloads scenario placements, models, textures, and BSP meshes)
+  const handleRefreshViewport = useCallback(() => {
+    textureCacheRef.current.clear();
+    modelCacheRef.current.clear();
+    if (layerGroupsRef.current) {
+      const bspGroup = layerGroupsRef.current.bsp;
+      while (bspGroup.children.length > 0) {
+        bspGroup.remove(bspGroup.children[0]);
+      }
+    }
+    for (const item of submeshMeshesRef.current) {
+      item.mesh.geometry.dispose();
+      item.lines.geometry.dispose();
+      (item.lines.material as THREE.Material).dispose();
+      item.solidMat.dispose();
+    }
+    submeshMeshesRef.current = [];
+    bspChildGroupsRef.current.clear();
+    setBspMeshes({});
     window.opence
       .getScenarioObjects?.()
       .then((res) => {
-        if (!active) return;
         if (res && res.ok) {
           setScenarioData(res.summary);
         }
       })
       .catch(() => {});
+  }, []);
+
+  // Load Scenario Objects (and auto-refresh when a tag is deleted or injected via tagCount change)
+  useEffect(() => {
+    let active = true;
+    const refreshScenario = () => {
+      textureCacheRef.current.clear();
+      modelCacheRef.current.clear();
+      window.opence
+        .getScenarioObjects?.()
+        .then((res) => {
+          if (!active) return;
+          if (res && res.ok) {
+            setScenarioData(res.summary);
+          }
+        })
+        .catch(() => {});
+    };
+    refreshScenario();
+    window.addEventListener('opence:scenario-updated', refreshScenario);
 
     return () => {
       active = false;
+      window.removeEventListener('opence:scenario-updated', refreshScenario);
     };
-  }, [header.scenarioName, header.crc32]);
+  }, [header.scenarioName, header.crc32, tagCount]);
 
   // Model geometry loader helper
   const loadModelGeometry = useCallback((modelTagId: number): Promise<ModelRenderGeometry | null> => {
@@ -1226,6 +1271,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       const {
         vehicles,
         scenery,
+        machines,
         spawns,
         items,
         encounters,
@@ -1233,6 +1279,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
         triggerVolumes,
         cutsceneCameras,
         netgameFlags,
+        worldBounds,
       } = layers;
 
       const clearGroup = (group: THREE.Group) => {
@@ -1242,6 +1289,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       };
       clearGroup(vehicles);
       clearGroup(scenery);
+      clearGroup(machines);
       clearGroup(spawns);
       clearGroup(items);
       clearGroup(encounters);
@@ -1249,6 +1297,56 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       clearGroup(triggerVolumes);
       clearGroup(cutsceneCameras);
       clearGroup(netgameFlags);
+      clearGroup(worldBounds);
+
+      // Render Map World Bounds wireframe box + Vehicle Floor / Ceiling planes
+      if (summary.worldBounds) {
+        const wb = summary.worldBounds;
+        const dx = Math.max(1, wb.max[0] - wb.min[0]);
+        const dy = Math.max(1, wb.max[1] - wb.min[1]);
+        const dz = Math.max(1, wb.max[2] - wb.min[2]);
+        const cx = (wb.min[0] + wb.max[0]) / 2;
+        const cy = (wb.min[1] + wb.max[1]) / 2;
+        const cz = (wb.min[2] + wb.max[2]) / 2;
+
+        const wbBoxGeom = new THREE.BoxGeometry(dx, dy, dz);
+        wbBoxGeom.translate(cx, cy, cz);
+        const wbEdgesGeom = new THREE.EdgesGeometry(wbBoxGeom);
+        const wbLineMat = new THREE.LineBasicMaterial({
+          color: 0xff6d00,
+          transparent: true,
+          opacity: 0.9,
+        });
+        const wbLines = new THREE.LineSegments(wbEdgesGeom, wbLineMat);
+        worldBounds.add(wbLines);
+
+        // Vehicle Floor & Vehicle Ceiling translucent indicator planes
+        const planeGeom = new THREE.PlaneGeometry(dx, dy);
+        if (Number.isFinite(wb.vehicleFloor)) {
+          const floorMat = new THREE.MeshBasicMaterial({
+            color: 0xef5350,
+            transparent: true,
+            opacity: 0.14,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          });
+          const floorMesh = new THREE.Mesh(planeGeom, floorMat);
+          floorMesh.position.set(cx, cy, wb.vehicleFloor);
+          worldBounds.add(floorMesh);
+        }
+        if (Number.isFinite(wb.vehicleCeiling) && wb.vehicleCeiling > wb.vehicleFloor) {
+          const ceilMat = new THREE.MeshBasicMaterial({
+            color: 0x29b6f6,
+            transparent: true,
+            opacity: 0.14,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+          });
+          const ceilMesh = new THREE.Mesh(planeGeom.clone(), ceilMat);
+          ceilMesh.position.set(cx, cy, wb.vehicleCeiling);
+          worldBounds.add(ceilMesh);
+        }
+      }
 
       for (const item of objectMeshesRef.current) {
         item.mesh.geometry.dispose();
@@ -1271,6 +1369,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
         let targetLayer = scenery;
         if (obj.kind === 'vehicle') targetLayer = vehicles;
         else if (obj.kind === 'scenery') targetLayer = scenery;
+        else if (obj.kind === 'machine') targetLayer = machines;
         else if (obj.kind === 'spawn') targetLayer = spawns;
         else if (obj.kind === 'weapon' || obj.kind === 'equipment') targetLayer = items;
         else if (obj.kind === 'encounter') targetLayer = encounters;
@@ -1673,6 +1772,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     layerGroupsRef.current.bsp.visible = visibleLayers.bsp;
     layerGroupsRef.current.vehicles.visible = visibleLayers.vehicles;
     layerGroupsRef.current.scenery.visible = visibleLayers.scenery;
+    layerGroupsRef.current.machines.visible = visibleLayers.machines;
     layerGroupsRef.current.spawns.visible = visibleLayers.spawns;
     layerGroupsRef.current.items.visible = visibleLayers.items;
     layerGroupsRef.current.encounters.visible = visibleLayers.encounters;
@@ -1680,6 +1780,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     layerGroupsRef.current.triggerVolumes.visible = visibleLayers.triggerVolumes;
     layerGroupsRef.current.cutsceneCameras.visible = visibleLayers.cutsceneCameras;
     layerGroupsRef.current.netgameFlags.visible = visibleLayers.netgameFlags;
+    layerGroupsRef.current.worldBounds.visible = visibleLayers.worldBounds;
   }, [visibleLayers]);
 
   // Update render mode materials
@@ -1761,6 +1862,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     const allGroups = [
       ...layerGroupsRef.current.vehicles.children,
       ...layerGroupsRef.current.scenery.children,
+      ...layerGroupsRef.current.machines.children,
       ...layerGroupsRef.current.spawns.children,
       ...layerGroupsRef.current.items.children,
       ...layerGroupsRef.current.encounters.children,
@@ -1927,6 +2029,343 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     syncBspMeshes();
   }, [syncBspMeshes]);
 
+  // Build spatial hash collision world whenever visible BSP meshes change (Guilty Spark Item 2)
+  useEffect(() => {
+    try {
+      const submeshes = visibleBspIndices.flatMap((idx) => bspMeshes[idx]?.submeshes || []);
+      if (submeshes.length === 0) {
+        collisionWorldRef.current = null;
+        return;
+      }
+      collisionWorldRef.current = createSourceCollisionWorld({ submeshes });
+    } catch (err) {
+      console.warn('[ScenarioViewport] Failed to build live collision world:', err);
+      collisionWorldRef.current = null;
+    }
+  }, [visibleBspIndices, bspMeshes]);
+
+  // Initialize Master Chief walk feet position from current camera when toggling walkMode ON
+  useEffect(() => {
+    if (walkMode) {
+      const pos = camPosRef.current;
+      // Three.js World (x, y, z) -> Halo Z-up (x, -z, y)
+      walkStateRef.current = {
+        position: [pos.x, -pos.z, pos.y - WALK_EYE_HEIGHT],
+        verticalVelocity: 0,
+        grounded: false,
+      };
+    }
+  }, [walkMode]);
+
+  // Render 3D .WRL error segments and faces inside haloRootRef (Guilty Spark Item 1)
+  useEffect(() => {
+    const haloRoot = haloRootRef.current;
+    if (!haloRoot) return;
+    if (wrlOverlayGroupRef.current) {
+      haloRoot.remove(wrlOverlayGroupRef.current);
+      wrlOverlayGroupRef.current = null;
+    }
+    if (!wrlData) {
+      setWrlSubmeshMatches([]);
+      return;
+    }
+    const wrlGroup = new THREE.Group();
+    wrlGroup.name = 'wrl_error_overlay';
+
+    // 1. Glowing red/cyan error line segments
+    if (wrlData.segments.length > 0) {
+      const segPositions = new Float32Array(wrlData.segments.length * 6);
+      const segColors = new Float32Array(wrlData.segments.length * 6);
+      for (let i = 0; i < wrlData.segments.length; i++) {
+        const seg = wrlData.segments[i];
+        const base = i * 6;
+        segPositions[base] = seg.start[0];
+        segPositions[base + 1] = seg.start[1];
+        segPositions[base + 2] = seg.start[2];
+        segPositions[base + 3] = seg.end[0];
+        segPositions[base + 4] = seg.end[1];
+        segPositions[base + 5] = seg.end[2];
+        const c = seg.color || [1, 0.2, 0.2];
+        segColors[base] = c[0];
+        segColors[base + 1] = c[1];
+        segColors[base + 2] = c[2];
+        segColors[base + 3] = c[0];
+        segColors[base + 4] = c[1];
+        segColors[base + 5] = c[2];
+      }
+      const segGeom = new THREE.BufferGeometry();
+      segGeom.setAttribute('position', new THREE.BufferAttribute(segPositions, 3));
+      segGeom.setAttribute('color', new THREE.BufferAttribute(segColors, 3));
+      const segMat = new THREE.LineBasicMaterial({
+        vertexColors: true,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.95,
+      });
+      const segLines = new THREE.LineSegments(segGeom, segMat);
+      segLines.renderOrder = 9995;
+      wrlGroup.add(segLines);
+    }
+
+    // 2. Translucent error polygon faces
+    if (wrlData.faces.length > 0) {
+      const faceVerts: number[] = [];
+      for (const f of wrlData.faces) {
+        if (f.vertices.length < 3) continue;
+        const v0 = f.vertices[0];
+        for (let k = 1; k < f.vertices.length - 1; k++) {
+          const v1 = f.vertices[k];
+          const v2 = f.vertices[k + 1];
+          faceVerts.push(v0[0], v0[1], v0[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        }
+      }
+      if (faceVerts.length > 0) {
+        const faceGeom = new THREE.BufferGeometry();
+        faceGeom.setAttribute('position', new THREE.Float32BufferAttribute(faceVerts, 3));
+        faceGeom.computeVertexNormals();
+        const faceMat = new THREE.MeshBasicMaterial({
+          color: 0xff1744,
+          transparent: true,
+          opacity: 0.45,
+          side: THREE.DoubleSide,
+          depthTest: false,
+        });
+        const faceMesh = new THREE.Mesh(faceGeom, faceMat);
+        faceMesh.renderOrder = 9994;
+        wrlGroup.add(faceMesh);
+      }
+    }
+
+    haloRoot.add(wrlGroup);
+    wrlOverlayGroupRef.current = wrlGroup;
+
+    // Match WRL coordinates against visible BSP submeshes
+    const submeshes = visibleBspIndices.flatMap((idx) => bspMeshes[idx]?.submeshes || []);
+    setWrlSubmeshMatches(matchWrlToSubmeshes(wrlData, submeshes));
+  }, [wrlData, visibleBspIndices, bspMeshes]);
+
+  // Option 1 (Milestone 18.2): Render 3D Collision Hitbox (`coll`) Wireframe Overlay around the selected object
+  useEffect(() => {
+    const haloRoot = haloRootRef.current;
+    if (!haloRoot) return;
+    if (collOverlayGroupRef.current) {
+      haloRoot.remove(collOverlayGroupRef.current);
+      collOverlayGroupRef.current = null;
+    }
+    if (!showCollHitboxOverlay || !selectedPlacement || !window.opence.getDependencySlots || !window.opence.extractCollisionWireframe) {
+      return;
+    }
+    const objTagId =
+      selectedPlacement.resolvedItemTagId !== undefined && selectedPlacement.resolvedItemTagId !== 0xffffffff
+        ? selectedPlacement.resolvedItemTagId
+        : selectedPlacement.objectTagId;
+    if (objTagId === undefined || objTagId === 0xffffffff) return;
+    const objTagIndex = objTagId & 0xffff;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const depRes = await window.opence.getDependencySlots(objTagIndex);
+        if (cancelled || !depRes.ok) return;
+        const collSlot = depRes.slots.find(
+          (s) => s.fieldPath === 'collision model' || s.currentGroup === 'model_collision_geometry',
+        );
+        const collTagId = collSlot?.currentTagId ?? 0xffffffff;
+        if (collTagId === 0xffffffff) return;
+        const collTagIndex = collTagId & 0xffff;
+        const wfRes = await window.opence.extractCollisionWireframe!(collTagIndex);
+        if (cancelled || !wfRes.ok || wfRes.linePositions.length === 0) return;
+
+        const grp = new THREE.Group();
+        grp.name = 'collision_hitbox_overlay';
+        grp.position.set(selectedPlacement.position[0], selectedPlacement.position[1], selectedPlacement.position[2]);
+        grp.rotation.set(selectedPlacement.rotation[2], -selectedPlacement.rotation[1], selectedPlacement.rotation[0], 'XYZ');
+
+        const lineGeom = new THREE.BufferGeometry();
+        lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(wfRes.linePositions, 3));
+        const lineMat = new THREE.LineBasicMaterial({
+          color: 0x00ff66,
+          depthTest: false,
+          transparent: true,
+          opacity: 0.92,
+        });
+        const lines = new THREE.LineSegments(lineGeom, lineMat);
+        lines.renderOrder = 9996;
+        grp.add(lines);
+
+        haloRoot.add(grp);
+        collOverlayGroupRef.current = grp;
+      } catch {
+        // Ignore if object has no collision model
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showCollHitboxOverlay, selectedPlacement]);
+
+  // Item 3 (Milestone 18.2): Render 3D BSP Cluster Portals, Fog Planes & Weather Polyhedra Overlays
+  useEffect(() => {
+    const haloRoot = haloRootRef.current;
+    if (!haloRoot) return;
+    if (bspDiagOverlayGroupRef.current) {
+      haloRoot.remove(bspDiagOverlayGroupRef.current);
+      bspDiagOverlayGroupRef.current = null;
+    }
+    if (!showBspDiagOverlay) return;
+
+    const grp = new THREE.Group();
+    grp.name = 'bsp_diagnostics_overlay';
+
+    const portalFillVerts: number[] = [];
+    const portalEdgeVerts: number[] = [];
+    const fogFillVerts: number[] = [];
+    const fogEdgeVerts: number[] = [];
+
+    for (const idx of visibleBspIndices) {
+      const m = bspMeshes[idx];
+      if (!m) continue;
+
+      // 1. Cluster Portals (Cyan translucent polygons + bright edges)
+      for (const portal of m.clusterPortals || []) {
+        const vs = portal.vertices;
+        if (vs.length < 3) continue;
+        const v0 = vs[0];
+        for (let k = 1; k < vs.length - 1; k++) {
+          const v1 = vs[k];
+          const v2 = vs[k + 1];
+          portalFillVerts.push(v0[0], v0[1], v0[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        }
+        for (let k = 0; k < vs.length; k++) {
+          const va = vs[k];
+          const vb = vs[(k + 1) % vs.length];
+          portalEdgeVerts.push(va[0], va[1], va[2], vb[0], vb[1], vb[2]);
+        }
+      }
+
+      // 2. Fog Planes (Purple/Magenta translucent polygons + bright edges)
+      for (const fog of m.fogPlanes || []) {
+        const vs = fog.vertices;
+        if (vs.length < 3) continue;
+        const v0 = vs[0];
+        for (let k = 1; k < vs.length - 1; k++) {
+          const v1 = vs[k];
+          const v2 = vs[k + 1];
+          fogFillVerts.push(v0[0], v0[1], v0[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+        }
+        for (let k = 0; k < vs.length; k++) {
+          const va = vs[k];
+          const vb = vs[(k + 1) % vs.length];
+          fogEdgeVerts.push(va[0], va[1], va[2], vb[0], vb[1], vb[2]);
+        }
+      }
+
+      // 3. Weather Polyhedra (Amber/Gold wireframe bounding spheres + plane normal indicators)
+      for (const wp of m.weatherPolyhedra || []) {
+        const sphGeom = new THREE.SphereGeometry(Math.max(0.5, wp.radius), 16, 12);
+        const sphMat = new THREE.MeshBasicMaterial({
+          color: 0xfbbf24,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.55,
+          depthTest: false,
+        });
+        const sphMesh = new THREE.Mesh(sphGeom, sphMat);
+        sphMesh.position.set(wp.center[0], wp.center[1], wp.center[2]);
+        sphMesh.renderOrder = 9991;
+        grp.add(sphMesh);
+      }
+    }
+
+    if (portalFillVerts.length > 0) {
+      const pFillGeom = new THREE.BufferGeometry();
+      pFillGeom.setAttribute('position', new THREE.Float32BufferAttribute(portalFillVerts, 3));
+      const pFillMat = new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.28,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const pFillMesh = new THREE.Mesh(pFillGeom, pFillMat);
+      pFillMesh.renderOrder = 9990;
+      grp.add(pFillMesh);
+    }
+    if (portalEdgeVerts.length > 0) {
+      const pEdgeGeom = new THREE.BufferGeometry();
+      pEdgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(portalEdgeVerts, 3));
+      const pEdgeMat = new THREE.LineBasicMaterial({
+        color: 0x00e5ff,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.9,
+      });
+      const pEdgeLines = new THREE.LineSegments(pEdgeGeom, pEdgeMat);
+      pEdgeLines.renderOrder = 9992;
+      grp.add(pEdgeLines);
+    }
+    if (fogFillVerts.length > 0) {
+      const fFillGeom = new THREE.BufferGeometry();
+      fFillGeom.setAttribute('position', new THREE.Float32BufferAttribute(fogFillVerts, 3));
+      const fFillMat = new THREE.MeshBasicMaterial({
+        color: 0xc084fc,
+        transparent: true,
+        opacity: 0.32,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      const fFillMesh = new THREE.Mesh(fFillGeom, fFillMat);
+      fFillMesh.renderOrder = 9990;
+      grp.add(fFillMesh);
+    }
+    if (fogEdgeVerts.length > 0) {
+      const fEdgeGeom = new THREE.BufferGeometry();
+      fEdgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(fogEdgeVerts, 3));
+      const fEdgeMat = new THREE.LineBasicMaterial({
+        color: 0xd8b4fe,
+        depthTest: false,
+        transparent: true,
+        opacity: 0.92,
+      });
+      const fEdgeLines = new THREE.LineSegments(fEdgeGeom, fEdgeMat);
+      fEdgeLines.renderOrder = 9992;
+      grp.add(fEdgeLines);
+    }
+
+    haloRoot.add(grp);
+    bspDiagOverlayGroupRef.current = grp;
+  }, [showBspDiagOverlay, visibleBspIndices, bspMeshes]);
+
+  const handleLoadWrlOrLog = useCallback(async () => {
+    if (!window.opence.pickWrlOrToolLog) return;
+    const res = await window.opence.pickWrlOrToolLog();
+    if (!res.ok) return;
+    setDiagFileName(res.fileName);
+    if (res.kind === 'wrl' && res.wrl) {
+      setWrlData(res.wrl);
+      setShowDiagPanel(true);
+    } else if (res.kind === 'log' && res.logReview) {
+      setToolLogReview(res.logReview);
+      setShowDiagPanel(true);
+    }
+  }, []);
+
+  const jumpCameraToHaloPoint = useCallback((pt: [number, number, number]) => {
+    const [hx, hy, hz] = pt;
+    // Halo (hx, hy, hz) -> Three.js World (hx, hz, -hy)
+    const wx = hx;
+    const wy = hz;
+    const wz = -hy;
+    camPosRef.current.set(wx - 4, wy + 3, wz + 4);
+    const dx = 4;
+    const dy = -3;
+    const dz = -4;
+    const horiz = Math.hypot(dx, dz);
+    camEulerRef.current.yaw = Math.atan2(-dx, -dz);
+    camEulerRef.current.pitch = Math.atan2(dy, horiz);
+  }, []);
+
   // Main Three.js setup and animation loop
   useEffect(() => {
     if (!webGLSupported || !containerRef.current || !primaryMesh) return;
@@ -1983,6 +2422,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     const bspGroup = new THREE.Group();
     const vehiclesGroup = new THREE.Group();
     const sceneryGroup = new THREE.Group();
+    const machinesGroup = new THREE.Group();
     const spawnsGroup = new THREE.Group();
     const itemsGroup = new THREE.Group();
     const encountersGroup = new THREE.Group();
@@ -1990,10 +2430,13 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     const triggerVolumesGroup = new THREE.Group();
     const cutsceneCamerasGroup = new THREE.Group();
     const netgameFlagsGroup = new THREE.Group();
+    const worldBoundsGroup = new THREE.Group();
+    worldBoundsGroup.visible = visibleLayers.worldBounds;
 
     haloRoot.add(bspGroup);
     haloRoot.add(vehiclesGroup);
     haloRoot.add(sceneryGroup);
+    haloRoot.add(machinesGroup);
     haloRoot.add(spawnsGroup);
     haloRoot.add(itemsGroup);
     haloRoot.add(encountersGroup);
@@ -2001,11 +2444,13 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     haloRoot.add(triggerVolumesGroup);
     haloRoot.add(cutsceneCamerasGroup);
     haloRoot.add(netgameFlagsGroup);
+    haloRoot.add(worldBoundsGroup);
 
     const layerGroups = {
       bsp: bspGroup,
       vehicles: vehiclesGroup,
       scenery: sceneryGroup,
+      machines: machinesGroup,
       spawns: spawnsGroup,
       items: itemsGroup,
       encounters: encountersGroup,
@@ -2013,6 +2458,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       triggerVolumes: triggerVolumesGroup,
       cutsceneCameras: cutsceneCamerasGroup,
       netgameFlags: netgameFlagsGroup,
+      worldBounds: worldBoundsGroup,
     };
     layerGroupsRef.current = layerGroups;
 
@@ -2033,6 +2479,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
         const allGroups = [
           ...(layerGroupsRef.current?.vehicles.children || []),
           ...(layerGroupsRef.current?.scenery.children || []),
+          ...(layerGroupsRef.current?.machines.children || []),
           ...(layerGroupsRef.current?.spawns.children || []),
           ...(layerGroupsRef.current?.items.children || []),
           ...(layerGroupsRef.current?.encounters.children || []),
@@ -2065,6 +2512,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       const allGroups = [
         ...(layerGroupsRef.current?.vehicles.children || []),
         ...(layerGroupsRef.current?.scenery.children || []),
+        ...(layerGroupsRef.current?.machines.children || []),
         ...(layerGroupsRef.current?.spawns.children || []),
         ...(layerGroupsRef.current?.items.children || []),
         ...(layerGroupsRef.current?.encounters.children || []),
@@ -2128,6 +2576,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       const allGroups = [
         ...layerGroupsRef.current.vehicles.children,
         ...layerGroupsRef.current.scenery.children,
+        ...layerGroupsRef.current.machines.children,
         ...layerGroupsRef.current.spawns.children,
         ...layerGroupsRef.current.items.children,
         ...layerGroupsRef.current.encounters.children,
@@ -2271,6 +2720,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
               const interactiveRoots = [
                 ...layerGroupsRef.current.vehicles.children,
                 ...layerGroupsRef.current.scenery.children,
+                ...layerGroupsRef.current.machines.children,
                 ...layerGroupsRef.current.spawns.children,
                 ...layerGroupsRef.current.items.children,
                 ...layerGroupsRef.current.encounters.children,
@@ -2445,10 +2895,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       const tag = (document.activeElement?.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
 
-      if (e.code === 'AltLeft') {
-        e.preventDefault();
-      }
-      if (!(e.ctrlKey || e.metaKey)) {
+      if (!(e.ctrlKey || e.metaKey || e.altKey)) {
         keysDownRef.current.add(e.code);
       }
 
@@ -2492,6 +2939,13 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       keysDownRef.current.delete(e.code);
     };
 
+    const onWindowBlur = () => {
+      keysDownRef.current.clear();
+      isRightMouseDownRef.current = false;
+      isLeftPanDraggingRef.current = false;
+      isMiddleDraggingRef.current = false;
+    };
+
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       setCameraSpeed((prev) => {
@@ -2506,6 +2960,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
     canvas.addEventListener('wheel', onWheel, { passive: false });
 
     // 8. Resize observer
@@ -2537,28 +2992,61 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       const { yaw, pitch } = camEulerRef.current;
       const pos = camPosRef.current;
 
-      // Only fly camera when gizmo is not being actively dragged
+      // Only fly/walk camera when gizmo is not being actively dragged
       if (!isTransformDraggingRef.current) {
-        const forward = new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
-        const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
-        const up = new THREE.Vector3(0, 1, 0);
-
-        const move = new THREE.Vector3();
         const isCtrlDown = keys.has('ControlLeft') || keys.has('ControlRight') || keys.has('MetaLeft') || keys.has('MetaRight');
-        if (!isCtrlDown) {
-          if (keys.has('KeyW')) move.add(forward);
-          if (keys.has('KeyS')) move.sub(forward);
-          if (keys.has('KeyD')) move.add(right);
-          if (keys.has('KeyA')) move.sub(right);
-          if (keys.has('Space')) move.add(up);
-          if (keys.has('AltLeft')) move.sub(up);
-        }
+        if (walkModeRef.current && collisionWorldRef.current && !isCtrlDown) {
+          // Guilty Spark Item 2: Master Chief 3-sphere capsule walk with gravity & jump
+          const fwdHaloX = -Math.sin(yaw);
+          const fwdHaloY = Math.cos(yaw);
+          const rightHaloX = Math.cos(yaw);
+          const rightHaloY = Math.sin(yaw);
 
-        if (move.lengthSq() > 0) {
-          move.normalize();
-          const speedMultiplier = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 2.5 : 1.0;
-          move.multiplyScalar(speedRef.current * speedMultiplier * dt);
-          pos.add(move);
+          let moveX = 0;
+          let moveY = 0;
+          if (keys.has('KeyW')) { moveX += fwdHaloX; moveY += fwdHaloY; }
+          if (keys.has('KeyS')) { moveX -= fwdHaloX; moveY -= fwdHaloY; }
+          if (keys.has('KeyD')) { moveX += rightHaloX; moveY += rightHaloY; }
+          if (keys.has('KeyA')) { moveX -= rightHaloX; moveY -= rightHaloY; }
+
+          const moveLen = Math.hypot(moveX, moveY);
+          const baseWalkSpeed = Math.max(4.5, Math.min(18.0, speedRef.current * 0.12));
+          const walkSpeed = (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? baseWalkSpeed * 2.2 : baseWalkSpeed;
+          const desiredVelocity: [number, number, number] = moveLen > 1e-5
+            ? [(moveX / moveLen) * walkSpeed, (moveY / moveLen) * walkSpeed, 0]
+            : [0, 0, 0];
+
+          const jumpReq = keys.has('Space');
+          walkStateRef.current = stepSourceWalk(
+            collisionWorldRef.current,
+            walkStateRef.current,
+            desiredVelocity,
+            dt,
+            jumpReq,
+          );
+          const [hx, hy, hz] = walkStateRef.current.position;
+          pos.set(hx, hz + WALK_EYE_HEIGHT, -hy);
+        } else {
+          const forward = new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+          const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+          const up = new THREE.Vector3(0, 1, 0);
+
+          const move = new THREE.Vector3();
+          if (!isCtrlDown) {
+            if (keys.has('KeyW')) move.add(forward);
+            if (keys.has('KeyS')) move.sub(forward);
+            if (keys.has('KeyD')) move.add(right);
+            if (keys.has('KeyA')) move.sub(right);
+            if (keys.has('Space')) move.add(up);
+            if (keys.has('KeyC')) move.sub(up);
+          }
+
+          if (move.lengthSq() > 0) {
+            move.normalize();
+            const speedMultiplier = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 2.5 : 1.0;
+            move.multiplyScalar(speedRef.current * speedMultiplier * dt);
+            pos.add(move);
+          }
         }
       }
 
@@ -2572,6 +3060,13 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
 
       if (selectionBoxHelperRef.current) {
         selectionBoxHelperRef.current.update();
+      }
+      if (collOverlayGroupRef.current) {
+        const activeObj = transformControls.object ?? getSelectedGroup();
+        if (activeObj) {
+          collOverlayGroupRef.current.position.copy(activeObj.position);
+          collOverlayGroupRef.current.quaternion.copy(activeObj.quaternion);
+        }
       }
       if (partnerBoxHelperRef.current) {
         partnerBoxHelperRef.current.update();
@@ -2681,6 +3176,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onWindowBlur);
       canvas.removeEventListener('wheel', onWheel);
 
       transformControls.dispose();
@@ -2782,6 +3278,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
               ['bsp', 'layer-toggle-bsp', 'BSP', null],
               ['vehicles', 'layer-toggle-vehicles', 'Vehicles', scenarioData?.counts.vehicles],
               ['scenery', 'layer-toggle-scenery', 'Scenery', scenarioData?.counts.scenery],
+              ['machines', 'layer-toggle-machines', 'Doors', scenarioData?.counts.machines],
               ['spawns', 'layer-toggle-spawns', 'Spawns', scenarioData?.counts.spawns],
               ['items', 'layer-toggle-items', 'Items', scenarioData ? scenarioData.counts.weapons + scenarioData.counts.equipment : null],
               ['encounters', 'layer-toggle-encounters', 'AI Squads', scenarioData?.counts.encounters],
@@ -2789,6 +3286,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
               ['triggerVolumes', 'layer-toggle-trigger-volumes', 'Triggers', scenarioData?.counts.triggerVolumes],
               ['cutsceneCameras', 'layer-toggle-cutscene-cameras', 'Cameras', scenarioData?.counts.cutsceneCameras],
               ['netgameFlags', 'layer-toggle-netgame-flags', 'Flags', scenarioData?.counts.netgameFlags],
+              ['worldBounds', 'layer-toggle-world-bounds', 'World Bounds', null],
             ] as const
           ).map(([layerKey, testId, label, count]) => {
             const active = visibleLayers[layerKey];
@@ -3052,7 +3550,108 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
             [R] Frame Scene
           </button>
 
+          {/* Guilty Spark Item 2: Walk Mode (Master Chief Collision + Gravity + Jump) */}
+          <button
+            data-testid="viewport-walk-mode-btn"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              setWalkMode((prev) => !prev);
+            }}
+            style={{
+              background: walkMode ? '#00e676' : 'var(--bg-panel)',
+              color: walkMode ? '#000' : 'var(--text-primary)',
+              border: `1px solid ${walkMode ? '#00e676' : 'var(--border)'}`,
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Toggle First-Person Master Chief Collision Walk Sandbox (WASD walk, Spacebar jump, Shift sprint)"
+          >
+            {walkMode ? '🚶 Walk Mode: ON' : '🚶 Walk Mode'}
+          </button>
 
+          {/* Guilty Spark Item 1: Load .WRL Error Overlay or tool.exe Build Log */}
+          <button
+            data-testid="viewport-wrl-diag-btn"
+            onClick={handleLoadWrlOrLog}
+            style={{
+              background: wrlData || toolLogReview ? 'rgba(244, 63, 94, 0.2)' : 'var(--bg-panel)',
+              color: wrlData || toolLogReview ? '#fb7185' : 'var(--text-primary)',
+              border: `1px solid ${wrlData || toolLogReview ? '#f43f5e' : 'var(--border)'}`,
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Load a Halo .WRL (VRML 1.0) error geometry overlay or tool.exe / debug.txt build log"
+          >
+            {wrlData || toolLogReview ? `⚠ WRL/Log (${diagFileName})` : 'Load .WRL / Log'}
+          </button>
+
+          {/* Option 1 (Milestone 18.2): Toggle 3D Collision Hitbox (`coll`) Wireframe Overlay */}
+          <button
+            data-testid="viewport-coll-hitbox-btn"
+            onClick={() => setShowCollHitboxOverlay((prev) => !prev)}
+            style={{
+              background: showCollHitboxOverlay ? 'rgba(0, 230, 118, 0.2)' : 'var(--bg-panel)',
+              color: showCollHitboxOverlay ? '#00e676' : 'var(--text-primary)',
+              border: `1px solid ${showCollHitboxOverlay ? '#00e676' : 'var(--border)'}`,
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Toggle 3D model_collision_geometry (coll) hitbox wireframe overlay on the selected object"
+          >
+            {showCollHitboxOverlay ? '🛡 Hitbox (coll): ON' : '🛡 Hitbox (coll)'}
+          </button>
+
+          {/* Item 3 (Milestone 18.2): Toggle 3D BSP Cluster Portals, Fog Planes & Weather Polyhedra Overlay */}
+          <button
+            data-testid="viewport-bsp-diag-btn"
+            onClick={() => setShowBspDiagOverlay((prev) => !prev)}
+            style={{
+              background: showBspDiagOverlay ? 'rgba(56, 189, 248, 0.2)' : 'var(--bg-panel)',
+              color: showBspDiagOverlay ? '#38bdf8' : 'var(--text-primary)',
+              border: `1px solid ${showBspDiagOverlay ? '#38bdf8' : 'var(--border)'}`,
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Toggle 3D BSP Cluster Portals (cyan), Planar Fog Regions (purple), and Weather Polyhedra (amber) overlays"
+          >
+            {showBspDiagOverlay ? '☁ Portals/Fog: ON' : '☁ Portals/Fog'}
+          </button>
+
+
+
+          {/* Refresh Viewport Button */}
+          <button
+            data-testid="viewport-refresh-btn"
+            onClick={handleRefreshViewport}
+            style={{
+              background: 'var(--bg-panel)',
+              color: 'var(--text-primary)',
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+            }}
+            title="Refresh 3D Viewport objects, models, textures, and BSP geometry"
+          >
+            <span>↻</span> Refresh
+          </button>
 
           {/* Inspector Panel Toggle Button */}
           <button
@@ -3090,6 +3689,201 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
             outline: 'none',
           }}
         />
+
+        {/* Guilty Spark Item 1: Floating 3D .WRL & tool.exe Diagnostic Triage Drawer */}
+        {showDiagPanel && (wrlData || toolLogReview) && (
+          <div
+            data-testid="wrl-diagnostics-drawer"
+            style={{
+              position: 'absolute',
+              top: 12,
+              left: 12,
+              width: 390,
+              maxHeight: 'calc(100% - 28px)',
+              background: 'rgba(15, 23, 42, 0.95)',
+              border: '1px solid rgba(244, 63, 94, 0.5)',
+              borderRadius: 8,
+              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.65)',
+              zIndex: 25,
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              fontSize: 11.5,
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '8px 12px',
+                background: 'rgba(244, 63, 94, 0.14)',
+                borderBottom: '1px solid rgba(244, 63, 94, 0.35)',
+              }}
+            >
+              <strong style={{ color: '#fda4af', fontSize: 12 }}>
+                ⚠ WRL / Tool Log Diagnostics — {diagFileName}
+              </strong>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setWrlData(null);
+                    setToolLogReview(null);
+                    setShowDiagPanel(false);
+                  }}
+                  style={{
+                    background: 'transparent',
+                    color: '#f87171',
+                    border: '1px solid rgba(248, 113, 113, 0.4)',
+                    borderRadius: 4,
+                    padding: '2px 6px',
+                    fontSize: 10.5,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Clear Overlay
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowDiagPanel(false)}
+                  style={{
+                    background: 'transparent',
+                    color: 'var(--text-secondary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    padding: '2px 6px',
+                    fontSize: 10.5,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Hide
+                </button>
+              </div>
+            </div>
+
+            <div style={{ padding: 10, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {wrlData && (
+                <div>
+                  <div style={{ fontWeight: 600, color: '#e2e8f0', marginBottom: 4 }}>
+                    VRML 1.0 Error Geometry ({wrlData.points.length} pts, {wrlData.segments.length} edges, {wrlData.faces.length} faces)
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 160, overflowY: 'auto' }}>
+                    {wrlData.faces.slice(0, 12).map((face, i) => (
+                      <div
+                        key={`face-${i}`}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          background: 'rgba(255,255,255,0.04)',
+                          padding: '4px 8px',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <span style={{ color: '#cbd5e1', fontFamily: 'var(--mono-font)', fontSize: 10.5 }}>
+                          Face #{i + 1}: [{face.centroid[0].toFixed(1)}, {face.centroid[1].toFixed(1)}, {face.centroid[2].toFixed(1)}]
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => jumpCameraToHaloPoint(face.centroid)}
+                          style={{
+                            background: 'rgba(56, 189, 248, 0.16)',
+                            color: '#38bdf8',
+                            border: '1px solid rgba(56, 189, 248, 0.4)',
+                            borderRadius: 3,
+                            padding: '2px 6px',
+                            fontSize: 10,
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Jump Camera
+                        </button>
+                      </div>
+                    ))}
+                    {wrlData.faces.length === 0 &&
+                      wrlData.segments.slice(0, 12).map((seg, i) => {
+                        const mid: [number, number, number] = [
+                          (seg.start[0] + seg.end[0]) * 0.5,
+                          (seg.start[1] + seg.end[1]) * 0.5,
+                          (seg.start[2] + seg.end[2]) * 0.5,
+                        ];
+                        return (
+                          <div
+                            key={`seg-${i}`}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              background: 'rgba(255,255,255,0.04)',
+                              padding: '4px 8px',
+                              borderRadius: 4,
+                            }}
+                          >
+                            <span style={{ color: '#cbd5e1', fontFamily: 'var(--mono-font)', fontSize: 10.5 }}>
+                              Edge #{i + 1}: [{mid[0].toFixed(1)}, {mid[1].toFixed(1)}, {mid[2].toFixed(1)}]
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => jumpCameraToHaloPoint(mid)}
+                              style={{
+                                background: 'rgba(56, 189, 248, 0.16)',
+                                color: '#38bdf8',
+                                border: '1px solid rgba(56, 189, 248, 0.4)',
+                                borderRadius: 3,
+                                padding: '2px 6px',
+                                fontSize: 10,
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              Jump Camera
+                            </button>
+                          </div>
+                        );
+                      })}
+                  </div>
+                  {wrlSubmeshMatches.length > 0 && (
+                    <div style={{ marginTop: 6, color: '#94a3b8', fontSize: 10.5 }}>
+                      Matched BSP Submeshes:{' '}
+                      {wrlSubmeshMatches
+                        .slice(0, 5)
+                        .map((m) => `#${m.submeshIndex} (${m.matchedPoints} pts)`)
+                        .join(', ')}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {toolLogReview && (
+                <div>
+                  <div style={{ fontWeight: 600, color: '#e2e8f0', marginBottom: 4 }}>
+                    tool.exe Log Triage ({toolLogReview.errorCount} errors, {toolLogReview.warningCount} warnings)
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 190, overflowY: 'auto' }}>
+                    {toolLogReview.diagnostics.map((d, i) => (
+                      <div
+                        key={`diag-${i}`}
+                        style={{
+                          padding: '6px 8px',
+                          borderRadius: 4,
+                          background: d.severity === 'error' ? 'rgba(244, 63, 94, 0.12)' : 'rgba(251, 191, 36, 0.12)',
+                          border: `1px solid ${d.severity === 'error' ? 'rgba(244, 63, 94, 0.35)' : 'rgba(251, 191, 36, 0.35)'}`,
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, color: d.severity === 'error' ? '#fda4af' : '#fde68a' }}>
+                          [{d.code.toUpperCase()}] {d.summary}
+                        </div>
+                        <div style={{ color: '#cbd5e1', fontSize: 10.5, marginTop: 2 }}>{d.recommendedFix}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* View Cube / Orientation XYZ Gizmo (Top-Right of Viewport) */}
         <div
@@ -3340,6 +4134,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                     {/* Palette Selector (if applicable) */}
                     {(selectedPlacement.kind === 'vehicle' ||
                       selectedPlacement.kind === 'scenery' ||
+                      selectedPlacement.kind === 'machine' ||
                       selectedPlacement.kind === 'biped' ||
                       selectedPlacement.kind === 'weapon' ||
                       selectedPlacement.kind === 'equipment') &&
@@ -3376,9 +4171,11 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                                       ? 'vehicles'
                                       : selectedPlacement.kind === 'scenery'
                                         ? 'scenery'
-                                        : selectedPlacement.kind === 'biped'
-                                          ? 'bipeds'
-                                          : 'weapons'
+                                        : selectedPlacement.kind === 'machine'
+                                          ? 'machines'
+                                          : selectedPlacement.kind === 'biped'
+                                            ? 'bipeds'
+                                            : 'weapons'
                               ] || []
                             ).map((p) => (
                               <option key={p.paletteIndex} value={p.paletteIndex}>
@@ -3455,15 +4252,83 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                       </div>
                     )}
 
-                    {/* Trigger Volume Extents */}
-                    {selectedPlacement.kind === 'trigger_volume' && selectedPlacement.extents && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <div style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 600 }}>
-                          Volume Extents (dx, dy, dz)
+                    {/* Trigger Volume Name & Extents (Resizable in 3D!) */}
+                    {selectedPlacement.kind === 'trigger_volume' && (
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          padding: 8,
+                          background: 'rgba(0, 230, 118, 0.08)',
+                          border: '1px solid rgba(0, 230, 118, 0.35)',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <div style={{ fontSize: 10.5, color: '#00e676', textTransform: 'uppercase', fontWeight: 700 }}>
+                          Trigger Volume Name &amp; Size
                         </div>
-                        <div style={{ fontSize: 11, fontFamily: 'var(--mono-font)', color: 'var(--accent-cyan)' }}>
-                          {selectedPlacement.extents.map((v) => v.toFixed(2)).join(' × ')} m
+                        <div>
+                          <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>Script Name (31 chars max):</span>
+                          <input
+                            data-testid="inspector-trigger-name"
+                            type="text"
+                            value={selectedPlacement.name || ''}
+                            onChange={(e) => {
+                              handleUpdatePlacement(selectedPlacement.id, { name: e.target.value });
+                            }}
+                            style={{
+                              width: '100%',
+                              background: 'var(--bg-main)',
+                              color: 'var(--text-primary)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 3,
+                              padding: '3px 6px',
+                              fontSize: 11,
+                              fontFamily: 'var(--mono-font)',
+                              marginTop: 2,
+                            }}
+                          />
                         </div>
+                        {selectedPlacement.extents && (
+                          <div>
+                            <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>
+                              Volume Extents (Width dX, Length dY, Height dZ in meters):
+                            </span>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginTop: 3 }}>
+                              {(['dX', 'dY', 'dZ'] as const).map((lbl, idx) => (
+                                <div key={lbl}>
+                                  <span style={{ fontSize: 9.5, color: 'var(--text-dim)' }}>{lbl}:</span>
+                                  <input
+                                    data-testid={`inspector-trigger-extent-${idx}`}
+                                    type="number"
+                                    step="0.5"
+                                    min="0.5"
+                                    value={selectedPlacement.extents![idx]}
+                                    onChange={(e) => {
+                                      const val = parseFloat(e.target.value);
+                                      if (!isNaN(val) && val > 0) {
+                                        const nextExt: [number, number, number] = [...selectedPlacement.extents!];
+                                        nextExt[idx] = val;
+                                        handleUpdatePlacement(selectedPlacement.id, { extents: nextExt });
+                                      }
+                                    }}
+                                    style={{
+                                      width: '100%',
+                                      background: 'var(--bg-main)',
+                                      color: 'var(--accent-cyan)',
+                                      border: '1px solid var(--border)',
+                                      borderRadius: 3,
+                                      padding: '3px 5px',
+                                      fontSize: 11,
+                                      fontFamily: 'var(--mono-font)',
+                                    }}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -3882,7 +4747,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                       </div>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
                         {(['x', 'y', 'z'] as const).map((axis, i) => (
-                          <div key={axis}>
+                          <div key={axis} style={{ minWidth: 0 }}>
                             <span style={{ fontSize: 10, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
                               {axis}:
                             </span>
@@ -3890,17 +4755,19 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                               data-testid={`inspector-pos-${axis}`}
                               type="number"
                               step="0.5"
-                              value={selectedPlacement.position[i]}
+                              value={Number(selectedPlacement.position[i].toFixed(7))}
                               onChange={(e) => {
                                 const val = parseFloat(e.target.value);
                                 if (!isNaN(val)) {
                                   const newPos = [...selectedPlacement.position] as [number, number, number];
-                                  newPos[i] = val;
+                                  newPos[i] = Number(val.toFixed(7));
                                   handleUpdatePlacement(selectedPlacement.id, { position: newPos });
                                 }
                               }}
                               style={{
                                 width: '100%',
+                                minWidth: 0,
+                                boxSizing: 'border-box',
                                 background: 'var(--bg-main)',
                                 color: 'var(--text-primary)',
                                 border: '1px solid var(--border)',
@@ -3914,6 +4781,67 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                         ))}
                       </div>
                     </div>
+
+                    {/* Milestone 22: Door / Device Machine & Device Group Linker */}
+                    {selectedPlacement.kind === 'machine' && (
+                      <div
+                        data-testid="inspector-machine-linker"
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 6,
+                          padding: 8,
+                          background: 'rgba(20, 184, 166, 0.08)',
+                          border: '1px solid rgba(20, 184, 166, 0.38)',
+                          borderRadius: 4,
+                        }}
+                      >
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: '#2dd4bf', textTransform: 'uppercase' }}>
+                          Door / Device Group &amp; Switch Linker (mach ↔ ctrl)
+                        </span>
+                        <div style={{ fontSize: 10.5, color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                          Automatic doors open on player proximity when Power Group &amp; Position Group are active. Use 1-Click Link below to bind this door to a shared Device Group and generate a switch/trigger script.
+                        </div>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button
+                            data-testid="inspector-link-device-group-btn"
+                            type="button"
+                            onClick={async () => {
+                              const doorName = `door_${selectedPlacement.id.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+                              const trigName = `trig_${doorName}`;
+                              if (window.opence.setupScenarioScriptEntities) {
+                                await window.opence.setupScenarioScriptEntities({
+                                  objectNames: [doorName],
+                                  triggerVolumes: [trigName],
+                                });
+                              }
+                              const scriptSnippet = `; Auto-Linked Door & Switch Controller (${doorName})\n(script continuous auto_${doorName}_controller\n  (sleep_until (volume_test_objects ${trigName} (players)) 10)\n  (device_set_power ${doorName} 1.0)\n  (device_set_position ${doorName} 1.0)\n  (sleep 90)\n  (device_set_position ${doorName} 0.0)\n)\n`;
+                              if (window.opence.decompileHaloScript && window.opence.compileHaloScript) {
+                                const cur = await window.opence.decompileHaloScript();
+                                const baseHsc = cur.ok && !cur.hscSource.includes('No compiled HaloScript') ? cur.hscSource : '';
+                                if (!baseHsc.includes(`auto_${doorName}_controller`)) {
+                                  await window.opence.compileHaloScript(`${baseHsc.trimEnd()}\n\n${scriptSnippet}`);
+                                }
+                              }
+                              window.dispatchEvent(new CustomEvent('opence:scenario-updated'));
+                            }}
+                            style={{
+                              flex: 1,
+                              padding: '5px 8px',
+                              fontSize: 10.5,
+                              fontWeight: 700,
+                              background: 'rgba(20, 184, 166, 0.2)',
+                              border: '1px solid #2dd4bf',
+                              color: '#2dd4bf',
+                              borderRadius: 3,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            ⚡ 1-Click Bind Door + Auto Trigger Script
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Rotation Angles */}
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -4081,6 +5009,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                           <option value="weapon">Weapon</option>
                           <option value="equipment">Equipment</option>
                           <option value="biped">Biped</option>
+                          <option value="machine">Door / Machine (device_machine)</option>
                           <option value="spawn">Player Starting Location (Spawn)</option>
                         </select>
                       </div>
@@ -4110,7 +5039,9 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                                       ? 'weapons'
                                       : swapKind === 'biped'
                                         ? 'bipeds'
-                                        : 'equipment'
+                                        : swapKind === 'machine'
+                                          ? 'machines'
+                                          : 'equipment'
                               ] || []
                             ).map((p) => (
                               <option key={p.paletteIndex} value={p.paletteIndex}>
@@ -4141,12 +5072,172 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                     </div>
                   </div>
                 ) : (
-                  <div style={{ padding: '24px 8px', textAlign: 'center', color: 'var(--text-dim)' }}>
-                    <div style={{ marginBottom: 8, fontSize: 13, fontWeight: 600 }}>No Object Selected</div>
-                    <div style={{ fontSize: 11, lineHeight: 1.5 }}>
-                      Click on any vehicle, scenery, weapon, or spawn in the 3D viewport, or pick one from the Outliner
-                      tab to view and edit its properties.
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                    <div style={{ padding: '14px 8px 6px', textAlign: 'center', color: 'var(--text-dim)' }}>
+                      <div style={{ marginBottom: 6, fontSize: 12.5, fontWeight: 600 }}>No Object Selected</div>
+                      <div style={{ fontSize: 11, lineHeight: 1.45 }}>
+                        Click on any vehicle, scenery, door, trigger volume, weapon, or spawn in the 3D viewport, or pick one from the Outliner tab.
+                      </div>
                     </div>
+
+                    {scenarioData?.worldBounds && (
+                      <div
+                        data-testid="inspector-world-bounds-card"
+                        style={{
+                          padding: 10,
+                          background: 'var(--bg-main)',
+                          border: '1px solid rgba(56, 189, 248, 0.35)',
+                          borderRadius: 4,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: 10.5, color: '#38bdf8', textTransform: 'uppercase', fontWeight: 700 }}>
+                            Map World Bounds &amp; Player/Vehicle Limits
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setVisibleLayers((prev) => ({ ...prev, worldBounds: !prev.worldBounds }))}
+                            style={{
+                              padding: '2px 6px',
+                              fontSize: 9.5,
+                              background: visibleLayers.worldBounds ? 'rgba(56, 189, 248, 0.2)' : 'var(--bg-panel)',
+                              color: visibleLayers.worldBounds ? '#38bdf8' : 'var(--text-dim)',
+                              border: '1px solid rgba(56, 189, 248, 0.4)',
+                              borderRadius: 3,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {visibleLayers.worldBounds ? 'Hide 3D Box' : 'Show 3D Box'}
+                          </button>
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 8, fontSize: 10.5 }}>
+                          {(
+                            [
+                              { label: 'Min X', idx: 0, isMax: false },
+                              { label: 'Max X', idx: 0, isMax: true },
+                              { label: 'Min Y', idx: 1, isMax: false },
+                              { label: 'Max Y', idx: 1, isMax: true },
+                              { label: 'Min Z', idx: 2, isMax: false },
+                              { label: 'Max Z', idx: 2, isMax: true },
+                            ] as const
+                          ).map((item) => {
+                            const wb = scenarioData.worldBounds!;
+                            const val = item.isMax ? wb.max[item.idx] : wb.min[item.idx];
+                            return (
+                              <label key={item.label} style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                                <span style={{ color: 'var(--text-dim)' }}>{item.label}</span>
+                                <input
+                                  type="number"
+                                  step={1}
+                                  defaultValue={Number(val.toFixed(2))}
+                                  key={`wb-${item.label}-${val}`}
+                                  onBlur={(e) => {
+                                    const nextVal = parseFloat(e.target.value);
+                                    if (!Number.isFinite(nextVal)) return;
+                                    const nextMin: [number, number, number] = [...wb.min];
+                                    const nextMax: [number, number, number] = [...wb.max];
+                                    if (item.isMax) nextMax[item.idx] = nextVal;
+                                    else nextMin[item.idx] = nextVal;
+                                    void handleUpdatePlacement('__world_bounds__', {
+                                      worldBounds: {
+                                        min: nextMin,
+                                        max: nextMax,
+                                        vehicleFloor: wb.vehicleFloor,
+                                        vehicleCeiling: wb.vehicleCeiling,
+                                      },
+                                    });
+                                  }}
+                                  style={{
+                                    width: '100%',
+                                    minWidth: 0,
+                                    boxSizing: 'border-box',
+                                    background: 'var(--bg-panel)',
+                                    color: 'var(--text-primary)',
+                                    border: '1px solid var(--border)',
+                                    borderRadius: 4,
+                                    padding: '4px 6px',
+                                    fontSize: 11,
+                                  }}
+                                />
+                              </label>
+                            );
+                          })}
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 8, fontSize: 10.5 }}>
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                            <span style={{ color: 'var(--text-dim)' }}>Vehicle Floor Z</span>
+                            <input
+                              type="number"
+                              step={1}
+                              defaultValue={Number(scenarioData.worldBounds.vehicleFloor.toFixed(2))}
+                              key={`wb-vfloor-${scenarioData.worldBounds.vehicleFloor}`}
+                              onBlur={(e) => {
+                                const vFloor = parseFloat(e.target.value);
+                                if (!Number.isFinite(vFloor)) return;
+                                const wb = scenarioData.worldBounds!;
+                                void handleUpdatePlacement('__world_bounds__', {
+                                  worldBounds: {
+                                    min: wb.min,
+                                    max: wb.max,
+                                    vehicleFloor: vFloor,
+                                    vehicleCeiling: wb.vehicleCeiling,
+                                  },
+                                });
+                              }}
+                              style={{
+                                width: '100%',
+                                minWidth: 0,
+                                boxSizing: 'border-box',
+                                background: 'var(--bg-panel)',
+                                color: 'var(--text-primary)',
+                                border: '1px solid var(--border)',
+                                borderRadius: 4,
+                                padding: '4px 6px',
+                                fontSize: 11,
+                              }}
+                            />
+                          </label>
+                          <label style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                            <span style={{ color: 'var(--text-dim)' }}>Vehicle Ceiling Z</span>
+                            <input
+                              type="number"
+                              step={1}
+                              defaultValue={Number(scenarioData.worldBounds.vehicleCeiling.toFixed(2))}
+                              key={`wb-vceil-${scenarioData.worldBounds.vehicleCeiling}`}
+                              onBlur={(e) => {
+                                const vCeil = parseFloat(e.target.value);
+                                if (!Number.isFinite(vCeil)) return;
+                                const wb = scenarioData.worldBounds!;
+                                void handleUpdatePlacement('__world_bounds__', {
+                                  worldBounds: {
+                                    min: wb.min,
+                                    max: wb.max,
+                                    vehicleFloor: wb.vehicleFloor,
+                                    vehicleCeiling: vCeil,
+                                  },
+                                });
+                              }}
+                              style={{
+                                width: '100%',
+                                minWidth: 0,
+                                boxSizing: 'border-box',
+                                background: 'var(--bg-panel)',
+                                color: 'var(--text-primary)',
+                                border: '1px solid var(--border)',
+                                borderRadius: 4,
+                                padding: '4px 6px',
+                                fontSize: 11,
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )
               ) : (
@@ -4176,6 +5267,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                         ['all', 'All'],
                         ['vehicle', 'Vehicles'],
                         ['scenery', 'Scenery'],
+                        ['machine', 'Doors'],
                         ['spawn', 'Spawns'],
                         ['weapon', 'Weapons'],
                         ['equipment', 'Equipment'],
@@ -4347,6 +5439,8 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
             [
               { kind: 'scenery', label: 'Add Scenery', icon: '🌲' },
               { kind: 'vehicle', label: 'Add Vehicle', icon: '🚙' },
+              { kind: 'machine', label: 'Add Door / Machine', icon: '🚪' },
+              { kind: 'trigger_volume', label: 'Add Trigger Volume', icon: '🟩' },
               { kind: 'weapon', label: 'Add Weapon', icon: '🔫' },
               { kind: 'equipment', label: 'Add Equipment', icon: '🧰' },
               { kind: 'netgame_flag', label: 'Add Netgame Flag', icon: '🚩' },
@@ -4484,6 +5578,8 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
               >
                 <option value="scenery">Scenery</option>
                 <option value="vehicle">Vehicle</option>
+                <option value="machine">Door / Machine (device_machine)</option>
+                <option value="trigger_volume">Trigger Volume (Resizable Zone)</option>
                 <option value="weapon">Weapon</option>
                 <option value="equipment">Equipment</option>
                 <option value="netgame_flag">Netgame Flag (Spawns / CTF / KOTH / Oddball / Race)</option>
@@ -4555,7 +5651,12 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
             )}
 
             {/* Palette item (if applicable) */}
-            {(addKind === 'vehicle' || addKind === 'scenery' || addKind === 'biped' || addKind === 'weapon' || addKind === 'equipment') &&
+            {(addKind === 'vehicle' ||
+              addKind === 'scenery' ||
+              addKind === 'machine' ||
+              addKind === 'biped' ||
+              addKind === 'weapon' ||
+              addKind === 'equipment') &&
               scenarioData && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <label style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600 }}>Palette Item</label>
@@ -4578,11 +5679,13 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
                           ? 'vehicles'
                           : addKind === 'scenery'
                             ? 'scenery'
-                            : addKind === 'weapon'
-                              ? 'weapons'
-                              : addKind === 'biped'
-                                ? 'bipeds'
-                                : 'equipment'
+                            : addKind === 'machine'
+                              ? 'machines'
+                              : addKind === 'weapon'
+                                ? 'weapons'
+                                : addKind === 'biped'
+                                  ? 'bipeds'
+                                  : 'equipment'
                       ] || []
                     ).map((p) => (
                       <option key={p.paletteIndex} value={p.paletteIndex}>
@@ -4782,7 +5885,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, onSelectObjectT
             </span>
           ) : (
             <span>
-              LMB Drag: Pan | RMB Drag: Orbit | Right-Click: Quick Add | WASD: Fly | R: Frame | Scroll: Speed
+              LMB Drag: Pan | RMB Drag: Orbit | Right-Click: Quick Add | WASD: Fly | Space / C: Up / Down | R: Frame | Scroll: Speed
             </span>
           )}
         </div>

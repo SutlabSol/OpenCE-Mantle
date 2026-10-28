@@ -9,7 +9,7 @@
  * without requiring Blender or HEK tool.exe.
  */
 
-import { fourCCFromString, NULL_TAG_ID } from '../constants/tag-classes';
+import { fourCCFromString, fourCCToString, NULL_TAG_ID } from '../constants/tag-classes';
 import { resolveStruct, decodeStruct, isRangeInBuffer } from '../map/definitions/engine';
 import {
   childFieldPath,
@@ -28,6 +28,7 @@ import { encodeBitmapWithMipmaps, encodeRgbaToPng } from './bitmap-codec';
 import type { CacheFileHeader } from '../map/header';
 import type { TagIndex } from '../map/tag-index';
 import { resolveTagDataPointer } from '../map/tag-index';
+import { auditMeshIntegrity, type MeshIntegrityReview } from './mesh-integrity';
 
 export type CustomObjectTagGroup = 'scenery' | 'weapon' | 'vehicle' | 'equipment';
 
@@ -83,6 +84,8 @@ export interface ObjMeshSummary {
   isTooComplex: boolean;
   message: string;
   collisionPreview?: CollisionCompilationStats;
+  /** Quantized coordinate edge-graph & T-junction topology review. */
+  meshIntegrity?: MeshIntegrityReview;
 }
 
 export interface CompiledModelVertex {
@@ -755,6 +758,27 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
 
   const finalMaterialSlots = materialSlots.length > 0 ? materialSlots : ['default'];
 
+  let meshIntegrity: MeshIntegrityReview | undefined;
+  if (rawPositions.length > 0 && rawFaces.length > 0 && rawFaces.length <= 32000) {
+    try {
+      const flatPos = new Float32Array(rawPositions.length * 3);
+      for (let i = 0; i < rawPositions.length; i++) {
+        flatPos[i * 3] = rawPositions[i][0];
+        flatPos[i * 3 + 1] = rawPositions[i][1];
+        flatPos[i * 3 + 2] = rawPositions[i][2];
+      }
+      const flatIdx = new Uint32Array(rawFaces.length * 3);
+      for (let i = 0; i < rawFaces.length; i++) {
+        flatIdx[i * 3] = rawFaces[i].v0;
+        flatIdx[i * 3 + 1] = rawFaces[i].v1;
+        flatIdx[i * 3 + 2] = rawFaces[i].v2;
+      }
+      meshIntegrity = auditMeshIntegrity({ positions: flatPos, indices: flatIdx });
+    } catch {
+      // Leave meshIntegrity undefined if bounds exceeded
+    }
+  }
+
   const summary: ObjMeshSummary = {
     vertexCount: rawPositions.length,
     triangleCount: rawTriangles.length,
@@ -771,6 +795,7 @@ export function parseObjMesh(objText: string, options: ObjParseOptions = {}): Pa
     },
     isTooComplex,
     message: `Mesh ready: ${rawPositions.length} vertices, ${rawTriangles.length} triangles (${uvStatus}). Dimensions: ${sizeBounds[0].toFixed(2)} x ${sizeBounds[1].toFixed(2)} x ${sizeBounds[2].toFixed(2)} world units.`,
+    meshIntegrity,
   };
 
   const parsedMesh: ParsedObjMesh = {
@@ -2624,10 +2649,10 @@ function buildPlaneBsp2dTree(
     centroid2dMap.set(sIdx, [cx / pts2d.length, cy / pts2d.length]);
   }
 
-  const MAX_BSP2D_DEPTH = 24; // Halo CE MAXIMUM_BSP2D_TRAVERSAL_DEPTH is 32
+  const MAX_BSP2D_DEPTH = 30; // Halo CE MAXIMUM_BSP2D_TRAVERSAL_DEPTH is 32
 
   const build2dRecursive = (sList: number[], depth: number): number => {
-    if (sList.length === 1 || depth >= MAX_BSP2D_DEPTH || bsp2dNodes.length >= 16384) {
+    if (sList.length === 1 || depth >= MAX_BSP2D_DEPTH || bsp2dNodes.length >= 65535) {
       return (0x80000000 | sList[0]) >>> 0;
     }
 
@@ -2655,6 +2680,7 @@ function buildPlaneBsp2dTree(
 
         const left: number[] = [];
         const right: number[] = [];
+        let straddleCount = 0;
         for (const otherSurf of sList) {
           if (otherSurf === candSurf) {
             left.push(otherSurf);
@@ -2673,16 +2699,22 @@ function buildPlaneBsp2dTree(
           } else if (minDist >= -1e-4) {
             right.push(otherSurf);
           } else {
-            // Polygon straddles the 2D line: place on side of centroid (or both if few)
-            const c = centroid2dMap.get(otherSurf)!;
-            const cDist = ni * c[0] + nj * c[1] - d;
-            if (cDist < 0) left.push(otherSurf);
-            else right.push(otherSurf);
+            // Polygon straddles the 2D splitting line: insert into BOTH left and right subtrees
+            // (matching Guilty Spark's `bsp_compile.rs` / `bsp2d.c`) so neither side has a collision hole!
+            left.push(otherSurf);
+            right.push(otherSurf);
+            straddleCount++;
           }
         }
 
-        if (left.length > 0 && right.length > 0) {
-          const score = Math.abs(left.length - right.length);
+        // Only accept a split if it strictly reduces both children below `sList.length`
+        if (
+          left.length > 0 &&
+          right.length > 0 &&
+          left.length < sList.length &&
+          right.length < sList.length
+        ) {
+          const score = Math.abs(left.length - right.length) + straddleCount * 2;
           if (score < bestScore) {
             bestScore = score;
             bestLine = { ni, nj, d };
@@ -2695,7 +2727,7 @@ function buildPlaneBsp2dTree(
       if (bestScore <= 1) break;
     }
 
-    // Fallback: axis-aligned 2D median split if all polygons overlap
+    // Fallback: axis-aligned 2D median split if no edge line strictly reduced both sides
     if (!bestLine || bestLeft.length === 0 || bestRight.length === 0) {
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
       for (const sIdx of sList) {
@@ -2712,13 +2744,44 @@ function buildPlaneBsp2dTree(
         return splitX ? ca[0] - cb[0] : ca[1] - cb[1];
       });
       const mid = Math.max(1, Math.floor(sorted.length / 2));
-      bestLeft = sorted.slice(0, mid);
-      bestRight = sorted.slice(mid);
-      const cA = centroid2dMap.get(bestLeft[bestLeft.length - 1])!;
-      const cB = centroid2dMap.get(bestRight[0])!;
+      const cA = centroid2dMap.get(sorted[mid - 1])!;
+      const cB = centroid2dMap.get(sorted[mid])!;
+      const splitVal = splitX ? (cA[0] + cB[0]) * 0.5 : (cA[1] + cB[1]) * 0.5;
       bestLine = splitX
-        ? { ni: 1, nj: 0, d: (cA[0] + cB[0]) * 0.5 }
-        : { ni: 0, nj: 1, d: (cA[1] + cB[1]) * 0.5 };
+        ? { ni: 1, nj: 0, d: splitVal }
+        : { ni: 0, nj: 1, d: splitVal };
+
+      // Classify against the axis-aligned split line, duplicating straddling polygons when doing so still reduces both sides
+      const candLeft: number[] = [];
+      const candRight: number[] = [];
+      for (const sIdx of sorted) {
+        const oPts = poly2dMap.get(sIdx)!;
+        let minD = Infinity;
+        let maxD = -Infinity;
+        for (const op of oPts) {
+          const dist = bestLine.ni * op[0] + bestLine.nj * op[1] - bestLine.d;
+          if (dist < minD) minD = dist;
+          if (dist > maxD) maxD = dist;
+        }
+        if (maxD <= 1e-4) candLeft.push(sIdx);
+        else if (minD >= -1e-4) candRight.push(sIdx);
+        else {
+          candLeft.push(sIdx);
+          candRight.push(sIdx);
+        }
+      }
+      if (
+        candLeft.length > 0 &&
+        candRight.length > 0 &&
+        candLeft.length < sList.length &&
+        candRight.length < sList.length
+      ) {
+        bestLeft = candLeft;
+        bestRight = candRight;
+      } else {
+        bestLeft = sorted.slice(0, mid);
+        bestRight = sorted.slice(mid);
+      }
     }
 
     const nodeIdx = bsp2dNodes.length;
@@ -2738,6 +2801,101 @@ function buildPlaneBsp2dTree(
   };
 
   return build2dRecursive(surfaceIndices, 0);
+}
+
+/**
+ * Coplanar diagonal flipper ported from Guilty Spark (`bsp_triangulate.rs:51-112`).
+ * Finds pairs of triangles sharing an internal edge that are coplanar (normal dot > 0.9999),
+ * checks if the quad is strictly convex, and flips the shared diagonal if doing so improves
+ * minimum triangle compactness (`area / perimeter^2`), eliminating sliver/needle triangles
+ * before BSP plane construction.
+ */
+function improveCoplanarDiagonals(
+  positions: [number, number, number][],
+  faces: { v0: number; v1: number; v2: number; materialSlotIndex: number }[],
+): { v0: number; v1: number; v2: number; materialSlotIndex: number }[] {
+  const out = faces.map((f) => ({ ...f }));
+  if (out.length < 2 || out.length > 16384) return out;
+
+  const triQuality = (a: number, b: number, c: number): { quality: number; nx: number; ny: number; nz: number } => {
+    const p0 = positions[a], p1 = positions[b], p2 = positions[c];
+    if (!p0 || !p1 || !p2) return { quality: 0, nx: 0, ny: 0, nz: 0 };
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const wx = p2[0] - p1[0], wy = p2[1] - p1[1], wz = p2[2] - p1[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const area2 = Math.hypot(cx, cy, cz);
+    if (area2 < 1e-7) return { quality: 0, nx: 0, ny: 0, nz: 0 };
+    const perim = Math.hypot(ux, uy, uz) + Math.hypot(vx, vy, vz) + Math.hypot(wx, wy, wz);
+    const quality = area2 / Math.max(1e-9, perim * perim);
+    return { quality, nx: cx / area2, ny: cy / area2, nz: cz / area2 };
+  };
+
+  for (let pass = 0; pass < 2; pass++) {
+    let flippedCount = 0;
+    // Map undirected edge `min,max` -> first triangle index
+    const edgeOwner = new Map<string, { tIdx: number; a: number; b: number; opp: number }>();
+    const flippedInPass = new Uint8Array(out.length);
+
+    for (let tIdx = 0; tIdx < out.length; tIdx++) {
+      if (flippedInPass[tIdx]) continue;
+      const f = out[tIdx];
+      const edges: [number, number, number][] = [
+        [f.v0, f.v1, f.v2],
+        [f.v1, f.v2, f.v0],
+        [f.v2, f.v0, f.v1],
+      ];
+      for (const [a, b, opp] of edges) {
+        const key = a < b ? `${a},${b}` : `${b},${a}`;
+        const prev = edgeOwner.get(key);
+        if (!prev) {
+          edgeOwner.set(key, { tIdx, a, b, opp });
+          continue;
+        }
+        const tA = prev.tIdx;
+        if (flippedInPass[tA] || flippedInPass[tIdx]) continue;
+        if (out[tA].materialSlotIndex !== f.materialSlotIndex) continue;
+        // Must share the edge in opposite winding order: prev has (a -> b), current has (b -> a)
+        if (prev.a !== b || prev.b !== a) continue;
+        const oppA = prev.opp;
+        const oppB = opp;
+        if (oppA === oppB || oppA === a || oppA === b || oppB === a || oppB === b) continue;
+
+        const qCurr1 = triQuality(prev.a, prev.b, oppA);
+        const qCurr2 = triQuality(a, b, oppB);
+        if (qCurr1.quality <= 0 || qCurr2.quality <= 0) continue;
+
+        const dot = qCurr1.nx * qCurr2.nx + qCurr1.ny * qCurr2.ny + qCurr1.nz * qCurr2.nz;
+        if (dot < 0.9999) continue; // Only flip strictly coplanar triangles
+
+        // Candidate flipped triangles: (oppA, prev.a, oppB) and (oppB, prev.b, oppA)
+        const qFlip1 = triQuality(oppA, prev.a, oppB);
+        const qFlip2 = triQuality(oppB, prev.b, oppA);
+        if (qFlip1.quality <= 0 || qFlip2.quality <= 0) continue;
+
+        // Verify flipped triangles preserve the exact same plane normal (convex quad check)
+        const dot1 = qFlip1.nx * qCurr1.nx + qFlip1.ny * qCurr1.ny + qFlip1.nz * qCurr1.nz;
+        const dot2 = qFlip2.nx * qCurr1.nx + qFlip2.ny * qCurr1.ny + qFlip2.nz * qCurr1.nz;
+        if (dot1 < 0.9999 || dot2 < 0.9999) continue;
+
+        const minCurr = Math.min(qCurr1.quality, qCurr2.quality);
+        const minFlip = Math.min(qFlip1.quality, qFlip2.quality);
+        if (minFlip > minCurr * 1.05) {
+          out[tA] = { v0: oppA, v1: prev.a, v2: oppB, materialSlotIndex: f.materialSlotIndex };
+          out[tIdx] = { v0: oppB, v1: prev.b, v2: oppA, materialSlotIndex: f.materialSlotIndex };
+          flippedInPass[tA] = 1;
+          flippedInPass[tIdx] = 1;
+          flippedCount++;
+          break;
+        }
+      }
+    }
+    if (flippedCount === 0) break;
+  }
+
+  return out;
 }
 
 /**
@@ -2779,14 +2937,15 @@ export function compileMeshCollisionBspData(
     return null;
   }
 
-  // Stage 1B: QEM Edge-Collapse Decimation if above face budget
+  // Stage 1B: QEM Edge-Collapse Decimation if above face budget, followed by Guilty Spark's
+  // coplanar diagonal flipping (`improveCoplanarDiagonals`) to eliminate needle/sliver triangles
   const decimated =
     welded.faces.length > maxFaceBudget
       ? decimateCollisionMeshQem(welded.positions, welded.faces, maxFaceBudget)
       : welded;
 
   const positions = decimated.positions;
-  const activeFaces = decimated.faces;
+  const activeFaces = improveCoplanarDiagonals(positions, decimated.faces);
 
   const planes: [number, number, number, number][] = [];
   const findOrAddPlane = (nx: number, ny: number, nz: number, d: number): { planeIdx: number; negated: boolean } => {
@@ -2951,9 +3110,22 @@ export function compileMeshCollisionBspData(
   }
 
   for (let e = 0; e < edges.length; e++) {
-    const [v0, v1] = edges[e].vertexIndices;
+    const edge = edges[e];
+    const [v0, v1] = edge.vertexIndices;
     if (vertexFirstEdge[v0] === -1) vertexFirstEdge[v0] = e;
     if (vertexFirstEdge[v1] === -1) vertexFirstEdge[v1] = e;
+    // Guarantee `edge_indices[0]` and `edge_indices[1]` are always valid in-bounds indices (>= 0)
+    // so Halo CE's `bsp3d_test_pill` (`&bsp->edges[edge->edge_indices[side]]`) never reads `edges[-1]`.
+    if (edge.edgeIndices[0] < 0) {
+      edge.edgeIndices[0] = edge.edgeIndices[1] >= 0 ? edge.edgeIndices[1] : e;
+    }
+    if (edge.edgeIndices[1] < 0) {
+      edge.edgeIndices[1] = edge.edgeIndices[0] >= 0 ? edge.edgeIndices[0] : e;
+    }
+    // If an edge is an open boundary (`surfaceIndices[1] === -1`), ensure its owning surface is marked two-sided
+    if (edge.surfaceIndices[1] < 0 && edge.surfaceIndices[0] >= 0 && surfaces[edge.surfaceIndices[0]]) {
+      surfaces[edge.surfaceIndices[0]].flags |= 0x01;
+    }
   }
 
   const vertices = positions.map((pt, idx) => ({
@@ -4071,3 +4243,384 @@ export function buildCustomObjectContainer(options: BuildCustomObjectOptions): B
     generatedTagPaths,
   };
 }
+
+export interface CoupledPhysicsScaleSummary {
+  objectTagId: number;
+  objectPath: string;
+  objectClass: string;
+  scaleFactor: number;
+  scaledGbxmodelVertices: number;
+  scaledCollisionVertices: number;
+  scaledCollisionPlanes: number;
+  scaledPhysicsMassPoints: number;
+  scaledVehicleSuspensions: number;
+  updatedWeaponOrEquipmentScale: boolean;
+  newPhysicsMass?: number;
+}
+
+/**
+ * Coupled Vehicle, Weapon, Equipment & Scenery Dimensional Physics Resizer (0.1x - 5.0x),
+ * ported from Guilty Spark (`live_scaling.rs:142-292` and `live_items.rs:289-307`).
+ *
+ * Scales in-place inside `mapBuffer`:
+ * 1. Root Object (`vehi`, `scen`, `weap`, `eqip`, `bipd`): bounding radius, bounding offset, render radius ($s^1$),
+ *    plus `weap`/`eqip` world item scale float at `+0x184` ($s^1$).
+ * 2. `gbxmodel` (`mod2`): node translations, marker translations, part centroids, and uncompressed 3D vertices ($s^1$).
+ * 3. `model_collision_geometry` (`coll`): pathfinding box/spheres, 3D BSP plane `d`, 2D BSP `plane_d`, and collision vertices ($s^1$).
+ * 4. `physics` (`phys`):
+ *    - `radius` (`+0x00`), `center_of_mass` (`+0x0C..0x14`), `ground_depth` (`+0x24`), `water_depth` (`+0x3C`) by $s^1$,
+ *    - `mass` (`+0x08`) and `mass_points[*].mass` (`+0x28`) by $s^3$,
+ *    - `xx/yy/zz_moment` (`+0x50..0x58`) and forward $3\times 3$ inertia matrix (`+0x5C` entry 0) by $s^5$,
+ *    - inverse $3\times 3$ inertia matrix (`+0x5C` entry 1) by $s^{-5}$,
+ *    - `powered_mass_points[*].antigrav_offset/height` (`+0x28`, `+0x2C`) by $s^1$,
+ *    - `mass_points[*].position` (`+0x38..0x40`) and `radius` (`+0x68`) by $s^1$.
+ * 5. `model_animations` (`antr`): `vehicles[*].suspensions[*]` extension/compression ground depths (`+0x04`, `+0x08`) by $s^1$.
+ */
+export function scaleObjectAndCoupledPhysicsInMap(
+  mapBuffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  objectTagId: number,
+  scaleFactor: number,
+): CoupledPhysicsScaleSummary {
+  const s1 = Math.max(0.1, Math.min(10.0, Number.isFinite(scaleFactor) ? scaleFactor : 1.0));
+  const s3 = s1 * s1 * s1;
+  const s5 = s3 * s1 * s1;
+  const invS5 = 1.0 / Math.max(1e-6, s5);
+
+  const entry = tagIndex.entries[objectTagId & 0xffff];
+  if (!entry) {
+    throw new Error(`Tag ID 0x${objectTagId.toString(16)} not found in map tag index.`);
+  }
+
+  const ptrToOff = (ptr: number): number | null => {
+    if (!ptr || ptr < tagIndex.baseMemoryAddress) return null;
+    const off = resolveTagDataPointer(ptr, header, tagIndex.baseMemoryAddress);
+    if (off < 0 || off >= mapBuffer.length) return null;
+    return off;
+  };
+
+  const scaleFloatAt = (off: number, factor: number) => {
+    if (off < 0 || off + 4 > mapBuffer.length) return;
+    const val = mapBuffer.readFloatLE(off);
+    if (Number.isFinite(val)) {
+      mapBuffer.writeFloatLE(val * factor, off);
+    }
+  };
+
+  let mod2TagId = 0xffffffff;
+  let antrTagId = 0xffffffff;
+  let collTagId = 0xffffffff;
+  let physTagId = 0xffffffff;
+  let updatedWeaponOrEquipmentScale = false;
+
+  const cls = fourCCToString(entry.primaryClassFourCC);
+  const rootOff = ptrToOff(entry.tagDataPointerOrResourceIndex);
+  if (rootOff === null) {
+    throw new Error(`Tag "${entry.path}" (${cls}) has no in-map tag data pointer.`);
+  }
+
+  if (cls === 'mod2' || cls === 'mode') {
+    mod2TagId = entry.tagId;
+    // Also check if another object tag references this gbxmodel
+    for (const cand of tagIndex.entries) {
+      const candCls = fourCCToString(cand.primaryClassFourCC);
+      if (['vehi', 'scen', 'weap', 'eqip', 'bipd'].includes(candCls)) {
+        const cOff = ptrToOff(cand.tagDataPointerOrResourceIndex);
+        if (cOff !== null && cOff + 0x88 <= mapBuffer.length) {
+          const mId = mapBuffer.readUInt32LE(cOff + 0x28 + 0x0c);
+          if ((mId & 0xffff) === (mod2TagId & 0xffff)) {
+            antrTagId = mapBuffer.readUInt32LE(cOff + 0x38 + 0x0c);
+            collTagId = mapBuffer.readUInt32LE(cOff + 0x70 + 0x0c);
+            physTagId = mapBuffer.readUInt32LE(cOff + 0x80 + 0x0c);
+            break;
+          }
+        }
+      }
+    }
+  } else if (cls === 'coll') {
+    collTagId = entry.tagId;
+  } else if (cls === 'phys') {
+    physTagId = entry.tagId;
+  } else {
+    // Object tag (`vehi`, `scen`, `weap`, `eqip`, `bipd`, `garb`, `mach`, `ctrl`)
+    scaleFloatAt(rootOff + 0x04, s1); // bounding_radius
+    scaleFloatAt(rootOff + 0x08, s1); // bounding_offset.x
+    scaleFloatAt(rootOff + 0x0c, s1); // bounding_offset.y
+    scaleFloatAt(rootOff + 0x10, s1); // bounding_offset.z
+    scaleFloatAt(rootOff + 0x104, s1); // render_bounding_radius
+
+    if ((cls === 'weap' || cls === 'eqip') && rootOff + 0x188 <= mapBuffer.length) {
+      const curItemScale = mapBuffer.readFloatLE(rootOff + 0x184);
+      const baseScale = Number.isFinite(curItemScale) && curItemScale > 0.01 && curItemScale < 50 ? curItemScale : 1.0;
+      mapBuffer.writeFloatLE(baseScale * s1, rootOff + 0x184);
+      updatedWeaponOrEquipmentScale = true;
+    }
+
+    if (rootOff + 0x90 <= mapBuffer.length) {
+      mod2TagId = mapBuffer.readUInt32LE(rootOff + 0x28 + 0x0c);
+      antrTagId = mapBuffer.readUInt32LE(rootOff + 0x38 + 0x0c);
+      collTagId = mapBuffer.readUInt32LE(rootOff + 0x70 + 0x0c);
+      physTagId = mapBuffer.readUInt32LE(rootOff + 0x80 + 0x0c);
+    }
+  }
+
+  let scaledGbxmodelVertices = 0;
+  let scaledCollisionVertices = 0;
+  let scaledCollisionPlanes = 0;
+  let scaledPhysicsMassPoints = 0;
+  let scaledVehicleSuspensions = 0;
+  let newPhysicsMass: number | undefined;
+
+  // 1. Scale `gbxmodel` (`mod2`)
+  const mod2Entry = mod2TagId !== 0xffffffff ? tagIndex.entries[mod2TagId & 0xffff] : undefined;
+  if (mod2Entry && !mod2Entry.isExternal) {
+    const mOff = ptrToOff(mod2Entry.tagDataPointerOrResourceIndex);
+    if (mOff !== null && mOff + 232 <= mapBuffer.length) {
+      // Markers (`+0x18`, stride 64 -> instances `+0x34`, stride 32 -> translation `+0x04..0x0C`)
+      const markersCount = mapBuffer.readUInt32LE(mOff + 0x18);
+      const markersOff = ptrToOff(mapBuffer.readUInt32LE(mOff + 0x1c));
+      if (markersOff !== null && markersCount > 0 && markersCount <= 256) {
+        for (let i = 0; i < markersCount; i++) {
+          const mkOff = markersOff + i * 64;
+          if (mkOff + 64 > mapBuffer.length) break;
+          const instCount = mapBuffer.readUInt32LE(mkOff + 0x34);
+          const instOff = ptrToOff(mapBuffer.readUInt32LE(mkOff + 0x38));
+          if (instOff !== null && instCount > 0 && instCount <= 256) {
+            for (let j = 0; j < instCount; j++) {
+              const io = instOff + j * 32;
+              scaleFloatAt(io + 0x04, s1);
+              scaleFloatAt(io + 0x08, s1);
+              scaleFloatAt(io + 0x0c, s1);
+            }
+          }
+        }
+      }
+
+      // Nodes (`+0xB8`, stride 156 -> default_translation `+0x28..0x30`, distance_from_parent `+0x44`, inverse_translation `+0x90..0x98`)
+      const nodesCount = mapBuffer.readUInt32LE(mOff + 0xb8);
+      const nodesOff = ptrToOff(mapBuffer.readUInt32LE(mOff + 0xbc));
+      if (nodesOff !== null && nodesCount > 0 && nodesCount <= 256) {
+        for (let n = 0; n < nodesCount; n++) {
+          const no = nodesOff + n * 156;
+          if (no + 156 > mapBuffer.length) break;
+          scaleFloatAt(no + 0x28, s1);
+          scaleFloatAt(no + 0x2c, s1);
+          scaleFloatAt(no + 0x30, s1);
+          scaleFloatAt(no + 0x44, s1);
+          scaleFloatAt(no + 0x90, s1);
+          scaleFloatAt(no + 0x94, s1);
+          scaleFloatAt(no + 0x98, s1);
+        }
+      }
+
+      // Geometries (`+0xD0`, stride 48 -> parts `+0x24`, stride 132)
+      const geomCount = mapBuffer.readUInt32LE(mOff + 0xd0);
+      const geomOff = ptrToOff(mapBuffer.readUInt32LE(mOff + 0xd4));
+      if (geomOff !== null && geomCount > 0 && geomCount <= 256) {
+        for (let g = 0; g < geomCount; g++) {
+          const go = geomOff + g * 48;
+          if (go + 48 > mapBuffer.length) break;
+          const partCount = mapBuffer.readUInt32LE(go + 0x24);
+          const partOff = ptrToOff(mapBuffer.readUInt32LE(go + 0x28));
+          if (partOff === null || partCount <= 0 || partCount > 256) continue;
+          for (let p = 0; p < partCount; p++) {
+            const po = partOff + p * 132;
+            if (po + 132 > mapBuffer.length) break;
+            // Centroid (`+0x14..0x1C`)
+            scaleFloatAt(po + 0x14, s1);
+            scaleFloatAt(po + 0x18, s1);
+            scaleFloatAt(po + 0x1c, s1);
+            const vCount = mapBuffer.readUInt32LE(po + 0x58);
+            const vOffsetOrPtr = mapBuffer.readUInt32LE(po + 0x64);
+            const vOff =
+              header.engine === 5
+                ? ptrToOff(vOffsetOrPtr)
+                : tagIndex.modelDataFileOffset + vOffsetOrPtr;
+            if (vOff !== null && vCount > 0 && vCount <= 65535 && vOff >= 0 && vOff + vCount * 68 <= mapBuffer.length) {
+              for (let v = 0; v < vCount; v++) {
+                const vo = vOff + v * 68;
+                scaleFloatAt(vo + 0x00, s1);
+                scaleFloatAt(vo + 0x04, s1);
+                scaleFloatAt(vo + 0x08, s1);
+                scaledGbxmodelVertices++;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Scale `model_collision_geometry` (`coll`)
+  const collEntry = collTagId !== 0xffffffff ? tagIndex.entries[collTagId & 0xffff] : undefined;
+  if (collEntry) {
+    const cOff = ptrToOff(collEntry.tagDataPointerOrResourceIndex);
+    if (cOff !== null && cOff + 664 <= mapBuffer.length) {
+      // Pathfinding box (`+616..+640`, 6 floats)
+      for (let b = 0; b < 6; b++) {
+        scaleFloatAt(cOff + 616 + b * 4, s1);
+      }
+      // Pathfinding spheres (`+640`, stride 32 -> center `+16..+24`, radius `+28`)
+      const sphCount = mapBuffer.readUInt32LE(cOff + 640);
+      const sphOff = ptrToOff(mapBuffer.readUInt32LE(cOff + 644));
+      if (sphOff !== null && sphCount > 0 && sphCount <= 256) {
+        for (let i = 0; i < sphCount; i++) {
+          const so = sphOff + i * 32;
+          scaleFloatAt(so + 16, s1);
+          scaleFloatAt(so + 20, s1);
+          scaleFloatAt(so + 24, s1);
+          scaleFloatAt(so + 28, s1);
+        }
+      }
+      // Collision nodes (`+652`, stride 64 -> bsps `+52`, stride 96)
+      const cNodesCount = mapBuffer.readUInt32LE(cOff + 652);
+      const cNodesOff = ptrToOff(mapBuffer.readUInt32LE(cOff + 656));
+      if (cNodesOff !== null && cNodesCount > 0 && cNodesCount <= 256) {
+        for (let n = 0; n < cNodesCount; n++) {
+          const no = cNodesOff + n * 64;
+          if (no + 64 > mapBuffer.length) break;
+          const bspCount = mapBuffer.readUInt32LE(no + 52);
+          const bspOff = ptrToOff(mapBuffer.readUInt32LE(no + 56));
+          if (bspOff === null || bspCount <= 0 || bspCount > 64) continue;
+          for (let b = 0; b < bspCount; b++) {
+            const bo = bspOff + b * 96;
+            if (bo + 96 > mapBuffer.length) break;
+            // Planes (`+12`, stride 16 -> `d` at `+12`)
+            const pCount = mapBuffer.readUInt32LE(bo + 12);
+            const pOff = ptrToOff(mapBuffer.readUInt32LE(bo + 16));
+            if (pOff !== null && pCount > 0 && pCount <= 65535) {
+              for (let p = 0; p < pCount; p++) {
+                scaleFloatAt(pOff + p * 16 + 12, s1);
+                scaledCollisionPlanes++;
+              }
+            }
+            // bsp2d_nodes (`+48`, stride 20 -> `plane_d` at `+8`)
+            const n2dCount = mapBuffer.readUInt32LE(bo + 48);
+            const n2dOff = ptrToOff(mapBuffer.readUInt32LE(bo + 52));
+            if (n2dOff !== null && n2dCount > 0 && n2dCount <= 65535) {
+              for (let n2 = 0; n2 < n2dCount; n2++) {
+                scaleFloatAt(n2dOff + n2 * 20 + 8, s1);
+              }
+            }
+            // Vertices (`+84`, stride 16 -> `point` at `+0..+8`)
+            const vCount = mapBuffer.readUInt32LE(bo + 84);
+            const vOff = ptrToOff(mapBuffer.readUInt32LE(bo + 88));
+            if (vOff !== null && vCount > 0 && vCount <= 65535) {
+              for (let v = 0; v < vCount; v++) {
+                const vo = vOff + v * 16;
+                scaleFloatAt(vo + 0, s1);
+                scaleFloatAt(vo + 4, s1);
+                scaleFloatAt(vo + 8, s1);
+                scaledCollisionVertices++;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Scale `physics` (`phys`) using Guilty Spark's exact dimensional laws ($s^1, s^3, s^5, s^{-5}$)
+  const physEntry = physTagId !== 0xffffffff ? tagIndex.entries[physTagId & 0xffff] : undefined;
+  if (physEntry) {
+    const pOff = ptrToOff(physEntry.tagDataPointerOrResourceIndex);
+    if (pOff !== null && pOff + 128 <= mapBuffer.length) {
+      scaleFloatAt(pOff + 0x00, s1); // radius
+      scaleFloatAt(pOff + 0x08, s3); // mass ($s^3$)
+      newPhysicsMass = mapBuffer.readFloatLE(pOff + 0x08);
+      scaleFloatAt(pOff + 0x0c, s1); // center_of_mass.x
+      scaleFloatAt(pOff + 0x10, s1); // center_of_mass.y
+      scaleFloatAt(pOff + 0x14, s1); // center_of_mass.z
+      scaleFloatAt(pOff + 0x24, s1); // ground_depth
+      scaleFloatAt(pOff + 0x3c, s1); // water_depth
+      scaleFloatAt(pOff + 0x50, s5); // xx_moment ($s^5$)
+      scaleFloatAt(pOff + 0x54, s5); // yy_moment ($s^5$)
+      scaleFloatAt(pOff + 0x58, s5); // zz_moment ($s^5$)
+
+      // inertial_matrix_and_inverse (`+0x5C`, count 2, stride 36)
+      const imCount = mapBuffer.readUInt32LE(pOff + 0x5c);
+      const imOff = ptrToOff(mapBuffer.readUInt32LE(pOff + 0x60));
+      if (imOff !== null && imCount >= 2 && imOff + 72 <= mapBuffer.length) {
+        // First 3x3 matrix: forward inertia tensor ($s^5$)
+        for (let k = 0; k < 9; k++) {
+          scaleFloatAt(imOff + k * 4, s5);
+        }
+        // Second 3x3 matrix: inverse inertia tensor ($s^{-5}$)
+        for (let k = 0; k < 9; k++) {
+          scaleFloatAt(imOff + 36 + k * 4, invS5);
+        }
+      }
+
+      // powered_mass_points (`+0x68`, stride 128 -> antigrav_offset `+0x28`, antigrav_height `+0x2C`)
+      const pmpCount = mapBuffer.readUInt32LE(pOff + 0x68);
+      const pmpOff = ptrToOff(mapBuffer.readUInt32LE(pOff + 0x6c));
+      if (pmpOff !== null && pmpCount > 0 && pmpCount <= 64) {
+        for (let i = 0; i < pmpCount; i++) {
+          const mo = pmpOff + i * 128;
+          if (mo + 128 > mapBuffer.length) break;
+          scaleFloatAt(mo + 0x28, s1);
+          scaleFloatAt(mo + 0x2c, s1);
+        }
+      }
+
+      // mass_points (`+0x74`, stride 128 -> mass `+0x28` by $s^3$, position `+0x38..0x40` by $s^1$, radius `+0x68` by $s^1$)
+      const mpCount = mapBuffer.readUInt32LE(pOff + 0x74);
+      const mpOff = ptrToOff(mapBuffer.readUInt32LE(pOff + 0x78));
+      if (mpOff !== null && mpCount > 0 && mpCount <= 128) {
+        for (let i = 0; i < mpCount; i++) {
+          const mo = mpOff + i * 128;
+          if (mo + 128 > mapBuffer.length) break;
+          scaleFloatAt(mo + 0x28, s3); // mass ($s^3$)
+          scaleFloatAt(mo + 0x38, s1); // position.x
+          scaleFloatAt(mo + 0x3c, s1); // position.y
+          scaleFloatAt(mo + 0x40, s1); // position.z
+          scaleFloatAt(mo + 0x68, s1); // radius
+          scaledPhysicsMassPoints++;
+        }
+      }
+    }
+  }
+
+  // 4. Scale `model_animations` (`antr`) vehicle suspension ground depths (`+0x04`, `+0x08` by $s^1$)
+  const antrEntry = antrTagId !== 0xffffffff ? tagIndex.entries[antrTagId & 0xffff] : undefined;
+  if (antrEntry) {
+    const aOff = ptrToOff(antrEntry.tagDataPointerOrResourceIndex);
+    if (aOff !== null && aOff + 128 <= mapBuffer.length) {
+      const vehCount = mapBuffer.readUInt32LE(aOff + 0x24);
+      const vehOff = ptrToOff(mapBuffer.readUInt32LE(aOff + 0x28));
+      if (vehOff !== null && vehCount > 0 && vehCount <= 32) {
+        for (let v = 0; v < vehCount; v++) {
+          const vo = vehOff + v * 116;
+          if (vo + 116 > mapBuffer.length) break;
+          const suspCount = mapBuffer.readUInt32LE(vo + 0x68);
+          const suspOff = ptrToOff(mapBuffer.readUInt32LE(vo + 0x6c));
+          if (suspOff !== null && suspCount > 0 && suspCount <= 32) {
+            for (let sp = 0; sp < suspCount; sp++) {
+              const so = suspOff + sp * 20;
+              if (so + 20 > mapBuffer.length) break;
+              scaleFloatAt(so + 0x04, s1); // full_extension_ground_depth
+              scaleFloatAt(so + 0x08, s1); // full_compression_ground_depth
+              scaledVehicleSuspensions++;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    objectTagId: entry.tagId,
+    objectPath: entry.path,
+    objectClass: cls,
+    scaleFactor: s1,
+    scaledGbxmodelVertices,
+    scaledCollisionVertices,
+    scaledCollisionPlanes,
+    scaledPhysicsMassPoints,
+    scaledVehicleSuspensions,
+    updatedWeaponOrEquipmentScale,
+    newPhysicsMass,
+  };
+}
+

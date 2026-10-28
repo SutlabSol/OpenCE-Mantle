@@ -34,7 +34,8 @@ var MCC_TAG_ARRAY_ADDRESS = MCC_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 var TAG_DATA_HEADER_XBOX_SIZE = 36;
 var XBOX_BASE_MEMORY_ADDRESS = 2151309312;
 var XBOX_TAG_ARRAY_ADDRESS = XBOX_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_XBOX_SIZE;
-var CE_TAG_SPACE_SIZE = 23 * 1024 * 1024;
+var CE_STOCK_TAG_SPACE_SIZE = 23 * 1024 * 1024;
+var CE_TAG_SPACE_SIZE = 128 * 1024 * 1024;
 
 // ../core/src/map/errors.ts
 var CorruptMapError = class extends Error {
@@ -188,8 +189,8 @@ function classifyMapLayout(buffer) {
 
 // electron/main.ts
 var import_electron3 = require("electron");
-var path10 = __toESM(require("path"));
-var fs8 = __toESM(require("fs"));
+var path11 = __toESM(require("path"));
+var fs9 = __toESM(require("fs"));
 
 // ../core/src/map/tag-footprints.ts
 var SCENARIO_STRUCTURE_BSP_FOURCC = fourCCFromString("sbsp");
@@ -33878,34 +33879,6 @@ var CRC_TABLE = (() => {
   return table;
 })();
 
-// ../core/src/map/finalize-map.ts
-var MAX_SCENARIO_NAME_LENGTH = TAG_STRING_SIZE - 1;
-function scenarioNameFromFileName(fileName) {
-  const base = fileName.split(/[\\/]/).pop() ?? "";
-  const dot = base.lastIndexOf(".");
-  const stem = dot >= 0 ? base.slice(0, dot) : base;
-  const warnings = [];
-  let name = "";
-  const replaced = /* @__PURE__ */ new Set();
-  for (const ch of stem) {
-    const code = ch.codePointAt(0);
-    if (code >= 32 && code <= 126) name += ch;
-    else {
-      name += "_";
-      replaced.add(ch);
-    }
-  }
-  if (replaced.size > 0) {
-    warnings.push(`The file name contains characters the map header can't store (${[...replaced].map((c) => `"${c}"`).join(", ")}); they were replaced with "_" in the map's internal name.`);
-  }
-  if (name.length > MAX_SCENARIO_NAME_LENGTH) {
-    warnings.push(`The file name is longer than ${MAX_SCENARIO_NAME_LENGTH} characters; the map's internal name was shortened to "${name.slice(0, MAX_SCENARIO_NAME_LENGTH)}". The game may not load a map whose internal name differs from its file name - choose a shorter name.`);
-    name = name.slice(0, MAX_SCENARIO_NAME_LENGTH);
-  }
-  if (name.length === 0) throw new Error('The chosen file name gives an empty map name. Choose a file name with at least one character before ".map".');
-  return { name, warnings };
-}
-
 // ../core/src/map/convert/resource-files.ts
 var HEADER_SIZE = 16;
 var ENTRY_SIZE = 12;
@@ -33946,6 +33919,34 @@ function readResourceTable(file, kind) {
     if (!byRange.has(key)) byRange.set(key, entry);
   }
   return { ok: true, table: { kind, label: file.label, fileSize: file.size, entries, byRange } };
+}
+
+// ../core/src/map/finalize-map.ts
+var MAX_SCENARIO_NAME_LENGTH = TAG_STRING_SIZE - 1;
+function scenarioNameFromFileName(fileName) {
+  const base = fileName.split(/[\\/]/).pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  const stem = dot >= 0 ? base.slice(0, dot) : base;
+  const warnings = [];
+  let name = "";
+  const replaced = /* @__PURE__ */ new Set();
+  for (const ch of stem) {
+    const code = ch.codePointAt(0);
+    if (code >= 32 && code <= 126) name += ch;
+    else {
+      name += "_";
+      replaced.add(ch);
+    }
+  }
+  if (replaced.size > 0) {
+    warnings.push(`The file name contains characters the map header can't store (${[...replaced].map((c) => `"${c}"`).join(", ")}); they were replaced with "_" in the map's internal name.`);
+  }
+  if (name.length > MAX_SCENARIO_NAME_LENGTH) {
+    warnings.push(`The file name is longer than ${MAX_SCENARIO_NAME_LENGTH} characters; the map's internal name was shortened to "${name.slice(0, MAX_SCENARIO_NAME_LENGTH)}". The game may not load a map whose internal name differs from its file name - choose a shorter name.`);
+    name = name.slice(0, MAX_SCENARIO_NAME_LENGTH);
+  }
+  if (name.length === 0) throw new Error('The chosen file name gives an empty map name. Choose a file name with at least one character before ".map".');
+  return { name, warnings };
 }
 
 // ../core/src/map/convert/externalize-in.ts
@@ -34046,6 +34047,252 @@ function encodeRgbaToPng(rgba, width, height) {
   const idatChunk = makePngChunk("IDAT", deflated);
   const iendChunk = makePngChunk("IEND", Buffer.alloc(0));
   return Buffer.concat([PNG_SIGNATURE, ihdrChunk, idatChunk, iendChunk]);
+}
+var _dxtBlockRgba = new Uint8Array(64);
+var _dxtPalR = new Int32Array(4);
+var _dxtPalG = new Int32Array(4);
+var _dxtPalB = new Int32Array(4);
+var _dxtAlphaPal = new Int32Array(8);
+
+// ../core/src/render/mesh-integrity.ts
+var TOLERANCE = 1e-6;
+var SHORT_EDGE = 1e-3;
+var AREA_EPSILON = 1e-10;
+var KEY_FACTOR = 1 / TOLERANCE;
+var SAMPLE_LIMIT = 16;
+var TJUNCTION_COMPARISON_LIMIT = 2e6;
+var TJUNCTION_DISTANCE_EPSILON = 5e-6;
+function pushSample(out, index) {
+  if (out.length < SAMPLE_LIMIT) out.push(index);
+}
+function auditMeshIntegrity(mesh) {
+  const posLen = mesh.positions.length;
+  const idxLen = mesh.indices.length;
+  if (!posLen || !idxLen || posLen % 3 !== 0 || idxLen % 3 !== 0) {
+    throw new Error("Mesh integrity audit requires non-empty coordinate/index triplets");
+  }
+  const vertexCount = posLen / 3;
+  const triangleCount = idxLen / 3;
+  const getPoint = (index) => [
+    mesh.positions[index * 3],
+    mesh.positions[index * 3 + 1],
+    mesh.positions[index * 3 + 2]
+  ];
+  const byIndex = /* @__PURE__ */ new Map();
+  const uniquePointPositions = /* @__PURE__ */ new Map();
+  const vertexKey = (index) => {
+    let key = byIndex.get(index);
+    if (key === void 0) {
+      const coords = getPoint(index);
+      key = `${Math.round(coords[0] * KEY_FACTOR)}:${Math.round(coords[1] * KEY_FACTOR)}:${Math.round(coords[2] * KEY_FACTOR)}`;
+      byIndex.set(index, key);
+      if (!uniquePointPositions.has(key)) {
+        uniquePointPositions.set(key, coords);
+      }
+    }
+    return key;
+  };
+  const parents = new Int32Array(triangleCount);
+  for (let t = 0; t < triangleCount; t++) parents[t] = t;
+  const find = (id) => {
+    while (parents[id] !== id) {
+      parents[id] = parents[parents[id]];
+      id = parents[id];
+    }
+    return id;
+  };
+  const union = (left, right) => {
+    const l = find(left);
+    const r = find(right);
+    if (l !== r) parents[r] = l;
+  };
+  const faces = /* @__PURE__ */ new Map();
+  const edges = /* @__PURE__ */ new Map();
+  const duplicateExamples = [];
+  const shortExamples = [];
+  const degenerateExamples = [];
+  const boundaryExamples = [];
+  const nonManifoldExamples = [];
+  const windingExamples = [];
+  let duplicateFaces = 0;
+  let shortEdges = 0;
+  let degenerateTriangles = 0;
+  const badTriangle = new Uint8Array(triangleCount);
+  for (let t = 0; t < triangleCount; t++) {
+    const i0 = mesh.indices[t * 3];
+    const i1 = mesh.indices[t * 3 + 1];
+    const i2 = mesh.indices[t * 3 + 2];
+    if (i0 < 0 || i1 < 0 || i2 < 0 || i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) {
+      continue;
+    }
+    const ids = [i0, i1, i2];
+    const tags = ids.map(vertexKey);
+    const identity = [...tags].sort().join(";");
+    const oldFace = faces.get(identity);
+    if (oldFace !== void 0) {
+      duplicateFaces++;
+      badTriangle[t] = 1;
+      badTriangle[oldFace] = 1;
+      pushSample(duplicateExamples, t);
+    } else {
+      faces.set(identity, t);
+    }
+    const a = getPoint(i0);
+    const b = getPoint(i1);
+    const c = getPoint(i2);
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    const cross = [
+      u[1] * v[2] - u[2] * v[1],
+      u[2] * v[0] - u[0] * v[2],
+      u[0] * v[1] - u[1] * v[0]
+    ];
+    if (new Set(tags).size < 3 || Math.hypot(cross[0], cross[1], cross[2]) <= AREA_EPSILON) {
+      degenerateTriangles++;
+      badTriangle[t] = 1;
+      pushSample(degenerateExamples, t);
+    }
+    for (let k = 0; k < 3; k++) {
+      const j = (k + 1) % 3;
+      const left = tags[k];
+      const right = tags[j];
+      if (left === right) continue;
+      const key = left < right ? `${left}|${right}` : `${right}|${left}`;
+      const direction = left < right ? 1 : -1;
+      const old = edges.get(key);
+      if (old) {
+        union(t, old.firstTriangle);
+        old.count++;
+        old.directionSum += direction;
+      } else {
+        const pa = getPoint(ids[k]);
+        const pb = getPoint(ids[j]);
+        edges.set(key, {
+          firstTriangle: t,
+          count: 1,
+          directionSum: direction,
+          start: pa,
+          end: pb
+        });
+        if (Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]) < SHORT_EDGE) {
+          shortEdges++;
+          pushSample(shortExamples, t);
+        }
+      }
+    }
+  }
+  let boundaryEdges = 0;
+  let nonManifoldEdges = 0;
+  let windingConflicts = 0;
+  for (const e of edges.values()) {
+    if (e.count === 1) {
+      boundaryEdges++;
+      pushSample(boundaryExamples, e.firstTriangle);
+    } else if (e.count > 2) {
+      nonManifoldEdges++;
+      pushSample(nonManifoldExamples, e.firstTriangle);
+    } else if (e.directionSum !== 0) {
+      windingConflicts++;
+      pushSample(windingExamples, e.firstTriangle);
+    }
+  }
+  const uniquePoints = [...uniquePointPositions.values()];
+  const sorted = [0, 1, 2].map(
+    (axis) => [...uniquePoints].sort((a, b) => a[axis] - b[axis])
+  );
+  const lowerBound = (points, axis, target) => {
+    let lo = 0;
+    let hi = points.length;
+    while (lo < hi) {
+      const mid = lo + hi >>> 1;
+      if (points[mid][axis] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  let tJunctionEdges = 0;
+  let tJunctionCandidatesChecked = 0;
+  let tJunctionScanComplete = true;
+  const tJunctionExamples = [];
+  for (const edge of edges.values()) {
+    const a = edge.start;
+    const b = edge.end;
+    const delta = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    const lengthSquared = delta[0] ** 2 + delta[1] ** 2 + delta[2] ** 2;
+    if (lengthSquared < SHORT_EDGE ** 2) continue;
+    const axis = Math.abs(delta[1]) > Math.abs(delta[0]) ? Math.abs(delta[2]) > Math.abs(delta[1]) ? 2 : 1 : Math.abs(delta[2]) > Math.abs(delta[0]) ? 2 : 0;
+    const candidates = sorted[axis];
+    const min = Math.min(a[axis], b[axis]) - TJUNCTION_DISTANCE_EPSILON;
+    const max = Math.max(a[axis], b[axis]) + TJUNCTION_DISTANCE_EPSILON;
+    const begin = lowerBound(candidates, axis, min);
+    const end = lowerBound(candidates, axis, max);
+    if (tJunctionCandidatesChecked + (end - begin) > TJUNCTION_COMPARISON_LIMIT) {
+      tJunctionScanComplete = false;
+      break;
+    }
+    let found = false;
+    const length = Math.sqrt(lengthSquared);
+    for (let i = begin; i < end; i++) {
+      tJunctionCandidatesChecked++;
+      const pt = candidates[i];
+      const t = ((pt[0] - a[0]) * delta[0] + (pt[1] - a[1]) * delta[1] + (pt[2] - a[2]) * delta[2]) / lengthSquared;
+      if (t <= TJUNCTION_DISTANCE_EPSILON / length || t >= 1 - TJUNCTION_DISTANCE_EPSILON / length) {
+        continue;
+      }
+      const projX = a[0] + t * delta[0] - pt[0];
+      const projY = a[1] + t * delta[1] - pt[1];
+      const projZ = a[2] + t * delta[2] - pt[2];
+      if (projX * projX + projY * projY + projZ * projZ <= TJUNCTION_DISTANCE_EPSILON ** 2) {
+        found = true;
+        break;
+      }
+    }
+    if (found) {
+      tJunctionEdges++;
+      badTriangle[edge.firstTriangle] = 1;
+      pushSample(tJunctionExamples, edge.firstTriangle);
+    }
+  }
+  for (const e of edges.values()) {
+    if (e.count !== 2 || e.directionSum !== 0) {
+      badTriangle[e.firstTriangle] = 1;
+    }
+  }
+  const componentDirty = /* @__PURE__ */ new Map();
+  for (let t = 0; t < triangleCount; t++) {
+    const root = find(t);
+    const dirty = (componentDirty.get(root) ?? false) || badTriangle[t] === 1;
+    componentDirty.set(root, dirty);
+  }
+  let openShellCandidates = 0;
+  let edgeClosedShellCandidates = 0;
+  for (const dirty of componentDirty.values()) {
+    if (dirty) openShellCandidates++;
+    else edgeClosedShellCandidates++;
+  }
+  return {
+    checkedTriangles: triangleCount,
+    duplicateFaces,
+    shortEdges,
+    degenerateTriangles,
+    boundaryEdges,
+    nonManifoldEdges,
+    windingConflicts,
+    tJunctionEdges,
+    tJunctionScanComplete,
+    tJunctionCandidatesChecked,
+    connectedShellCandidates: componentDirty.size,
+    openShellCandidates,
+    edgeClosedShellCandidates,
+    exampleDuplicateTriangles: duplicateExamples,
+    exampleShortEdges: shortExamples,
+    exampleDegenerateTriangles: degenerateExamples,
+    exampleBoundaryTriangles: boundaryExamples,
+    exampleNonManifoldTriangles: nonManifoldExamples,
+    exampleWindingTriangles: windingExamples,
+    exampleTJunctionTriangles: tJunctionExamples,
+    note: "Quantized coordinate edge-graph audit (1e-6 tolerance). Identifies 2-manifold defects and interior T-junctions across UV-split vertices."
+  };
 }
 
 // ../core/src/render/collision-generator.ts
@@ -34538,6 +34785,25 @@ function parseObjMesh(objText, options = {}) {
   const uvModeLabel = uvUnwrapMode === "per_triangle" ? "Per-Triangle Ordered Grid" : uvUnwrapMode === "smart" ? "Smart Angle Unwrap" : "6-Side Box Unfold";
   const uvStatus = !usedAutoUv && hasUvCoordinates ? `${rawUvs.length} UV coords` : `Auto-unwrapped (${uvModeLabel})`;
   const finalMaterialSlots = materialSlots.length > 0 ? materialSlots : ["default"];
+  let meshIntegrity;
+  if (rawPositions.length > 0 && rawFaces.length > 0 && rawFaces.length <= 32e3) {
+    try {
+      const flatPos = new Float32Array(rawPositions.length * 3);
+      for (let i = 0; i < rawPositions.length; i++) {
+        flatPos[i * 3] = rawPositions[i][0];
+        flatPos[i * 3 + 1] = rawPositions[i][1];
+        flatPos[i * 3 + 2] = rawPositions[i][2];
+      }
+      const flatIdx = new Uint32Array(rawFaces.length * 3);
+      for (let i = 0; i < rawFaces.length; i++) {
+        flatIdx[i * 3] = rawFaces[i].v0;
+        flatIdx[i * 3 + 1] = rawFaces[i].v1;
+        flatIdx[i * 3 + 2] = rawFaces[i].v2;
+      }
+      meshIntegrity = auditMeshIntegrity({ positions: flatPos, indices: flatIdx });
+    } catch {
+    }
+  }
   const summary = {
     vertexCount: rawPositions.length,
     triangleCount: rawTriangles.length,
@@ -34553,7 +34819,8 @@ function parseObjMesh(objText, options = {}) {
       radius
     },
     isTooComplex,
-    message: `Mesh ready: ${rawPositions.length} vertices, ${rawTriangles.length} triangles (${uvStatus}). Dimensions: ${sizeBounds[0].toFixed(2)} x ${sizeBounds[1].toFixed(2)} x ${sizeBounds[2].toFixed(2)} world units.`
+    message: `Mesh ready: ${rawPositions.length} vertices, ${rawTriangles.length} triangles (${uvStatus}). Dimensions: ${sizeBounds[0].toFixed(2)} x ${sizeBounds[1].toFixed(2)} x ${sizeBounds[2].toFixed(2)} world units.`,
+    meshIntegrity
   };
   const parsedMesh = {
     summary,
@@ -34565,10 +34832,10 @@ function parseObjMesh(objText, options = {}) {
     usedAutoUv,
     groupBounds
   };
-  if (rawPositions.length >= 3 && rawFaces.length > 0 && rawFaces.length <= 15e3) {
+  if (options.collisionMode !== "box" && rawPositions.length >= 3 && rawFaces.length > 0 && rawFaces.length <= 32760) {
     const previewBsp = compileMeshCollisionBspData(parsedMesh, Math.max(1, finalMaterialSlots.length), {
-      mode: "auto",
-      targetFaces: options.targetCollisionFaces ?? 800
+      mode: options.collisionMode ?? "exact",
+      targetFaces: options.targetCollisionFaces ?? 4096
     });
     if (previewBsp) {
       summary.collisionPreview = previewBsp.stats;
@@ -35182,9 +35449,9 @@ function buildPlaneBsp2dTree(surfaceIndices, surfaces, positions, plane, designa
     }
     centroid2dMap.set(sIdx, [cx / pts2d.length, cy / pts2d.length]);
   }
-  const MAX_BSP2D_DEPTH = 24;
+  const MAX_BSP2D_DEPTH = 30;
   const build2dRecursive = (sList, depth) => {
-    if (sList.length === 1 || depth >= MAX_BSP2D_DEPTH || bsp2dNodes.length >= 16384) {
+    if (sList.length === 1 || depth >= MAX_BSP2D_DEPTH || bsp2dNodes.length >= 65535) {
       return (2147483648 | sList[0]) >>> 0;
     }
     let bestLine = null;
@@ -35205,6 +35472,7 @@ function buildPlaneBsp2dTree(surfaceIndices, surfaces, positions, plane, designa
         const d = ni * p0[0] + nj * p0[1];
         const left = [];
         const right = [];
+        let straddleCount = 0;
         for (const otherSurf of sList) {
           if (otherSurf === candSurf) {
             left.push(otherSurf);
@@ -35223,14 +35491,13 @@ function buildPlaneBsp2dTree(surfaceIndices, surfaces, positions, plane, designa
           } else if (minDist >= -1e-4) {
             right.push(otherSurf);
           } else {
-            const c = centroid2dMap.get(otherSurf);
-            const cDist = ni * c[0] + nj * c[1] - d;
-            if (cDist < 0) left.push(otherSurf);
-            else right.push(otherSurf);
+            left.push(otherSurf);
+            right.push(otherSurf);
+            straddleCount++;
           }
         }
-        if (left.length > 0 && right.length > 0) {
-          const score = Math.abs(left.length - right.length);
+        if (left.length > 0 && right.length > 0 && left.length < sList.length && right.length < sList.length) {
+          const score = Math.abs(left.length - right.length) + straddleCount * 2;
           if (score < bestScore) {
             bestScore = score;
             bestLine = { ni, nj, d };
@@ -35258,11 +35525,35 @@ function buildPlaneBsp2dTree(surfaceIndices, surfaces, positions, plane, designa
         return splitX ? ca[0] - cb[0] : ca[1] - cb[1];
       });
       const mid = Math.max(1, Math.floor(sorted.length / 2));
-      bestLeft = sorted.slice(0, mid);
-      bestRight = sorted.slice(mid);
-      const cA = centroid2dMap.get(bestLeft[bestLeft.length - 1]);
-      const cB = centroid2dMap.get(bestRight[0]);
-      bestLine = splitX ? { ni: 1, nj: 0, d: (cA[0] + cB[0]) * 0.5 } : { ni: 0, nj: 1, d: (cA[1] + cB[1]) * 0.5 };
+      const cA = centroid2dMap.get(sorted[mid - 1]);
+      const cB = centroid2dMap.get(sorted[mid]);
+      const splitVal = splitX ? (cA[0] + cB[0]) * 0.5 : (cA[1] + cB[1]) * 0.5;
+      bestLine = splitX ? { ni: 1, nj: 0, d: splitVal } : { ni: 0, nj: 1, d: splitVal };
+      const candLeft = [];
+      const candRight = [];
+      for (const sIdx of sorted) {
+        const oPts = poly2dMap.get(sIdx);
+        let minD = Infinity;
+        let maxD = -Infinity;
+        for (const op of oPts) {
+          const dist = bestLine.ni * op[0] + bestLine.nj * op[1] - bestLine.d;
+          if (dist < minD) minD = dist;
+          if (dist > maxD) maxD = dist;
+        }
+        if (maxD <= 1e-4) candLeft.push(sIdx);
+        else if (minD >= -1e-4) candRight.push(sIdx);
+        else {
+          candLeft.push(sIdx);
+          candRight.push(sIdx);
+        }
+      }
+      if (candLeft.length > 0 && candRight.length > 0 && candLeft.length < sList.length && candRight.length < sList.length) {
+        bestLeft = candLeft;
+        bestRight = candRight;
+      } else {
+        bestLeft = sorted.slice(0, mid);
+        bestRight = sorted.slice(mid);
+      }
     }
     const nodeIdx = bsp2dNodes.length;
     bsp2dNodes.push({
@@ -35280,20 +35571,91 @@ function buildPlaneBsp2dTree(surfaceIndices, surfaces, positions, plane, designa
   };
   return build2dRecursive(surfaceIndices, 0);
 }
+function improveCoplanarDiagonals(positions, faces) {
+  const out = faces.map((f) => ({ ...f }));
+  if (out.length < 2 || out.length > 16384) return out;
+  const triQuality = (a, b, c) => {
+    const p0 = positions[a], p1 = positions[b], p2 = positions[c];
+    if (!p0 || !p1 || !p2) return { quality: 0, nx: 0, ny: 0, nz: 0 };
+    const ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
+    const vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
+    const wx = p2[0] - p1[0], wy = p2[1] - p1[1], wz = p2[2] - p1[2];
+    const cx = uy * vz - uz * vy;
+    const cy = uz * vx - ux * vz;
+    const cz = ux * vy - uy * vx;
+    const area2 = Math.hypot(cx, cy, cz);
+    if (area2 < 1e-7) return { quality: 0, nx: 0, ny: 0, nz: 0 };
+    const perim = Math.hypot(ux, uy, uz) + Math.hypot(vx, vy, vz) + Math.hypot(wx, wy, wz);
+    const quality = area2 / Math.max(1e-9, perim * perim);
+    return { quality, nx: cx / area2, ny: cy / area2, nz: cz / area2 };
+  };
+  for (let pass = 0; pass < 2; pass++) {
+    let flippedCount = 0;
+    const edgeOwner = /* @__PURE__ */ new Map();
+    const flippedInPass = new Uint8Array(out.length);
+    for (let tIdx = 0; tIdx < out.length; tIdx++) {
+      if (flippedInPass[tIdx]) continue;
+      const f = out[tIdx];
+      const edges = [
+        [f.v0, f.v1, f.v2],
+        [f.v1, f.v2, f.v0],
+        [f.v2, f.v0, f.v1]
+      ];
+      for (const [a, b, opp] of edges) {
+        const key = a < b ? `${a},${b}` : `${b},${a}`;
+        const prev = edgeOwner.get(key);
+        if (!prev) {
+          edgeOwner.set(key, { tIdx, a, b, opp });
+          continue;
+        }
+        const tA = prev.tIdx;
+        if (flippedInPass[tA] || flippedInPass[tIdx]) continue;
+        if (out[tA].materialSlotIndex !== f.materialSlotIndex) continue;
+        if (prev.a !== b || prev.b !== a) continue;
+        const oppA = prev.opp;
+        const oppB = opp;
+        if (oppA === oppB || oppA === a || oppA === b || oppB === a || oppB === b) continue;
+        const qCurr1 = triQuality(prev.a, prev.b, oppA);
+        const qCurr2 = triQuality(a, b, oppB);
+        if (qCurr1.quality <= 0 || qCurr2.quality <= 0) continue;
+        const dot = qCurr1.nx * qCurr2.nx + qCurr1.ny * qCurr2.ny + qCurr1.nz * qCurr2.nz;
+        if (dot < 0.9999) continue;
+        const qFlip1 = triQuality(oppA, prev.a, oppB);
+        const qFlip2 = triQuality(oppB, prev.b, oppA);
+        if (qFlip1.quality <= 0 || qFlip2.quality <= 0) continue;
+        const dot1 = qFlip1.nx * qCurr1.nx + qFlip1.ny * qCurr1.ny + qFlip1.nz * qCurr1.nz;
+        const dot2 = qFlip2.nx * qCurr1.nx + qFlip2.ny * qCurr1.ny + qFlip2.nz * qCurr1.nz;
+        if (dot1 < 0.9999 || dot2 < 0.9999) continue;
+        const minCurr = Math.min(qCurr1.quality, qCurr2.quality);
+        const minFlip = Math.min(qFlip1.quality, qFlip2.quality);
+        if (minFlip > minCurr * 1.05) {
+          out[tA] = { v0: oppA, v1: prev.a, v2: oppB, materialSlotIndex: f.materialSlotIndex };
+          out[tIdx] = { v0: oppB, v1: prev.b, v2: oppA, materialSlotIndex: f.materialSlotIndex };
+          flippedInPass[tA] = 1;
+          flippedInPass[tIdx] = 1;
+          flippedCount++;
+          break;
+        }
+      }
+    }
+    if (flippedCount === 0) break;
+  }
+  return out;
+}
 function compileMeshCollisionBspData(mesh, materialCount, options) {
   const mode = options?.mode ?? "auto";
   if (mode === "box" || mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0) {
     return null;
   }
   const inputTriangleCount = mesh.rawFaces.length;
-  const maxFaceBudget = mode === "exact" ? Math.max(256, Math.min(4096, options?.targetFaces ?? 2048)) : Math.max(64, Math.min(2048, options?.targetFaces ?? 800));
+  const maxFaceBudget = mode === "exact" ? 32760 : Math.max(64, Math.min(32760, options?.targetFaces ?? 4096));
   const welded = weldCollisionPositions(mesh.rawPositions, mesh.rawFaces, 1e-4);
   if (welded.positions.length < 3 || welded.faces.length === 0) {
     return null;
   }
   const decimated = welded.faces.length > maxFaceBudget ? decimateCollisionMeshQem(welded.positions, welded.faces, maxFaceBudget) : welded;
   const positions = decimated.positions;
-  const activeFaces = decimated.faces;
+  const activeFaces = improveCoplanarDiagonals(positions, decimated.faces);
   const planes = [];
   const findOrAddPlane = (nx, ny, nz, d) => {
     for (let i = 0; i < planes.length; i++) {
@@ -35348,7 +35710,7 @@ function compileMeshCollisionBspData(mesh, materialCount, options) {
   if (initialPolys.length === 0) {
     return null;
   }
-  const mergedPolys = mergeCoplanarConvexPolygons(positions, initialPolys, planeBySurfaceDesignator);
+  const mergedPolys = mode === "exact" ? initialPolys : mergeCoplanarConvexPolygons(positions, initialPolys, planeBySurfaceDesignator);
   const dirPlaneToDesignator = new Int32Array(planeBySurfaceDesignator.length);
   for (let i = 0; i < planeBySurfaceDesignator.length; i++) {
     const dp = planeBySurfaceDesignator[i];
@@ -35417,9 +35779,19 @@ function compileMeshCollisionBspData(mesh, materialCount, options) {
     });
   }
   for (let e = 0; e < edges.length; e++) {
-    const [v0, v1] = edges[e].vertexIndices;
+    const edge = edges[e];
+    const [v0, v1] = edge.vertexIndices;
     if (vertexFirstEdge[v0] === -1) vertexFirstEdge[v0] = e;
     if (vertexFirstEdge[v1] === -1) vertexFirstEdge[v1] = e;
+    if (edge.edgeIndices[0] < 0) {
+      edge.edgeIndices[0] = edge.edgeIndices[1] >= 0 ? edge.edgeIndices[1] : e;
+    }
+    if (edge.edgeIndices[1] < 0) {
+      edge.edgeIndices[1] = edge.edgeIndices[0] >= 0 ? edge.edgeIndices[0] : e;
+    }
+    if (edge.surfaceIndices[1] < 0 && edge.surfaceIndices[0] >= 0 && surfaces[edge.surfaceIndices[0]]) {
+      surfaces[edge.surfaceIndices[0]].flags |= 1;
+    }
   }
   const vertices = positions.map((pt, idx) => ({
     point: [pt[0], pt[1], pt[2]],
@@ -35484,7 +35856,7 @@ function compileMeshCollisionBspData(mesh, materialCount, options) {
   const bsp3dNodes = [];
   const defaultBackLeaf = isConcave ? 2147483648 : 4294967295;
   const buildTree = (polys, usedPlanes, depth) => {
-    if (polys.length === 0 || depth >= 52 || bsp3dNodes.length >= 8192) {
+    if (polys.length === 0 || depth >= 64 || bsp3dNodes.length >= 32760) {
       return defaultBackLeaf;
     }
     const uniquePlanes = [];
@@ -35724,19 +36096,765 @@ var VALUE_TYPE_BY_NAME = Object.fromEntries(
   Object.entries(HS_VALUE_TYPES).map(([k, v]) => [v, Number(k)])
 );
 
-// electron/recent-maps.ts
+// ../core/src/map/mod-packager.ts
+function convertJmsToObjText(jmsText) {
+  const tokens = jmsText.replace(/;[^\r\n]*/g, "").trim().split(/\s+/).filter((t) => t.length > 0);
+  let cursor = 0;
+  const nextToken = () => tokens[cursor++] ?? "";
+  const nextInt = () => Number.parseInt(nextToken(), 10) || 0;
+  const nextFloat = () => Number.parseFloat(nextToken()) || 0;
+  const version = nextInt();
+  if (version < 8190 || version > 8220) {
+    throw new Error(`Unsupported .JMS version "${version}" (expected Halo CE JMS 8200).`);
+  }
+  nextToken();
+  const nodeCount = nextInt();
+  for (let n = 0; n < nodeCount; n++) {
+    nextToken();
+    nextInt();
+    nextInt();
+    for (let k = 0; k < 7; k++) nextFloat();
+  }
+  const materialCount = nextInt();
+  const materialNames = [];
+  for (let m = 0; m < materialCount; m++) {
+    materialNames.push(nextToken() || `mat_${m}`);
+    nextToken();
+  }
+  const markerCount = nextInt();
+  for (let mk = 0; mk < markerCount; mk++) {
+    nextToken();
+    nextInt();
+    nextInt();
+    for (let k = 0; k < 8; k++) nextFloat();
+  }
+  const regionCount = nextInt();
+  for (let r = 0; r < regionCount; r++) {
+    nextToken();
+  }
+  const vertexCount = nextInt();
+  const objLines = [`# Converted from Halo CE .JMS (version ${version})`];
+  for (let v = 0; v < vertexCount; v++) {
+    nextInt();
+    const x = nextFloat() * 0.01;
+    const y = nextFloat() * 0.01;
+    const z = nextFloat() * 0.01;
+    const nx = nextFloat();
+    const ny = nextFloat();
+    const nz = nextFloat();
+    nextInt();
+    nextFloat();
+    const u = nextFloat();
+    const vt = nextFloat();
+    nextFloat();
+    objLines.push(`v ${x.toFixed(5)} ${y.toFixed(5)} ${z.toFixed(5)}`);
+    objLines.push(`vn ${nx.toFixed(5)} ${ny.toFixed(5)} ${nz.toFixed(5)}`);
+    objLines.push(`vt ${u.toFixed(5)} ${vt.toFixed(5)}`);
+  }
+  const triangleCount = nextInt();
+  let lastMat = -1;
+  for (let t = 0; t < triangleCount; t++) {
+    nextInt();
+    const matIdx = nextInt();
+    if (matIdx !== lastMat) {
+      lastMat = matIdx;
+      objLines.push(`usemtl ${materialNames[matIdx] ?? `mat_${matIdx}`}`);
+    }
+    const v0 = nextInt() + 1;
+    const v1 = nextInt() + 1;
+    const v2 = nextInt() + 1;
+    objLines.push(`f ${v0}/${v0}/${v0} ${v1}/${v1}/${v1} ${v2}/${v2}/${v2}`);
+  }
+  return {
+    objText: objLines.join("\n"),
+    nodeCount,
+    materialNames,
+    markerCount,
+    vertexCount,
+    triangleCount
+  };
+}
+function convertColladaDaeToObjText(daeXml) {
+  const objLines = ["# Converted from COLLADA .DAE by OpenCE Mantle"];
+  const materialNames = [];
+  let globalVertOffset = 0;
+  let globalNormOffset = 0;
+  let globalUvOffset = 0;
+  let totalVerts = 0;
+  let totalTris = 0;
+  let meshCount = 0;
+  const meshRegex = /<mesh\b[^>]*>([\s\S]*?)<\/mesh>/gi;
+  let meshMatch;
+  while ((meshMatch = meshRegex.exec(daeXml)) !== null) {
+    const meshBody = meshMatch[1];
+    meshCount++;
+    const sources = /* @__PURE__ */ new Map();
+    const sourceRegex = /<source\b[^>]*\bid=["']([^"']+)["'][^>]*>([\s\S]*?)<\/source>/gi;
+    let srcMatch;
+    while ((srcMatch = sourceRegex.exec(meshBody)) !== null) {
+      const srcId = srcMatch[1].trim();
+      const floatMatch = /<float_array\b[^>]*>([\s\S]*?)<\/float_array>/i.exec(srcMatch[2]);
+      if (floatMatch) {
+        const nums = floatMatch[1].trim().split(/\s+/).filter((s) => s.length > 0).map((s) => Number.parseFloat(s) || 0);
+        sources.set(srcId, nums);
+      }
+    }
+    const verticesPosMap = /* @__PURE__ */ new Map();
+    const vertTagRegex = /<vertices\b[^>]*\bid=["']([^"']+)["'][^>]*>([\s\S]*?)<\/vertices>/gi;
+    let vtMatch;
+    while ((vtMatch = vertTagRegex.exec(meshBody)) !== null) {
+      const vId = vtMatch[1].trim();
+      const posInput = /<input\b[^>]*semantic=["']POSITION["'][^>]*source=["']#?([^"']+)["']/i.exec(vtMatch[2]);
+      if (posInput) {
+        verticesPosMap.set(vId, posInput[1].trim());
+      }
+    }
+    let posSourceId = Array.from(verticesPosMap.values())[0] ?? "";
+    let normSourceId = "";
+    let uvSourceId = "";
+    const allInputsRegex = /<input\b([^>]*)\/?>/gi;
+    let inpMatch;
+    while ((inpMatch = allInputsRegex.exec(meshBody)) !== null) {
+      const attrs = inpMatch[1];
+      const sem = /semantic=["']([^"']+)["']/i.exec(attrs)?.[1]?.toUpperCase();
+      const src = /source=["']#?([^"']+)["']/i.exec(attrs)?.[1]?.trim();
+      if (!sem || !src) continue;
+      if (sem === "VERTEX" && verticesPosMap.has(src)) {
+        posSourceId = verticesPosMap.get(src);
+      } else if (sem === "POSITION" && !posSourceId) {
+        posSourceId = src;
+      } else if (sem === "NORMAL" && !normSourceId) {
+        normSourceId = src;
+      } else if ((sem === "TEXCOORD" || sem === "UV") && !uvSourceId) {
+        uvSourceId = src;
+      }
+    }
+    const posArr = sources.get(posSourceId) ?? [];
+    const normArr = sources.get(normSourceId) ?? [];
+    const uvArr = sources.get(uvSourceId) ?? [];
+    const vCount = Math.floor(posArr.length / 3);
+    const nCount = Math.floor(normArr.length / 3);
+    const tCount = Math.floor(uvArr.length / 2);
+    if (vCount === 0) continue;
+    for (let i = 0; i < vCount; i++) {
+      objLines.push(
+        `v ${(posArr[i * 3] ?? 0).toFixed(5)} ${(posArr[i * 3 + 1] ?? 0).toFixed(5)} ${(posArr[i * 3 + 2] ?? 0).toFixed(5)}`
+      );
+    }
+    for (let i = 0; i < nCount; i++) {
+      objLines.push(
+        `vn ${(normArr[i * 3] ?? 0).toFixed(5)} ${(normArr[i * 3 + 1] ?? 0).toFixed(5)} ${(normArr[i * 3 + 2] ?? 0).toFixed(5)}`
+      );
+    }
+    for (let i = 0; i < tCount; i++) {
+      objLines.push(`vt ${(uvArr[i * 2] ?? 0).toFixed(5)} ${(uvArr[i * 2 + 1] ?? 0).toFixed(5)}`);
+    }
+    totalVerts += vCount;
+    const primRegex = /<(triangles|polylist)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
+    let primMatch;
+    while ((primMatch = primRegex.exec(meshBody)) !== null) {
+      const primKind = primMatch[1].toLowerCase();
+      const primAttrs = primMatch[2];
+      const primBody = primMatch[3];
+      const matName = /material=["']([^"']+)["']/i.exec(primAttrs)?.[1]?.trim() || `material_${meshCount}`;
+      if (!materialNames.includes(matName)) materialNames.push(matName);
+      objLines.push(`usemtl ${matName}`);
+      let vOff = 0;
+      let nOff = -1;
+      let tOff = -1;
+      let maxOffset = 0;
+      const pInputRegex = /<input\b([^>]*)\/?>/gi;
+      let pi;
+      while ((pi = pInputRegex.exec(primBody)) !== null) {
+        const iAttrs = pi[1];
+        const sem = /semantic=["']([^"']+)["']/i.exec(iAttrs)?.[1]?.toUpperCase();
+        const off = Number.parseInt(/offset=["'](\d+)["']/i.exec(iAttrs)?.[1] ?? "0", 10) || 0;
+        if (off > maxOffset) maxOffset = off;
+        if (sem === "VERTEX" || sem === "POSITION") vOff = off;
+        else if (sem === "NORMAL") nOff = off;
+        else if (sem === "TEXCOORD" || sem === "UV") tOff = off;
+      }
+      const stride = maxOffset + 1;
+      const pMatch = /<p\b[^>]*>([\s\S]*?)<\/p>/i.exec(primBody);
+      if (!pMatch) continue;
+      const pIndices = pMatch[1].trim().split(/\s+/).filter((s) => s.length > 0).map((s) => Number.parseInt(s, 10) || 0);
+      const formatCorner = (baseIdx) => {
+        const vi = (pIndices[baseIdx + vOff] ?? 0) + 1 + globalVertOffset;
+        const ti = tOff >= 0 && tCount > 0 ? (pIndices[baseIdx + tOff] ?? 0) + 1 + globalUvOffset : "";
+        const ni = nOff >= 0 && nCount > 0 ? (pIndices[baseIdx + nOff] ?? 0) + 1 + globalNormOffset : "";
+        if (ti !== "" && ni !== "") return `${vi}/${ti}/${ni}`;
+        if (ti !== "") return `${vi}/${ti}`;
+        if (ni !== "") return `${vi}//${ni}`;
+        return `${vi}`;
+      };
+      if (primKind === "polylist") {
+        const vcountMatch = /<vcount\b[^>]*>([\s\S]*?)<\/vcount>/i.exec(primBody);
+        const vcounts = vcountMatch ? vcountMatch[1].trim().split(/\s+/).filter((s) => s.length > 0).map((s) => Number.parseInt(s, 10) || 3) : [];
+        let pCursor = 0;
+        for (const vc of vcounts) {
+          if (vc >= 3 && pCursor + vc * stride <= pIndices.length) {
+            const c0 = formatCorner(pCursor);
+            for (let k = 1; k < vc - 1; k++) {
+              const c1 = formatCorner(pCursor + k * stride);
+              const c2 = formatCorner(pCursor + (k + 1) * stride);
+              objLines.push(`f ${c0} ${c1} ${c2}`);
+              totalTris++;
+            }
+          }
+          pCursor += vc * stride;
+        }
+      } else {
+        const triStep = stride * 3;
+        for (let idx = 0; idx + triStep <= pIndices.length; idx += triStep) {
+          const c0 = formatCorner(idx);
+          const c1 = formatCorner(idx + stride);
+          const c2 = formatCorner(idx + stride * 2);
+          objLines.push(`f ${c0} ${c1} ${c2}`);
+          totalTris++;
+        }
+      }
+    }
+    globalVertOffset += vCount;
+    globalNormOffset += nCount;
+    globalUvOffset += tCount;
+  }
+  if (totalVerts === 0 || totalTris === 0) {
+    throw new Error("No valid <mesh> geometry found in COLLADA .DAE file.");
+  }
+  return {
+    objText: objLines.join("\n"),
+    meshCount,
+    materialNames,
+    vertexCount: totalVerts,
+    triangleCount: totalTris
+  };
+}
+
+// ../core/src/render/wrl-diagnostics.ts
+var MAX_FILE = 4 * 1024 * 1024;
+var MAX_REGIONS = 512;
+var MAX_VERTICES = 12e4;
+var MAX_PRIMITIVES = 15e4;
+var MAX_FAN = 256;
+var NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+function extractBlock(source, name, startAt = 0) {
+  const token = new RegExp(`\\b${name}\\s*\\{`, "g");
+  token.lastIndex = startAt;
+  const match = token.exec(source);
+  if (!match) return null;
+  const left = source.indexOf("{", match.index);
+  let depth = 1;
+  for (let i = left + 1; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) {
+      return { text: source.slice(left + 1, i), end: i + 1 };
+    }
+  }
+  throw new Error(`Malformed WRL: unclosed ${name} block`);
+}
+function arrayInBlock(source, name) {
+  const found = new RegExp(`\\b${name}\\s*\\[([^\\]]*)\\]`).exec(source);
+  if (!found) throw new Error(`Malformed WRL: missing ${name} array`);
+  return found[1];
+}
+function parseNumericArray(source, max) {
+  const tokens = source.trim().split(/[\s,]+/).filter(Boolean);
+  if (!tokens.length || tokens.length > max) {
+    throw new Error("WRL numeric array is empty or exceeds safety limits");
+  }
+  return tokens.map((token) => {
+    if (!NUMBER_RE.test(token)) throw new Error("WRL contains invalid numeric text");
+    const value = Number(token);
+    if (!Number.isFinite(value) || Math.abs(value) > 1e7) {
+      throw new Error("WRL coordinate or number exceeds safety bounds");
+    }
+    return value;
+  });
+}
+function toVec3Tuples(values, label) {
+  if (values.length % 3 !== 0) {
+    throw new Error(`WRL ${label} must contain complete coordinate triplets`);
+  }
+  return Array.from({ length: values.length / 3 }, (_, i) => [
+    values[3 * i],
+    values[3 * i + 1],
+    values[3 * i + 2]
+  ]);
+}
+function parseIndexSpans(values, vertexCount) {
+  const spans = [];
+  let current = [];
+  for (const v of values) {
+    if (!Number.isSafeInteger(v)) {
+      throw new Error("WRL coordinates must be addressed with integer indices");
+    }
+    if (v === -1) {
+      if (!current.length) throw new Error("WRL has an empty indexed span");
+      if (current.length > MAX_FAN) throw new Error("WRL polygon/line span exceeds limit");
+      spans.push(current);
+      current = [];
+    } else {
+      if (v < 0 || v >= vertexCount) {
+        throw new Error("WRL index refers to nonexistent coordinate");
+      }
+      current.push(v);
+    }
+    if (spans.length > MAX_PRIMITIVES) {
+      throw new Error("WRL contains too many error elements");
+    }
+  }
+  if (current.length) throw new Error("WRL indexed span lacks -1 terminator");
+  return spans;
+}
+function parseMaterialColors(section) {
+  const material = extractBlock(section, "Material");
+  if (!material) return [[1, 0, 0]];
+  const source = /\bdiffuseColor\s*\[/.test(material.text) ? arrayInBlock(material.text, "diffuseColor") : "";
+  if (!source) return [[1, 0, 0]];
+  const out = toVec3Tuples(parseNumericArray(source, MAX_PRIMITIVES * 3), "color");
+  if (out.some((rgb) => rgb.some((v) => v < 0 || v > 1))) {
+    throw new Error("WRL color values must be in 0..1");
+  }
+  return out;
+}
+function parseCoordinateList(section) {
+  const coords = extractBlock(section, "Coordinate3");
+  if (!coords) throw new Error("WRL Separator is missing Coordinate3");
+  return toVec3Tuples(parseNumericArray(arrayInBlock(coords.text, "point"), MAX_VERTICES * 3), "point");
+}
+function parseHaloWrl(text, sourceCentimetres = true) {
+  if (typeof text !== "string" || !text.length || text.length > MAX_FILE) {
+    throw new Error("Halo WRL must be a nonempty text file smaller than 4 MiB");
+  }
+  if (!/^\s*#VRML 1\.0 ascii(?:\s|$)/i.test(text)) {
+    throw new Error("Only Halo 1 Tool #VRML 1.0 ascii diagnostic files are supported.");
+  }
+  const source = text.split(/\r?\n/).map((line) => line.replace(/#.*/, "")).join("\n");
+  const scale = sourceCentimetres ? 0.01 : 1;
+  let searchAt = 0;
+  let regions = 0;
+  let totalVertices = 0;
+  const segments = [];
+  const faces = [];
+  const regionSummaries = [];
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  while (true) {
+    const region = extractBlock(source, "Separator", searchAt);
+    if (!region) break;
+    searchAt = region.end;
+    const regionIndex = regions++;
+    if (regions > MAX_REGIONS) throw new Error("WRL contains too many error regions");
+    const vertices = parseCoordinateList(region.text).map(
+      (coords) => [coords[0] * scale, coords[1] * scale, coords[2] * scale]
+    );
+    totalVertices += vertices.length;
+    if (totalVertices > MAX_VERTICES) throw new Error("WRL exceeds vertex safety budget");
+    const binding = extractBlock(region.text, "MaterialBinding");
+    const perVertex = !!binding && /\bPER_VERTEX\b/.test(binding.text);
+    const palette = parseMaterialColors(region.text);
+    const colorFor = (element, vertex) => palette[perVertex ? vertex : element] ?? palette[0] ?? [1, 0, 0];
+    const rMin = [Infinity, Infinity, Infinity];
+    const rMax = [-Infinity, -Infinity, -Infinity];
+    let rSegments = 0;
+    let rFaces = 0;
+    const touch = (p) => {
+      for (let i = 0; i < 3; i++) {
+        min[i] = Math.min(min[i], p[i]);
+        max[i] = Math.max(max[i], p[i]);
+        rMin[i] = Math.min(rMin[i], p[i]);
+        rMax[i] = Math.max(rMax[i], p[i]);
+      }
+    };
+    const lines = extractBlock(region.text, "IndexedLineSet");
+    if (lines) {
+      const spans = parseIndexSpans(
+        parseNumericArray(arrayInBlock(lines.text, "coordIndex"), MAX_PRIMITIVES * 4),
+        vertices.length
+      );
+      spans.forEach((span, index) => {
+        if (span.length < 2) throw new Error("WRL IndexedLineSet requires at least two vertices");
+        for (let i = 1; i < span.length; i++) {
+          const start = vertices[span[i - 1]];
+          const end = vertices[span[i]];
+          segments.push({ start, end, color: colorFor(index, span[i - 1]), region: regionIndex });
+          rSegments++;
+          touch(start);
+          touch(end);
+          if (segments.length + faces.length > MAX_PRIMITIVES) {
+            throw new Error("WRL error geometry exceeds preview budget");
+          }
+        }
+      });
+    }
+    const polygons = extractBlock(region.text, "IndexedFaceSet");
+    if (polygons) {
+      const spans = parseIndexSpans(
+        parseNumericArray(arrayInBlock(polygons.text, "coordIndex"), MAX_PRIMITIVES * 4),
+        vertices.length
+      );
+      spans.forEach((span, index) => {
+        if (span.length < 3) throw new Error("WRL IndexedFaceSet requires at least three vertices");
+        for (let i = 1; i < span.length - 1; i++) {
+          const a = vertices[span[0]];
+          const b = vertices[span[i]];
+          const c = vertices[span[i + 1]];
+          const centroid = [
+            (a[0] + b[0] + c[0]) / 3,
+            (a[1] + b[1] + c[1]) / 3,
+            (a[2] + b[2] + c[2]) / 3
+          ];
+          faces.push({
+            a,
+            b,
+            c,
+            vertices: [a, b, c],
+            centroid,
+            color: colorFor(index, span[0]),
+            region: regionIndex
+          });
+          rFaces++;
+          touch(a);
+          touch(b);
+          touch(c);
+          if (segments.length + faces.length > MAX_PRIMITIVES) {
+            throw new Error("WRL error geometry exceeds preview budget");
+          }
+        }
+      });
+    }
+    if (rSegments > 0 || rFaces > 0) {
+      regionSummaries.push({
+        index: regionIndex,
+        segmentCount: rSegments,
+        faceCount: rFaces,
+        bounds: { min: rMin, max: rMax },
+        center: [
+          (rMin[0] + rMax[0]) * 0.5,
+          (rMin[1] + rMax[1]) * 0.5,
+          (rMin[2] + rMax[2]) * 0.5
+        ],
+        primaryColor: palette[0] ?? [1, 0, 0]
+      });
+    }
+  }
+  if (!regions || !segments.length && !faces.length) {
+    throw new Error("WRL has no supported Halo 1 error geometry (IndexedLineSet/IndexedFaceSet)");
+  }
+  return {
+    format: "Halo Tool VRML 1.0",
+    points: [],
+    segments,
+    faces,
+    regions,
+    regionSummaries,
+    bounds: { min, max },
+    coordinateScale: scale,
+    notes: [
+      "WRL is diagnostic geometry generated by Halo Tool (red = open edges, yellow/magenta = intersecting/degenerate faces, cyan = portal errors).",
+      sourceCentimetres ? "Halo Tool centimetres scaled by 0.01 to match Halo world units." : "Coordinates displayed 1:1 as provided."
+    ]
+  };
+}
+var MAX_MATCH_DISTANCE_SQ = 0.25 ** 2;
+var KNOWN_TOOL_PATTERNS = [
+  {
+    id: "BSP_DEPTH",
+    pattern: /global_plane_count\s*<\s*MAXIMUM_BSP3D_DEPTH|couldn.t build leaf map/i,
+    action: "Collision BSP partitioning exceeded engine depth. Simplify dense geometry and complex curved collision.",
+    wrl: false
+  },
+  {
+    id: "EMPTY_COLLISION",
+    pattern: /collision bsp is empty/i,
+    action: "This mesh has no collidable geometry. Verify at least one sealed, collision-enabled shell instead of only render-only (!) surfaces.",
+    wrl: false
+  },
+  {
+    id: "BSP_DIVIDING_EDGE",
+    pattern: /dividing_edge->vertex_indices\[1\]\s*==\s*NONE/i,
+    action: "Investigate near-coplanar or rounding-unstable collision faces around the affected area and recheck scale.",
+    wrl: false
+  },
+  {
+    id: "BSP_TOO_SMALL",
+    pattern: /not a valid structure_bsp_cluster_block index/i,
+    action: "Examine tiny or degenerate level scale and overlapping source faces.",
+    wrl: false
+  },
+  {
+    id: "PHANTOM_COLLISION",
+    pattern: /\bphantom bsp\b/i,
+    action: "Near-coplanar or micro-sliver triangles caused phantom collision planes. Flatten coplanar faces and remove sliver triangles.",
+    wrl: false
+  },
+  {
+    id: "OPEN_EDGE",
+    pattern: /\bopen edge\b|\bedge(?:\s+#?\d+)?\s+is\s+open\b/i,
+    action: "Seal the affected collision shell or mark decorative meshes with the render-only (!) material symbol. Inspect red edges in the WRL overlay.",
+    wrl: true
+  },
+  {
+    id: "NON_MANIFOLD",
+    pattern: /\bcouldn.t update edge\b|\bmore than 2 faces\b/i,
+    action: "Three or more faces share a single edge, or adjacent faces have reversed normals. Inspect the WRL overlay.",
+    wrl: true
+  },
+  {
+    id: "INTERSECTING_FACES",
+    pattern: /\bz-buffered triangle\b|\bintersecting surfaces?\b/i,
+    action: "Two collision triangles intersect without shared vertices. Weld or boolean-join them into connected topology.",
+    wrl: true
+  },
+  {
+    id: "RADIOSITY_UVS",
+    pattern: /\bdegenerate triangle or triangle with bad uvs\b/i,
+    action: "Lightmap UVs are collapsed/collinear on a face (or a flat-shaded # material is missing UVs). Re-unwrap the highlighted WRL faces.",
+    wrl: true
+  },
+  {
+    id: "DEGENERATE",
+    pattern: /\bdegenerate triangles?\b|\bzero.area\b/i,
+    action: "Locate collapsed or zero-area triangles in the WRL overlay and merge/retriangulate their vertices.",
+    wrl: true
+  },
+  {
+    id: "COPLANAR",
+    pattern: /\bnearly coplanar\b/i,
+    action: "Snap nearly-coplanar adjacent faces to the exact same plane or increase the angle between them.",
+    wrl: true
+  },
+  {
+    id: "PORTAL",
+    pattern: /\bportal.*(?:closed spaces|outside the bsp|divid|edge|leak|unearthed)\b/i,
+    action: "Verify +portal planes divide apprehension-sealed clusters cleanly and extend slightly into the surrounding BSP walls.",
+    wrl: true
+  },
+  {
+    id: "COLLISION",
+    pattern: /\b(?:failed|could not|couldn.t) (?:to )?(?:import|build) collision\b/i,
+    action: "Downstream collision build failure: fix the preceding open-edge, non-manifold, or intersecting-face errors first.",
+    wrl: true
+  },
+  {
+    id: "JMS_VERSION",
+    pattern: /\bwrong version number\b/i,
+    action: "Ensure JMS file header starts with version 8200 for Halo 1.",
+    wrl: false
+  },
+  {
+    id: "JMS_TRUNCATED",
+    pattern: /\breached end of file during parse\b/i,
+    action: "JMS file was truncated during export. Re-export and verify vertex/triangle counts.",
+    wrl: false
+  },
+  {
+    id: "TAG_TRUNCATED",
+    pattern: /\bcouldn.t read .*bytes from offset\b|\bcouldn.t read elements\b/i,
+    action: "A referenced tag file is truncated or corrupted.",
+    wrl: false
+  },
+  {
+    id: "PVS",
+    pattern: /\breimported for new, faster visibility\b/i,
+    action: "Check floating visibility clusters and portal seals.",
+    wrl: false
+  },
+  {
+    id: "T_JUNCTION",
+    pattern: /\bfound possible t.junction\b/i,
+    action: "A vertex lies in the middle of an adjacent triangle edge without splitting it. Connect the vertex to split the adjacent triangle.",
+    wrl: true
+  },
+  {
+    id: "BSP_OVERLAP",
+    pattern: /\bcouldn.t build bsp because of overlapping surfaces\b/i,
+    action: "Two collidable surfaces are coplanar and overlapping. Delete duplicate faces.",
+    wrl: true
+  },
+  {
+    id: "VERTEX_BOUNDS",
+    pattern: /\bvertex has a bad point\b/i,
+    action: "A vertex exceeds Halo 1 world coordinate bounds. Check mesh scale and distance from origin.",
+    wrl: false
+  },
+  {
+    id: "PORTAL_DUPLICATE",
+    pattern: /\bfound duplicate triangle building connected geometry\b/i,
+    action: "Remove duplicate +portal faces highlighted in the WRL overlay.",
+    wrl: true
+  },
+  {
+    id: "CLUSTER_COMPLEXITY",
+    pattern: /\bcouldn.t allocate subcluster\b/i,
+    action: "A single visibility cluster contains too many triangles. Add +portal planes or simplify geometry.",
+    wrl: false
+  },
+  {
+    id: "SKY_CLUSTER",
+    pattern: /\bcluster can see multiple skies\b/i,
+    action: "Ensure a cluster only has line-of-sight to one +sky index, or separate sky regions with portals.",
+    wrl: false
+  },
+  {
+    id: "PORTAL_UNEARTHED",
+    pattern: /\bunearthed edge\b/i,
+    action: "Seal the +portal outer edges into the BSP wall geometry or connect them to adjacent portal edges.",
+    wrl: true
+  }
+];
+function analyzeHaloToolLog(input) {
+  if (typeof input !== "string" || input.length > 1024 * 1024 || !input.trim()) {
+    throw new Error("Tool log must be nonempty and smaller than 1 MiB");
+  }
+  if (input.includes("\0")) {
+    throw new Error("Binary data is not a supported Halo Tool text log");
+  }
+  const lines = input.split(/\r?\n/);
+  if (lines.length > 25e3) {
+    throw new Error("Tool log has too many lines");
+  }
+  const diagnostics = [];
+  let unclassified = 0;
+  let unclassifiedErrors = 0;
+  lines.forEach((line, index) => {
+    const isError = /\b(?:###\s*)?(?:error|exception|fatal)\b/i.test(line);
+    const isWarning = /\bwarning\b/i.test(line);
+    const item = KNOWN_TOOL_PATTERNS.find((k) => k.pattern.test(line));
+    if (!item && (isError || isWarning)) {
+      unclassified++;
+      if (isError) unclassifiedErrors++;
+    }
+    if (!item) return;
+    if (diagnostics.length >= 256) return;
+    const sev = isError ? "error" : "warning";
+    const msg = line.trim().slice(0, 500);
+    diagnostics.push({
+      line: index + 1,
+      level: sev,
+      severity: sev,
+      code: item.id,
+      message: msg,
+      summary: msg,
+      action: item.action,
+      recommendedFix: item.action,
+      wrlUseful: item.wrl
+    });
+  });
+  const errorCount = diagnostics.filter((d) => d.level === "error").length + unclassifiedErrors;
+  const warningCount = diagnostics.filter((d) => d.level === "warning").length + (unclassified - unclassifiedErrors);
+  return {
+    diagnostics,
+    errorCount,
+    warningCount,
+    unclassified,
+    containsFatal: errorCount > 0,
+    textLines: lines.length,
+    note: "Classified against 24 canonical Halo 1 Tool error/warning patterns."
+  };
+}
+
+// electron/mcc-deploy.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
+var os = __toESM(require("os"));
+var MAX_MANIFEST_BYTES = 1024 * 1024;
+function decodeMccModManifest(bytes) {
+  if (bytes.length > MAX_MANIFEST_BYTES) {
+    throw new Error("ModManifest.txt exceeds 1 MiB safety limit.");
+  }
+  if (bytes.length >= 2 && bytes[0] === 255 && bytes[1] === 254) {
+    if (bytes.length % 2 !== 0) {
+      throw new Error("Malformed UTF-16LE ModManifest.txt (odd byte count).");
+    }
+    const text2 = bytes.subarray(2).toString("utf16le");
+    return { text: text2, utf16le: true, utf8Bom: false };
+  }
+  const utf8Bom = bytes.length >= 3 && bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191;
+  const payload = utf8Bom ? bytes.subarray(3) : bytes;
+  const text = payload.toString("utf8");
+  return { text, utf16le: false, utf8Bom };
+}
+function discoverSteamMccInstallations() {
+  const candidates = /* @__PURE__ */ new Set([
+    "C:\\Program Files (x86)\\Steam",
+    "C:\\Program Files\\Steam"
+  ]);
+  for (const drive of ["C", "D", "E", "F", "G"]) {
+    candidates.add(`${drive}:\\SteamLibrary`);
+    candidates.add(`${drive}:\\Steam`);
+  }
+  const libraryRoots = /* @__PURE__ */ new Set();
+  for (const root of candidates) {
+    if (fs.existsSync(root)) {
+      libraryRoots.add(root);
+    }
+    const vdfPath = path.join(root, "steamapps", "libraryfolders.vdf");
+    if (fs.existsSync(vdfPath)) {
+      try {
+        const text = fs.readFileSync(vdfPath, "utf8");
+        const regex = /"path"\s+"([^"]+)"/gi;
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+          const libPath = match[1].replace(/\\\\/g, "\\");
+          if (fs.existsSync(libPath)) {
+            libraryRoots.add(libPath);
+          }
+        }
+      } catch {
+      }
+    }
+  }
+  const mccInstallPaths = [];
+  for (const lib of libraryRoots) {
+    const mccDir = path.join(lib, "steamapps", "common", "Halo The Master Chief Collection");
+    if (fs.existsSync(mccDir) && fs.existsSync(path.join(mccDir, "halo1"))) {
+      mccInstallPaths.push(mccDir);
+    }
+  }
+  const defaultModManifestPath = path.join(
+    os.homedir(),
+    "AppData",
+    "LocalLow",
+    "MCC",
+    "Config",
+    "ModManifest.txt"
+  );
+  const manifestExists = fs.existsSync(defaultModManifestPath);
+  const registeredRoots = [];
+  if (manifestExists) {
+    try {
+      const { text } = decodeMccModManifest(fs.readFileSync(defaultModManifestPath));
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith("#") && !trimmed.startsWith("//")) {
+          registeredRoots.push(trimmed);
+        }
+      }
+    } catch {
+    }
+  }
+  return {
+    mccInstallPaths,
+    defaultModManifestPath,
+    manifestExists,
+    registeredRoots
+  };
+}
+
+// electron/recent-maps.ts
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
 var import_electron = require("electron");
 var MAX_RECENT = 10;
 function storePath() {
-  return path.join(import_electron.app.getPath("userData"), "recent-maps.json");
+  return path2.join(import_electron.app.getPath("userData"), "recent-maps.json");
 }
 function getRecentMaps() {
   try {
-    const raw = fs.readFileSync(storePath(), "utf-8");
+    const raw = fs2.readFileSync(storePath(), "utf-8");
     const list = JSON.parse(raw);
-    return Array.isArray(list) ? list.filter((p) => typeof p === "string" && fs.existsSync(p)) : [];
+    return Array.isArray(list) ? list.filter((p) => typeof p === "string" && fs2.existsSync(p)) : [];
   } catch {
     return [];
   }
@@ -35745,18 +36863,18 @@ function addRecentMap(filePath) {
   const current = getRecentMaps().filter((p) => p !== filePath);
   const updated = [filePath, ...current].slice(0, MAX_RECENT);
   try {
-    fs.writeFileSync(storePath(), JSON.stringify(updated, null, 2));
+    fs2.writeFileSync(storePath(), JSON.stringify(updated, null, 2));
   } catch {
   }
   return updated;
 }
 
 // electron/settings.ts
-var fs2 = __toESM(require("fs"));
-var path2 = __toESM(require("path"));
+var fs3 = __toESM(require("fs"));
+var path3 = __toESM(require("path"));
 var import_electron2 = require("electron");
 function storePath2() {
-  return path2.join(import_electron2.app.getPath("userData"), "settings.json");
+  return path3.join(import_electron2.app.getPath("userData"), "settings.json");
 }
 var DEFAULT_SETTINGS = {
   lastExtractDir: null,
@@ -35767,15 +36885,15 @@ var DEFAULT_SETTINGS = {
 };
 function migratePath(p) {
   if (typeof p !== "string" || !p) return null;
-  if (!fs2.existsSync(p) && p.includes("OpenCE-Modding-Tool")) {
+  if (!fs3.existsSync(p) && p.includes("OpenCE-Modding-Tool")) {
     const candidate = p.replace(/OpenCE-Modding-Tool/g, "OpenCE-Mantle");
-    if (fs2.existsSync(candidate)) return candidate;
+    if (fs3.existsSync(candidate)) return candidate;
   }
   return p;
 }
 function getSettings() {
   try {
-    const raw = fs2.readFileSync(storePath2(), "utf-8");
+    const raw = fs3.readFileSync(storePath2(), "utf-8");
     const parsed = JSON.parse(raw);
     let changed = false;
     const resourceMaps = {
@@ -35836,7 +36954,7 @@ function getSettings() {
 }
 function writeSettings(next) {
   try {
-    fs2.writeFileSync(storePath2(), JSON.stringify(next, null, 2));
+    fs3.writeFileSync(storePath2(), JSON.stringify(next, null, 2));
   } catch {
   }
 }
@@ -35869,13 +36987,13 @@ function detectOpenCeDirectory() {
     const home = import_electron2.app.getPath("home");
     const candidates = [
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE",
-      path2.join(home, "Desktop", "Halo CE Related", "Halo CE - OpenCE"),
+      path3.join(home, "Desktop", "Halo CE Related", "Halo CE - OpenCE"),
       "C:\\Halo CE - OpenCE",
       "C:\\OpenCE",
       "C:\\Games\\OpenCE"
     ];
     for (const c of candidates) {
-      if (fs2.existsSync(c) && fs2.existsSync(path2.join(c, "halo.exe"))) {
+      if (fs3.existsSync(c) && fs3.existsSync(path3.join(c, "halo.exe"))) {
         return c;
       }
     }
@@ -35885,29 +37003,29 @@ function detectOpenCeDirectory() {
 }
 function setOpenCeDirectory(dir) {
   const current = getSettings();
-  const exe = dir ? path2.join(dir, "halo.exe") : null;
+  const exe = dir ? path3.join(dir, "halo.exe") : null;
   writeSettings({
     ...current,
     openCeDirectory: dir,
-    openCeExecutablePath: exe && fs2.existsSync(exe) ? exe : null
+    openCeExecutablePath: exe && fs3.existsSync(exe) ? exe : null
   });
 }
 
 // electron/tag-test-runner.ts
-var fs3 = __toESM(require("fs"));
-var path4 = __toESM(require("path"));
+var fs4 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
 var net = __toESM(require("net"));
 var import_child_process = require("child_process");
 
 // electron/worker-manager.ts
 var import_worker_threads = require("worker_threads");
-var path3 = __toESM(require("path"));
+var path4 = __toESM(require("path"));
 var import_crypto2 = require("crypto");
 var worker = null;
 var pending = /* @__PURE__ */ new Map();
 function ensureWorker(onLog) {
   if (worker) return worker;
-  const instance = new import_worker_threads.Worker(path3.join(__dirname, "map-worker.js"));
+  const instance = new import_worker_threads.Worker(path4.join(__dirname, "map-worker.js"));
   worker = instance;
   instance.on("message", (msg) => {
     if (msg.type === "ready") {
@@ -35947,8 +37065,8 @@ function sendWorkerRequest(request, onLog, onProgress = () => {
 }) {
   const requestId = (0, import_crypto2.randomUUID)();
   const instance = ensureWorker(onLog);
-  const promise = new Promise((resolve4, reject) => {
-    pending.set(requestId, { resolve: resolve4, reject, onProgress });
+  const promise = new Promise((resolve5, reject) => {
+    pending.set(requestId, { resolve: resolve5, reject, onProgress });
     instance.postMessage({ ...request, requestId });
   });
   return { requestId, promise };
@@ -35965,7 +37083,6 @@ var TagTestRunner = class {
     this.telnetConnected = false;
     this.statusState = "stopped";
     this.stagedMapIndex = 0;
-    this.initBackupPath = null;
     this.activeOpenCeDir = null;
     this.debugTxtWatcher = null;
     this.debugTxtLastSize = 0;
@@ -36087,19 +37204,19 @@ if ($wshell.AppActivate('Halo')) {
     if (!dir) {
       return { directory: null, executable: null, exists: false };
     }
-    const exe = path4.join(dir, "halo.exe");
-    const exists = fs3.existsSync(exe);
+    const exe = path5.join(dir, "halo.exe");
+    const exists = fs4.existsSync(exe);
     return { directory: dir, executable: exe, exists };
   }
   restoreInitBackupIfPresent() {
     const cfg = this.getOpenCeConfig();
     if (cfg.directory) {
-      const initPath = path4.join(cfg.directory, "init.txt");
-      const backupPath = path4.join(cfg.directory, "init.txt.opence_backup");
+      const initPath = path5.join(cfg.directory, "init.txt");
+      const backupPath = path5.join(cfg.directory, "init.txt.opence_backup");
       try {
-        if (fs3.existsSync(backupPath)) {
-          fs3.copyFileSync(backupPath, initPath);
-          fs3.unlinkSync(backupPath);
+        if (fs4.existsSync(backupPath)) {
+          fs4.copyFileSync(backupPath, initPath);
+          fs4.unlinkSync(backupPath);
         }
       } catch {
       }
@@ -36124,7 +37241,7 @@ if ($wshell.AppActivate('Halo')) {
     this.emitStatus();
     try {
       const mapSlot = this.stagedMapIndex === 0 ? "_opence_tag_test_a" : "_opence_tag_test_b";
-      const stagedMapPath = path4.join(openCeDir, "custom_maps", `${mapSlot}.map`);
+      const stagedMapPath = path5.join(openCeDir, "custom_maps", `${mapSlot}.map`);
       this.currentMapName = mapSlot;
       this.emitLog("stdout", `[TagTest] Staging in-memory map to ${mapSlot}.map...`);
       const settings = getSettings();
@@ -36135,20 +37252,20 @@ if ($wshell.AppActivate('Halo')) {
           bitmapsPath: settings.resourceMaps.bitmaps ?? void 0,
           soundsPath: settings.resourceMaps.sounds ?? void 0
         },
-        (level, msg) => this.emitLog("stdout", `[Worker] ${msg}`)
+        (_level, msg) => this.emitLog("stdout", `[Worker] ${msg}`)
       ).promise;
       if (!stageResult || !stageResult.ok) {
         throw new Error("Failed to stage map for OpenCE.");
       }
       this.emitLog("stdout", `[TagTest] Map staged successfully (CRC32 0x${(stageResult.crc32 >>> 0).toString(16).padStart(8, "0")}).`);
       this.restoreInitBackupIfPresent();
-      const initPath = path4.join(openCeDir, "init.txt");
-      const backupPath = path4.join(openCeDir, "init.txt.opence_backup");
-      if (fs3.existsSync(initPath)) {
+      const initPath = path5.join(openCeDir, "init.txt");
+      const backupPath = path5.join(openCeDir, "init.txt.opence_backup");
+      if (fs4.existsSync(initPath)) {
         try {
-          const existing = fs3.readFileSync(initPath, "utf-8");
+          const existing = fs4.readFileSync(initPath, "utf-8");
           if (!existing.includes("_opence_tag_test")) {
-            fs3.copyFileSync(initPath, backupPath);
+            fs4.copyFileSync(initPath, backupPath);
           }
         } catch {
         }
@@ -36157,10 +37274,10 @@ if ($wshell.AppActivate('Halo')) {
 display_framerate true\r
 map_name custom_maps\\${mapSlot}\r
 `;
-      fs3.writeFileSync(initPath, initContent, "utf-8");
-      const debugTxtPath = path4.join(openCeDir, "debug.txt");
-      if (fs3.existsSync(debugTxtPath)) {
-        this.debugTxtLastSize = fs3.statSync(debugTxtPath).size;
+      fs4.writeFileSync(initPath, initContent, "utf-8");
+      const debugTxtPath = path5.join(openCeDir, "debug.txt");
+      if (fs4.existsSync(debugTxtPath)) {
+        this.debugTxtLastSize = fs4.statSync(debugTxtPath).size;
       } else {
         this.debugTxtLastSize = 0;
       }
@@ -36265,10 +37382,10 @@ map_name custom_maps\\${mapSlot}\r
     this.stopDebugWatcher();
     this.debugTxtWatcher = setInterval(() => {
       try {
-        if (!fs3.existsSync(debugTxtPath)) return;
-        const stat = fs3.statSync(debugTxtPath);
+        if (!fs4.existsSync(debugTxtPath)) return;
+        const stat = fs4.statSync(debugTxtPath);
         if (stat.size > this.debugTxtLastSize) {
-          const stream = fs3.createReadStream(debugTxtPath, {
+          const stream = fs4.createReadStream(debugTxtPath, {
             start: this.debugTxtLastSize,
             end: stat.size,
             encoding: "utf-8"
@@ -36304,7 +37421,7 @@ map_name custom_maps\\${mapSlot}\r
     try {
       this.stagedMapIndex = this.stagedMapIndex === 0 ? 1 : 0;
       const nextSlot = this.stagedMapIndex === 0 ? "_opence_tag_test_a" : "_opence_tag_test_b";
-      const targetPath = path4.join(this.activeOpenCeDir, "custom_maps", `${nextSlot}.map`);
+      const targetPath = path5.join(this.activeOpenCeDir, "custom_maps", `${nextSlot}.map`);
       this.emitLog("stdout", `[TagTest] Hot-reloading map to ${nextSlot}.map...`);
       const settings = getSettings();
       const stageResult = await sendWorkerRequest(
@@ -36314,7 +37431,7 @@ map_name custom_maps\\${mapSlot}\r
           bitmapsPath: settings.resourceMaps.bitmaps ?? void 0,
           soundsPath: settings.resourceMaps.sounds ?? void 0
         },
-        (level, msg) => this.emitLog("stdout", `[Worker] ${msg}`)
+        (_level, msg) => this.emitLog("stdout", `[Worker] ${msg}`)
       ).promise;
       if (!stageResult || !stageResult.ok) {
         throw new Error("Failed to stage updated map.");
@@ -36350,7 +37467,7 @@ map_name custom_maps\\${mapSlot}\r
       this.cleanup();
       return Promise.resolve({ ok: true });
     }
-    return new Promise((resolve4) => {
+    return new Promise((resolve5) => {
       if (this.telnetConnected && this.telnetSocket) {
         try {
           this.telnetSocket.write("quit\r\n");
@@ -36365,7 +37482,7 @@ map_name custom_maps\\${mapSlot}\r
           }
         }
         this.cleanup();
-        resolve4({ ok: true });
+        resolve5({ ok: true });
       }, 600);
     });
   }
@@ -36382,23 +37499,23 @@ map_name custom_maps\\${mapSlot}\r
     this.child = null;
     this.stopDebugWatcher();
     if (this.activeOpenCeDir) {
-      const scriptPath = path4.join(this.activeOpenCeDir, "_opence_tag_test.txt");
+      const scriptPath = path5.join(this.activeOpenCeDir, "_opence_tag_test.txt");
       try {
-        if (fs3.existsSync(scriptPath)) {
-          fs3.unlinkSync(scriptPath);
+        if (fs4.existsSync(scriptPath)) {
+          fs4.unlinkSync(scriptPath);
         }
       } catch {
       }
-      const initPath = path4.join(this.activeOpenCeDir, "init.txt");
-      const backupPath = path4.join(this.activeOpenCeDir, "init.txt.opence_backup");
+      const initPath = path5.join(this.activeOpenCeDir, "init.txt");
+      const backupPath = path5.join(this.activeOpenCeDir, "init.txt.opence_backup");
       try {
-        if (fs3.existsSync(backupPath)) {
-          fs3.copyFileSync(backupPath, initPath);
-          fs3.unlinkSync(backupPath);
-        } else if (fs3.existsSync(initPath)) {
-          const content = fs3.readFileSync(initPath, "utf-8");
+        if (fs4.existsSync(backupPath)) {
+          fs4.copyFileSync(backupPath, initPath);
+          fs4.unlinkSync(backupPath);
+        } else if (fs4.existsSync(initPath)) {
+          const content = fs4.readFileSync(initPath, "utf-8");
           if (content.includes("_opence_tag_test")) {
-            fs3.unlinkSync(initPath);
+            fs4.unlinkSync(initPath);
           }
         }
       } catch {
@@ -36411,8 +37528,8 @@ map_name custom_maps\\${mapSlot}\r
 var tagTestRunner = new TagTestRunner();
 
 // electron/save-map-as.ts
-var path6 = __toESM(require("path"));
-var fs4 = __toESM(require("fs"));
+var path7 = __toESM(require("path"));
+var fs5 = __toESM(require("fs"));
 
 // electron/map-file-rules.ts
 function isBackupFilePath(filePath) {
@@ -36425,7 +37542,7 @@ var COMPRESSED_MAP_MESSAGE = "This map is compressed, so it cannot be edited, in
 var BACKUP_FILE_SAVE_MESSAGE = "This map was opened from a backup (.bak) file. Use File > Save As to write it under a new name; Save would overwrite the backup.";
 
 // electron/save-map.ts
-var path5 = __toESM(require("path"));
+var path6 = __toESM(require("path"));
 var SAVE_MAP_CHANNEL = "map:save";
 var hex = (n) => `0x${(n >>> 0).toString(16).padStart(8, "0")}`;
 function logSaved(log, result) {
@@ -36452,7 +37569,7 @@ async function saveMapFlow(deps) {
   if (!open.backedUp && !open.overwriteConfirmed) {
     if (!await deps.confirmOverwriteWithoutBackup(open.filePath)) return cancelled;
     deps.markOverwriteConfirmed();
-    deps.log("warn", `Overwriting ${path5.basename(open.filePath)} without a backup (confirmed).`);
+    deps.log("warn", `Overwriting ${path6.basename(open.filePath)} without a backup (confirmed).`);
   }
   if (!await deps.confirmScenarioName(open.filePath)) return cancelled;
   deps.log("info", `Saving ${open.filePath}`);
@@ -36482,7 +37599,7 @@ async function confirmUnsavedChanges(deps) {
 // electron/save-map-as.ts
 var SAVE_MAP_AS_CHANNEL = "map:saveAs";
 function isSamePath(a, b) {
-  return path6.resolve(a).toLowerCase() === path6.resolve(b).toLowerCase();
+  return path7.resolve(a).toLowerCase() === path7.resolve(b).toLowerCase();
 }
 async function saveMapAsFlow(deps) {
   const openMap = deps.getOpenMap();
@@ -36494,14 +37611,14 @@ async function saveMapAsFlow(deps) {
   }
   const filePath = await deps.showSaveDialog(openMap.filePath.replace(/(\.map)?$/i, "_copy.map"));
   if (!filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  const resolvedTarget = path6.resolve(filePath);
+  const resolvedTarget = path7.resolve(filePath);
   if (isSamePath(resolvedTarget, openMap.filePath)) {
     const message = "Save As cannot overwrite the open map. Use File > Save, or choose a different file name.";
     deps.log("error", `Save As refused: ${resolvedTarget} is the open map.`);
     await deps.showError("Save As cannot overwrite the open map.", "Use File > Save to overwrite it, or choose a different file name.");
     return { ok: false, code: "REFUSED_SOURCE_PATH", message };
   }
-  const exists = deps.fileExists ?? fs4.existsSync;
+  const exists = deps.fileExists ?? fs5.existsSync;
   if (exists(resolvedTarget) && !await deps.confirmOverwrite(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   if (!await deps.confirmScenarioName(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   deps.log("info", `Saving map as ${resolvedTarget}`);
@@ -36527,8 +37644,8 @@ function registerSaveMapAsIpc(ipc, deps, onResult = () => {
 }
 
 // electron/backup-on-open.ts
-var path7 = __toESM(require("path"));
-var fs5 = __toESM(require("fs"));
+var path8 = __toESM(require("path"));
+var fs6 = __toESM(require("fs"));
 var import_crypto3 = require("crypto");
 function isBackedUp(outcome) {
   return outcome === "created" || outcome === "replaced" || outcome === "kept-existing" || outcome === "up-to-date";
@@ -36541,14 +37658,14 @@ function describeBackupError(err, backupName) {
   return `${backupName} could not be created: ${err instanceof Error ? err.message : String(err)}`;
 }
 async function backupOnOpenFlow(mapPath, deps) {
-  const f = deps.fs ?? fs5;
+  const f = deps.fs ?? fs6;
   if (isBackupFilePath(mapPath)) {
-    deps.log("info", `Opened a backup file (${path7.basename(mapPath)}): no backup prompt, and File > Save is disabled for it - use Save As.`);
+    deps.log("info", `Opened a backup file (${path8.basename(mapPath)}): no backup prompt, and File > Save is disabled for it - use Save As.`);
     return "not-applicable";
   }
   const backupPath = backupPathFor(mapPath);
-  const mapName = path7.basename(mapPath);
-  const backupName = path7.basename(backupPath);
+  const mapName = path8.basename(mapPath);
+  const backupName = path8.basename(backupPath);
   try {
     const exists = f.existsSync(backupPath);
     if (exists && f.statSync(backupPath).size === f.statSync(mapPath).size && f.readFileSync(backupPath).equals(f.readFileSync(mapPath))) {
@@ -36599,12 +37716,12 @@ ${mapName} is still open and unchanged. File > Save will ask before overwriting 
 }
 
 // electron/convert-map.ts
-var path8 = __toESM(require("path"));
-var fs6 = __toESM(require("fs"));
+var path9 = __toESM(require("path"));
+var fs7 = __toESM(require("fs"));
 function defaultConvertOutputPath(sourcePath) {
-  const dir = path8.dirname(sourcePath);
-  const stem = path8.basename(sourcePath).replace(/\.map$/i, "");
-  return path8.join(dir, `${stem}_ce.map`);
+  const dir = path9.dirname(sourcePath);
+  const stem = path9.basename(sourcePath).replace(/\.map$/i, "");
+  return path9.join(dir, `${stem}_ce.map`);
 }
 var REPAIR_IDS = TAG_DATA_REPAIR_IDS;
 function sanitizeRepairChoice(value) {
@@ -36620,7 +37737,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
   if (!await deps.confirmUnsavedChanges()) return cancelled2();
   const filePath = await deps.showSaveDialog(defaultConvertOutputPath(sourcePath));
   if (!filePath) return cancelled2();
-  const target = path8.resolve(filePath);
+  const target = path9.resolve(filePath);
   const refuse = async (code, message) => {
     deps.log("error", `Convert refused: ${message}`);
     await deps.showError("The map was not converted.", message);
@@ -36630,7 +37747,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
   const openMap = deps.getOpenMapPath();
   if (openMap && isSamePath(target, openMap)) return refuse("REFUSED_OPEN_MAP", "The converted map cannot overwrite the map that is open in the app. Choose a different file name.");
   if (isBackupFilePath(target)) return refuse("REFUSED_BACKUP_FILE", "The converted map cannot be written as a .bak file. Choose a .map file name.");
-  const exists = deps.fileExists ?? fs6.existsSync;
+  const exists = deps.fileExists ?? fs7.existsSync;
   if (exists(target) && !await deps.confirmOverwrite(target)) return cancelled2();
   if (!await deps.confirmScenarioName(target)) return cancelled2();
   deps.log("info", `Converting ${sourcePath} to a Custom Edition map: ${target}`);
@@ -36638,7 +37755,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
     const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts, repairs, resourcePaths);
     if (result.ok) {
       const hex2 = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
-      deps.log("info", `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex2(result.previousCrc32)} -> ${hex2(result.crc32)}. ${path8.basename(sourcePath)} was not changed.`);
+      deps.log("info", `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex2(result.previousCrc32)} -> ${hex2(result.crc32)}. ${path9.basename(sourcePath)} was not changed.`);
       for (const w of result.warnings) deps.log("warn", w);
       deps.log("info", result.staleChecksumWarning);
     } else {
@@ -36654,8 +37771,8 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
 }
 
 // electron/batch-extract-fs.ts
-var fs7 = __toESM(require("fs"));
-var path9 = __toESM(require("path"));
+var fs8 = __toESM(require("fs"));
+var path10 = __toESM(require("path"));
 var WINDOWS_RESERVED_NAMES = /* @__PURE__ */ new Set([
   "CON",
   "PRN",
@@ -36681,7 +37798,7 @@ var WINDOWS_RESERVED_NAMES = /* @__PURE__ */ new Set([
   "LPT9"
 ]);
 function sanitizeMapName(mapFileNameOrPath) {
-  const base = path9.basename(mapFileNameOrPath);
+  const base = path10.basename(mapFileNameOrPath);
   const withoutExt = base.replace(/\.bak$/i, "").replace(/\.map$/i, "");
   let sanitized = withoutExt.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").replace(/[. ]+$/, "").trim();
   if (WINDOWS_RESERVED_NAMES.has(sanitized.toUpperCase())) {
@@ -36690,16 +37807,16 @@ function sanitizeMapName(mapFileNameOrPath) {
   return sanitized || "exported_map";
 }
 function countExistingOcetagsFiles(targetDir) {
-  if (!fs7.existsSync(targetDir)) return 0;
+  if (!fs8.existsSync(targetDir)) return 0;
   let count = 0;
   const queue = [targetDir];
   while (queue.length > 0) {
     const current = queue.pop();
     try {
-      const entries = fs7.readdirSync(current, { withFileTypes: true });
+      const entries = fs8.readdirSync(current, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.name.startsWith(".")) continue;
-        const full = path9.join(current, entry.name);
+        const full = path10.join(current, entry.name);
         if (entry.isDirectory()) {
           queue.push(full);
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".ocetags")) {
@@ -36713,14 +37830,14 @@ function countExistingOcetagsFiles(targetDir) {
 }
 function getDriveFreeSpace(dirPath) {
   try {
-    const stat = fs7.statfsSync(dirPath);
+    const stat = fs8.statfsSync(dirPath);
     return stat.bavail * stat.bsize;
   } catch {
     return null;
   }
 }
 function commitStagedFiles(stagingDir, targetDir) {
-  if (!fs7.existsSync(stagingDir)) return 0;
+  if (!fs8.existsSync(stagingDir)) return 0;
   let count = 0;
   const queue = [stagingDir];
   const filesToMove = [];
@@ -36728,12 +37845,12 @@ function commitStagedFiles(stagingDir, targetDir) {
     const current = queue.pop();
     let entries = [];
     try {
-      entries = fs7.readdirSync(current, { withFileTypes: true });
+      entries = fs8.readdirSync(current, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const entry of entries) {
-      const full = path9.join(current, entry.name);
+      const full = path10.join(current, entry.name);
       if (entry.isDirectory()) {
         queue.push(full);
       } else if (entry.isFile()) {
@@ -36742,28 +37859,28 @@ function commitStagedFiles(stagingDir, targetDir) {
     }
   }
   for (const stagedFile of filesToMove) {
-    const rel = path9.relative(stagingDir, stagedFile);
-    const dest = path9.join(targetDir, rel);
-    fs7.mkdirSync(path9.dirname(dest), { recursive: true });
-    if (fs7.existsSync(dest)) {
+    const rel = path10.relative(stagingDir, stagedFile);
+    const dest = path10.join(targetDir, rel);
+    fs8.mkdirSync(path10.dirname(dest), { recursive: true });
+    if (fs8.existsSync(dest)) {
       try {
-        fs7.unlinkSync(dest);
+        fs8.unlinkSync(dest);
       } catch {
       }
     }
-    fs7.renameSync(stagedFile, dest);
+    fs8.renameSync(stagedFile, dest);
     count++;
   }
   try {
-    fs7.rmSync(stagingDir, { recursive: true, force: true });
+    fs8.rmSync(stagingDir, { recursive: true, force: true });
   } catch {
   }
   return count;
 }
 function discardStagedFiles(stagingDir) {
-  if (fs7.existsSync(stagingDir)) {
+  if (fs8.existsSync(stagingDir)) {
     try {
-      fs7.rmSync(stagingDir, { recursive: true, force: true });
+      fs8.rmSync(stagingDir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -36806,11 +37923,11 @@ function generateBatchReportText(manifest) {
   return lines.join("\n");
 }
 function writeManifestAndReport(targetDir, manifest, reportText) {
-  fs7.mkdirSync(targetDir, { recursive: true });
-  const manifestPath = path9.join(targetDir, "manifest.json");
-  const reportPath = path9.join(targetDir, "batch-extract-report.txt");
-  fs7.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
-  fs7.writeFileSync(reportPath, reportText, "utf-8");
+  fs8.mkdirSync(targetDir, { recursive: true });
+  const manifestPath = path10.join(targetDir, "manifest.json");
+  const reportPath = path10.join(targetDir, "batch-extract-report.txt");
+  fs8.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  fs8.writeFileSync(reportPath, reportText, "utf-8");
   return { manifestPath, reportPath };
 }
 
@@ -36833,10 +37950,10 @@ function sendLog(level, message) {
   mainWindow?.webContents.send("app:log", { level, message, timestamp: Date.now() });
 }
 function getAppIconPath() {
-  const icoCandidate = path10.join(__dirname, "../build/icon.ico");
-  const pngCandidate = path10.join(__dirname, "../build/icon.png");
-  if (process.platform === "win32" && fs8.existsSync(icoCandidate)) return icoCandidate;
-  if (fs8.existsSync(pngCandidate)) return pngCandidate;
+  const icoCandidate = path11.join(__dirname, "../build/icon.ico");
+  const pngCandidate = path11.join(__dirname, "../build/icon.png");
+  if (process.platform === "win32" && fs9.existsSync(icoCandidate)) return icoCandidate;
+  if (fs9.existsSync(pngCandidate)) return pngCandidate;
   return void 0;
 }
 function createWindow() {
@@ -36848,7 +37965,7 @@ function createWindow() {
     backgroundColor: "#15171c",
     icon: getAppIconPath(),
     webPreferences: {
-      preload: path10.join(__dirname, "preload.js"),
+      preload: path11.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -36857,7 +37974,7 @@ function createWindow() {
   if (isDev) {
     mainWindow.loadURL("http://localhost:5173");
   } else {
-    mainWindow.loadFile(path10.join(__dirname, "../dist/index.html"));
+    mainWindow.loadFile(path11.join(__dirname, "../dist/index.html"));
   }
   buildMenu();
   updateTitle();
@@ -36874,7 +37991,7 @@ function createWindow() {
 }
 function updateTitle() {
   if (!mainWindow) return;
-  const name = currentMapPath ? `${path10.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
+  const name = currentMapPath ? `${path11.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
   mainWindow.setTitle(`${name}OpenCE Mantle`);
 }
 function setOpenMapState(map) {
@@ -36888,7 +38005,7 @@ function setOpenMapState(map) {
 }
 var unsavedChangesDeps = {
   isModified: () => currentMapModified,
-  fileName: () => currentMapPath ? path10.basename(currentMapPath) : "the open map",
+  fileName: () => currentMapPath ? path11.basename(currentMapPath) : "the open map",
   ask: async (fileName) => {
     const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
       type: "warning",
@@ -37086,9 +38203,9 @@ async function extractTagsFlow(request) {
     return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before extracting tags." };
   }
   const settings = getSettings();
-  const defaultDir = settings.lastExtractDir && fs8.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
+  const defaultDir = settings.lastExtractDir && fs9.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
   const safeName = String(request.suggestedFileName || "extracted_tags").replace(/[<>:"/\\|?*]/g, "_") || "extracted_tags";
-  const defaultPath = path10.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
+  const defaultPath = path11.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
   let resolvedTarget;
   if (request.originalIndices.length > 1) {
     const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
@@ -37097,7 +38214,7 @@ async function extractTagsFlow(request) {
       properties: ["openDirectory", "createDirectory"]
     });
     if (canceled || filePaths.length === 0) return { ok: false, code: "CANCELLED", message: "Extraction was cancelled." };
-    resolvedTarget = path10.resolve(filePaths[0]);
+    resolvedTarget = path11.resolve(filePaths[0]);
   } else {
     const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
       title: "Extract tags to...",
@@ -37105,28 +38222,28 @@ async function extractTagsFlow(request) {
       filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }]
     });
     if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-    resolvedTarget = path10.resolve(filePath);
+    resolvedTarget = path11.resolve(filePath);
   }
-  const resolvedSourceMap = path10.resolve(currentMapPath);
-  const resolvedAppDir = path10.resolve(import_electron3.app.getAppPath());
+  const resolvedSourceMap = path11.resolve(currentMapPath);
+  const resolvedAppDir = path11.resolve(import_electron3.app.getAppPath());
   if (resolvedTarget === resolvedSourceMap) {
     return { ok: false, code: "REFUSED_SOURCE_PATH", message: "You cannot overwrite the source map file. Choose a different location." };
   }
-  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path10.sep)) {
+  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path11.sep)) {
     return { ok: false, code: "REFUSED_APP_PATH", message: "You cannot save inside the application install directory. Choose a different location." };
   }
-  if (fs8.existsSync(resolvedTarget)) {
+  if (fs9.existsSync(resolvedTarget)) {
     const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path10.basename(resolvedTarget)}" already exists.`,
+      message: `"${path11.basename(resolvedTarget)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   }
-  setLastExtractDir(path10.dirname(resolvedTarget));
+  setLastExtractDir(path11.dirname(resolvedTarget));
   sendLog("info", `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
   const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
   const resourceMapPaths = {
@@ -37140,7 +38257,7 @@ async function extractTagsFlow(request) {
       type: "extractTags",
       originalIndices: request.originalIndices,
       outputPath: resolvedTarget,
-      sourceMapName: currentMapScenarioName ?? path10.basename(currentMapPath, ".map"),
+      sourceMapName: currentMapScenarioName ?? path11.basename(currentMapPath, ".map"),
       resourceMapPaths,
       itemName: request.itemName,
       itemNames: request.itemNames,
@@ -37173,23 +38290,23 @@ async function batchExtractPreflightFlow() {
     return null;
   }
   const settings = getSettings();
-  const defaultDir = settings.lastExtractDir && fs8.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
+  const defaultDir = settings.lastExtractDir && fs9.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
   const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
     title: "Choose parent folder to export map to...",
     defaultPath: defaultDir,
     properties: ["openDirectory", "createDirectory"]
   });
   if (canceled || filePaths.length === 0) return null;
-  const parentDir = path10.resolve(filePaths[0]);
-  const mapName = sanitizeMapName(currentMapScenarioName ?? path10.basename(currentMapPath, ".map"));
-  const targetDir = path10.join(parentDir, mapName);
-  const resolvedSourceMap = path10.resolve(currentMapPath);
-  const resolvedAppDir = path10.resolve(import_electron3.app.getAppPath());
+  const parentDir = path11.resolve(filePaths[0]);
+  const mapName = sanitizeMapName(currentMapScenarioName ?? path11.basename(currentMapPath, ".map"));
+  const targetDir = path11.join(parentDir, mapName);
+  const resolvedSourceMap = path11.resolve(currentMapPath);
+  const resolvedAppDir = path11.resolve(import_electron3.app.getAppPath());
   if (targetDir === resolvedSourceMap) {
     await showErrorBox("Invalid location", "You cannot extract into the source map file location. Choose a different folder.");
     return null;
   }
-  if (targetDir === resolvedAppDir || targetDir.startsWith(resolvedAppDir + path10.sep)) {
+  if (targetDir === resolvedAppDir || targetDir.startsWith(resolvedAppDir + path11.sep)) {
     await showErrorBox("Invalid location", "You cannot save inside the application install directory. Choose a different folder.");
     return null;
   }
@@ -37248,14 +38365,18 @@ async function startBatchExtractFlow(options) {
     const p = settings.resourceMaps[kind];
     if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
-  const sourceMapName = currentMapScenarioName ?? path10.basename(currentMapPath, ".map");
-  sendLog("info", `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode})...`);
+  const sourceMapName = currentMapScenarioName ?? path11.basename(currentMapPath, ".map");
+  sendLog(
+    "info",
+    `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode}, format: ${options.extractFormat ?? "ocetags"})...`
+  );
   const { requestId, promise } = sendWorkerRequest(
     {
       type: "batchExtract",
       parentDir: options.parentDir,
       sourceMapName,
       mode: options.mode,
+      extractFormat: options.extractFormat,
       resourceMapPaths
     },
     sendLog,
@@ -37296,7 +38417,7 @@ async function finalizeBatchExtractFlow(request) {
           toolVersion: "0.1.0",
           containerVersion: OCETAGS_FORMAT_VERSION,
           extractedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          mapFileName: path10.basename(currentMapPath ?? request.summary.mapName),
+          mapFileName: path11.basename(currentMapPath ?? request.summary.mapName),
           scenarioName: currentMapScenarioName ?? request.summary.mapName,
           summary: {
             totalTagsInMap: request.summary.totalTagsInMap,
@@ -37310,7 +38431,7 @@ async function finalizeBatchExtractFlow(request) {
           files: request.summary.tags.filter((t) => t.status === "extracted").map((t) => ({
             path: t.path,
             group: t.group,
-            relativePath: path10.relative(request.targetDir, t.outputPath ?? ""),
+            relativePath: path11.relative(request.targetDir, t.outputPath ?? ""),
             sizeBytes: t.sizeBytes ?? 0,
             tagCount: t.tagCount ?? 1
           })),
@@ -37344,7 +38465,7 @@ var RESOURCE_MAP_FILTER_NAMES = { bitmaps: "bitmaps.map", sounds: "sounds.map", 
 function readResourceMapStatus(kind, filePath) {
   if (!filePath) return { state: "not-configured" };
   try {
-    const buffer = fs8.readFileSync(filePath);
+    const buffer = fs9.readFileSync(filePath);
     const result = validateResourceMapFile(buffer, kind);
     if (!result.ok) return { state: "missing-or-unreadable", path: filePath, error: result.error };
     return { state: "ok", path: filePath, fileSizeBytes: buffer.length, entryCount: result.identity.entryCount };
@@ -37379,20 +38500,20 @@ function getResourceMapStatusesFlow() {
 }
 function openRandomAccessFile(filePath) {
   try {
-    const fd = fs8.openSync(filePath, "r");
-    const size = fs8.fstatSync(fd).size;
-    const label = path10.basename(filePath);
+    const fd = fs9.openSync(filePath, "r");
+    const size = fs9.fstatSync(fd).size;
+    const label = path11.basename(filePath);
     return {
       file: {
         label,
         size,
         read: (offset, length) => {
           const buf = Buffer.alloc(length);
-          fs8.readSync(fd, buf, 0, length, offset);
+          fs9.readSync(fd, buf, 0, length, offset);
           return buf;
         }
       },
-      close: () => fs8.closeSync(fd)
+      close: () => fs9.closeSync(fd)
     };
   } catch {
     return null;
@@ -37433,7 +38554,7 @@ function identifyResourceMapFlow(filePath, expectedVersion, expectedKind) {
     let kind = "bitmaps";
     if (expectedKind) {
       kind = expectedKind;
-    } else if (type === 2 || path10.basename(filePath).toLowerCase().includes("sounds")) {
+    } else if (type === 2 || path11.basename(filePath).toLowerCase().includes("sounds")) {
       kind = "sounds";
     } else {
       kind = "bitmaps";
@@ -37530,9 +38651,9 @@ function getSearchRoots() {
   const cwd = process.cwd();
   return [
     cwd,
-    path10.resolve(cwd, ".."),
-    path10.resolve(__dirname, ".."),
-    path10.resolve(__dirname, "../.."),
+    path11.resolve(cwd, ".."),
+    path11.resolve(__dirname, ".."),
+    path11.resolve(__dirname, "../.."),
     "C:\\Users\\LeviB\\Projects\\OpenCE-Mantle"
   ];
 }
@@ -37542,51 +38663,55 @@ function detectDefaultResourceMapPathsFlow() {
   const searchRoots = getSearchRoots();
   const candidates = {
     halomd: [
-      ...searchRoots.map((r) => path10.join(r, "sample_maps/HaloMD/bitmaps.map")),
-      path10.join(home, "Library/Application Support/HaloMD/GameData/Maps/bitmaps.map"),
-      path10.join(cwd, "bitmaps.map")
+      ...searchRoots.map((r) => path11.join(r, "sample_maps/HaloMD/bitmaps.map")),
+      path11.join(home, "Library/Application Support/HaloMD/GameData/Maps/bitmaps.map"),
+      path11.join(cwd, "bitmaps.map")
     ],
     ce: [
-      ...searchRoots.map((r) => path10.join(r, "sample_maps/custom edition/bitmaps.map")),
+      ...searchRoots.map((r) => path11.join(r, "sample_maps/custom edition/bitmaps.map")),
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE\\custom_maps\\bitmaps.map",
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE\\custom_maps\\bitmaps.map",
+      "C:\\Users\\LeviB\\Projects\\OpenCE-MapExp\\build\\windows\\custom_maps\\bitmaps.map",
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\CUSTOM EDITION DEFAULT MAPS\\bitmaps.map",
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
-      path10.join(cwd, "maps/bitmaps.map")
+      path11.join(cwd, "maps/bitmaps.map")
     ],
     pc: [
-      ...searchRoots.map((r) => path10.join(r, "sample_maps/PC/bitmaps.map")),
-      ...searchRoots.map((r) => path10.join(r, "sample_maps/HaloMD/bitmaps.map")),
+      ...searchRoots.map((r) => path11.join(r, "sample_maps/PC/bitmaps.map")),
+      ...searchRoots.map((r) => path11.join(r, "sample_maps/HaloMD/bitmaps.map")),
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\bitmaps.map",
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\bitmaps.map",
       "C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo\\maps\\bitmaps.map"
     ],
     demo: [
-      ...searchRoots.map((r) => path10.join(r, "sample_maps/MacDemo/bitmaps.map")),
-      ...searchRoots.map((r) => path10.join(r, "sample_maps/Base Siege/bitmaps.map")),
+      ...searchRoots.map((r) => path11.join(r, "sample_maps/MacDemo/bitmaps.map")),
+      ...searchRoots.map((r) => path11.join(r, "sample_maps/Base Siege/bitmaps.map")),
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map",
-      path10.join(home, "Applications/Halo Demo/Maps/bitmaps.map")
+      path11.join(home, "Applications/Halo Demo/Maps/bitmaps.map")
     ],
     mcc: [
-      ...searchRoots.map((r) => path10.join(r, "sample_maps/MCC/bitmaps.map")),
+      ...searchRoots.map((r) => path11.join(r, "sample_maps/MCC/bitmaps.map")),
       "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "E:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map"
-    ]
+    ],
+    xbox: []
   };
   const result = {
     halomd: null,
     ce: null,
     pc: null,
     demo: null,
-    mcc: null
+    mcc: null,
+    xbox: null
   };
   for (const ver of Object.keys(candidates)) {
     for (const p of candidates[ver]) {
       try {
-        if (fs8.existsSync(p)) {
+        if (fs9.existsSync(p)) {
           result[ver] = p;
           break;
         }
@@ -37623,12 +38748,12 @@ async function planInjectFlow(containerPath, mode) {
   const pcBitmaps = settings.versionResourceMaps?.pc?.bitmaps ?? settings.versionResourceMaps?.halomd?.bitmaps ?? defaults.pc ?? defaults.halomd ?? void 0;
   let pcSounds = settings.versionResourceMaps?.pc?.sounds ?? settings.versionResourceMaps?.halomd?.sounds ?? void 0;
   if (!pcSounds && pcBitmaps) {
-    const sib = path10.join(path10.dirname(pcBitmaps), "sounds.map");
-    if (fs8.existsSync(sib)) pcSounds = sib;
+    const sib = path11.join(path11.dirname(pcBitmaps), "sounds.map");
+    if (fs9.existsSync(sib)) pcSounds = sib;
   }
   const fallbackPcResourcePaths = {};
-  if (pcBitmaps && fs8.existsSync(pcBitmaps)) fallbackPcResourcePaths.bitmaps = pcBitmaps;
-  if (pcSounds && fs8.existsSync(pcSounds)) fallbackPcResourcePaths.sounds = pcSounds;
+  if (pcBitmaps && fs9.existsSync(pcBitmaps)) fallbackPcResourcePaths.bitmaps = pcBitmaps;
+  if (pcSounds && fs9.existsSync(pcSounds)) fallbackPcResourcePaths.sounds = pcSounds;
   sendLog("info", `Planning ${mode === "swap" ? "swap" : "add"} injection from ${containerPath}`);
   const { promise } = sendWorkerRequest(
     { type: "planInject", containerPath, mode, resourceMapPaths, fallbackPcResourcePaths },
@@ -37646,7 +38771,7 @@ async function planInjectFlow(containerPath, mode) {
 async function confirmScenarioName(filePath) {
   let warnings;
   try {
-    warnings = scenarioNameFromFileName(path10.basename(filePath)).warnings;
+    warnings = scenarioNameFromFileName(path11.basename(filePath)).warnings;
   } catch (err) {
     await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message: "This file name cannot be used for a map.", detail: err.message });
     return false;
@@ -37784,7 +38909,7 @@ async function getBitmapTextureFlow(bitmapTagId, imageIndex) {
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const bitmapsPath = resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "getBitmapTexture", bitmapTagId, imageIndex, bitmapsPath },
     sendLog
@@ -37835,7 +38960,7 @@ async function getBitmapInfoFlow(tagIndex) {
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const bitmapsPath = resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "getBitmapInfo", tagIndex, bitmapsPath },
     sendLog
@@ -37847,7 +38972,7 @@ async function getBitmapRgbaFlow(tagIndex, imageIndex) {
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const bitmapsPath = resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "getBitmapRgba", tagIndex, imageIndex, bitmapsPath },
     sendLog
@@ -37859,7 +38984,7 @@ async function exportBitmapFlow(tagIndex, imageIndex, format, outputPath) {
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const bitmapsPath = resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "exportBitmap", tagIndex, imageIndex, format, outputPath, bitmapsPath },
     sendLog
@@ -37871,7 +38996,7 @@ async function replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat) 
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const bitmapsPath = settings.resourceMaps.bitmaps ?? void 0;
+  const bitmapsPath = resolveResourceMapsForSource(currentMapPath).bitmapsPath ?? settings.resourceMaps.bitmaps ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "replaceBitmap", tagIndex, imageIndex, inputPath, targetFormat, bitmapsPath },
     sendLog
@@ -37905,7 +39030,7 @@ async function getSoundInfoFlow(tagIndex) {
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const soundsPath = settings.resourceMaps.sounds ?? void 0;
+  const soundsPath = resolveResourceMapsForSource(currentMapPath).soundsPath ?? settings.resourceMaps.sounds ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "getSoundInfo", tagIndex, soundsPath },
     sendLog
@@ -37917,7 +39042,7 @@ async function getSoundWavFlow(tagIndex, pitchRangeIndex, permutationIndex) {
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const soundsPath = settings.resourceMaps.sounds ?? void 0;
+  const soundsPath = resolveResourceMapsForSource(currentMapPath).soundsPath ?? settings.resourceMaps.sounds ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "getSoundWav", tagIndex, pitchRangeIndex, permutationIndex, soundsPath },
     sendLog
@@ -37929,7 +39054,7 @@ async function exportSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, outp
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const soundsPath = settings.resourceMaps.sounds ?? void 0;
+  const soundsPath = resolveResourceMapsForSource(currentMapPath).soundsPath ?? settings.resourceMaps.sounds ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "exportSound", tagIndex, pitchRangeIndex, permutationIndex, outputPath, soundsPath },
     sendLog
@@ -37941,7 +39066,7 @@ async function replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inp
     return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
   }
   const settings = getSettings();
-  const soundsPath = settings.resourceMaps.sounds ?? void 0;
+  const soundsPath = resolveResourceMapsForSource(currentMapPath).soundsPath ?? settings.resourceMaps.sounds ?? void 0;
   const { promise } = sendWorkerRequest(
     { type: "replaceSound", tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat, soundsPath },
     sendLog
@@ -37980,12 +39105,26 @@ async function pickExportDirectoryFlow() {
   });
   return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
+function read3dMeshSourceAsObjText(filePath) {
+  const raw = fs9.readFileSync(filePath, "utf8");
+  const low = filePath.toLowerCase();
+  if (low.endsWith(".jms")) {
+    return convertJmsToObjText(raw).objText;
+  }
+  if (low.endsWith(".dae")) {
+    return convertColladaDaeToObjText(raw).objText;
+  }
+  return raw;
+}
 async function pickObjFileFlow() {
   if (!mainWindow) return { path: null };
   const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
-    title: "Select Wavefront OBJ Mesh for Collision Analysis",
+    title: "Select 3D Model (.obj / .jms / .dae)",
     filters: [
+      { name: "3D Models (*.obj;*.jms;*.dae)", extensions: ["obj", "jms", "dae"] },
       { name: "Wavefront OBJ (*.obj)", extensions: ["obj"] },
+      { name: "Halo CE JMS (*.jms)", extensions: ["jms"] },
+      { name: "COLLADA DAE (*.dae)", extensions: ["dae"] },
       { name: "All Files (*.*)", extensions: ["*"] }
     ],
     properties: ["openFile"]
@@ -38000,7 +39139,7 @@ async function analyzeCollisionObjFlow(filePath, options) {
       if (!picked.path) return { ok: false, error: "Cancelled" };
       p = picked.path;
     }
-    const text = fs8.readFileSync(p, "utf8");
+    const text = read3dMeshSourceAsObjText(p);
     const summary = parseAndAnalyzeObj(text, options);
     return { ok: true, summary, filePath: p };
   } catch (err) {
@@ -38009,10 +39148,10 @@ async function analyzeCollisionObjFlow(filePath, options) {
 }
 async function exportUvTemplateFlow(options) {
   try {
-    if (!options.objFilePath || !fs8.existsSync(options.objFilePath)) {
-      return { ok: false, error: "Select a valid .obj model file first." };
+    if (!options.objFilePath || !fs9.existsSync(options.objFilePath)) {
+      return { ok: false, error: "Select a valid .obj / .jms / .dae model file first." };
     }
-    const objText = fs8.readFileSync(options.objFilePath, "utf8");
+    const objText = read3dMeshSourceAsObjText(options.objFilePath);
     const size = options.size ?? (options.previewOnly ? 512 : 1024);
     const { pngBuffer, usedAutoUv } = renderObjUvTemplatePng(objText, size, {
       scale: options.scale,
@@ -38026,8 +39165,8 @@ async function exportUvTemplateFlow(options) {
       return { ok: true, usedAutoUv, previewDataUrl };
     }
     if (!mainWindow) return { ok: false, error: "Application window is not available." };
-    const baseName = path10.basename(options.objFilePath, path10.extname(options.objFilePath));
-    const defaultPath = path10.join(path10.dirname(options.objFilePath), `${baseName}_uv_template.png`);
+    const baseName = path11.basename(options.objFilePath, path11.extname(options.objFilePath));
+    const defaultPath = path11.join(path11.dirname(options.objFilePath), `${baseName}_uv_template.png`);
     const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
       title: "Save UV Template Image (.png)",
       defaultPath,
@@ -38036,7 +39175,7 @@ async function exportUvTemplateFlow(options) {
     if (canceled || !filePath) {
       return { ok: false, error: "Cancelled" };
     }
-    fs8.writeFileSync(filePath, pngBuffer);
+    fs9.writeFileSync(filePath, pngBuffer);
     sendLog("info", `Saved UV wireframe template to ${filePath}`);
     return { ok: true, outputPath: filePath, usedAutoUv, previewDataUrl };
   } catch (err) {
@@ -38046,15 +39185,15 @@ async function exportUvTemplateFlow(options) {
 async function pickSaveOceTagsPathFlow(defaultName) {
   if (!mainWindow) return { path: null };
   const settings = getSettings();
-  const baseDir = settings.lastExtractDir ?? (currentMapPath ? path10.dirname(currentMapPath) : import_electron3.app.getPath("documents"));
+  const baseDir = settings.lastExtractDir ?? (currentMapPath ? path11.dirname(currentMapPath) : import_electron3.app.getPath("documents"));
   const cleanFile = defaultName.endsWith(OCETAGS_EXTENSION) ? defaultName : `${defaultName}${OCETAGS_EXTENSION}`;
   const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
     title: "Save Custom Object Tag Set (.ocetags)",
-    defaultPath: path10.join(baseDir, cleanFile),
+    defaultPath: path11.join(baseDir, cleanFile),
     filters: [{ name: "OpenCE Tag Set (*.ocetags)", extensions: ["ocetags"] }]
   });
   if (canceled || !filePath) return { path: null };
-  setLastExtractDir(path10.dirname(filePath));
+  setLastExtractDir(path11.dirname(filePath));
   return { path: filePath };
 }
 async function buildCustomObjectTagFlow(request) {
@@ -38068,7 +39207,7 @@ async function buildCustomObjectTagFlow(request) {
     const p = settings.resourceMaps[kind];
     if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
-  sendLog("info", `Building custom ${request.tagGroup} tag "${request.tagPath}" from ${path10.basename(request.objFilePath)}...`);
+  sendLog("info", `Building custom ${request.tagGroup} tag "${request.tagPath}" from ${path11.basename(request.objFilePath)}...`);
   const { promise } = sendWorkerRequest(
     { type: "buildCustomObjectTag", request, resourceMapPaths },
     sendLog,
@@ -38291,6 +39430,29 @@ async function duplicateTagFlow(tagIndex, newPath) {
     return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   }
 }
+async function deleteTagFlow(tagIndex) {
+  if (!currentMapPath) return { ok: false, code: "NO_MAP_LOADED", message: "No map is open." };
+  if (currentMapCompressed) return { ok: false, code: "COMPRESSED", message: COMPRESSED_MAP_MESSAGE };
+  const { promise } = sendWorkerRequest(
+    { type: "deleteTag", tagIndex },
+    sendLog
+  );
+  try {
+    const result = await promise;
+    if (result.ok) {
+      setOpenMapState(result.map);
+      sendLog(
+        "info",
+        `Deleted tag #${tagIndex} "${result.deletedPath}" (${result.deletedGroup}) and scrubbed ${result.scrubbedReferencesCount} incoming reference(s) to NULL_TAG_ID (in memory). Use File > Save to write changes.`
+      );
+    }
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Failed to delete tag: ${e.message}`);
+    return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
+  }
+}
 async function pickBspSourceMapFlow() {
   if (!mainWindow) return { path: null };
   const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
@@ -38308,9 +39470,9 @@ function detectSourceMapEdition(filePath) {
   const fpLower = (filePath || "").toLowerCase();
   let buf = Buffer.alloc(2048);
   try {
-    const fd = fs8.openSync(filePath, "r");
-    fs8.readSync(fd, buf, 0, 2048, 0);
-    fs8.closeSync(fd);
+    const fd = fs9.openSync(filePath, "r");
+    fs9.readSync(fd, buf, 0, 2048, 0);
+    fs9.closeSync(fd);
   } catch {
     return "ce";
   }
@@ -38333,8 +39495,25 @@ var EDITION_DISPLAY_NAMES = {
   ce: "Halo Custom Edition (v609)",
   demo: "Halo Mac Demo (v6)",
   halomd: "HaloMD (v7)",
-  mcc: "Halo MCC (CEA)"
+  mcc: "Halo MCC (CEA)",
+  xbox: "Halo Xbox Retail (v5)"
 };
+function isResourceMapCompatibleWithEdition(filePath, edition, kind) {
+  if (!filePath || !fs9.existsSync(filePath)) return false;
+  try {
+    const stat = fs9.statSync(filePath);
+    if (kind === "bitmaps") {
+      if (edition === "ce" && stat.size > 240 * 1024 * 1024) return false;
+      if ((edition === "pc" || edition === "halomd") && stat.size < 240 * 1024 * 1024) return false;
+    } else if (kind === "sounds") {
+      if (edition === "ce" && stat.size > 120 * 1024 * 1024) return false;
+      if ((edition === "pc" || edition === "halomd") && stat.size < 120 * 1024 * 1024) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 function resolveResourceMapsForSource(sourceFilePath, options) {
   const edition = detectSourceMapEdition(sourceFilePath);
   const editionName = EDITION_DISPLAY_NAMES[edition] || edition.toUpperCase();
@@ -38344,51 +39523,51 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
   let soundsPath = options?.customSoundsPath || null;
   if (!bitmapsPath) {
     const userVer = settings.versionResourceMaps?.[edition];
-    if (userVer?.bitmaps && fs8.existsSync(userVer.bitmaps)) {
+    if (isResourceMapCompatibleWithEdition(userVer?.bitmaps, edition, "bitmaps")) {
       bitmapsPath = userVer.bitmaps;
     }
   }
   if (!soundsPath) {
     const userVer = settings.versionResourceMaps?.[edition];
-    if (userVer?.sounds && fs8.existsSync(userVer.sounds)) {
+    if (isResourceMapCompatibleWithEdition(userVer?.sounds, edition, "sounds")) {
       soundsPath = userVer.sounds;
     }
   }
   if (edition === "ce") {
-    if (!bitmapsPath && settings.resourceMaps.bitmaps && fs8.existsSync(settings.resourceMaps.bitmaps)) {
+    if (!bitmapsPath && isResourceMapCompatibleWithEdition(settings.resourceMaps.bitmaps, "ce", "bitmaps")) {
       bitmapsPath = settings.resourceMaps.bitmaps;
     }
-    if (!soundsPath && settings.resourceMaps.sounds && fs8.existsSync(settings.resourceMaps.sounds)) {
+    if (!soundsPath && isResourceMapCompatibleWithEdition(settings.resourceMaps.sounds, "ce", "sounds")) {
       soundsPath = settings.resourceMaps.sounds;
     }
   }
-  const donorDir = path10.dirname(sourceFilePath);
+  const donorDir = path11.dirname(sourceFilePath);
   if (!bitmapsPath) {
-    const localBmp = path10.join(donorDir, "bitmaps.map");
-    if (fs8.existsSync(localBmp)) bitmapsPath = localBmp;
+    const localBmp = path11.join(donorDir, "bitmaps.map");
+    if (isResourceMapCompatibleWithEdition(localBmp, edition, "bitmaps")) bitmapsPath = localBmp;
   }
   if (!soundsPath) {
-    const localSnd = path10.join(donorDir, "sounds.map");
-    if (fs8.existsSync(localSnd)) soundsPath = localSnd;
+    const localSnd = path11.join(donorDir, "sounds.map");
+    if (isResourceMapCompatibleWithEdition(localSnd, edition, "sounds")) soundsPath = localSnd;
   }
-  if (!bitmapsPath && defaults[edition] && fs8.existsSync(defaults[edition])) {
+  if (!bitmapsPath && isResourceMapCompatibleWithEdition(defaults[edition], edition, "bitmaps")) {
     bitmapsPath = defaults[edition];
   }
-  if (!bitmapsPath && edition === "pc" && defaults.halomd && fs8.existsSync(defaults.halomd)) {
+  if (!bitmapsPath && edition === "pc" && isResourceMapCompatibleWithEdition(defaults.halomd, "pc", "bitmaps")) {
     bitmapsPath = defaults.halomd;
   }
   if (!soundsPath && bitmapsPath) {
-    const siblingSnd = path10.join(path10.dirname(bitmapsPath), "sounds.map");
-    if (fs8.existsSync(siblingSnd)) soundsPath = siblingSnd;
+    const siblingSnd = path11.join(path11.dirname(bitmapsPath), "sounds.map");
+    if (isResourceMapCompatibleWithEdition(siblingSnd, edition, "sounds")) soundsPath = siblingSnd;
   }
   if (!soundsPath && edition === "pc") {
     const pcSoundsCandidates = [
-      ...getSearchRoots().map((r) => path10.join(r, "sample_maps/PC/sounds.map")),
+      ...getSearchRoots().map((r) => path11.join(r, "sample_maps/PC/sounds.map")),
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\sounds.map",
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\sounds.map"
     ];
     for (const p of pcSoundsCandidates) {
-      if (fs8.existsSync(p)) {
+      if (isResourceMapCompatibleWithEdition(p, "pc", "sounds")) {
         soundsPath = p;
         break;
       }
@@ -38396,7 +39575,7 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
   }
   if (edition === "mcc" && !soundsPath) {
     const ceSounds = settings.versionResourceMaps?.ce?.sounds || settings.resourceMaps.sounds;
-    if (ceSounds && fs8.existsSync(ceSounds)) {
+    if (ceSounds && fs9.existsSync(ceSounds)) {
       soundsPath = ceSounds;
     }
   }
@@ -38462,7 +39641,7 @@ var saveMapDeps = {
       defaultId: 1,
       cancelId: 1,
       noLink: true,
-      message: `Overwrite ${path10.basename(filePath)} without a backup?`,
+      message: `Overwrite ${path11.basename(filePath)} without a backup?`,
       detail: "You skipped the backup copy when you opened this map, so the current file cannot be restored afterwards. Use File > Save As to keep it."
     });
     return response === 0;
@@ -38500,7 +39679,7 @@ async function discardChangesFlow() {
     defaultId: 1,
     cancelId: 1,
     noLink: true,
-    message: `Discard all unsaved changes to ${path10.basename(currentMapPath)}?`,
+    message: `Discard all unsaved changes to ${path11.basename(currentMapPath)}?`,
     detail: "The map is reopened from the file on disk. Injected tags that were not saved are lost."
   });
   if (response !== 0) return null;
@@ -38529,7 +39708,7 @@ var saveMapAsDeps = {
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path10.basename(filePath)}" already exists.`,
+      message: `"${path11.basename(filePath)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     return response === 0;
@@ -38652,14 +39831,30 @@ async function verifyEmbeddedDataFlow() {
     return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
   }
 }
+function getAppDisplayVersion() {
+  try {
+    const pkgPath = path11.join(__dirname, "../package.json");
+    if (fs9.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs9.readFileSync(pkgPath, "utf8"));
+      if (typeof pkg.displayVersion === "string" && pkg.displayVersion.trim()) {
+        return pkg.displayVersion.trim();
+      }
+      if (typeof pkg.version === "string" && pkg.version.trim()) {
+        return pkg.version.trim();
+      }
+    }
+  } catch {
+  }
+  return import_electron3.app.getVersion();
+}
 function showAboutDialog() {
   if (!mainWindow) return;
-  const pngIcon = path10.join(__dirname, "../build/icon.png");
+  const pngIcon = path11.join(__dirname, "../build/icon.png");
   import_electron3.dialog.showMessageBox(mainWindow, {
     type: "info",
     title: "About",
-    icon: fs8.existsSync(pngIcon) ? pngIcon : void 0,
-    message: `OpenCE Mantle v${import_electron3.app.getVersion()}`,
+    icon: fs9.existsSync(pngIcon) ? pngIcon : void 0,
+    message: `OpenCE Mantle v${getAppDisplayVersion()}`,
     detail: "A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\nFormat references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\nCompression reference: Chimera.\nTarget runtime: OpenCE (OpenCommunityEdition/OpenCE).\n\nNo Bungie/Microsoft assets are bundled; this tool only operates on files you supply."
   });
 }
@@ -38701,6 +39896,7 @@ function buildMenu() {
         { label: "Inject Tags...", click: () => mainWindow?.webContents.send("menu:action", "inject-tags") },
         { label: "Verify Embedded Data...", click: () => mainWindow?.webContents.send("menu:action", "verify-embedded-data") },
         { label: "Swap BSP...", click: () => mainWindow?.webContents.send("menu:action", "swap-bsp") },
+        { label: "Compare With Another .map File...", click: () => mainWindow?.webContents.send("menu:action", "compare-maps") },
         { type: "separator" },
         {
           label: "Identify Resource Maps",
@@ -38791,6 +39987,7 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("tags:setUnicodeString", (_e, tagIndex, stringIndex, newText) => setUnicodeStringFlow(tagIndex, stringIndex, newText));
   import_electron3.ipcMain.handle("tags:renameTag", (_e, tagIndex, newPath) => renameTagFlow(tagIndex, newPath));
   import_electron3.ipcMain.handle("tags:duplicateTag", (_e, tagIndex, newPath) => duplicateTagFlow(tagIndex, newPath));
+  import_electron3.ipcMain.handle("tags:deleteTag", (_e, tagIndex) => deleteTagFlow(tagIndex));
   import_electron3.ipcMain.handle("dialog:pickBspSourceMap", () => pickBspSourceMapFlow());
   import_electron3.ipcMain.handle("dialog:pickBspResource", async (_e, kind) => {
     if (!mainWindow) return { path: null };
@@ -39037,6 +40234,287 @@ import_electron3.app.whenReady().then(() => {
     }
     return res;
   });
+  import_electron3.ipcMain.handle(
+    "mod:exportOpenCeModFolder",
+    async (_e, options) => {
+      if (!currentMapPath) return { ok: false, message: "No map is open." };
+      if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+      if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+      const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+        title: "Select Output Parent Directory for OpenCE Mod Folder (creates <mod_name>/mod.toml + tags/...)",
+        properties: ["openDirectory", "createDirectory"]
+      });
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { ok: false, message: "Cancelled." };
+      }
+      const parentOutputDir = pick.filePaths[0];
+      const settings = getSettings();
+      const { promise } = sendWorkerRequest(
+        {
+          type: "exportOpenCeModFolder",
+          rootTagIndices: options.rootTagIndices,
+          modName: options.modName,
+          version: options.version,
+          author: options.author,
+          description: options.description,
+          includeDependencies: options.includeDependencies ?? false,
+          replaceTargetTagIndex: options.replaceTargetTagIndex,
+          parentOutputDir,
+          bitmapsPath: settings.resourceMaps.bitmaps ?? void 0,
+          soundsPath: settings.resourceMaps.sounds ?? void 0,
+          locPath: settings.resourceMaps.loc ?? void 0
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok) {
+        sendLog(
+          "info",
+          `Exported OpenCE mod folder "${res.modFolderName}" (${res.tagCount} loose tag files + mod.toml) to ${res.outputDir}`
+        );
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "mod:importLegacyTags",
+    async (_e, sourceMode, injectMode = "add") => {
+      if (!currentMapPath) return { ok: false, message: "No map is open." };
+      if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
+      if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+      let sourcePathLabel = "";
+      let inputPaths = [];
+      if (sourceMode === "folder") {
+        const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+          title: "Select Legacy Tag Folder (legacy_tags, sample_mods, or HMT Extract folder)",
+          properties: ["openDirectory"]
+        });
+        if (pick.canceled || !pick.filePaths[0]) {
+          return { ok: false, message: "Cancelled." };
+        }
+        sourcePathLabel = pick.filePaths[0];
+        inputPaths = pick.filePaths;
+      } else {
+        const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+          title: "Select Legacy Tag File(s) (HEK loose tags or HMT .meta / .xml files)",
+          properties: ["openFile", "multiSelections"]
+        });
+        if (pick.canceled || pick.filePaths.length === 0) {
+          return { ok: false, message: "Cancelled." };
+        }
+        sourcePathLabel = pick.filePaths[0];
+        inputPaths = pick.filePaths;
+      }
+      const settings = getSettings();
+      const { promise } = sendWorkerRequest(
+        {
+          type: "importLegacyTags",
+          inputPaths,
+          mode: injectMode,
+          bitmapsPath: settings.resourceMaps.bitmaps ?? void 0,
+          soundsPath: settings.resourceMaps.sounds ?? void 0,
+          locPath: settings.resourceMaps.loc ?? void 0
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send("map:updated", res.map);
+        sendLog(
+          "info",
+          `Imported legacy tags (${res.formatDetected}): +${res.addedCount} added, ${res.swappedCount} swapped, ${res.reusedCount} reused from ${sourcePathLabel}.`
+        );
+        return { ...res, sourcePath: sourcePathLabel };
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "bitmap:replaceFromDataUrl",
+    async (_e, tagIndex, imageIndex, pngDataUrl, targetFormat) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, code: "NO_MAP_LOADED", message: "No uncompressed map is open." };
+      }
+      try {
+        const base64 = pngDataUrl.replace(/^data:image\/\w+;base64,/, "");
+        const pngBytes = new Uint8Array(Buffer.from(base64, "base64"));
+        const settings = getSettings();
+        const { promise } = sendWorkerRequest(
+          {
+            type: "replaceBitmapFromPngBytes",
+            tagIndex,
+            imageIndex,
+            pngBytes,
+            targetFormat,
+            bitmapsPath: settings.resourceMaps.bitmaps ?? void 0
+          },
+          sendLog
+        );
+        const res = await promise;
+        if (res.ok) {
+          setOpenMapState(res.map);
+          mainWindow?.webContents.send("map:updated", res.map);
+          sendLog("info", `Applied 3D painted texture to bitmap tag #${tagIndex} (image ${imageIndex}).`);
+        }
+        return res;
+      } catch (err) {
+        const e = err;
+        return { ok: false, code: e.code ?? "BITMAP_REPLACE_ERROR", message: e.message };
+      }
+    }
+  );
+  const resolveCustomTexturesDirectory = () => {
+    const baseDir = process.env.PORTABLE_EXECUTABLE_DIR ? process.env.PORTABLE_EXECUTABLE_DIR : import_electron3.app.isPackaged ? path11.dirname(process.execPath) : process.cwd();
+    const texturesDir = path11.join(baseDir, "textures");
+    fs9.mkdirSync(texturesDir, { recursive: true });
+    try {
+      const existing = fs9.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+      if (existing.length === 0) {
+        const presets = [
+          {
+            name: "unsc_olive_armor.png",
+            fn: (x, y) => {
+              const n = (x * 37 + y * 57 ^ x * 13) & 15;
+              const seam = x % 32 === 0 || y % 32 === 0 ? -18 : 0;
+              return [Math.max(0, 74 + n + seam), Math.max(0, 88 + n + seam), Math.max(0, 58 + n + seam), 255];
+            }
+          },
+          {
+            name: "covenant_hex_plate.png",
+            fn: (x, y) => {
+              const hx = (x + (y >> 3 & 1) * 8) % 16;
+              const hy = y % 16;
+              const edge = hx === 0 || hy === 0 ? 30 : 0;
+              return [92 + edge, 52 + edge, 148 + edge, 255];
+            }
+          },
+          {
+            name: "forerunner_circuit_panel.png",
+            fn: (x, y) => {
+              const grid = x % 16 === 0 || y % 16 === 0 || (x + y) % 32 === 0;
+              return grid ? [56, 189, 248, 255] : [68, 78, 92, 255];
+            }
+          },
+          {
+            name: "hazard_warning_stripes.png",
+            fn: (x, y) => {
+              const stripe = x + y >> 4 & 1;
+              return stripe ? [234, 179, 8, 255] : [30, 32, 36, 255];
+            }
+          },
+          {
+            name: "weathered_steel_grunge.png",
+            fn: (x, y) => {
+              const scratch = (x * 73 + y * 19 ^ y * 29) & 31;
+              const v = 110 + scratch;
+              return [v, v + 2, v + 6, 255];
+            }
+          },
+          {
+            name: "desert_camo_plate.png",
+            fn: (x, y) => {
+              const cell = ((x >> 4) * 7 + (y >> 4) * 13 ^ (x >> 3) + (y >> 3)) & 3;
+              if (cell === 0) return [194, 168, 120, 255];
+              if (cell === 1) return [156, 126, 84, 255];
+              if (cell === 2) return [118, 96, 66, 255];
+              return [176, 148, 102, 255];
+            }
+          }
+        ];
+        for (const p of presets) {
+          const rgba = new Uint8Array(64 * 64 * 4);
+          for (let y = 0; y < 64; y++) {
+            for (let x = 0; x < 64; x++) {
+              const [r, g, b, a] = p.fn(x, y);
+              const idx = (y * 64 + x) * 4;
+              rgba[idx] = r;
+              rgba[idx + 1] = g;
+              rgba[idx + 2] = b;
+              rgba[idx + 3] = a;
+            }
+          }
+          const png = encodeRgbaToPng(rgba, 64, 64);
+          fs9.writeFileSync(path11.join(texturesDir, p.name), png);
+        }
+      }
+    } catch {
+    }
+    return texturesDir;
+  };
+  import_electron3.ipcMain.handle("bitmap:getCustomBrushTextures", async () => {
+    const texturesDir = resolveCustomTexturesDirectory();
+    const textures = [];
+    try {
+      const files = fs9.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+      for (const file of files) {
+        const fullPath = path11.join(texturesDir, file);
+        const ext = path11.extname(file).toLowerCase();
+        const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png";
+        const buf = fs9.readFileSync(fullPath);
+        const cleanName = path11.basename(file, ext).replace(/[_-]+/g, " ");
+        textures.push({
+          name: cleanName,
+          filePath: fullPath,
+          dataUrl: `data:${mime};base64,${buf.toString("base64")}`
+        });
+      }
+    } catch {
+    }
+    return { ok: true, texturesDir, textures };
+  });
+  import_electron3.ipcMain.handle("bitmap:openCustomTexturesFolder", async () => {
+    const texturesDir = resolveCustomTexturesDirectory();
+    await import_electron3.shell.openPath(texturesDir);
+    return { ok: true, texturesDir };
+  });
+  import_electron3.ipcMain.handle(
+    "render:updateBspVertices",
+    async (_e, bspIndex, submeshUpdates) => {
+      try {
+        const { promise } = sendWorkerRequest(
+          {
+            type: "updateBspVertices",
+            bspIndex,
+            submeshUpdates
+          },
+          sendLog
+        );
+        const res = await promise;
+        if (res.ok) {
+          setOpenMapState(res.map);
+          mainWindow?.webContents.send("map:updated", res.map);
+        }
+        return res;
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "render:updateModelVertices",
+    async (_e, modelTagId, submeshUpdates, lod) => {
+      try {
+        const { promise } = sendWorkerRequest(
+          {
+            type: "updateModelVertices",
+            modelTagId,
+            submeshUpdates,
+            lod
+          },
+          sendLog
+        );
+        const res = await promise;
+        if (res.ok) {
+          setOpenMapState(res.map);
+          mainWindow?.webContents.send("map:updated", res.map);
+        }
+        return res;
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
   import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
   registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
   import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());
@@ -39050,12 +40528,87 @@ import_electron3.app.whenReady().then(() => {
     if (typeof filePath === "string" && filePath) import_electron3.shell.showItemInFolder(filePath);
   });
   import_electron3.ipcMain.handle("app:getSettings", () => getSettings());
-  import_electron3.ipcMain.handle("app:version", () => import_electron3.app.getVersion());
+  import_electron3.ipcMain.handle("app:version", () => getAppDisplayVersion());
   import_electron3.ipcMain.handle("app:recentMaps", () => getRecentMaps());
   import_electron3.ipcMain.on("app:notImplemented", (_e, feature) => sendLog("warn", `${feature} is not implemented yet (coming in a later milestone).`));
   import_electron3.ipcMain.handle("app:showAbout", () => showAboutDialog());
+  let devOverlayWindow = null;
+  const inGameHotkeysState = {
+    overlayPinned: false,
+    godMode: false,
+    infiniteAmmo: false,
+    wireframe: false,
+    aiDebug: false,
+    superJump: false,
+    medusa: false,
+    bumpPossession: false
+  };
+  const registerTagTestGlobalHotkeys = () => {
+    try {
+      if (!import_electron3.globalShortcut.isRegistered("F7")) {
+        import_electron3.globalShortcut.register("F7", () => {
+          inGameHotkeysState.godMode = !inGameHotkeysState.godMode;
+          const v = inGameHotkeysState.godMode ? 1 : 0;
+          tagTestRunner.sendCommand(`cheat_deathless_player ${v}`);
+          tagTestRunner.sendCommand(`sv_say "[OpenCE Dev] God Mode: ${v ? "ON" : "OFF"} (F7)"`);
+          mainWindow?.webContents.send("tagTest:hotkeyAction", { action: "godMode", value: inGameHotkeysState.godMode });
+        });
+      }
+      if (!import_electron3.globalShortcut.isRegistered("F8")) {
+        import_electron3.globalShortcut.register("F8", () => {
+          inGameHotkeysState.infiniteAmmo = !inGameHotkeysState.infiniteAmmo;
+          const v = inGameHotkeysState.infiniteAmmo ? 1 : 0;
+          tagTestRunner.sendCommand(`cheat_infinite_ammo ${v}`);
+          tagTestRunner.sendCommand(`cheat_bottomless_clip ${v}`);
+          tagTestRunner.sendCommand(`sv_say "[OpenCE Dev] Infinite Ammo & Bottomless Clip: ${v ? "ON" : "OFF"} (F8)"`);
+          mainWindow?.webContents.send("tagTest:hotkeyAction", { action: "infiniteAmmo", value: inGameHotkeysState.infiniteAmmo });
+        });
+      }
+      if (!import_electron3.globalShortcut.isRegistered("F9")) {
+        import_electron3.globalShortcut.register("F9", () => {
+          inGameHotkeysState.wireframe = !inGameHotkeysState.wireframe;
+          const v = inGameHotkeysState.wireframe ? 1 : 0;
+          tagTestRunner.sendCommand(`rasterizer_wireframe ${v}`);
+          tagTestRunner.sendCommand(`debug_portals ${v}`);
+          tagTestRunner.sendCommand(`sv_say "[OpenCE Dev] Wireframe & BSP Portals: ${v ? "ON" : "OFF"} (F9)"`);
+          mainWindow?.webContents.send("tagTest:hotkeyAction", { action: "wireframe", value: inGameHotkeysState.wireframe });
+        });
+      }
+      if (!import_electron3.globalShortcut.isRegistered("F10")) {
+        import_electron3.globalShortcut.register("F10", () => {
+          inGameHotkeysState.aiDebug = !inGameHotkeysState.aiDebug;
+          const v = inGameHotkeysState.aiDebug ? 1 : 0;
+          tagTestRunner.sendCommand(`ai_render ${v}`);
+          tagTestRunner.sendCommand(`debug_objects ${v}`);
+          tagTestRunner.sendCommand(`sv_say "[OpenCE Dev] AI Perception & Object Bounds: ${v ? "ON" : "OFF"} (F10)"`);
+          mainWindow?.webContents.send("tagTest:hotkeyAction", { action: "aiDebug", value: inGameHotkeysState.aiDebug });
+        });
+      }
+    } catch {
+    }
+  };
+  const unregisterTagTestGlobalHotkeys = () => {
+    try {
+      for (const key of ["F6", "F7", "F8", "F9", "F10"]) {
+        if (import_electron3.globalShortcut.isRegistered(key)) {
+          import_electron3.globalShortcut.unregister(key);
+        }
+      }
+      if (devOverlayWindow && !devOverlayWindow.isDestroyed()) {
+        devOverlayWindow.close();
+        devOverlayWindow = null;
+      }
+      inGameHotkeysState.overlayPinned = false;
+    } catch {
+    }
+  };
   tagTestRunner.onStatusChange((status) => {
     mainWindow?.webContents.send("tagTest:status", status);
+    if (status.state === "running" || status.state === "launching") {
+      registerTagTestGlobalHotkeys();
+    } else if (status.state === "stopped") {
+      unregisterTagTestGlobalHotkeys();
+    }
   });
   tagTestRunner.onLog((entry) => {
     mainWindow?.webContents.send("tagTest:log", entry);
@@ -39097,6 +40650,410 @@ import_electron3.app.whenReady().then(() => {
   import_electron3.ipcMain.handle("window:isAlwaysOnTop", () => {
     return mainWindow?.isAlwaysOnTop() ?? false;
   });
+  import_electron3.ipcMain.handle("wrl:pickAndParse", async () => {
+    if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+    const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+      title: "Load .WRL (VRML 1.0 Error Geometry) or tool.exe / debug.txt Build Log",
+      filters: [
+        { name: "Halo WRL & Tool Logs (*.wrl, *.txt, *.log)", extensions: ["wrl", "txt", "log"] },
+        { name: "VRML 1.0 Error Geometry (*.wrl)", extensions: ["wrl"] },
+        { name: "Tool Log / debug.txt (*.txt, *.log)", extensions: ["txt", "log"] }
+      ],
+      properties: ["openFile"]
+    });
+    if (pick.canceled || !pick.filePaths[0]) {
+      return { ok: false, cancelled: true, message: "Cancelled." };
+    }
+    const filePath = pick.filePaths[0];
+    const fileName = path11.basename(filePath);
+    try {
+      const text = fs9.readFileSync(filePath, "utf8");
+      if (filePath.toLowerCase().endsWith(".wrl") || text.trimStart().startsWith("#VRML")) {
+        const wrl = parseHaloWrl(text);
+        sendLog(
+          "info",
+          `Loaded WRL diagnostic "${fileName}": ${wrl.faces.length} error face(s), ${wrl.segments.length} error edge(s), ${wrl.points.length} vertex(es).`
+        );
+        return { ok: true, kind: "wrl", fileName, wrl };
+      } else {
+        const logReview = analyzeHaloToolLog(text);
+        sendLog(
+          "info",
+          `Analyzed tool.exe log "${fileName}": ${logReview.errorCount} error(s), ${logReview.warningCount} warning(s).`
+        );
+        return { ok: true, kind: "log", fileName, logReview };
+      }
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  import_electron3.ipcMain.handle("map:compareWithAnother", async () => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first before comparing." };
+    }
+    if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+    const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+      title: "Select Second .map File to Compare Against Open Map",
+      filters: [{ name: "Halo Map (*.map, *.bak)", extensions: ["map", "bak"] }],
+      properties: ["openFile"]
+    });
+    if (pick.canceled || !pick.filePaths[0]) {
+      return { ok: false, cancelled: true, message: "Cancelled." };
+    }
+    const otherFilePath = pick.filePaths[0];
+    const { promise } = sendWorkerRequest(
+      { type: "compareMaps", otherFilePath },
+      sendLog,
+      (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "compareMaps", stage, percent })
+    );
+    const res = await promise;
+    if (res.ok) {
+      sendLog(
+        "info",
+        `Compared "${res.leftFileName}" vs "${res.rightFileName}": ${res.report.changedTags} changed, +${res.report.addedTags} added, -${res.report.removedTags} removed.`
+      );
+    }
+    return res;
+  });
+  import_electron3.ipcMain.handle("mcc:discover", async () => {
+    const info = discoverSteamMccInstallations();
+    return {
+      ok: true,
+      mccInstallPaths: info.mccInstallPaths,
+      defaultModManifestPath: info.defaultModManifestPath,
+      manifestExists: info.manifestExists,
+      registeredRoots: info.registeredRoots
+    };
+  });
+  import_electron3.ipcMain.handle(
+    "mcc:deployMod",
+    async (_e, options) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map before deploying to Steam MCC." };
+      }
+      if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+      const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+        title: "Select Output Parent Directory for Steam MCC Mod Package",
+        properties: ["openDirectory", "createDirectory"]
+      });
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { ok: false, cancelled: true, message: "Cancelled." };
+      }
+      const parentOutputDir = pick.filePaths[0];
+      const { promise } = sendWorkerRequest(
+        {
+          type: "deployMccMod",
+          parentOutputDir,
+          title: options.title,
+          description: options.description,
+          author: options.author,
+          isMultiplayer: options.isMultiplayer,
+          registerInModManifest: options.registerInModManifest
+        },
+        sendLog,
+        (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "deployMccMod", stage, percent })
+      );
+      const res = await promise;
+      if (res.ok) {
+        sendLog(
+          "info",
+          `Deployed Steam MCC Mod Package to ${res.modFolderPath}${res.manifestRegistered ? ` and registered in ${res.manifestPath}` : ""}.`
+        );
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "map:globalReplaceTagFieldValue",
+    async (_evt, options) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      const { promise } = sendWorkerRequest(
+        {
+          type: "globalReplaceTagFieldValue",
+          fieldNameQuery: options.fieldNameQuery,
+          tagGroupFilter: options.tagGroupFilter,
+          matchValue: options.matchValue,
+          newValue: options.newValue
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok && res.replacedCount > 0) {
+        currentMapModified = true;
+        sendLog("info", `Globally updated ${res.replacedCount} field(s) matching "${options.fieldNameQuery}" -> "${options.newValue}".`);
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "map:compileJmaAnimation",
+    async (_evt, targetAntrTagIndex, animName) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+      const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+        title: "Select Halo CE Skeletal Animation (.jma / .jmm / .jmo / .jmr)",
+        filters: [
+          { name: "Halo Animation Source (*.jma;*.jmm;*.jmo;*.jmr;*.jmw;*.jmz)", extensions: ["jma", "jmm", "jmo", "jmr", "jmw", "jmz"] },
+          { name: "All Files (*.*)", extensions: ["*"] }
+        ],
+        properties: ["openFile"]
+      });
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { ok: false, cancelled: true, message: "Cancelled." };
+      }
+      const filePath = pick.filePaths[0];
+      const fileName = path11.basename(filePath);
+      const inferredAnimName = animName?.trim() || path11.basename(filePath, path11.extname(filePath));
+      const jmaText = fs9.readFileSync(filePath, "utf8");
+      const { promise } = sendWorkerRequest(
+        {
+          type: "compileJmaAnimation",
+          targetAntrTagIndex,
+          jmaText,
+          animName: inferredAnimName
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          "info",
+          `Compiled .JMA animation "${res.animationName}" (${res.frameCount} frames, ${res.nodeCount} nodes) into model_animations tag #${targetAntrTagIndex}.`
+        );
+        return { ...res, fileName };
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "map:compileJmsPhysics",
+    async (_evt, targetPhysTagIndex, totalMass) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+      const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+        title: "Select Halo CE .JMS File with Mass Points / Markers",
+        filters: [
+          { name: "Halo CE JMS (*.jms)", extensions: ["jms"] },
+          { name: "All Files (*.*)", extensions: ["*"] }
+        ],
+        properties: ["openFile"]
+      });
+      if (pick.canceled || !pick.filePaths[0]) {
+        return { ok: false, cancelled: true, message: "Cancelled." };
+      }
+      const filePath = pick.filePaths[0];
+      const fileName = path11.basename(filePath);
+      const jmsText = fs9.readFileSync(filePath, "utf8");
+      const { promise } = sendWorkerRequest(
+        {
+          type: "compileJmsPhysics",
+          targetPhysTagIndex,
+          jmsText,
+          totalMass
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          "info",
+          `Compiled ${res.massPointCount} mass points (mass ${res.totalMass} kg) from ${fileName} into physics tag #${targetPhysTagIndex}.`
+        );
+        return { ...res, fileName };
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "map:decompileTagToSource",
+    async (_evt, tagIndex, animationIndex) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+      const { promise } = sendWorkerRequest(
+        {
+          type: "decompileTagToSource",
+          tagIndex,
+          animationIndex
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (!res.ok) return res;
+      const leaf = (res.tagPath.split("\\").pop() || "exported").replace(/[^a-zA-Z0-9_-]/g, "_");
+      const suggestedName = res.kind === "physics_jms" ? "physics.jms" : res.kind === "animations_jma" ? `${res.animationName || leaf}.jma` : `${leaf}.jms`;
+      const save = await import_electron3.dialog.showSaveDialog(mainWindow, {
+        title: `Save Decompiled Source File (${suggestedName})`,
+        defaultPath: suggestedName,
+        filters: [
+          res.defaultExt === "jma" ? { name: "Halo Skeletal Animation (*.jma)", extensions: ["jma"] } : { name: "Halo Jointed Model Skeleton (*.jms)", extensions: ["jms"] },
+          { name: "All Files (*.*)", extensions: ["*"] }
+        ]
+      });
+      if (save.canceled || !save.filePath) {
+        return { ok: false, cancelled: true, message: "Save cancelled." };
+      }
+      fs9.writeFileSync(save.filePath, res.sourceText, "utf8");
+      sendLog("info", `Decompiled "${res.tagPath}" -> ${save.filePath} (${res.summary}).`);
+      return {
+        ok: true,
+        outputPath: save.filePath,
+        kind: res.kind,
+        tagPath: res.tagPath,
+        summary: res.summary
+      };
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "map:compileStringsTag",
+    async (_evt, targetTagIndex, textContent) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      let finalContent = textContent;
+      let fileName;
+      if (!finalContent || !finalContent.trim()) {
+        if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+        const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+          title: "Select Halo String Source File (.txt / .hmt)",
+          filters: [
+            { name: "Halo String Source (*.txt;*.hmt)", extensions: ["txt", "hmt"] },
+            { name: "All Files (*.*)", extensions: ["*"] }
+          ],
+          properties: ["openFile"]
+        });
+        if (pick.canceled || !pick.filePaths[0]) {
+          return { ok: false, cancelled: true, message: "Cancelled." };
+        }
+        const fp = pick.filePaths[0];
+        fileName = path11.basename(fp);
+        const rawBuf = fs9.readFileSync(fp);
+        if (rawBuf.length >= 2 && rawBuf[0] === 255 && rawBuf[1] === 254) {
+          finalContent = rawBuf.subarray(2).toString("utf16le");
+        } else {
+          finalContent = rawBuf.toString("utf8");
+        }
+      }
+      const { promise } = sendWorkerRequest(
+        {
+          type: "compileStringsTag",
+          targetTagIndex,
+          textContent: finalContent
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          "info",
+          `Compiled ${res.entryCount} string(s) into ${res.tagGroup} "${res.tagPath}".`
+        );
+        return { ...res, fileName };
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle("map:inspectMeterTag", async (_evt, meterTagIndex) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      {
+        type: "inspectMeterTag",
+        meterTagIndex
+      },
+      sendLog
+    );
+    return promise;
+  });
+  import_electron3.ipcMain.handle(
+    "map:compileFontFromGlyphAtlas",
+    async (_evt, targetFontTagIndex, glyphSpec) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      const { promise } = sendWorkerRequest(
+        {
+          type: "compileFontFromGlyphAtlas",
+          targetFontTagIndex,
+          glyphSpec
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok) {
+        currentMapModified = true;
+        sendLog(
+          "info",
+          `Compiled ${res.glyphCount} glyphs (${res.totalPixelBytes} pixel bytes) into font tag "${res.tagPath}".`
+        );
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "map:injectProceduralWorldBsp",
+    async (_evt, options) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      const { promise } = sendWorkerRequest(
+        {
+          type: "injectProceduralWorldBsp",
+          worldMesh: options.worldMesh,
+          bspIndex: options.bspIndex,
+          shaderBindings: options.shaderBindings,
+          collisionMode: options.collisionMode
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok && res.map) {
+        setOpenMapState(res.map);
+        sendLog(
+          "info",
+          `Injected procedural world geometry into Structure BSP (+${res.addedTriangles} triangles, +${res.addedCollisionSurfaces} collision surfaces, +${res.addedSubmeshes} shader submeshes).`
+        );
+      }
+      return res;
+    }
+  );
+  import_electron3.ipcMain.handle(
+    "map:scaleCoupledPhysics",
+    async (_evt, objectTagId, scaleFactor) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      const { promise } = sendWorkerRequest(
+        {
+          type: "scaleCoupledPhysics",
+          objectTagId,
+          scaleFactor
+        },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok && res.map) {
+        setOpenMapState(res.map);
+        const s = res.summary;
+        sendLog(
+          "info",
+          `Coupled Physics Resizer (${s.scaleFactor.toFixed(2)}x) applied to "${s.objectPath}" (${s.objectClass}): ${s.scaledGbxmodelVertices} model verts, ${s.scaledCollisionVertices} collision verts, ${s.scaledPhysicsMassPoints} mass points, ${s.scaledVehicleSuspensions} suspensions.`
+        );
+      }
+      return res;
+    }
+  );
   try {
     tagTestRunner.restoreInitBackupIfPresent();
   } catch {
@@ -39113,7 +41070,7 @@ import_electron3.app.on("window-all-closed", () => {
   if (process.platform !== "darwin") import_electron3.app.quit();
 });
 import_electron3.app.on("open-file", (_event, filePath) => {
-  if (fs8.existsSync(filePath)) {
+  if (fs9.existsSync(filePath)) {
     openMapGuarded(filePath).then((r) => r && mainWindow?.webContents.send("map:loaded", r));
   }
 });

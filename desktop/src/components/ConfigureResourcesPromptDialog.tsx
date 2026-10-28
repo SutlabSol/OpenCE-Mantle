@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import type { HaloBitmapVersion } from '../../electron/shared-types';
 
 export interface ConfigureResourcesPromptDialogProps {
@@ -15,6 +15,7 @@ const EDITION_NAMES: Record<HaloBitmapVersion, string> = {
   pc: 'Halo PC Retail',
   demo: 'Halo Mac / PC Demo',
   mcc: 'Halo: Master Chief Collection (MCC)',
+  xbox: 'Halo: Combat Evolved (Xbox Retail)',
 };
 
 export default function ConfigureResourcesPromptDialog({
@@ -32,6 +33,7 @@ export default function ConfigureResourcesPromptDialog({
     pc: null,
     demo: null,
     mcc: null,
+    xbox: null,
   });
   const [saving, setSaving] = useState(false);
 

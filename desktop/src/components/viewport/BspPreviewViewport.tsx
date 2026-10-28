@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as THREE from 'three';
-import type { BspRenderMesh } from '../../../electron/shared-types';
+import type { BspRenderMesh, WrlDiagnostics } from '../../../electron/shared-types';
+import {
+  createSourceCollisionWorld,
+  stepSourceWalk,
+  WALK_EYE_HEIGHT,
+  WALK_JUMP_VELOCITY,
+  type SourceCollisionWorld,
+  type SourceWalkState,
+} from '../../../../core/src/render/live-collision';
 
 export interface BspPreviewViewportProps {
   sourceFilePath: string;
@@ -53,6 +61,18 @@ export default function BspPreviewViewport({
   const [wireframe, setWireframe] = useState(true);
   const [bspVisibility, setBspVisibility] = useState<Record<number, boolean>>({});
   const [meshes, setMeshes] = useState<Record<number, BspRenderMesh>>({});
+  const [walkMode, setWalkMode] = useState<boolean>(false);
+  const walkModeRef = useRef<boolean>(false);
+  walkModeRef.current = walkMode;
+  const collisionWorldRef = useRef<SourceCollisionWorld | null>(null);
+  const walkStateRef = useRef<SourceWalkState>({
+    position: [0, 0, 5],
+    verticalVelocity: 0,
+    grounded: false,
+  });
+  const keysDownRef = useRef<Set<string>>(new Set());
+  const [wrlData, setWrlData] = useState<WrlDiagnostics | null>(null);
+  const wrlGroupRef = useRef<THREE.Group | null>(null);
 
   const webGLSupported = useMemo(() => isWebGLAvailable(), []);
 
@@ -95,7 +115,7 @@ export default function BspPreviewViewport({
         }
         try {
           const res = await window.opence.getSourceBspMesh?.(sourceFilePath, idx);
-        if (!res) continue;
+          if (!res) continue;
           if (res.ok && active) {
             cacheRef.current.set(idx, res.mesh);
             newMeshes[idx] = res.mesh;
@@ -166,7 +186,7 @@ export default function BspPreviewViewport({
 
   // Camera Orbit update helper
   const updateCameraPosition = useCallback(() => {
-    if (!cameraRef.current) return;
+    if (!cameraRef.current || walkModeRef.current) return;
     const { target, radius, theta, phi } = orbitRef.current;
     const x = target.x + radius * Math.sin(phi) * Math.sin(theta);
     const y = target.y + radius * Math.cos(phi);
@@ -253,13 +273,59 @@ export default function BspPreviewViewport({
     scene.add(grid);
 
     let animId = 0;
-    const renderLoop = () => {
+    let lastTime = performance.now();
+    const renderLoop = (time: number) => {
       animId = requestAnimationFrame(renderLoop);
+      const dt = Math.min((time - lastTime) / 1000, 0.1);
+      lastTime = time;
+      if (walkModeRef.current && collisionWorldRef.current && cameraRef.current) {
+        const keys = keysDownRef.current;
+        const { theta, phi } = orbitRef.current;
+        const fwdX = -Math.sin(theta);
+        const fwdY = Math.cos(theta);
+        const rightX = Math.cos(theta);
+        const rightY = Math.sin(theta);
+        let mx = 0;
+        let my = 0;
+        if (keys.has('KeyW')) { mx += fwdX; my += fwdY; }
+        if (keys.has('KeyS')) { mx -= fwdX; my -= fwdY; }
+        if (keys.has('KeyD')) { mx += rightX; my += rightY; }
+        if (keys.has('KeyA')) { mx -= rightX; my -= rightY; }
+        const len = Math.hypot(mx, my);
+        const speed = (keys.has('ShiftLeft') || keys.has('ShiftRight')) ? 5.0 : 2.25;
+        const stepDist = len > 1e-5 ? speed * dt : 0;
+        const desired: [number, number, number] = len > 1e-5
+          ? [(mx / len) * stepDist, (my / len) * stepDist, 0]
+          : [0, 0, 0];
+        if (keys.has('Space') && walkStateRef.current.grounded) {
+          walkStateRef.current.verticalVelocity = WALK_JUMP_VELOCITY;
+          walkStateRef.current.grounded = false;
+        }
+        walkStateRef.current = stepSourceWalk(collisionWorldRef.current, walkStateRef.current, desired, dt);
+        const [hx, hy, hz] = walkStateRef.current.position;
+        const eyeX = hx;
+        const eyeY = hz + WALK_EYE_HEIGHT;
+        const eyeZ = -hy;
+        cameraRef.current.position.set(eyeX, eyeY, eyeZ);
+        const lookX = eyeX - Math.sin(phi) * Math.sin(theta) * 10;
+        const lookY = eyeY - Math.cos(phi) * 10;
+        const lookZ = eyeZ - Math.sin(phi) * Math.cos(theta) * 10;
+        cameraRef.current.lookAt(lookX, lookY, lookZ);
+      }
       if (rendererRef.current && sceneRef.current && cameraRef.current) {
         rendererRef.current.render(sceneRef.current, cameraRef.current);
       }
     };
-    renderLoop();
+    animId = requestAnimationFrame(renderLoop);
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      keysDownRef.current.add(e.code);
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      keysDownRef.current.delete(e.code);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
 
     const handleResize = () => {
       if (!container || !rendererRef.current || !cameraRef.current) return;
@@ -277,6 +343,8 @@ export default function BspPreviewViewport({
 
     return () => {
       cancelAnimationFrame(animId);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
       renderer.dispose();
@@ -372,7 +440,49 @@ export default function BspPreviewViewport({
     });
 
     frameCamera();
+
+    // Rebuild collision world for selected BSPs (Guilty Spark Item 2)
+    const submeshes = selectedBspIndices.flatMap((idx) => meshes[idx]?.submeshes || []);
+    collisionWorldRef.current = submeshes.length > 0 ? createSourceCollisionWorld({ submeshes }) : null;
   }, [meshes, selectedBspIndices, bspVisibility, wireframe, frameCamera]);
+
+  useEffect(() => {
+    if (walkMode && cameraRef.current) {
+      const p = cameraRef.current.position;
+      walkStateRef.current = {
+        position: [p.x, -p.z, p.y - WALK_EYE_HEIGHT],
+        verticalVelocity: 0,
+        grounded: false,
+      };
+    }
+  }, [walkMode]);
+
+  // Render WRL overlay in BspPreviewViewport (Guilty Spark Item 1)
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    if (wrlGroupRef.current) {
+      scene.remove(wrlGroupRef.current);
+      wrlGroupRef.current = null;
+    }
+    if (!wrlData) return;
+    const grp = new THREE.Group();
+    if (wrlData.segments.length > 0) {
+      const pos = new Float32Array(wrlData.segments.length * 6);
+      for (let i = 0; i < wrlData.segments.length; i++) {
+        const s = wrlData.segments[i];
+        const b = i * 6;
+        pos[b] = s.start[0]; pos[b + 1] = s.start[2]; pos[b + 2] = -s.start[1];
+        pos[b + 3] = s.end[0]; pos[b + 4] = s.end[2]; pos[b + 5] = -s.end[1];
+      }
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      const mat = new THREE.LineBasicMaterial({ color: 0xff1744, depthTest: false });
+      grp.add(new THREE.LineSegments(geom, mat));
+    }
+    scene.add(grp);
+    wrlGroupRef.current = grp;
+  }, [wrlData]);
 
   // Toggle wireframe visibility
   useEffect(() => {
@@ -513,6 +623,43 @@ export default function BspPreviewViewport({
             }}
           >
             Wireframe: {wireframe ? 'ON' : 'OFF'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setWalkMode((prev) => !prev)}
+            style={{
+              padding: '3px 8px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              cursor: 'pointer',
+              background: walkMode ? 'rgba(0, 230, 118, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+              border: `1px solid ${walkMode ? '#00e676' : 'var(--border)'}`,
+              color: walkMode ? '#00e676' : 'var(--text-secondary)',
+            }}
+            title="Toggle First-Person Master Chief Walk Sandbox (WASD + Spacebar jump)"
+          >
+            Walk: {walkMode ? 'ON' : 'OFF'}
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const res = await window.opence.pickWrlOrToolLog?.();
+              if (res?.ok && res.kind === 'wrl' && res.wrl) {
+                setWrlData(res.wrl);
+              }
+            }}
+            style={{
+              padding: '3px 8px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              cursor: 'pointer',
+              background: wrlData ? 'rgba(244, 63, 94, 0.2)' : 'rgba(255, 255, 255, 0.04)',
+              border: `1px solid ${wrlData ? '#f43f5e' : 'var(--border)'}`,
+              color: wrlData ? '#fb7185' : 'var(--text-secondary)',
+            }}
+            title="Overlay a Halo .WRL VRML 1.0 error file on this BSP"
+          >
+            {wrlData ? `WRL (${wrlData.segments.length + wrlData.faces.length})` : '.WRL Overlay'}
           </button>
           <button
             type="button"

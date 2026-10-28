@@ -1,6 +1,6 @@
 {
   "name": "opence-core",
-  "version": "0.1.0",
+  "version": "0.6.8",
   "private": true,
   "description": "Pure TypeScript library for parsing and rebuilding Halo: Custom Edition (PC) .map files. No Electron/React/DOM dependencies.",
   "main": "dist/index.js",

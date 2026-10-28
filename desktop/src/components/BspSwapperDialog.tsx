@@ -13,9 +13,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
   const [isPreflighting, setIsPreflighting] = useState(false);
   const [preflight, setPreflight] = useState<BspSwapPreflightResult | null>(null);
   const [selectedSourceBspIndex, setSelectedSourceBspIndex] = useState(0);
-  const [selectedSourceBspIndices, setSelectedSourceBspIndices] = useState<number[]>([0]);
   const [selectedTargetBspIndex, setSelectedTargetBspIndex] = useState(0);
-  const [stripDobcAndDecals, setStripDobcAndDecals] = useState(true);
   const [stripDobc, setStripDobc] = useState(true);
   const [stripDecals, setStripDecals] = useState(true);
   const [customBitmapsPath, setCustomBitmapsPath] = useState<string | null>(null);
@@ -25,12 +23,14 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
   const [newScenarioName, setNewScenarioName] = useState('');
   const [relocateGroundObjects, setRelocateGroundObjects] = useState(true);
   const [harvestShaders, setHarvestShaders] = useState(true);
-  const [importSceneryAndMachines, setImportSceneryAndMachines] = useState(true);
+  const [importScenery, setImportScenery] = useState(true);
+  const [importMachines, setImportMachines] = useState(true);
   const [importVehicles, setImportVehicles] = useState(true);
   const [makeDoorsAutomatic, setMakeDoorsAutomatic] = useState(true);
   const [filterObjectsToBspBounds, setFilterObjectsToBspBounds] = useState(true);
   const [clearExistingPlacements, setClearExistingPlacements] = useState(false);
   const [clearPlayerSpawns, setClearPlayerSpawns] = useState(false);
+  const [isExportingBsp, setIsExportingBsp] = useState(false);
   const [isSwapping, setIsSwapping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successSummary, setSuccessSummary] = useState<string | null>(null);
@@ -48,7 +48,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
       setCustomBitmapsPath(null);
       setCustomSoundsPath(null);
       setSelectedSourceBspIndex(0);
-      setSelectedSourceBspIndices([0]);
     }
   }, [isOpen]);
 
@@ -60,7 +59,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
       if (res && res.path) {
         setSourcePath(res.path);
         setSelectedSourceBspIndex(0);
-        setSelectedSourceBspIndices([0]);
         runPreflight(res.path, 0, 0);
       }
     } catch (err) {
@@ -68,21 +66,17 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
     }
   };
 
-  const runPreflight = async (srcPath: string, srcIdx: number, dstIdx: number, indices?: number[]) => {
+  const runPreflight = async (srcPath: string, srcIdx: number, dstIdx: number) => {
     setIsPreflighting(true);
     setError(null);
     try {
-      const effectiveIndices = indices && indices.length > 0 ? indices : [srcIdx];
-      const result = effectiveIndices.length > 1
-        ? await window.opence.bspSwapPreflight(srcPath, srcIdx, dstIdx, effectiveIndices)
-        : await window.opence.bspSwapPreflight(srcPath, srcIdx, dstIdx);
+      const result = await window.opence.bspSwapPreflight(srcPath, srcIdx, dstIdx);
       setIsPreflighting(false);
       setPreflight(result);
       if (!result.ok) {
         setError(result.error || 'Failed to analyze source map BSPs.');
       } else {
         setSelectedSourceBspIndex(srcIdx);
-        setSelectedSourceBspIndices(effectiveIndices);
         setSelectedTargetBspIndex(dstIdx);
       }
     } catch (err) {
@@ -91,43 +85,17 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
     }
   };
 
-  const handleSourceBspToggle = (idx: number) => {
-    let next: number[];
-    if (selectedSourceBspIndices.includes(idx)) {
-      if (selectedSourceBspIndices.length <= 1) return; // Prevent deselecting all
-      next = selectedSourceBspIndices.filter((i) => i !== idx);
-    } else {
-      next = [...selectedSourceBspIndices, idx].sort((a, b) => a - b);
-    }
-    setSelectedSourceBspIndices(next);
-    setSelectedSourceBspIndex(next[0] ?? 0);
+  const handleSourceBspChange = (idx: number) => {
+    setSelectedSourceBspIndex(idx);
     if (sourcePath) {
-      runPreflight(sourcePath, next[0] ?? 0, selectedTargetBspIndex, next);
-    }
-  };
-
-  const handleSelectAllBsps = () => {
-    if (!preflight) return;
-    const all = preflight.sourceBsps.map((b) => b.index);
-    setSelectedSourceBspIndices(all);
-    setSelectedSourceBspIndex(all[0] ?? 0);
-    if (sourcePath) {
-      runPreflight(sourcePath, all[0] ?? 0, selectedTargetBspIndex, all);
-    }
-  };
-
-  const handleSelectFirstBspOnly = () => {
-    setSelectedSourceBspIndices([0]);
-    setSelectedSourceBspIndex(0);
-    if (sourcePath) {
-      runPreflight(sourcePath, 0, selectedTargetBspIndex, [0]);
+      runPreflight(sourcePath, idx, selectedTargetBspIndex);
     }
   };
 
   const handleTargetBspChange = (idx: number) => {
     setSelectedTargetBspIndex(idx);
     if (sourcePath) {
-      runPreflight(sourcePath, selectedSourceBspIndex, idx, selectedSourceBspIndices);
+      runPreflight(sourcePath, selectedSourceBspIndex, idx);
     }
   };
 
@@ -158,21 +126,22 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
 
     try {
       const payload: any = {
-        sourceBspIndex: selectedSourceBspIndices[0] ?? 0,
+        sourceBspIndex: selectedSourceBspIndex,
         targetBspIndex: selectedTargetBspIndex,
         stripDobcAndDecals: stripDobc && stripDecals,
         relocateGroundObjects,
         harvestShaders,
-        importSceneryAndMachines,
+        importScenery,
+        importMachines,
+        importSceneryAndMachines: importScenery || importMachines,
         importVehicles,
         makeDoorsAutomatic,
         filterObjectsToBspBounds,
         clearExistingPlacements,
         clearPlayerSpawns,
+        bspScriptMode: 'none',
+        addBspActivationScript: false,
       };
-      if (selectedSourceBspIndices.length > 1) {
-        payload.sourceBspIndices = selectedSourceBspIndices;
-      }
       if (!stripDobc || !stripDecals) {
         payload.stripDobc = stripDobc;
         payload.stripDecals = stripDecals;
@@ -197,16 +166,13 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
           (res.summary.harvestedShaders ?? 0) > 0 || (res.summary.harvestedBitmaps ?? 0) > 0
             ? ` Harvested ${res.summary.harvestedShaders ?? 0} shader(s) and ${res.summary.harvestedBitmaps ?? 0} bitmap(s).`
             : '';
-        const multiMsg = selectedSourceBspIndices.length > 1
-          ? ` Fused ${selectedSourceBspIndices.length} Structure BSPs into structure_bsps[${selectedTargetBspIndex}].`
-          : '';
         const parts: string[] = [];
         if ((res.summary.importedScenery ?? 0) > 0) parts.push(`${res.summary.importedScenery} scenery object(s)`);
         if ((res.summary.importedVehicles ?? 0) > 0) parts.push(`${res.summary.importedVehicles} vehicle(s)`);
         if ((res.summary.importedMachines ?? 0) > 0) parts.push(`${res.summary.importedMachines} door(s)/bridge(s)`);
         const sceneryMsg = parts.length > 0 ? ` Imported ${parts.join(', ')}.` : '';
         setSuccessSummary(
-          `Swapped BSP successfully!${multiMsg} New map size: ${(res.summary.newSize / (1024 * 1024)).toFixed(2)} MB (${deltaSign}${deltaMb} MB). Relocated ${res.summary.relocatedSpawns} spawn/item placement(s).${harvestMsg}${sceneryMsg}`,
+          `Swapped BSP successfully! New map size: ${(res.summary.newSize / (1024 * 1024)).toFixed(2)} MB (${deltaSign}${deltaMb} MB). Relocated ${res.summary.relocatedSpawns} spawn/item placement(s).${harvestMsg}${sceneryMsg}`,
         );
         onSuccess();
       } else {
@@ -231,8 +197,6 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
     });
     return map;
   }, [preflight]);
-
-  const isMultiBsp = selectedSourceBspIndices.length > 1;
 
   return (
     <div
@@ -324,8 +288,8 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
               lineHeight: 1.5,
             }}
           >
-            Directly transplant single-player campaign BSPs (e.g. Silent Cartographer, Halo, Truth & Reconciliation)
-            into your multiplayer map. Select multiple BSPs to fuse exterior and interior zones into a single playable multiplayer structure.
+            Directly transplant a single-player campaign or multiplayer Structure BSP (e.g. Silent Cartographer, Halo, Truth &amp; Reconciliation)
+            into your open map, or export BSPs to Wavefront .OBJ + .MTL / .GLB for custom editing in Blender.
           </div>
 
           {/* Source Map File Picker */}
@@ -392,7 +356,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   paddingRight: '6px',
                 }}
               >
-              {/* Source BSP Selector Card with Multi-BSP Support */}
+              {/* Source BSP Selector Card (Single Choice) */}
               <div
                 style={{
                   background: 'rgba(255, 255, 255, 0.02)',
@@ -405,66 +369,15 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
-                      Select Source BSP(s) to Import
-                    </label>
-                    {isMultiBsp && (
-                      <span
-                        style={{
-                          fontSize: '10px',
-                          fontWeight: 700,
-                          padding: '1px 6px',
-                          borderRadius: '3px',
-                          background: 'rgba(56, 189, 248, 0.15)',
-                          color: 'var(--accent-cyan, #38bdf8)',
-                          border: '1px solid rgba(56, 189, 248, 0.3)',
-                        }}
-                      >
-                        Multi-BSP Combine Mode ({selectedSourceBspIndices.length} Selected)
-                      </span>
-                    )}
-                  </div>
-                  {preflight.sourceBsps.length > 1 && (
-                    <div style={{ display: 'flex', gap: '6px' }}>
-                      <button
-                        type="button"
-                        onClick={handleSelectAllBsps}
-                        style={{
-                          fontSize: '11px',
-                          padding: '2px 8px',
-                          borderRadius: '3px',
-                          background: 'rgba(255, 255, 255, 0.05)',
-                          border: '1px solid var(--border)',
-                          color: 'var(--text-secondary)',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        Select All
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleSelectFirstBspOnly}
-                        style={{
-                          fontSize: '11px',
-                          padding: '2px 8px',
-                          borderRadius: '3px',
-                          background: 'rgba(255, 255, 255, 0.05)',
-                          border: '1px solid var(--border)',
-                          color: 'var(--text-secondary)',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        BSP 0 Only
-                      </button>
-                    </div>
-                  )}
+                  <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase' }}>
+                    Select Source BSP to Import
+                  </label>
                 </div>
 
-                {/* BSP Checkbox List */}
+                {/* BSP Radio List */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                   {preflight.sourceBsps.map((bsp: BspInfo) => {
-                    const isChecked = selectedSourceBspIndices.includes(bsp.index);
+                    const isSelected = selectedSourceBspIndex === bsp.index;
                     return (
                       <label
                         key={bsp.index}
@@ -474,19 +387,20 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                           gap: '10px',
                           padding: '6px 10px',
                           borderRadius: '4px',
-                          background: isChecked ? 'rgba(56, 189, 248, 0.06)' : 'rgba(255, 255, 255, 0.01)',
-                          border: `1px solid ${isChecked ? 'rgba(56, 189, 248, 0.25)' : 'var(--border)'}`,
+                          background: isSelected ? 'rgba(56, 189, 248, 0.06)' : 'rgba(255, 255, 255, 0.01)',
+                          border: `1px solid ${isSelected ? 'rgba(56, 189, 248, 0.25)' : 'var(--border)'}`,
                           cursor: 'pointer',
                           fontSize: '12px',
                         }}
                       >
                         <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => handleSourceBspToggle(bsp.index)}
+                          type="radio"
+                          name="sourceBspSelect"
+                          checked={isSelected}
+                          onChange={() => handleSourceBspChange(bsp.index)}
                         />
                         <div style={{ flex: 1, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontWeight: isChecked ? 600 : 400 }}>
+                          <span style={{ fontWeight: isSelected ? 600 : 400 }}>
                             BSP {bsp.index}: {bsp.path}
                           </span>
                           <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
@@ -543,23 +457,17 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                 <div>
                   <div style={{ color: 'var(--text-dim)', fontSize: '10.5px' }}>Source Geometry</div>
                   <div style={{ fontWeight: 600, marginTop: '2px' }}>
-                    {isMultiBsp
-                      ? `${selectedSourceBspIndices.length} BSPs Combined`
-                      : `${preflight.selectedSourceBsp?.vertexCount.toLocaleString()} vertices`}
+                    {preflight.selectedSourceBsp?.vertexCount.toLocaleString()} vertices
                   </div>
                   <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>
-                    {isMultiBsp
-                      ? `${preflight.selectedSourceBsps?.reduce((s, b) => s + b.triangleCount, 0).toLocaleString()} total triangles`
-                      : `${preflight.selectedSourceBsp?.triangleCount.toLocaleString()} triangles`}
+                    {preflight.selectedSourceBsp?.triangleCount.toLocaleString()} triangles
                   </div>
                 </div>
 
                 <div>
                   <div style={{ color: 'var(--text-dim)', fontSize: '10.5px' }}>Submeshes</div>
                   <div style={{ fontWeight: 600, marginTop: '2px' }}>
-                    {isMultiBsp
-                      ? `${preflight.selectedSourceBsps?.reduce((s, b) => s + b.submeshCount, 0)} submeshes`
-                      : `${preflight.selectedSourceBsp?.submeshCount ?? 0} submeshes`}
+                    {preflight.selectedSourceBsp?.submeshCount ?? 0} submeshes
                   </div>
                   <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>
                     {preflight.selectedSourceBsp?.hasDobc ? 'DOBC present' : 'Clean DOBC'}
@@ -588,7 +496,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   <div style={{ fontWeight: 600, marginTop: '2px' }}>
                     {formatBytes(preflight.estimatedNewSize)}
                   </div>
-                  <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>Safe limit: ~250 MB</div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '10.5px' }}>Safe limit: ~23 MB</div>
                 </div>
               </div>
 
@@ -829,6 +737,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   </span>
                 </label>
 
+                {/* Import Scenery (Separate Toggle) */}
                 <label
                   style={{
                     display: 'flex',
@@ -841,15 +750,36 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   <input
                     data-testid="bsp-swapper-import-scenery-checkbox"
                     type="checkbox"
-                    checked={importSceneryAndMachines}
-                    onChange={(e) => setImportSceneryAndMachines(e.target.checked)}
+                    checked={importScenery}
+                    onChange={(e) => setImportScenery(e.target.checked)}
                   />
                   <span>
-                    <strong>Import Scenery & Doors/Bridges</strong> (Imports props, rocks, trees, and doors/bridges)
+                    <strong>Import Scenery</strong> (Imports props, rocks, trees, and scenery objects)
                   </span>
                 </label>
 
-                {importSceneryAndMachines && (
+                {/* Import Doors & Bridges (Separate Toggle) */}
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    fontSize: '12px',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    data-testid="bsp-swapper-import-doors-checkbox"
+                    type="checkbox"
+                    checked={importMachines}
+                    onChange={(e) => setImportMachines(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Import Doors & Bridges</strong> (Imports doors, airlocks, shutters, and bridges)
+                  </span>
+                </label>
+
+                {importMachines && (
                   <label
                     style={{
                       display: 'flex',
@@ -867,12 +797,12 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                       onChange={(e) => setMakeDoorsAutomatic(e.target.checked)}
                     />
                     <span>
-                      <strong>Make Doors Automatic</strong> (Enables auto-opening in multiplayer without campaign scripts)
+                      <strong>Make Doors Automatic (Working Doors)</strong> (Enables auto-opening in multiplayer without campaign scripts)
                     </span>
                   </label>
                 )}
 
-                {importSceneryAndMachines && (
+                {(importScenery || importMachines || importVehicles) && (
                   <label
                     style={{
                       display: 'flex',
@@ -890,11 +820,12 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                       onChange={(e) => setFilterObjectsToBspBounds(e.target.checked)}
                     />
                     <span>
-                      <strong>Filter to Swapped BSP Bounds</strong> (Excludes donor mission props outside this BSP)
+                      <strong>Filter to Swapped BSP Bounds</strong> (Excludes donor mission props/doors/vehicles outside this BSP)
                     </span>
                   </label>
                 )}
 
+                {/* Import Vehicles */}
                 <label
                   style={{
                     display: 'flex',
@@ -915,6 +846,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   </span>
                 </label>
 
+                {/* Clear Old Map Placements */}
                 <label
                   style={{
                     display: 'flex',
@@ -936,6 +868,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   </span>
                 </label>
 
+                {/* Clear Old Map Spawns */}
                 <label
                   style={{
                     display: 'flex',
@@ -953,9 +886,120 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                     onChange={(e) => setClearPlayerSpawns(e.target.checked)}
                   />
                   <span>
-                    <strong>Clear Old Player Spawns</strong> (Removes existing player spawn points and starting locations)
+                    <strong>Clear Old Map Spawns</strong> (Removes existing player spawn points and starting locations)
                   </span>
                 </label>
+
+                {/* External Blender / 3D Pipeline: Export Open Map BSP(s) as Separate .OBJ+.MTL or .GLB Files */}
+                <div
+                  style={{
+                    marginTop: '4px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                    padding: '10px 12px',
+                    borderRadius: '5px',
+                    background: 'rgba(34, 197, 94, 0.08)',
+                    border: '1px solid rgba(34, 197, 94, 0.35)',
+                  }}
+                >
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#4ade80', textTransform: 'uppercase' }}>
+                    Blender / External 3D BSP Export Pipeline (.OBJ + .MTL / .GLB)
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.35 }}>
+                    Export the open map&apos;s Structure BSP(s) as separate 3D files with all shader material groups (<code>usemtl mat_shader_...</code>) intact for editing/combining in Blender.
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      disabled={isExportingBsp}
+                      onClick={async () => {
+                        if (!window.opence.pickExport3dPath || !window.opence.exportBsp3d) return;
+                        setIsExportingBsp(true);
+                        setError(null);
+                        try {
+                          const targetBsps = preflight?.targetBsps ?? [];
+                          const indicesToExport = targetBsps.length > 0 ? targetBsps.map((b) => b.index) : [selectedTargetBspIndex];
+                          let exportedCount = 0;
+                          for (const bIdx of indicesToExport) {
+                            const bName = (targetBsps[bIdx]?.path || `bsp_${bIdx}`).split('\\').pop() || `bsp_${bIdx}`;
+                            const pick = await window.opence.pickExport3dPath(`${bName}.obj`, 'obj');
+                            if (!pick || !pick.path) break;
+                            const exp = await window.opence.exportBsp3d(bIdx, 'obj', pick.path);
+                            if (exp.ok) {
+                              exportedCount++;
+                            } else {
+                              setError(exp.message || 'Failed to export BSP to .OBJ.');
+                            }
+                          }
+                          if (exportedCount > 0) {
+                            setSuccessSummary(`Exported ${exportedCount} BSP(s) to Wavefront .OBJ + .MTL (with shader materials intact) for Blender!`);
+                          }
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : String(err));
+                        } finally {
+                          setIsExportingBsp(false);
+                        }
+                      }}
+                      style={{
+                        padding: '5px 10px',
+                        fontSize: '11.5px',
+                        fontWeight: 600,
+                        borderRadius: '4px',
+                        background: '#14532d',
+                        color: '#ecfdf5',
+                        border: '1px solid #22c55e',
+                        cursor: isExportingBsp ? 'wait' : 'pointer',
+                      }}
+                    >
+                      📤 Export Open Map BSP(s) to Blender (.OBJ + .MTL)
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isExportingBsp}
+                      onClick={async () => {
+                        if (!window.opence.pickExport3dPath || !window.opence.exportBsp3d) return;
+                        setIsExportingBsp(true);
+                        setError(null);
+                        try {
+                          const targetBsps = preflight?.targetBsps ?? [];
+                          const indicesToExport = targetBsps.length > 0 ? targetBsps.map((b) => b.index) : [selectedTargetBspIndex];
+                          let exportedCount = 0;
+                          for (const bIdx of indicesToExport) {
+                            const bName = (targetBsps[bIdx]?.path || `bsp_${bIdx}`).split('\\').pop() || `bsp_${bIdx}`;
+                            const pick = await window.opence.pickExport3dPath(`${bName}.glb`, 'glb');
+                            if (!pick || !pick.path) break;
+                            const exp = await window.opence.exportBsp3d(bIdx, 'glb', pick.path);
+                            if (exp.ok) {
+                              exportedCount++;
+                            } else {
+                              setError(exp.message || 'Failed to export BSP to .GLB.');
+                            }
+                          }
+                          if (exportedCount > 0) {
+                            setSuccessSummary(`Exported ${exportedCount} BSP(s) to glTF 2.0 (.GLB) for Blender!`);
+                          }
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : String(err));
+                        } finally {
+                          setIsExportingBsp(false);
+                        }
+                      }}
+                      style={{
+                        padding: '5px 10px',
+                        fontSize: '11.5px',
+                        fontWeight: 600,
+                        borderRadius: '4px',
+                        background: '#1e3a5f',
+                        color: '#bae6fd',
+                        border: '1px solid #38bdf8',
+                        cursor: isExportingBsp ? 'wait' : 'pointer',
+                      }}
+                    >
+                      📤 Export Open Map BSP(s) to Blender (.GLB)
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {/* Warnings */}
@@ -1025,10 +1069,10 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                   minHeight: 0,
                 }}
               >
-                {sourcePath && selectedSourceBspIndices.length > 0 ? (
+                {sourcePath ? (
                   <BspPreviewViewport
                     sourceFilePath={sourcePath}
-                    selectedBspIndices={selectedSourceBspIndices}
+                    selectedBspIndices={[selectedSourceBspIndex]}
                     bspNames={bspNamesMap}
                     height="100%"
                   />
@@ -1046,7 +1090,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                       fontSize: '12px',
                     }}
                   >
-                    <span>No BSPs selected for preview</span>
+                    <span>No BSP selected for preview</span>
                   </div>
                 )}
               </div>
@@ -1118,13 +1162,7 @@ export default function BspSwapperDialog({ isOpen, onClose, onSuccess }: Props) 
                 cursor: isSwapping || !preflight?.ok ? 'not-allowed' : 'pointer',
               }}
             >
-              {isSwapping
-                ? isMultiBsp
-                  ? 'Merging & Swapping BSPs...'
-                  : 'Swapping BSP...'
-                : isMultiBsp
-                ? `Merge & Swap (${selectedSourceBspIndices.length} BSPs)`
-                : 'Perform BSP Swap'}
+              {isSwapping ? 'Swapping BSP...' : 'Perform BSP Swap'}
             </button>
           </div>
         </div>

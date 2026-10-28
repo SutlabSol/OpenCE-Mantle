@@ -8,7 +8,7 @@ import WelcomeDropZone from './components/WelcomeDropZone';
 import CompressedBanner from './components/CompressedBanner';
 import UnsupportedBanner from './components/UnsupportedBanner';
 import TagBrowser from './components/TagBrowser';
-import CenterWorkspace from './components/CenterWorkspace';
+import CenterWorkspace, { type CenterWorkspaceTab } from './components/CenterWorkspace';
 import PropertiesPalette, { type PropertiesPaletteTab } from './components/PropertiesPalette';
 import LogPanel from './components/LogPanel';
 import StatusBar from './components/StatusBar';
@@ -28,9 +28,9 @@ import ConfigureResourcesPromptDialog from './components/ConfigureResourcesPromp
 import BspSwapperDialog from './components/BspSwapperDialog';
 import OpenCeForgeExportDialog from './components/OpenCeForgeExportDialog';
 import BuildObjectTagDialog from './components/BuildObjectTagDialog';
-import DeprotectDialog from './components/DeprotectDialog';
 import ScriptEditorDialog from './components/ScriptEditorDialog';
 import ModdingStudioDialog from './components/ModdingStudioDialog';
+import MapCompareDialog from './components/MapCompareDialog';
 import type { BatchExtractPreflightResult, HaloBitmapVersion } from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
@@ -49,9 +49,9 @@ export default function App() {
   const [bspSwapperOpen, setBspSwapperOpen] = useState(false);
   const [forgeExportOpen, setForgeExportOpen] = useState(false);
   const [buildObjectTagOpen, setBuildObjectTagOpen] = useState(false);
-  const [deprotectDialogOpen, setDeprotectDialogOpen] = useState(false);
   const [scriptEditorOpen, setScriptEditorOpen] = useState(false);
   const [moddingStudioOpen, setModdingStudioOpen] = useState(false);
+  const [mapCompareOpen, setMapCompareOpen] = useState(false);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
@@ -61,7 +61,9 @@ export default function App() {
   const [hudPreviewerTag, setHudPreviewerTag] = useState<TagEntrySummary | null>(null);
   /** Properties palette active tab */
   const [propertiesPaletteTab, setPropertiesPaletteTab] = useState<PropertiesPaletteTab>('overview');
-  /** Milestone 9: Tag action modal (rename or duplicate) */
+  /** Active center workspace tab */
+  const [centerTab, setCenterTab] = useState<CenterWorkspaceTab>('overview');
+  /** Milestone 9: Tag action modal (rename, duplicate, or delete) */
   const [tagAction, setTagAction] = useState<{ action: TagActionType; tag: TagEntrySummary } | null>(null);
   /** Prompt dialog when opening an edition without configured bitmaps/sounds */
   const [resourcePrompt, setResourcePrompt] = useState<{
@@ -69,13 +71,9 @@ export default function App() {
     mapScenarioName: string;
   } | null>(null);
   const [skippedPromptMapPaths, setSkippedPromptMapPaths] = useState<Set<string>>(new Set());
-  const { logs, progress, log } = useOpenceEvents();
+  const { logs, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
-  const hasMap = mapState?.status === 'ok' || mapState?.status === 'compressed';
-  const isCompressed = mapState?.status === 'compressed';
-  const canDecompress = hasMap && isCompressed;
-  const canRecompress = hasMap && !isCompressed;
   const canExtract = mapState?.status === 'ok';
   const canInject = mapState?.status === 'ok';
   const canVerifyEmbeddedData = mapState?.status === 'ok';
@@ -121,10 +119,11 @@ export default function App() {
       else if (action === 'swap-bsp') setBspSwapperOpen(true);
       else if (action === 'extract-to-forge') setForgeExportOpen(true);
       else if (action === 'build-object-tag') setBuildObjectTagOpen(true);
+      else if (action === 'compare-maps') setMapCompareOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
       else if (action === 'convert-map') setConvertSource('pick');
       else if (action.startsWith('identify-bitmaps:')) {
-        setIdentifyBitmapsVersion(action.split(':')[1] as HaloBitmapVersion);
+        setSettingsDialogOpen(true);
       } else if (action.endsWith('-stub')) log('warn', `${action.replace('-stub', '')} is coming in a later milestone.`);
     });
     const offLoaded = window.opence.onMapLoaded((result) => {
@@ -240,12 +239,6 @@ export default function App() {
     if (result) log('info', `Saved decompressed map to ${result.outputPath}`);
   };
 
-  const handleRecompress = async () => {
-    if (!mapState || mapState.status === 'error') return;
-    const result = await window.opence.recompressMap(mapState.filePath);
-    if (result) log('info', `Saved recompressed map to ${result.outputPath}`);
-  };
-
   // Main logs the outcome (map name, CRC32, warnings) and sends the updated map; the renderer only triggers it.
   const handleSave = async () => {
     if (!canSave) return;
@@ -263,75 +256,6 @@ export default function App() {
     if (result?.ok) {
       setMapState(result.map);
       resetSelectionState();
-    }
-  };
-
-  const notImplemented = (feature: string) => {
-    window.opence.notImplemented(feature);
-    log('warn', `${feature} is coming in a later milestone.`);
-  };
-
-  const handleOpenSoundAuditor = () => {
-    if (mapState?.status !== 'ok') return;
-    const isSound = (t: TagEntrySummary) => ['snd!', 'snde', 'lsnd'].includes(t.primaryClass);
-    const target = focusedTag && isSound(focusedTag) ? focusedTag : mapState.tags.find(isSound);
-    if (target) {
-      setSoundAuditorTag(target);
-    } else {
-      log('warn', 'No sound (snd!, snde, lsnd) tags found in this map.');
-    }
-  };
-
-  const handleOpenBitmapEditor = () => {
-    if (mapState?.status !== 'ok') return;
-    const target = focusedTag && focusedTag.primaryClass === 'bitm' ? focusedTag : mapState.tags.find((t) => t.primaryClass === 'bitm');
-    if (target) {
-      setBitmapEditorTag(target);
-    } else {
-      log('warn', 'No bitmap (bitm) tags found in this map.');
-    }
-  };
-
-  const handleOpenHudPreviewer = () => {
-    if (mapState?.status !== 'ok') return;
-    const isHud = (t: TagEntrySummary) => ['hudg', 'wphi', 'grhi', 'hud#'].includes(t.primaryClass);
-    const target = focusedTag && isHud(focusedTag) ? focusedTag : mapState.tags.find(isHud);
-    if (target) {
-      setHudPreviewerTag(target);
-    } else {
-      log('warn', 'No HUD definition (hudg, wphi, grhi) tags found in this map.');
-    }
-  };
-
-  const handleExport3dModel = async (format: 'glb' | 'obj') => {
-    if (mapState?.status !== 'ok') return;
-    const isModel = (t: TagEntrySummary) => ['mode', 'mod2'].includes(t.primaryClass);
-    const target = focusedTag && isModel(focusedTag) ? focusedTag : mapState.tags.find(isModel);
-    if (!target) {
-      log('warn', 'No 3D model (mode / mod2) tags found in this map.');
-      return;
-    }
-    const defaultName = `${target.path.split('\\').pop() || 'model'}.${format}`;
-    const pickRes = await window.opence.pickExport3dPath(defaultName, format);
-    if (!pickRes?.path) return;
-    const res = await window.opence.exportModel3d(target.tagId, 4, format, pickRes.path);
-    if (res?.ok) {
-      log('info', `Successfully exported 3D model "${target.path}" to ${pickRes.path}`);
-    } else {
-      log('error', `Failed to export 3D model: ${res?.message}`);
-    }
-  };
-
-  const handleExportBsp = async (format: 'glb' | 'obj') => {
-    if (mapState?.status !== 'ok') return;
-    const defaultName = `${mapState.header.scenarioName || 'structure_bsp'}.${format}`;
-    const pickRes = await window.opence.pickExport3dPath(defaultName, format);
-    if (!pickRes?.path) return;
-    const res = await window.opence.exportBsp3d(0, format, pickRes.path);
-    if (res?.ok) {
-      log('info', `Successfully exported structure BSP to ${pickRes.path}`);
-    } else {
-      log('error', `Failed to export BSP: ${res?.message}`);
     }
   };
 
@@ -367,6 +291,7 @@ export default function App() {
               { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
               { label: 'HaloScript (.hsc) IDE & Sample Scripts...', onClick: () => setScriptEditorOpen(true), disabled: !canExtract },
               { label: 'Universal Converter, Scanner & Mod Studio...', onClick: () => setModdingStudioOpen(true), disabled: !canExtract },
+              { label: 'Compare With Another .map File...', onClick: () => setMapCompareOpen(true), disabled: !canExtract },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
               { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
               { label: '', separator: true },
@@ -384,7 +309,6 @@ export default function App() {
         onExtract={() => requestExtract(Array.from(selectedTagIndices))}
         onExtractWholeMap={() => void handleBatchExtract()}
         onInject={() => setInjectDialogOpen(true)}
-        progress={progress}
       />
 
       {mapState?.status === 'compressed' && <CompressedBanner onDecompress={handleDecompress} />}
@@ -412,12 +336,15 @@ export default function App() {
               }}
               onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
               onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
+              onDeleteTag={(tag) => setTagAction({ action: 'delete', tag })}
               onOpenBitmapEditor={setBitmapEditorTag}
               onOpenSoundAuditor={setSoundAuditorTag}
               onOpenHudPreviewer={setHudPreviewerTag}
             />
             <CenterWorkspace
               header={mapState.header}
+              allTags={mapState.tags}
+              onActiveTabChange={setCenterTab}
               onSelectObjectTag={(tagId, objectPath) => {
                 if (mapState?.status !== 'ok') return;
                 const target =
@@ -435,7 +362,7 @@ export default function App() {
                 if (mapState?.status !== 'ok') return;
                 const target =
                   typeof tagIndexOrPath === 'number'
-                    ? mapState.tags[tagIndexOrPath]
+                    ? (mapState.tags.find((t) => t.index === tagIndexOrPath) ?? mapState.tags[tagIndexOrPath])
                     : mapState.tags.find(
                         (t) =>
                           t.path.toLowerCase() === tagIndexOrPath.toLowerCase() ||
@@ -448,19 +375,21 @@ export default function App() {
                 }
               }}
             />
-            <PropertiesPalette
-              focusedTag={focusedTag}
-              allTags={mapState.tags}
-              activeTab={propertiesPaletteTab}
-              onTabChange={setPropertiesPaletteTab}
-              onSelectTag={(idx) => {
-                const t = mapState.tags[idx];
-                if (t) {
-                  setFocusedTag(t);
-                  setSelectedTagIndices(new Set([idx]));
-                }
-              }}
-            />
+            {centerTab !== 'bitmap-3d' && centerTab !== 'bsp-model-studio' && (
+              <PropertiesPalette
+                focusedTag={focusedTag}
+                allTags={mapState.tags}
+                activeTab={propertiesPaletteTab}
+                onTabChange={setPropertiesPaletteTab}
+                onSelectTag={(idx) => {
+                  const t = mapState.tags.find((tag) => tag.index === idx) ?? mapState.tags[idx];
+                  if (t) {
+                    setFocusedTag(t);
+                    setSelectedTagIndices(new Set([t.index]));
+                  }
+                }}
+              />
+            )}
           </>
         ) : (
           <WelcomeDropZone onOpen={handleOpen} />
@@ -521,10 +450,27 @@ export default function App() {
           tag={tagAction.tag}
           onClose={() => setTagAction(null)}
           onSuccess={(newIdx) => {
+            const wasDelete = tagAction.action === 'delete';
+            const deletedIdx = tagAction.tag.index;
             setTagAction(null);
-            if (typeof newIdx === 'number' && mapState.tags[newIdx]) {
-              setFocusedTag(mapState.tags[newIdx]);
-              setSelectedTagIndices(new Set([newIdx]));
+            window.dispatchEvent(new CustomEvent('opence:scenario-updated'));
+            if (wasDelete) {
+              if (focusedTag?.index === deletedIdx) {
+                setFocusedTag(null);
+              }
+              setSelectedTagIndices((prev) => {
+                const next = new Set(prev);
+                next.delete(deletedIdx);
+                return next;
+              });
+              return;
+            }
+            if (typeof newIdx === 'number') {
+              const found = mapState.tags.find((t) => t.index === newIdx) ?? mapState.tags[newIdx];
+              if (found) {
+                setFocusedTag(found);
+                setSelectedTagIndices(new Set([found.index]));
+              }
             }
           }}
         />
@@ -560,27 +506,23 @@ export default function App() {
             if (updatedMap) {
               setMapState(updatedMap);
             }
-            const tagsList = updatedMap?.tags ?? (mapState?.status === 'ok' ? mapState.tags : []);
+            const tagsList: TagEntrySummary[] =
+              updatedMap && updatedMap.status === 'ok'
+                ? updatedMap.tags
+                : mapState?.status === 'ok'
+                  ? mapState.tags
+                  : [];
             const found = tagsList.find(
-              (t) =>
+              (t: TagEntrySummary) =>
                 t.primaryClassName === newGroup &&
                 t.path.toLowerCase() === newTagPath.toLowerCase(),
             );
             if (found) {
               setFocusedTag(found);
               setSelectedTagIndices(new Set([found.index]));
-              setPropertiesPaletteTab('properties');
+              setPropertiesPaletteTab('overview');
             }
           }}
-        />
-      )}
-
-      {deprotectDialogOpen && mapState?.status === 'ok' && (
-        <DeprotectDialog
-          open={deprotectDialogOpen}
-          onClose={() => setDeprotectDialogOpen(false)}
-          onMapUpdated={(updated) => setMapState(updated)}
-          log={log}
         />
       )}
 
@@ -599,6 +541,19 @@ export default function App() {
           onClose={() => setModdingStudioOpen(false)}
           onTagsUpdated={(newTags) => {
             setMapState((prev) => (prev && prev.status === 'ok' ? { ...prev, tags: newTags, modified: true } : prev));
+          }}
+        />
+      )}
+
+      {mapCompareOpen && mapState?.status === 'ok' && (
+        <MapCompareDialog
+          onClose={() => setMapCompareOpen(false)}
+          onSelectLeftTag={(tagIdx) => {
+            const found = mapState.tags.find((t) => t.index === tagIdx) ?? mapState.tags[tagIdx];
+            if (found) {
+              setFocusedTag(found);
+              setSelectedTagIndices(new Set([found.index]));
+            }
           }}
         />
       )}

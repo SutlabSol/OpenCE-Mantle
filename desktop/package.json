@@ -1,6 +1,6 @@
 {
   "name": "opence-desktop",
-  "version": "0.1.0",
+  "version": "0.6.8",
   "private": true,
   "description": "OpenCE Mantle - GUI desktop app for modding Halo: Custom Edition (PC) maps.",
   "main": "dist-electron/main.js",
@@ -17,7 +17,7 @@
     "typecheck": "yarn typecheck:electron && yarn typecheck:renderer",
     "test": "vitest run",
     "build": "yarn build:renderer && yarn build:electron",
-    "dist:win": "yarn build && electron-builder --win portable nsis",
+    "dist:win": "node build-dist.js",
     "dist:win:portable": "node build-dist.js"
   },
   "dependencies": {

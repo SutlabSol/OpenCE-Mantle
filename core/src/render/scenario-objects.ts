@@ -18,6 +18,7 @@ export type ScenarioObjectKind =
   | 'biped'
   | 'weapon'
   | 'equipment'
+  | 'machine'
   | 'spawn'
   | 'encounter'
   | 'firing_position'
@@ -73,17 +74,26 @@ export interface ScenarioPaletteItem {
   name: string;
 }
 
+export interface ScenarioWorldBounds {
+  min: [number, number, number];
+  max: [number, number, number];
+  vehicleFloor: number;
+  vehicleCeiling: number;
+}
+
 export interface ScenarioPlacementsSummary {
   scenarioTagId: number;
   scenarioPath: string;
   totalObjects: number;
   objects: ScenarioObjectPlacement[];
+  worldBounds?: ScenarioWorldBounds;
   counts: {
     vehicles: number;
     scenery: number;
     bipeds: number;
     weapons: number;
     equipment: number;
+    machines?: number;
     spawns: number;
     encounters?: number;
     firingPositions?: number;
@@ -98,6 +108,7 @@ export interface ScenarioPlacementsSummary {
     bipeds: ScenarioPaletteItem[];
     weapons: ScenarioPaletteItem[];
     equipment: ScenarioPaletteItem[];
+    machines?: ScenarioPaletteItem[];
   };
 }
 
@@ -480,6 +491,7 @@ export function extractScenarioPlacements(
     bipeds: 0,
     weapons: 0,
     equipment: 0,
+    machines: 0,
     spawns: 0,
     encounters: 0,
     firingPositions: 0,
@@ -635,7 +647,62 @@ export function extractScenarioPlacements(
     }
   }
 
+  // 4b. Machines / Doors (device_machine)
+  const machinePal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get('machine palette')?.value as { count: number; pointerLow: number } | undefined,
+    'ScenarioMachinePalette',
+  );
+  const machinesRef = scnr.get('machines')?.value as { count: number; pointerLow: number } | undefined;
+  if (machinesRef && machinesRef.count > 0) {
+    const mSize = resolveStruct('ScenarioMachine').totalSize;
+    const mOffset = resolvePointer(machinesRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    for (let i = 0; i < machinesRef.count; i++) {
+      const item = decodeStruct(buffer, mOffset + i * mSize, 'ScenarioMachine');
+      const typeIdx = (item.get('type')?.value as number) ?? 0;
+      const nameIdx = (item.get('name')?.value as number) ?? -1;
+      const pos = (item.get('position')?.value as [number, number, number]) || [0, 0, 0];
+      const rot = (item.get('rotation')?.value as [number, number, number]) || [0, 0, 0];
+      const pal = machinePal[typeIdx] || { tagId: 0xffffffff, path: 'Door / Machine', modelTagId: 0xffffffff };
+
+      placements.push({
+        id: `machine-${i}`,
+        kind: 'machine',
+        paletteIndex: typeIdx,
+        nameIndex: nameIdx,
+        objectTagId: pal.tagId,
+        objectPath: pal.path,
+        modelTagId: pal.modelTagId,
+        position: pos,
+        rotation: rot,
+      });
+      counts.machines++;
+    }
+  }
+
   // Build Comprehensive Palettes (Scenario palette items + injected / map tags)
+  // Machine / Door palette
+  const fullMachinePal: ScenarioPaletteItem[] = machinePal.map((p, i) => ({
+    paletteIndex: i,
+    tagId: p.tagId,
+    path: p.path,
+    name: p.path.split('\\').pop() || p.path || `Door ${i}`,
+  }));
+  const machineTagEntries = tagIndex.entries.filter(
+    (e) => (e.primaryClassName === 'device_machine' || e.primaryClassFourCC === 0x6d616368) && !e.isExternal,
+  );
+  for (const me of machineTagEntries) {
+    if (!fullMachinePal.some((p) => p.tagId === me.tagId)) {
+      fullMachinePal.push({
+        paletteIndex: fullMachinePal.length,
+        tagId: me.tagId,
+        path: me.path,
+        name: me.path.split('\\').pop() || me.path,
+      });
+    }
+  }
   // Vehicle palette
   const fullVehiclePal: ScenarioPaletteItem[] = vehiclePal.map((p, i) => ({
     paletteIndex: i,
@@ -1079,11 +1146,43 @@ export function extractScenarioPlacements(
     }
   }
 
+  // Extract BSP 0 worldBounds + vehicleFloor/vehicleCeiling
+  let worldBounds: ScenarioWorldBounds | undefined;
+  try {
+    const bspsRef = scnr.get('structure bsps')?.value as { count: number; pointerLow: number } | undefined;
+    if (bspsRef && bspsRef.count > 0) {
+      const bspArrOff = resolvePointer(bspsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      const bspStart = buffer.readUInt32LE(bspArrOff + 0);
+      const bspAddress = buffer.readUInt32LE(bspArrOff + 8);
+      const bspHeaderPtr = buffer.readUInt32LE(bspStart);
+      const sbspOff = bspStart + (bspHeaderPtr - bspAddress);
+      if (sbspOff >= 0 && sbspOff + 224 <= buffer.length) {
+        const vehicleFloor = buffer.readFloatLE(sbspOff + 16);
+        const vehicleCeiling = buffer.readFloatLE(sbspOff + 20);
+        const minX = buffer.readFloatLE(sbspOff + 200);
+        const maxX = buffer.readFloatLE(sbspOff + 204);
+        const minY = buffer.readFloatLE(sbspOff + 208);
+        const maxY = buffer.readFloatLE(sbspOff + 212);
+        const minZ = buffer.readFloatLE(sbspOff + 216);
+        const maxZ = buffer.readFloatLE(sbspOff + 220);
+        worldBounds = {
+          min: [minX, minY, minZ],
+          max: [maxX, maxY, maxZ],
+          vehicleFloor,
+          vehicleCeiling,
+        };
+      }
+    }
+  } catch {
+    // non-fatal
+  }
+
   return {
     scenarioTagId: tagIndex.scenarioTagId,
     scenarioPath: scenarioEntry.path,
     totalObjects: placements.length,
     objects: placements,
+    worldBounds,
     counts,
     palettes: {
       vehicles: fullVehiclePal,
@@ -1091,6 +1190,7 @@ export function extractScenarioPlacements(
       bipeds: fullBipedPal,
       weapons: fullWeaponPal,
       equipment: fullEquipmentPal,
+      machines: fullMachinePal,
     },
   };
 }
@@ -1128,6 +1228,7 @@ function getScenarioReflexiveInfo(
     biped: { fieldName: 'bipeds', structName: 'ScenarioBiped' },
     weapon: { fieldName: 'weapons', structName: 'ScenarioWeapon' },
     equipment: { fieldName: 'netgame equipment', structName: 'ScenarioNetgameEquipment' },
+    machine: { fieldName: 'machines', structName: 'ScenarioMachine' },
     spawn: { fieldName: 'player starting locations', structName: 'ScenarioPlayerStartingLocation' },
     encounter: { fieldName: 'encounters', structName: 'ScenarioEncounter' },
     firing_position: { fieldName: 'encounters', structName: 'ScenarioEncounter' },
@@ -1175,6 +1276,8 @@ export function updateScenarioPlacement(
     teamIndex?: number;
     multiplayerSpawnFlags?: number;
     forceSpawn?: boolean;
+    extents?: [number, number, number];
+    name?: string;
   },
 ): ScenarioPlacementsSummary {
   const [kindStr, idxStr] = placementId.split('-');
@@ -1237,6 +1340,15 @@ export function updateScenarioPlacement(
       buffer.writeFloatLE(updates.position[0], itemOffset + 72);
       buffer.writeFloatLE(updates.position[1], itemOffset + 76);
       buffer.writeFloatLE(updates.position[2], itemOffset + 80);
+    }
+    if (updates.extents) {
+      buffer.writeFloatLE(Math.max(0.25, updates.extents[0]), itemOffset + 84);
+      buffer.writeFloatLE(Math.max(0.25, updates.extents[1]), itemOffset + 88);
+      buffer.writeFloatLE(Math.max(0.25, updates.extents[2]), itemOffset + 92);
+    }
+    if (updates.name !== undefined && updates.name.trim().length > 0) {
+      buffer.fill(0, itemOffset + 4, itemOffset + 36);
+      buffer.write(updates.name.trim().slice(0, 31), itemOffset + 4, 'ascii');
     }
   } else if (kindStr === 'cutscene_camera') {
     const info = getScenarioReflexiveInfo(buffer, header, tagIndex, 'cutscene_camera');
@@ -1582,6 +1694,193 @@ export function addScenarioPlacement(
     return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
   }
 
+  if (kind === 'trigger_volume') {
+    const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'trigger_volume');
+    const newItemBytes = Buffer.alloc(info.structSize, 0);
+    const volName = `trigger_vol_${info.count}`;
+    newItemBytes.write(volName.slice(0, 31), 4, 'ascii');
+    // rotation vector forward = [1, 0, 0] at +48..59
+    newItemBytes.writeFloatLE(1.0, 48);
+    newItemBytes.writeFloatLE(0.0, 52);
+    newItemBytes.writeFloatLE(0.0, 56);
+    // rotation vector up = [0, 0, 1] at +60..71
+    newItemBytes.writeFloatLE(0.0, 60);
+    newItemBytes.writeFloatLE(0.0, 64);
+    newItemBytes.writeFloatLE(1.0, 68);
+    // starting corner at +72..83
+    newItemBytes.writeFloatLE(position[0], 72);
+    newItemBytes.writeFloatLE(position[1], 76);
+    newItemBytes.writeFloatLE(position[2], 80);
+    // ending corner offset (extents) at +84..95
+    newItemBytes.writeFloatLE(4.0, 84);
+    newItemBytes.writeFloatLE(4.0, 88);
+    newItemBytes.writeFloatLE(3.0, 92);
+
+    const appended = appendReflexiveElement(curBuf, curHdr, tagIndex, info.reflexiveFieldOffset, newItemBytes);
+    const summary = extractScenarioPlacements(appended.buffer, appended.header, tagIndex);
+    const newId = `trigger_volume-${info.count}`;
+    const newPlacement = summary.objects.find((o) => o.id === newId)!;
+    return { buffer: appended.buffer, header: appended.header, summary, newPlacement };
+  }
+
+  if (kind === 'machine') {
+    const machinesPal = summaryBefore.palettes.machines ?? [];
+    let chosenTagId = (machinesPal[paletteIndex] || machinesPal[0])?.tagId ?? 0xffffffff;
+
+    // If the map has no device_machine tag yet (e.g. bloodgulch.map), synthesize one from a scenery tag
+    if (chosenTagId === 0xffffffff) {
+      const donorScen =
+        curTagIndex.entries.find((e) => e.primaryClassName === 'scenery' && !e.isExternal && e.path.toLowerCase().includes('rock')) ??
+        curTagIndex.entries.find((e) => e.primaryClassName === 'scenery' && !e.isExternal);
+      if (donorScen) {
+        const scenOff = resolveTagDataPointer(donorScen.tagDataPointerOrResourceIndex, curHdr, curTagIndex.baseMemoryAddress);
+        const machBytes = Buffer.alloc(804, 0);
+        if (scenOff >= 0 && scenOff + 380 <= curBuf.length) {
+          curBuf.copy(machBytes, 0, scenOff, scenOff + 380);
+        }
+        machBytes.writeInt16LE(7, 0x00); // object_type = 7 (device_machine)
+        machBytes.writeFloatLE(0.5, 384); // power transition time
+        machBytes.writeFloatLE(0.5, 388);
+        machBytes.writeFloatLE(1.5, 392); // position transition time (1.5s)
+        machBytes.writeFloatLE(1.5, 396);
+        machBytes.writeFloatLE(1.0, 524); // runtime inverse power transition
+        machBytes.writeFloatLE(1.0, 528);
+        machBytes.writeFloatLE(1.0 / 45.0, 532); // runtime inverse position transition (45 ticks)
+        machBytes.writeFloatLE(1.0 / 45.0, 536);
+        machBytes.writeInt16LE(0, 656); // machine type = 0 (door)
+        machBytes.writeUInt16LE(1, 658); // flags = 1 (pathfinding obstacle)
+        machBytes.writeFloatLE(3.0, 660); // door open time = 3.0s
+        machBytes.writeInt16LE(1, 744); // collision response = 1 (pause until crushed)
+        machBytes.writeUInt32LE(90, 800); // runtime door open time ticks = 90
+
+        const deps: OceContainer['tags'][0]['dependencies'] = [];
+        for (const depSpec of [
+          { off: 0x28, field: 'model' },
+          { off: 0x38, field: 'animation graph' },
+          { off: 0x70, field: 'collision model' },
+          { off: 0x80, field: 'physics' },
+          { off: 0x90, field: 'modifier shader' },
+          { off: 0xa0, field: 'creation effect' },
+        ]) {
+          const depTagId = machBytes.readUInt32LE(depSpec.off + 12);
+          const depEntry = depTagId !== 0xffffffff ? curTagIndex.entries[depTagId & 0xffff] : undefined;
+          if (depEntry && depEntry.primaryClassName) {
+            deps.push({
+              fieldPath: `devices\\synthetic_door\\synthetic_door.${depSpec.field}`,
+              group: depEntry.primaryClassName,
+              path: depEntry.path,
+              kind: 'internal',
+            });
+          } else {
+            machBytes.fill(0, depSpec.off, depSpec.off + 12);
+            machBytes.writeUInt32LE(0xffffffff, depSpec.off + 12);
+          }
+        }
+        for (const rOff of [0xf8, 0x104, 0x154, 0x160, 0x16c, 0x178]) {
+          machBytes.fill(0, rOff, rOff + 12);
+        }
+
+        const synthPath = 'devices\\synthetic_door\\synthetic_door';
+        const synthContainer: OceContainer = {
+          magic: OCETAGS_MAGIC,
+          formatVersion: OCETAGS_FORMAT_VERSION,
+          createdAt: new Date().toISOString(),
+          sourceMapName: 'scenario_editor',
+          hasUnresolvedBspReferences: false,
+          resourceMapIdentities: {},
+          externalResourceRefs: [],
+          externalData: 'embedded',
+          rootOriginalIndices: [99998],
+          tags: [
+            {
+              originalIndex: 99998,
+              group: 'device_machine',
+              path: synthPath,
+              structName: 'DeviceMachine',
+              secondaryClassFourCC: 0x64657669,
+              tertiaryClassFourCC: 0x6f626a65,
+              data: machBytes.toString('base64'),
+              dependencies: deps,
+              embeddedRawDataAssets: [],
+              embeddedRawDataPatches: [],
+              injectionBlockers: [],
+            },
+          ],
+          notExtracted: [],
+          warnings: [],
+        };
+        const plan = planAddInjection({ buffer: curBuf, header: curHdr, tagIndex: curTagIndex }, synthContainer, {});
+        if (plan.kind === 'ok' && plan.blockedOther.length === 0 && plan.blockedEmbedded.length === 0) {
+          curBuf = applyAddInjection(curBuf, curHdr, curTagIndex, synthContainer, plan);
+          curHdr = parseCacheFileHeader(curBuf);
+          curTagIndex = parseTagIndex(curBuf, curHdr);
+          const createdMach = curTagIndex.entries.find(
+            (e) => e.primaryClassName === 'device_machine' && e.path.toLowerCase() === synthPath,
+          );
+          if (createdMach) {
+            chosenTagId = createdMach.tagId;
+          }
+        }
+      }
+    }
+
+    if (chosenTagId === 0xffffffff) {
+      throw new Error('No door / device_machine available in map tags.');
+    }
+
+    const palRes = ensurePaletteEntry(
+      curBuf,
+      curHdr,
+      curTagIndex,
+      'machine palette',
+      'ScenarioMachinePalette',
+      chosenTagId,
+      0x6d616368,
+    );
+    curBuf = palRes.buffer;
+    curHdr = palRes.header;
+
+    // Ensure the device_machine tag has a non-zero door open time so automatic proximity operation works
+    const machEntry = curTagIndex.entries[chosenTagId & 0xffff];
+    if (machEntry && !machEntry.isExternal) {
+      try {
+        const machOff = resolveTagDataPointer(machEntry.tagDataPointerOrResourceIndex, curHdr, curTagIndex.baseMemoryAddress);
+        if (machOff >= 0 && machOff + 804 <= curBuf.length) {
+          const openTime = curBuf.readFloatLE(machOff + 660); // Device (656B) + machine type (2B) + flags (2B) = +660
+          if (!(openTime > 0.1)) {
+            curBuf.writeFloatLE(3.0, machOff + 660);
+            curBuf.writeUInt32LE(90, machOff + 800); // door open time ticks = 90 (3.0s * 30Hz)
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+
+    const info = getScenarioReflexiveInfo(curBuf, curHdr, curTagIndex, 'machine');
+    const newItemBytes = Buffer.alloc(info.structSize, 0);
+    newItemBytes.writeInt16LE(palRes.paletteIndex, 0);
+    newItemBytes.writeInt16LE(-1, 2); // name index = -1
+    newItemBytes.writeUInt16LE(0, 4); // not placed = 0 (placed automatically)
+    newItemBytes.writeFloatLE(position[0], 8);
+    newItemBytes.writeFloatLE(position[1], 12);
+    newItemBytes.writeFloatLE(position[2], 16);
+    newItemBytes.writeFloatLE(rotation[0], 20);
+    newItemBytes.writeFloatLE(rotation[1], 24);
+    newItemBytes.writeFloatLE(rotation[2], 28);
+    newItemBytes.writeUInt16LE(1, 32); // bsp indices = 1
+    newItemBytes.writeInt16LE(-1, 40); // power group = -1 (NONE -> starts powered at 1.0 in OpenCE devices.c!)
+    newItemBytes.writeInt16LE(-1, 42); // position group = -1 (automatic proximity door operation)
+    newItemBytes.writeUInt32LE(0, 44); // device flags = 0 (powered & ready)
+    newItemBytes.writeUInt32LE(4, 48); // machine flags = 4 (never appears locked, operates automatically)
+
+    const appended = appendReflexiveElement(curBuf, curHdr, curTagIndex, info.reflexiveFieldOffset, newItemBytes);
+    const summary = extractScenarioPlacements(appended.buffer, appended.header, curTagIndex);
+    const newId = `machine-${info.count}`;
+    const newPlacement = summary.objects.find((o) => o.id === newId)!;
+    return { buffer: appended.buffer, header: appended.header, tagIndex: curTagIndex, summary, newPlacement };
+  }
+
   if (kind === 'biped') {
     const chosen = summaryBefore.palettes.bipeds[paletteIndex] || summaryBefore.palettes.bipeds[0];
     if (!chosen) throw new Error('No biped available in map palettes.');
@@ -1727,6 +2026,9 @@ export function addScenarioPlacement(
 
 /**
  * Deletes a scenario object placement by shifting subsequent elements down and decrementing count.
+ * Also updates `scenario.object_names` indices and automatically disarms/removes any compiled
+ * HaloScript (`scenario.scripts`) that referenced the deleted trigger volume, camera, or named object
+ * so Halo CE never crashes with an out-of-bounds assertion on load.
  */
 export function deleteScenarioPlacement(
   buffer: Buffer,
@@ -1741,6 +2043,13 @@ export function deleteScenarioPlacement(
   const info = getScenarioReflexiveInfo(buffer, header, tagIndex, kind);
   if (index < 0 || index >= info.count) {
     throw new Error(`Placement index ${index} out of range (count: ${info.count}) for kind ${kind}.`);
+  }
+
+  // Record the nameIndex of the placement being deleted (if it had one)
+  const deletedElemOffset = info.baseOffset + index * info.structSize;
+  let directDeletedNameIdx = -1;
+  if (kind === 'vehicle' || kind === 'biped' || kind === 'scenery' || kind === 'weapon' || kind === 'machine') {
+    directDeletedNameIdx = buffer.readInt16LE(deletedElemOffset + 2);
   }
 
   // Shift elements after index down by 1 structSize
@@ -1762,6 +2071,166 @@ export function deleteScenarioPlacement(
     pointerLow: info.pointerLow,
     pointerHigh: 0,
   });
+
+  // Synchronize `scenario.object_names` (offset 0x204 in Scenario struct, 36 bytes per entry)
+  const kindToObjType: Partial<Record<ScenarioObjectKind, number>> = {
+    biped: 0,
+    vehicle: 1,
+    weapon: 2,
+    equipment: 3,
+    scenery: 6,
+    machine: 7,
+  };
+  const deletedObjType = kindToObjType[kind];
+  const deletedObjNameIndices = new Set<number>();
+  if (directDeletedNameIdx >= 0) {
+    deletedObjNameIndices.add(directDeletedNameIdx);
+  }
+
+  const scnrDef = resolveStruct('Scenario');
+  const objNamesField = scnrDef.fields.find((f) => f.name === 'object names');
+  if (objNamesField && deletedObjType !== undefined) {
+    const objNamesRefl = decodeReflexive(buffer, info.scenarioOffset + objNamesField.offset);
+    if (objNamesRefl.count > 0) {
+      const objNamesBase = resolvePointer(objNamesRefl.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      if (objNamesBase >= 0 && objNamesBase + objNamesRefl.count * 36 <= buffer.length) {
+        for (let i = 0; i < objNamesRefl.count; i++) {
+          const entryOff = objNamesBase + i * 36;
+          const oType = buffer.readInt16LE(entryOff + 32);
+          const pIdx = buffer.readInt16LE(entryOff + 34);
+          if (oType === deletedObjType) {
+            if (pIdx === index) {
+              buffer.writeInt16LE(-1, entryOff + 32);
+              buffer.writeInt16LE(-1, entryOff + 34);
+              deletedObjNameIndices.add(i);
+            } else if (pIdx > index) {
+              buffer.writeInt16LE(pIdx - 1, entryOff + 34);
+            }
+          } else if (i === directDeletedNameIdx && pIdx === index) {
+            buffer.writeInt16LE(-1, entryOff + 32);
+            buffer.writeInt16LE(-1, entryOff + 34);
+          }
+        }
+      }
+    }
+  }
+
+  // Synchronize compiled HaloScript syntax nodes and disarm any scripts referencing deleted entities
+  if (
+    deletedObjNameIndices.size > 0 ||
+    kind === 'trigger_volume' ||
+    kind === 'cutscene_camera'
+  ) {
+    const syntaxSize = buffer.readInt32LE(info.scenarioOffset + 0x474);
+    const syntaxPtr = buffer.readUInt32LE(info.scenarioOffset + 0x474 + 12);
+    const scriptsCount = buffer.readInt32LE(info.scenarioOffset + 0x49c);
+    const scriptsPtr = buffer.readUInt32LE(info.scenarioOffset + 0x49c + 4);
+
+    if (syntaxSize >= 56 && syntaxPtr > 0) {
+      const syntaxBase = resolvePointer(syntaxPtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+      if (syntaxBase >= 0 && syntaxBase + syntaxSize <= buffer.length) {
+        const nodeCount = Math.min(
+          buffer.readUInt16LE(syntaxBase + 0x2e),
+          Math.floor((syntaxSize - 56) / 20),
+        );
+        const invalidatedNodes = new Set<number>();
+
+        for (let n = 0; n < nodeCount; n++) {
+          const nOff = syntaxBase + 56 + n * 20;
+          const nType = buffer.readInt16LE(nOff + 0x04);
+          const nFlags = buffer.readUInt16LE(nOff + 0x06);
+          const isPrimitive = (nFlags & 1) !== 0;
+          const isGlobal = (nFlags & 4) !== 0;
+          if (!isPrimitive || isGlobal) continue;
+
+          const dataVal = buffer.readUInt32LE(nOff + 0x10);
+          if (kind === 'trigger_volume' && nType === 11) {
+            if (dataVal === index) {
+              invalidatedNodes.add(n);
+            } else if (dataVal > index && dataVal !== 0xffffffff) {
+              buffer.writeUInt32LE(dataVal - 1, nOff + 0x10);
+            }
+          } else if (kind === 'cutscene_camera' && nType === 13) {
+            if (dataVal === index) {
+              invalidatedNodes.add(n);
+            } else if (dataVal > index && dataVal !== 0xffffffff) {
+              buffer.writeUInt32LE(dataVal - 1, nOff + 0x10);
+            }
+          } else if (
+            deletedObjNameIndices.size > 0 &&
+            (nType === 23 || (nType >= 37 && nType <= 48)) &&
+            deletedObjNameIndices.has(dataVal)
+          ) {
+            invalidatedNodes.add(n);
+          }
+        }
+
+        if (invalidatedNodes.size > 0 && scriptsCount > 0 && scriptsPtr > 0) {
+          const scriptsBase = resolvePointer(scriptsPtr, header.tagDataOffset, tagIndex.baseMemoryAddress);
+          if (scriptsBase >= 0 && scriptsBase + scriptsCount * 92 <= buffer.length) {
+            // Check whether a syntax subtree touches any invalidated node (or calls a static script that does)
+            const scriptBroken = new Array<boolean>(scriptsCount).fill(false);
+            const checkSubtree = (rootHandle: number, visitedNodes: Set<number>): boolean => {
+              if (rootHandle === 0xffffffff) return false;
+              const nIdx = rootHandle & 0xffff;
+              if (nIdx >= nodeCount || visitedNodes.has(nIdx)) return false;
+              visitedNodes.add(nIdx);
+              if (invalidatedNodes.has(nIdx)) return true;
+
+              const nOff = syntaxBase + 56 + nIdx * 20;
+              const nFlags = buffer.readUInt16LE(nOff + 0x06);
+              const nextHandle = buffer.readUInt32LE(nOff + 0x08);
+              const dataVal = buffer.readUInt32LE(nOff + 0x10);
+              const isPrimitive = (nFlags & 1) !== 0;
+              const isScriptCall = (nFlags & 2) !== 0;
+
+              if (isScriptCall) {
+                const calleeIdx = buffer.readUInt16LE(nOff + 0x02);
+                if (calleeIdx < scriptsCount && scriptBroken[calleeIdx]) return true;
+              }
+              if (!isPrimitive && dataVal !== 0xffffffff) {
+                if (checkSubtree(dataVal, visitedNodes)) return true;
+              }
+              if (nextHandle !== 0xffffffff) {
+                if (checkSubtree(nextHandle, visitedNodes)) return true;
+              }
+              return false;
+            };
+
+            // Two passes so static script callers also detect broken callees
+            for (let pass = 0; pass < 2; pass++) {
+              for (let s = 0; s < scriptsCount; s++) {
+                const rootH = buffer.readUInt32LE(scriptsBase + s * 92 + 36);
+                if (checkSubtree(rootH, new Set())) {
+                  scriptBroken[s] = true;
+                }
+              }
+            }
+
+            // Remove broken scripts from the scripts block so Halo CE does not execute them
+            const survivingScripts: Buffer[] = [];
+            for (let s = 0; s < scriptsCount; s++) {
+              if (!scriptBroken[s]) {
+                survivingScripts.push(
+                  Buffer.from(buffer.subarray(scriptsBase + s * 92, scriptsBase + (s + 1) * 92)),
+                );
+              }
+            }
+            if (survivingScripts.length < scriptsCount) {
+              buffer.fill(0, scriptsBase, scriptsBase + scriptsCount * 92);
+              for (let s = 0; s < survivingScripts.length; s++) {
+                survivingScripts[s]!.copy(buffer, scriptsBase + s * 92);
+              }
+              buffer.writeInt32LE(survivingScripts.length, info.scenarioOffset + 0x49c);
+              if (survivingScripts.length === 0) {
+                buffer.writeUInt32LE(0, info.scenarioOffset + 0x49c + 4);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 
   return extractScenarioPlacements(buffer, header, tagIndex);
 }
@@ -1833,6 +2302,22 @@ export function swapScenarioPlacement(
       const summary = extractScenarioPlacements(curBuf, curHdr, tagIndex);
       const newPlacement = summary.objects.find((o) => o.id === placementId)!;
       return { buffer: curBuf, header: curHdr, summary, newPlacement };
+    } else if (newKind === 'machine') {
+      const machinesPal = summaryBefore.palettes.machines ?? [];
+      const chosen = machinesPal[newPaletteIndex] || machinesPal[0];
+      if (!chosen) throw new Error('No door / device_machine available in map palettes.');
+      const palRes = ensurePaletteEntry(curBuf, curHdr, tagIndex, 'machine palette', 'ScenarioMachinePalette', chosen.tagId, 0x6d616368);
+      curBuf = palRes.buffer;
+      curHdr = palRes.header;
+      const [_, idxStr] = placementId.split('-');
+      const index = parseInt(idxStr, 10);
+      const info = getScenarioReflexiveInfo(curBuf, curHdr, tagIndex, 'machine');
+      const itemOffset = info.baseOffset + index * info.structSize;
+      curBuf.writeInt16LE(palRes.paletteIndex, itemOffset + 0);
+
+      const summary = extractScenarioPlacements(curBuf, curHdr, tagIndex);
+      const newPlacement = summary.objects.find((o) => o.id === placementId)!;
+      return { buffer: curBuf, header: curHdr, summary, newPlacement };
     } else if (newKind === 'biped') {
       const chosen = summaryBefore.palettes.bipeds[newPaletteIndex] || summaryBefore.palettes.bipeds[0];
       if (!chosen) throw new Error('No biped available in map palettes.');
@@ -1866,4 +2351,92 @@ export function swapScenarioPlacement(
     rotation,
     teamIndex,
   );
+}
+
+/**
+ * Updates the active Structure BSP's world bounds (`world bounds x/y/z` at +200..223) and
+ * `vehicle floor` (+16) / `vehicle ceiling` (+20), and optionally shifts outer boundary
+ * collision planes that match the previous world bounds.
+ */
+export function updateScenarioWorldBounds(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  bounds: ScenarioWorldBounds,
+  bspIndex = 0,
+): ScenarioPlacementsSummary {
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (0x${tagIndex.scenarioTagId.toString(16)}) not found.`);
+  }
+  const scenarioOffset = resolveTagDataPointer(
+    scenarioEntry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress,
+  );
+  const scnr = decodeStruct(buffer, scenarioOffset, 'Scenario');
+  const bspsRef = scnr.get('structure bsps')?.value as { count: number; pointerLow: number } | undefined;
+  if (bspsRef && bspsRef.count > 0) {
+    const idx = Math.max(0, Math.min(bspsRef.count - 1, bspIndex));
+    const bspArrOff = resolvePointer(bspsRef.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress) + idx * 32;
+    const bspStart = buffer.readUInt32LE(bspArrOff + 0);
+    const bspAddress = buffer.readUInt32LE(bspArrOff + 8);
+    const bspHeaderPtr = buffer.readUInt32LE(bspStart);
+    const sbspOff = bspStart + (bspHeaderPtr - bspAddress);
+    if (sbspOff >= 0 && sbspOff + 224 <= buffer.length) {
+      const oldMinX = buffer.readFloatLE(sbspOff + 200);
+      const oldMaxX = buffer.readFloatLE(sbspOff + 204);
+      const oldMinY = buffer.readFloatLE(sbspOff + 208);
+      const oldMaxY = buffer.readFloatLE(sbspOff + 212);
+      const oldMinZ = buffer.readFloatLE(sbspOff + 216);
+      const oldMaxZ = buffer.readFloatLE(sbspOff + 220);
+
+      buffer.writeFloatLE(bounds.vehicleFloor, sbspOff + 16);
+      buffer.writeFloatLE(bounds.vehicleCeiling, sbspOff + 20);
+      buffer.writeFloatLE(bounds.min[0], sbspOff + 200);
+      buffer.writeFloatLE(bounds.max[0], sbspOff + 204);
+      buffer.writeFloatLE(bounds.min[1], sbspOff + 208);
+      buffer.writeFloatLE(bounds.max[1], sbspOff + 212);
+      buffer.writeFloatLE(bounds.min[2], sbspOff + 216);
+      buffer.writeFloatLE(bounds.max[2], sbspOff + 220);
+
+      // Also shift any outer axis-aligned boundary planes in CollisionBSP (+176) that sat on the old worldBounds
+      try {
+        const collBspCount = buffer.readInt32LE(sbspOff + 176);
+        const collBspPtr = buffer.readUInt32LE(sbspOff + 180);
+        if (collBspCount > 0 && collBspPtr > 0) {
+          const collBspOff = bspStart + (collBspPtr - bspAddress);
+          const planesCount = buffer.readInt32LE(collBspOff + 12);
+          const planesPtr = buffer.readUInt32LE(collBspOff + 16);
+          const planesOff = bspStart + (planesPtr - bspAddress);
+          const eps = 1.5;
+          if (planesCount > 0 && planesOff >= 0 && planesOff + planesCount * 16 <= buffer.length) {
+            for (let p = 0; p < planesCount; p++) {
+              const pOff = planesOff + p * 16;
+              const nx = buffer.readFloatLE(pOff + 0);
+              const ny = buffer.readFloatLE(pOff + 4);
+              const nz = buffer.readFloatLE(pOff + 8);
+              const d = buffer.readFloatLE(pOff + 12);
+              if (Math.abs(nx) > 0.98) {
+                const coord = d / nx;
+                if (Math.abs(coord - oldMinX) < eps) buffer.writeFloatLE(bounds.min[0] * nx, pOff + 12);
+                else if (Math.abs(coord - oldMaxX) < eps) buffer.writeFloatLE(bounds.max[0] * nx, pOff + 12);
+              } else if (Math.abs(ny) > 0.98) {
+                const coord = d / ny;
+                if (Math.abs(coord - oldMinY) < eps) buffer.writeFloatLE(bounds.min[1] * ny, pOff + 12);
+                else if (Math.abs(coord - oldMaxY) < eps) buffer.writeFloatLE(bounds.max[1] * ny, pOff + 12);
+              } else if (Math.abs(nz) > 0.98) {
+                const coord = d / nz;
+                if (Math.abs(coord - oldMinZ) < eps) buffer.writeFloatLE(bounds.min[2] * nz, pOff + 12);
+                else if (Math.abs(coord - oldMaxZ) < eps) buffer.writeFloatLE(bounds.max[2] * nz, pOff + 12);
+              }
+            }
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+  }
+  return extractScenarioPlacements(buffer, header, tagIndex);
 }

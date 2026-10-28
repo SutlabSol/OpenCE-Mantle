@@ -9,6 +9,8 @@ interface Props {
   allTags?: TagEntrySummary[];
 }
 
+let cachedReflexiveClipboardJson: string | null = null;
+
 /**
  * Recursively apply a new value to the leaf field at `fieldPath` (a dotted reflexive path such
  * as `"magazines[0].rounds recharged"`) within `fields`. Returns a new array; the input is not
@@ -174,7 +176,22 @@ export function resolveCrossReflexiveOptions(
     lowerName === 'type' ||
     lowerName === 'parent node' ||
     lowerName === 'first child node' ||
-    lowerName === 'next sibling node';
+    lowerName === 'next sibling node' ||
+    lowerName === 'sky' ||
+    lowerName === 'fog' ||
+    lowerName === 'weather' ||
+    lowerName === 'background sound' ||
+    lowerName === 'sound environment' ||
+    lowerName === 'command list' ||
+    lowerName === 'starting profile' ||
+    lowerName === 'conversation' ||
+    lowerName === 'camera track' ||
+    lowerName === 'trigger' ||
+    lowerName === 'source' ||
+    lowerName === 'destination' ||
+    lowerName.includes('function') ||
+    lowerName.includes('cluster') ||
+    lowerName.includes('portal');
 
   if (!isKnownIndexField) return null;
 
@@ -193,14 +210,46 @@ export function resolveCrossReflexiveOptions(
     targetReflexiveName = 'materials';
   } else if (lowerName.includes('geometry')) {
     targetReflexiveName = 'geometries';
-  } else if (lowerName === 'name' || lowerName.includes('name index') || lowerName === 'object name') {
+  } else if (
+    lowerName === 'name' ||
+    lowerName.includes('name index') ||
+    lowerName === 'object name' ||
+    lowerName === 'source' ||
+    lowerName === 'destination'
+  ) {
     targetReflexiveName = 'object names';
   } else if (lowerName.includes('trigger volume')) {
     targetReflexiveName = 'trigger volumes';
+  } else if (lowerName === 'trigger') {
+    targetReflexiveName = 'triggers';
   } else if (lowerName.includes('camera point')) {
     targetReflexiveName = 'cutscene camera points';
+  } else if (lowerName.includes('camera track')) {
+    targetReflexiveName = 'camera tracks';
   } else if (lowerName === 'actor type') {
     targetReflexiveName = 'actor palette';
+  } else if (lowerName === 'sky') {
+    targetReflexiveName = 'skies';
+  } else if (lowerName === 'fog') {
+    targetReflexiveName = 'fog palette';
+  } else if (lowerName === 'weather') {
+    targetReflexiveName = 'weather palette';
+  } else if (lowerName === 'background sound') {
+    targetReflexiveName = 'background sound palette';
+  } else if (lowerName === 'sound environment') {
+    targetReflexiveName = 'sound environment palette';
+  } else if (lowerName.includes('command list')) {
+    targetReflexiveName = 'command lists';
+  } else if (lowerName.includes('starting profile')) {
+    targetReflexiveName = 'player starting profiles';
+  } else if (lowerName.includes('conversation')) {
+    targetReflexiveName = 'ai conversations';
+  } else if (lowerName.includes('function')) {
+    targetReflexiveName = 'functions';
+  } else if (lowerName.includes('portal')) {
+    targetReflexiveName = 'cluster portals';
+  } else if (lowerName.includes('cluster')) {
+    targetReflexiveName = 'clusters';
   } else if (lowerName === 'type') {
     if (lowerPath.startsWith('vehicles[')) targetReflexiveName = 'vehicle palette';
     else if (lowerPath.startsWith('scenery[')) targetReflexiveName = 'scenery palette';
@@ -250,11 +299,64 @@ export function resolveCrossReflexiveOptions(
   return { reflexiveName: targetBlock.name, options };
 }
 
+const INTERNAL_CACHE_FIELD_NAMES = new Set([
+  'node list checksum',
+  'detail node count',
+  'hardware character index',
+  'pixels offset',
+  'character index',
+  'bsp3d nodes',
+  'planes',
+  'leaves',
+  'bsp2d references',
+  'bsp2d nodes',
+  'surfaces',
+  'edges',
+  'vertices',
+  'source file',
+  'compiledin',
+  'pointer',
+  'data offset',
+  'vertex offset',
+  'indices offset',
+]);
+
+/**
+ * Returns true if a field is an uneditable raw offset, read-only field, or compiler-internal
+ * cache field that should be hidden when Simple Mode is active.
+ */
+function isClutterFieldInSimpleMode(field: TagFieldDescriptor): boolean {
+  if (field.kind === 'unsupported') return true;
+  if (field.readOnly && field.kind !== 'reflexive') return true;
+  const lower = field.name.trim().toLowerCase();
+  if (INTERNAL_CACHE_FIELD_NAMES.has(lower)) return true;
+  if (field.kind === 'reflexive') {
+    const count = field.children ? field.children.length : (field.reflexiveCount ?? 0);
+    if (field.readOnly && count === 0 && !field.reflexiveStruct) return true;
+  }
+  return false;
+}
+
+/**
+ * Component labels for composite array fields (e.g. RealPoint3D -> X, Y, Z; RealColorRGB -> R, G, B).
+ */
+function getCompositeLabels(type: string, length: number): string[] {
+  const lower = type.toLowerCase();
+  if (lower.includes('argb')) return ['Alpha', 'Red', 'Green', 'Blue'].slice(0, length);
+  if (lower.includes('color') || lower.includes('rgb')) return ['Red', 'Green', 'Blue', 'Alpha'].slice(0, length);
+  if (lower.includes('euler')) return ['Yaw (°)', 'Pitch (°)', 'Roll (°)'].slice(0, length);
+  if (lower.includes('quaternion')) return ['i (X)', 'j (Y)', 'k (Z)', 'w (Real)'].slice(0, length);
+  if (lower.includes('plane')) return ['Normal I', 'Normal J', 'Normal K', 'Distance D'].slice(0, length);
+  if (lower.includes('rectangle')) return ['Top', 'Left', 'Bottom', 'Right'].slice(0, length);
+  return ['X', 'Y', 'Z', 'W'].slice(0, length);
+}
+
 export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props) {
   const [fieldsResult, setFieldsResult] = useState<TagFieldsResult | null>(null);
   const [isLoadingFields, setIsLoadingFields] = useState(false);
   const [fieldsError, setFieldsError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [simpleMode, setSimpleMode] = useState(true);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [savingField, setSavingField] = useState<string | null>(null);
   const [addingChunkPath, setAddingChunkPath] = useState<string | null>(null);
@@ -396,19 +498,26 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
     });
   };
 
-  const filteredFields = useMemo(() => {
-    if (!fieldsResult) return [];
+  const { filteredFields, hiddenClutterCount } = useMemo(() => {
+    if (!fieldsResult) return { filteredFields: [], hiddenClutterCount: 0 };
     // Dependency slots are edited via the Dependency Swapper tab in `PropertiesPalette`;
     // hide them here (value fields only: numbers, bounds, enums, bitfields, strings, composites).
-    const valueFields = fieldsResult.fields.filter((f) => f.kind !== 'dependency');
+    const allValueFields = fieldsResult.fields.filter((f) => f.kind !== 'dependency');
+    const clutterCount = allValueFields.filter((f) => isClutterFieldInSimpleMode(f)).length;
+    const valueFields = simpleMode
+      ? allValueFields.filter((f) => !isClutterFieldInSimpleMode(f))
+      : allValueFields;
     const q = search.trim().toLowerCase();
-    if (!q) return valueFields;
-    return valueFields.filter((f) => {
-      if (f.name.toLowerCase().includes(q) || f.type.toLowerCase().includes(q)) return true;
-      // Keep reflexive blocks when any non-dependency descendant field matches.
-      return f.kind === 'reflexive' && reflexiveDescendantMatches(f, q);
-    });
-  }, [fieldsResult, search]);
+    if (!q) return { filteredFields: valueFields, hiddenClutterCount: clutterCount };
+    return {
+      filteredFields: valueFields.filter((f) => {
+        if (f.name.toLowerCase().includes(q) || f.type.toLowerCase().includes(q)) return true;
+        // Keep reflexive blocks when any non-dependency descendant field matches.
+        return f.kind === 'reflexive' && reflexiveDescendantMatches(f, q);
+      }),
+      hiddenClutterCount: clutterCount,
+    };
+  }, [fieldsResult, search, simpleMode]);
 
   if (!focusedTag) {
     return <div data-testid="tag-editor-empty" style={{ padding: 16, fontSize: 12, color: 'var(--text-dim)', fontStyle: 'italic' }}>Select a tag to edit its fields.</div>;
@@ -425,28 +534,67 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
           .filter((cf) => cf.kind !== 'reflexive' && cf.kind !== 'dependency' && !cf.readOnly)
           .map((cf) => [cf.name, cf.value]),
       ),
+      dependencies: Object.fromEntries(
+        elementFields
+          .filter((cf) => cf.kind === 'dependency')
+          .map((cf) => [cf.name, cf.value]),
+      ),
     };
     const jsonText = JSON.stringify(payload, null, 2);
+    cachedReflexiveClipboardJson = jsonText;
     try {
       await navigator.clipboard.writeText(jsonText);
-      setStatusMessage(`Copied "${elementPath}" values to clipboard as JSON.`);
+      setStatusMessage(`Copied "${elementPath}" (${Object.keys(payload.values as object).length} fields) to clipboard.`);
     } catch {
-      setStatusMessage(`Copied "${elementPath}" (${Object.keys(payload.values as object).length} fields).`);
+      setStatusMessage(`Copied "${elementPath}" (${Object.keys(payload.values as object).length} fields) to internal clipboard.`);
     }
+  };
+
+  const readReflexiveClipboardPayload = async (): Promise<{
+    values: Record<string, unknown>;
+    dependencies?: Record<string, unknown>;
+  } | null> => {
+    let text = cachedReflexiveClipboardJson ?? '';
+    try {
+      const sysText = await navigator.clipboard.readText();
+      if (sysText && sysText.trim().startsWith('{')) {
+        text = sysText;
+      }
+    } catch {
+      /* fallback to cachedReflexiveClipboardJson */
+    }
+    if (!text) return null;
+    const parsed = JSON.parse(text) as {
+      values?: Record<string, unknown>;
+      dependencies?: Record<string, unknown>;
+    };
+    const values =
+      parsed?.values ??
+      (typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null);
+    if (!values) return null;
+    return { values, dependencies: parsed?.dependencies };
   };
 
   const handlePasteReflexiveElementJson = async (elementPath: string, elementFields: TagFieldDescriptor[]) => {
     try {
-      const text = await navigator.clipboard.readText();
-      const parsed = JSON.parse(text) as { values?: Record<string, unknown> };
-      const values = parsed?.values ?? (typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null);
-      if (!values) {
-        setStatusMessage('Failed to paste: Clipboard does not contain valid reflexive JSON.');
+      const payload = await readReflexiveClipboardPayload();
+      if (!payload) {
+        setStatusMessage('Failed to paste: Copy a reflexive element first using "Copy JSON".');
         return;
       }
+      const { values, dependencies } = payload;
       let updatedCount = 0;
       for (const cf of elementFields) {
-        if (cf.kind === 'reflexive' || cf.kind === 'dependency' || cf.readOnly) continue;
+        if (cf.kind === 'reflexive' || cf.readOnly) continue;
+        if (cf.kind === 'dependency') {
+          if (dependencies && Object.prototype.hasOwnProperty.call(dependencies, cf.name)) {
+            const depVal = dependencies[cf.name];
+            const tagId = typeof depVal === 'number' && depVal !== NULL_TAG_ID ? depVal : null;
+            await window.opence.setDependencySlot(focusedTag.index, `${elementPath}.${cf.name}`, tagId);
+            updatedCount++;
+          }
+          continue;
+        }
         if (Object.prototype.hasOwnProperty.call(values, cf.name)) {
           await handleUpdateField(`${elementPath}.${cf.name}`, values[cf.name]);
           updatedCount++;
@@ -456,6 +604,155 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
     } catch (err) {
       setStatusMessage(`Failed to paste JSON into "${elementPath}": ${(err as Error).message}`);
     }
+  };
+
+  const handleAppendAndPasteReflexiveElementJson = async (reflexiveFieldPath: string) => {
+    if (!focusedTag || !window.opence.addReflexiveChunk) return;
+    try {
+      const payload = await readReflexiveClipboardPayload();
+      if (!payload) {
+        setStatusMessage('Failed to append & paste: Copy a reflexive element first using "Copy JSON".');
+        return;
+      }
+      setAddingChunkPath(reflexiveFieldPath);
+      const addRes = await window.opence.addReflexiveChunk(focusedTag.index, reflexiveFieldPath, -1);
+      if (!addRes.ok) {
+        setStatusMessage(`Failed to append chunk to "${reflexiveFieldPath}": ${addRes.message}`);
+        return;
+      }
+      const newElementPath = `${reflexiveFieldPath}[${addRes.newElementIndex}]`;
+      const { values, dependencies } = payload;
+      let updatedCount = 0;
+      for (const [k, v] of Object.entries(values)) {
+        await window.opence.updateTagField(focusedTag.index, `${newElementPath}.${k}`, v);
+        updatedCount++;
+      }
+      if (dependencies) {
+        for (const [k, depVal] of Object.entries(dependencies)) {
+          const tagId = typeof depVal === 'number' && depVal !== NULL_TAG_ID ? depVal : null;
+          await window.opence.setDependencySlot(focusedTag.index, `${newElementPath}.${k}`, tagId);
+          updatedCount++;
+        }
+      }
+      setExpandedReflexives((prev) => new Set(prev).add(reflexiveFieldPath));
+      const refresh = await window.opence.getTagFields(focusedTag.index);
+      if (refresh.ok) {
+        setFieldsResult(refresh.data);
+      }
+      setStatusMessage(`Appended "${newElementPath}" and pasted ${updatedCount} field(s) from clipboard! (Ctrl+S to save)`);
+    } catch (err) {
+      setStatusMessage(`Failed to append & paste into "${reflexiveFieldPath}": ${(err as Error).message}`);
+    } finally {
+      setAddingChunkPath(null);
+    }
+  };
+
+  // Item 2 (Milestone 19.2): Reflexive Block File (.json) Export & Import
+  const handleExportReflexiveBlockFile = (reflexiveFieldPath: string, reflexiveField: TagFieldDescriptor) => {
+    const elements = (reflexiveField.children ?? []).map((el, idx) => ({
+      index: idx,
+      structName: el.structName,
+      values: Object.fromEntries(
+        el.fields
+          .filter((cf) => cf.kind !== 'reflexive' && cf.kind !== 'dependency' && !cf.readOnly)
+          .map((cf) => [cf.name, cf.value]),
+      ),
+      dependencies: Object.fromEntries(
+        el.fields
+          .filter((cf) => cf.kind === 'dependency')
+          .map((cf) => [cf.name, cf.value]),
+      ),
+    }));
+    const payload = {
+      __openceReflexiveBlock: true,
+      version: 1,
+      sourceTag: focusedTag.path,
+      sourceClass: focusedTag.primaryClassName,
+      reflexivePath: reflexiveFieldPath,
+      structName: reflexiveField.reflexiveStruct ?? 'Block',
+      elementCount: elements.length,
+      elements,
+    };
+    const jsonText = JSON.stringify(payload, null, 2);
+    const blob = new Blob([jsonText], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safeName = `${focusedTag.path.split('\\').pop() || 'tag'}_${reflexiveFieldPath.replace(/[^a-z0-9_-]/gi, '_')}.block.json`;
+    a.href = url;
+    a.download = safeName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setStatusMessage(`Exported reflexive block "${reflexiveFieldPath}" (${elements.length} element(s)) to ${safeName}.`);
+  };
+
+  const handleImportReflexiveBlockFile = (reflexiveFieldPath: string, reflexiveField: TagFieldDescriptor) => {
+    if (!focusedTag) return;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        setAddingChunkPath(reflexiveFieldPath);
+        const text = await file.text();
+        const parsed = JSON.parse(text) as {
+          elements?: Array<{ values?: Record<string, unknown>; dependencies?: Record<string, unknown> }>;
+          values?: Record<string, unknown>;
+          dependencies?: Record<string, unknown>;
+        };
+        const incomingElements = Array.isArray(parsed.elements)
+          ? parsed.elements
+          : parsed.values
+            ? [{ values: parsed.values, dependencies: parsed.dependencies }]
+            : [];
+        if (incomingElements.length === 0) {
+          setStatusMessage(`Failed to import "${file.name}": No reflexive elements or values found in JSON.`);
+          return;
+        }
+        let existingCount = reflexiveField.children ? reflexiveField.children.length : (reflexiveField.reflexiveCount ?? 0);
+        let updatedTotal = 0;
+        for (let i = 0; i < incomingElements.length; i++) {
+          const item = incomingElements[i];
+          let targetIdx = i;
+          if (i >= existingCount && window.opence.addReflexiveChunk) {
+            const addRes = await window.opence.addReflexiveChunk(focusedTag.index, reflexiveFieldPath, -1);
+            if (!addRes.ok) break;
+            targetIdx = addRes.newElementIndex;
+            existingCount = targetIdx + 1;
+          }
+          const elementPath = `${reflexiveFieldPath}[${targetIdx}]`;
+          if (item.values) {
+            for (const [k, v] of Object.entries(item.values)) {
+              await window.opence.updateTagField(focusedTag.index, `${elementPath}.${k}`, v);
+              updatedTotal++;
+            }
+          }
+          if (item.dependencies) {
+            for (const [k, depVal] of Object.entries(item.dependencies)) {
+              const tagId = typeof depVal === 'number' && depVal !== NULL_TAG_ID ? depVal : null;
+              await window.opence.setDependencySlot(focusedTag.index, `${elementPath}.${k}`, tagId);
+              updatedTotal++;
+            }
+          }
+        }
+        setExpandedReflexives((prev) => new Set(prev).add(reflexiveFieldPath));
+        const refresh = await window.opence.getTagFields(focusedTag.index);
+        if (refresh.ok) {
+          setFieldsResult(refresh.data);
+        }
+        setStatusMessage(
+          `Imported ${incomingElements.length} element(s) (${updatedTotal} field updates) from "${file.name}" into "${reflexiveFieldPath}"!`,
+        );
+      } catch (err) {
+        setStatusMessage(`Failed to import block JSON: ${(err as Error).message}`);
+      } finally {
+        setAddingChunkPath(null);
+      }
+    };
+    input.click();
   };
 
   return (
@@ -477,16 +774,17 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
                 {groupExplanation}
               </div>
             )}
-            {/* Search filter */}
-            <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)' }}>
+            {/* Search filter & Simple Mode toggle */}
+            <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
               <input
                 data-testid="fields-search-input"
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Filter fields..."
+                placeholder="Search fields by name (e.g. speed, damage, magazines)..."
                 style={{
-                  width: '100%',
+                  flex: 1,
+                  minWidth: 160,
                   boxSizing: 'border-box',
                   background: 'var(--bg-input, #1e1e1e)',
                   border: '1px solid var(--border)',
@@ -496,6 +794,50 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
                   padding: '4px 8px',
                 }}
               />
+              <button
+                type="button"
+                data-testid="toggle-simple-mode-btn"
+                onClick={() => setSimpleMode((prev) => !prev)}
+                title={
+                  simpleMode
+                    ? `Simple Mode is ON (hiding ${hiddenClutterCount} read-only/internal fields and advanced JSON buttons). Click to show all raw fields.`
+                    : 'Advanced Mode is ON (showing all raw/read-only fields and JSON tools). Click to switch back to Simple Mode.'
+                }
+                style={{
+                  background: simpleMode ? 'rgba(34, 197, 94, 0.16)' : 'rgba(148, 163, 184, 0.14)',
+                  border: simpleMode ? '1px solid rgba(34, 197, 94, 0.45)' : '1px solid var(--border)',
+                  borderRadius: 3,
+                  color: simpleMode ? '#4ade80' : 'var(--text-secondary)',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  padding: '4px 8px',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {simpleMode
+                  ? `✨ Simple View${hiddenClutterCount > 0 ? ` (${hiddenClutterCount} raw hidden)` : ''}`
+                  : '🔧 Advanced View (All Raw Fields)'}
+              </button>
+              {expandedReflexives.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setExpandedReflexives(new Set())}
+                  title="Collapse all open blocks"
+                  style={{
+                    background: 'rgba(255, 255, 255, 0.06)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 3,
+                    color: 'var(--text-dim)',
+                    fontSize: 11,
+                    padding: '4px 7px',
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Collapse All ▲
+                </button>
+              )}
             </div>
 
             {/* Status message */}
@@ -543,12 +885,16 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
                     onCreateObjectName={handleCreateAndAssignObjectName}
                     onCopyElementJson={handleCopyReflexiveElementJson}
                     onPasteElementJson={handlePasteReflexiveElementJson}
+                    onAppendAndPasteJson={handleAppendAndPasteReflexiveElementJson}
+                    onExportBlockFile={handleExportReflexiveBlockFile}
+                    onImportBlockFile={handleImportReflexiveBlockFile}
                     addingChunkPath={addingChunkPath}
                     expandedBitfields={expandedBitfields}
                     onToggleBitfield={toggleBitfieldExpand}
                     expandedReflexives={expandedReflexives}
                     onToggleReflexive={toggleReflexiveExpand}
                     search={search}
+                    simpleMode={simpleMode}
                   />
                 ))
               )}
@@ -576,6 +922,9 @@ interface FieldCardProps {
   onCreateObjectName?: (targetFieldPath: string, newObjName: string) => void;
   onCopyElementJson?: (elementPath: string, elementFields: TagFieldDescriptor[]) => void;
   onPasteElementJson?: (elementPath: string, elementFields: TagFieldDescriptor[]) => void;
+  onAppendAndPasteJson?: (reflexiveFieldPath: string) => void;
+  onExportBlockFile?: (reflexiveFieldPath: string, reflexiveField: TagFieldDescriptor) => void;
+  onImportBlockFile?: (reflexiveFieldPath: string, reflexiveField: TagFieldDescriptor) => void;
   addingChunkPath?: string | null;
   expandedBitfields: Set<string>;
   onToggleBitfield: (fieldPath: string) => void;
@@ -583,6 +932,8 @@ interface FieldCardProps {
   onToggleReflexive: (fieldPath: string) => void;
   /** Non-empty trimmed search query; reflexive blocks auto-expand when a descendant field matches. */
   search?: string;
+  /** When true, hides read-only/internal fields, hex offsets, and advanced JSON buttons. */
+  simpleMode?: boolean;
 }
 
 function FieldCard({
@@ -597,12 +948,16 @@ function FieldCard({
   onCreateObjectName,
   onCopyElementJson,
   onPasteElementJson,
+  onAppendAndPasteJson,
+  onExportBlockFile,
+  onImportBlockFile,
   addingChunkPath,
   expandedBitfields,
   onToggleBitfield,
   expandedReflexives,
   onToggleReflexive,
   search,
+  simpleMode = true,
 }: FieldCardProps) {
   const isSaving = savingField === fieldPath;
   const isExpanded = expandedBitfields.has(fieldPath);
@@ -613,8 +968,8 @@ function FieldCard({
   const [newObjNameDraft, setNewObjNameDraft] = useState<string>('');
   const fieldUnitInfo = useMemo(() => getFieldUnit(field.name, field.type), [field.name, field.type]);
   const fieldExplanation = useMemo(
-    () => getFieldExplanation(field.name, tagClassName),
-    [field.name, tagClassName],
+    () => getFieldExplanation(field.name, tagClassName, field.type, field.kind),
+    [field.name, tagClassName, field.type, field.kind],
   );
   const crossRefInfo = useMemo(() => resolveCrossReflexiveOptions(field, rootFields, fieldPath), [field, rootFields, fieldPath]);
   const canAddChunk = Boolean(
@@ -729,28 +1084,101 @@ function FieldCard({
               </span>
             </div>
             {canAddChunk && (
-              <button
-                type="button"
-                data-testid={`reflexive-add-${fieldPath}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onAddChunk?.(fieldPath, -1);
-                }}
-                disabled={isAddingChunk}
-                title="Append a new default element chunk to this reflexive array"
-                style={{
-                  background: 'rgba(34, 197, 94, 0.15)',
-                  border: '1px solid rgba(34, 197, 94, 0.4)',
-                  borderRadius: 2,
-                  color: '#4ade80',
-                  fontSize: 10,
-                  fontWeight: 600,
-                  cursor: isAddingChunk ? 'wait' : 'pointer',
-                  padding: '2px 6px',
-                }}
-              >
-                {isAddingChunk ? 'Adding...' : '+ Add Element'}
-              </button>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {!simpleMode && onExportBlockFile && (
+                  <button
+                    type="button"
+                    data-testid={`reflexive-export-file-${fieldPath}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onExportBlockFile(fieldPath, field);
+                    }}
+                    title="Export all elements of this reflexive block to a portable .block.json file on disk"
+                    style={{
+                      background: 'rgba(56, 189, 248, 0.14)',
+                      border: '1px solid rgba(56, 189, 248, 0.4)',
+                      borderRadius: 2,
+                      color: '#38bdf8',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      padding: '2px 6px',
+                    }}
+                  >
+                    💾 Export .JSON
+                  </button>
+                )}
+                {!simpleMode && onImportBlockFile && (
+                  <button
+                    type="button"
+                    data-testid={`reflexive-import-file-${fieldPath}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onImportBlockFile(fieldPath, field);
+                    }}
+                    disabled={isAddingChunk}
+                    title="Import elements into this reflexive block from a .block.json file on disk"
+                    style={{
+                      background: 'rgba(168, 85, 247, 0.15)',
+                      border: '1px solid rgba(168, 85, 247, 0.45)',
+                      borderRadius: 2,
+                      color: '#c084fc',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      cursor: isAddingChunk ? 'wait' : 'pointer',
+                      padding: '2px 6px',
+                    }}
+                  >
+                    📂 Import .JSON
+                  </button>
+                )}
+                {!simpleMode && onAppendAndPasteJson && (
+                  <button
+                    type="button"
+                    data-testid={`reflexive-append-paste-${fieldPath}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onAppendAndPasteJson(fieldPath);
+                    }}
+                    disabled={isAddingChunk}
+                    title="Append a new element to this reflexive block and paste the copied element JSON into it"
+                    style={{
+                      background: 'rgba(251, 191, 36, 0.16)',
+                      border: '1px solid rgba(251, 191, 36, 0.45)',
+                      borderRadius: 2,
+                      color: '#fbbf24',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      cursor: isAddingChunk ? 'wait' : 'pointer',
+                      padding: '2px 6px',
+                    }}
+                  >
+                    📋 Append &amp; Paste
+                  </button>
+                )}
+                <button
+                  type="button"
+                  data-testid={`reflexive-add-${fieldPath}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAddChunk?.(fieldPath, -1);
+                  }}
+                  disabled={isAddingChunk}
+                  title="Append a new default element chunk to this reflexive array"
+                  style={{
+                    background: 'rgba(34, 197, 94, 0.15)',
+                    border: '1px solid rgba(34, 197, 94, 0.4)',
+                    borderRadius: 2,
+                    color: '#4ade80',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    cursor: isAddingChunk ? 'wait' : 'pointer',
+                    padding: '2px 6px',
+                  }}
+                >
+                  {isAddingChunk ? 'Adding...' : '+ Add Element'}
+                </button>
+              </div>
             )}
           </div>
 
@@ -759,7 +1187,9 @@ function FieldCard({
               {(isReflexiveExpanded || (searchQ !== '' && reflexiveDescendantMatches(field, searchQ))) && (
                 <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {field.children.map((el, idx) => {
-                    const editableChildFields = el.fields.filter((cf) => cf.kind !== 'dependency');
+                    const editableChildFields = el.fields.filter(
+                      (cf) => cf.kind !== 'dependency' && (!simpleMode || !isClutterFieldInSimpleMode(cf)),
+                    );
                     return (
                       <div
                         key={idx}
@@ -787,13 +1217,15 @@ function FieldCard({
                               fontFamily: 'var(--mono-font)',
                             }}
                           >
-                            {`${field.name}[${idx}]`}
-                            <span style={{ marginLeft: 6, fontWeight: 400, color: 'var(--text-dim)' }}>
-                              {el.structName} @ 0x{el.structBase.toString(16).toUpperCase()}
-                            </span>
+                            {`${field.name} #${idx + 1} (${field.name}[${idx}])`}
+                            {!simpleMode && (
+                              <span style={{ marginLeft: 6, fontWeight: 400, color: 'var(--text-dim)' }}>
+                                {el.structName} @ 0x{el.structBase.toString(16).toUpperCase()}
+                              </span>
+                            )}
                           </div>
                           <div style={{ display: 'flex', gap: 4 }}>
-                            {onCopyElementJson && (
+                            {!simpleMode && onCopyElementJson && (
                               <button
                                 type="button"
                                 data-testid={`reflexive-copy-json-${fieldPath}[${idx}]`}
@@ -813,7 +1245,7 @@ function FieldCard({
                                 Copy JSON
                               </button>
                             )}
-                            {onPasteElementJson && (
+                            {!simpleMode && onPasteElementJson && (
                               <button
                                 type="button"
                                 data-testid={`reflexive-paste-json-${fieldPath}[${idx}]`}
@@ -873,12 +1305,16 @@ function FieldCard({
                                 onCreateObjectName={onCreateObjectName}
                                 onCopyElementJson={onCopyElementJson}
                                 onPasteElementJson={onPasteElementJson}
+                                onAppendAndPasteJson={onAppendAndPasteJson}
+                                onExportBlockFile={onExportBlockFile}
+                                onImportBlockFile={onImportBlockFile}
                                 addingChunkPath={addingChunkPath}
                                 expandedBitfields={expandedBitfields}
                                 onToggleBitfield={onToggleBitfield}
                                 expandedReflexives={expandedReflexives}
                                 onToggleReflexive={onToggleReflexive}
                                 search={search}
+                                simpleMode={simpleMode}
                               />
                             );
                           })}
@@ -1139,6 +1575,84 @@ function FieldCard({
           }}
           style={inputStyle}
         />
+      ) : field.kind === 'composite' && Array.isArray(localVal) ? (
+        <div>
+          {(() => {
+            const arr = localVal as number[];
+            const labels = getCompositeLabels(field.type, arr.length);
+            const isColor = field.type.toLowerCase().includes('color') && arr.length >= 3;
+            const rgbStartIdx = field.type.toLowerCase().includes('argb') && arr.length === 4 ? 1 : 0;
+            const toHex = (c: number) =>
+              Math.max(0, Math.min(255, Math.round((Number(c) || 0) * 255)))
+                .toString(16)
+                .padStart(2, '0');
+            const hexColor = isColor
+              ? `#${toHex(arr[rgbStartIdx])}${toHex(arr[rgbStartIdx + 1])}${toHex(arr[rgbStartIdx + 2])}`
+              : '#ffffff';
+            return (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                {isColor && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ fontSize: 9.5, color: 'var(--text-dim)' }}>Swatch</span>
+                    <input
+                      type="color"
+                      value={hexColor}
+                      disabled={isSaving}
+                      onChange={(e) => {
+                        const hex = e.target.value.replace('#', '');
+                        const r = parseInt(hex.slice(0, 2), 16) / 255;
+                        const g = parseInt(hex.slice(2, 4), 16) / 255;
+                        const b = parseInt(hex.slice(4, 6), 16) / 255;
+                        const next = [...arr];
+                        next[rgbStartIdx] = Number(r.toFixed(4));
+                        next[rgbStartIdx + 1] = Number(g.toFixed(4));
+                        next[rgbStartIdx + 2] = Number(b.toFixed(4));
+                        setLocalVal(next);
+                        onSave(fieldPath, next.map(Number));
+                      }}
+                      style={{
+                        width: 28,
+                        height: 23,
+                        padding: 0,
+                        border: '1px solid var(--border)',
+                        borderRadius: 2,
+                        background: 'transparent',
+                        cursor: 'pointer',
+                      }}
+                    />
+                  </div>
+                )}
+                {arr.map((compVal, compIdx) => (
+                  <div key={compIdx} style={{ flex: 1, minWidth: 56 }}>
+                    <span style={{ fontSize: 9.5, color: 'var(--text-dim)' }}>
+                      {labels[compIdx] ?? `[${compIdx}]`}
+                    </span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={compVal !== undefined && compVal !== null ? String(compVal) : '0'}
+                      disabled={isSaving}
+                      onChange={(e) => {
+                        const next = [...arr];
+                        next[compIdx] = e.target.value as unknown as number;
+                        setLocalVal(next);
+                      }}
+                      onBlur={() => {
+                        onSave(fieldPath, arr.map((v) => Number(v) || 0));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          onSave(fieldPath, arr.map((v) => Number(v) || 0));
+                        }
+                      }}
+                      style={inputStyle}
+                    />
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
       ) : field.kind === 'dependency' ? (
         <DependencyEditor
           field={field}
@@ -1154,7 +1668,7 @@ function FieldCard({
         />
       ) : (
         <div style={{ fontSize: 11, color: 'var(--text-dim)', fontStyle: 'italic' }}>
-          Unsupported value shape
+          Raw data buffer (managed automatically by OpenCE compilers)
         </div>
       )}
     </div>

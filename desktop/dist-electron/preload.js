@@ -38,6 +38,7 @@ var api = {
   setUnicodeString: (tagIndex, stringIndex, newText) => import_electron.ipcRenderer.invoke("tags:setUnicodeString", tagIndex, stringIndex, newText),
   renameTag: (tagIndex, newPath) => import_electron.ipcRenderer.invoke("tags:renameTag", tagIndex, newPath),
   duplicateTag: (tagIndex, newPath) => import_electron.ipcRenderer.invoke("tags:duplicateTag", tagIndex, newPath),
+  deleteTag: (tagIndex) => import_electron.ipcRenderer.invoke("tags:deleteTag", tagIndex),
   pickBspSourceMap: () => import_electron.ipcRenderer.invoke("dialog:pickBspSourceMap"),
   pickBspResource: (kind) => import_electron.ipcRenderer.invoke("dialog:pickBspResource", kind),
   bspSwapPreflight: (sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices) => import_electron.ipcRenderer.invoke("bsp:swapPreflight", sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices),
@@ -84,6 +85,13 @@ var api = {
   cleanOpenSauceYelo: () => import_electron.ipcRenderer.invoke("map:cleanOpenSauceYelo"),
   scanMapTagErrors: () => import_electron.ipcRenderer.invoke("map:scanTagErrors"),
   globalReplaceTagReference: (fromTagId, toTagId) => import_electron.ipcRenderer.invoke("map:globalReplaceTagReference", fromTagId, toTagId),
+  exportOpenCeModFolder: (options) => import_electron.ipcRenderer.invoke("mod:exportOpenCeModFolder", options),
+  importLegacyTags: (sourceMode, injectMode) => import_electron.ipcRenderer.invoke("mod:importLegacyTags", sourceMode, injectMode),
+  replaceBitmapFromDataUrl: (tagIndex, imageIndex, pngDataUrl, targetFormat) => import_electron.ipcRenderer.invoke("bitmap:replaceFromDataUrl", tagIndex, imageIndex, pngDataUrl, targetFormat),
+  getCustomBrushTextures: () => import_electron.ipcRenderer.invoke("bitmap:getCustomBrushTextures"),
+  openCustomTexturesFolder: () => import_electron.ipcRenderer.invoke("bitmap:openCustomTexturesFolder"),
+  updateBspVertices: (bspIndex, submeshUpdates) => import_electron.ipcRenderer.invoke("render:updateBspVertices", bspIndex, submeshUpdates),
+  updateModelVertices: (modelTagId, submeshUpdates, lod) => import_electron.ipcRenderer.invoke("render:updateModelVertices", modelTagId, submeshUpdates, lod),
   exportModel3d: (modelTagId, lod, format, outputPath) => import_electron.ipcRenderer.invoke("3d:exportModel", modelTagId, lod, format, outputPath),
   exportBsp3d: (bspIndex, format, outputPath) => import_electron.ipcRenderer.invoke("3d:exportBsp", bspIndex, format, outputPath),
   convertPreflight: (source, resourcePaths) => import_electron.ipcRenderer.invoke("map:convertPreflight", source, resourcePaths),
@@ -136,6 +144,11 @@ var api = {
     import_electron.ipcRenderer.on("tagTest:status", listener);
     return () => import_electron.ipcRenderer.removeListener("tagTest:status", listener);
   },
+  onTagTestHotkeyAction: (cb) => {
+    const listener = (_, data) => cb(data);
+    import_electron.ipcRenderer.on("tagTest:hotkeyAction", listener);
+    return () => import_electron.ipcRenderer.removeListener("tagTest:hotkeyAction", listener);
+  },
   pickOpenCeDirectory: () => import_electron.ipcRenderer.invoke("tagTest:pickDir"),
   getOpenCeConfig: () => import_electron.ipcRenderer.invoke("tagTest:getConfig"),
   setOpenCeDirectory: (dir) => import_electron.ipcRenderer.invoke("tagTest:setDir", dir),
@@ -144,7 +157,20 @@ var api = {
   tagTestTriggerFlycam: () => import_electron.ipcRenderer.invoke("tagTest:triggerFlycam"),
   setAlwaysOnTop: (flag) => import_electron.ipcRenderer.invoke("window:setAlwaysOnTop", flag),
   isAlwaysOnTop: () => import_electron.ipcRenderer.invoke("window:isAlwaysOnTop"),
-  getPathForFile: (file) => import_electron.webUtils.getPathForFile(file)
+  getPathForFile: (file) => import_electron.webUtils.getPathForFile(file),
+  pickWrlOrToolLog: () => import_electron.ipcRenderer.invoke("wrl:pickAndParse"),
+  compareWithAnotherMap: () => import_electron.ipcRenderer.invoke("map:compareWithAnother"),
+  discoverSteamMcc: () => import_electron.ipcRenderer.invoke("mcc:discover"),
+  deployMccMod: (options) => import_electron.ipcRenderer.invoke("mcc:deployMod", options),
+  globalReplaceTagFieldValue: (options) => import_electron.ipcRenderer.invoke("map:globalReplaceTagFieldValue", options),
+  compileJmaAnimation: (targetAntrTagIndex, animName) => import_electron.ipcRenderer.invoke("map:compileJmaAnimation", targetAntrTagIndex, animName),
+  compileJmsPhysics: (targetPhysTagIndex, totalMass) => import_electron.ipcRenderer.invoke("map:compileJmsPhysics", targetPhysTagIndex, totalMass),
+  decompileTagToSource: (tagIndex, animationIndex) => import_electron.ipcRenderer.invoke("map:decompileTagToSource", tagIndex, animationIndex),
+  compileStringsTag: (targetTagIndex, textContent) => import_electron.ipcRenderer.invoke("map:compileStringsTag", targetTagIndex, textContent),
+  inspectMeterTag: (meterTagIndex) => import_electron.ipcRenderer.invoke("map:inspectMeterTag", meterTagIndex),
+  compileFontFromGlyphAtlas: (targetFontTagIndex, glyphSpec) => import_electron.ipcRenderer.invoke("map:compileFontFromGlyphAtlas", targetFontTagIndex, glyphSpec),
+  injectProceduralWorldBsp: (options) => import_electron.ipcRenderer.invoke("map:injectProceduralWorldBsp", options),
+  scaleCoupledPhysics: (objectTagId, scaleFactor) => import_electron.ipcRenderer.invoke("map:scaleCoupledPhysics", objectTagId, scaleFactor)
 };
 import_electron.contextBridge.exposeInMainWorld("opence", api);
 //# sourceMappingURL=preload.js.map

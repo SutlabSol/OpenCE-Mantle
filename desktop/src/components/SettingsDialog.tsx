@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, CSSProperties } from 'react';
 import type {
   HaloBitmapVersion,
-  ResourceMapKind,
-  ResourceMapStatus,
   VersionResourceMaps,
   BitmapIdentificationResult,
 } from '../../electron/shared-types';

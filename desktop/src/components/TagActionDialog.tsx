@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, KeyboardEvent } from 'react';
 import type { TagEntrySummary } from '../../electron/shared-types';
 
-export type TagActionType = 'rename' | 'duplicate';
+export type TagActionType = 'rename' | 'duplicate' | 'delete';
 
 interface Props {
   action: TagActionType;
@@ -19,9 +19,11 @@ export default function TagActionDialog({ action, tag, onClose, onSuccess }: Pro
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
+    if (action !== 'delete') {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [action]);
 
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -32,6 +34,24 @@ export default function TagActionDialog({ action, tag, onClose, onSuccess }: Pro
 
   const handleSubmit = async (e?: FormEvent) => {
     if (e) e.preventDefault();
+    if (action === 'delete') {
+      setIsSubmitting(true);
+      setError(null);
+      try {
+        const res = await window.opence.deleteTag(tag.index);
+        setIsSubmitting(false);
+        if (res.ok) {
+          onSuccess(undefined);
+        } else {
+          setError(res.message || 'Failed to delete tag.');
+        }
+      } catch (err) {
+        setIsSubmitting(false);
+        setError(err instanceof Error ? err.message : String(err));
+      }
+      return;
+    }
+
     const cleanPath = path.trim();
     if (!cleanPath) {
       setError('Path cannot be empty.');
@@ -70,9 +90,10 @@ export default function TagActionDialog({ action, tag, onClose, onSuccess }: Pro
   };
 
   const isRename = action === 'rename';
-  const title = isRename ? 'Rename Tag' : 'Duplicate Tag';
-  const submitLabel = isRename ? 'Rename Tag' : 'Duplicate Tag';
-  const testIdPrefix = isRename ? 'rename-tag' : 'duplicate-tag';
+  const isDelete = action === 'delete';
+  const title = isDelete ? 'Delete Tag from Map' : isRename ? 'Rename Tag' : 'Duplicate Tag';
+  const submitLabel = isDelete ? 'Delete Tag' : isRename ? 'Rename Tag' : 'Duplicate Tag';
+  const testIdPrefix = isDelete ? 'delete-tag' : isRename ? 'rename-tag' : 'duplicate-tag';
 
   return (
     <div
@@ -148,37 +169,57 @@ export default function TagActionDialog({ action, tag, onClose, onSuccess }: Pro
 
         <form onSubmit={handleSubmit} style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', wordBreak: 'break-all' }}>
-            <strong>Source Tag:</strong> {tag.path} <span style={{ fontFamily: 'var(--mono-font)' }}>(0x{tag.tagId.toString(16).toUpperCase()})</span>
+            <strong>Target Tag:</strong> {tag.path} <span style={{ fontFamily: 'var(--mono-font)' }}>(0x{tag.tagId.toString(16).toUpperCase()})</span>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <label htmlFor="tag-action-path" style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>
-              {isRename ? 'New Tag Path' : 'Duplicate Tag Path'}
-            </label>
-            <input
-              id="tag-action-path"
-              ref={inputRef}
-              data-testid={`${testIdPrefix}-input`}
-              type="text"
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-              disabled={isSubmitting}
+          {isDelete ? (
+            <div
               style={{
-                background: 'var(--bg-main)',
-                border: '1px solid var(--border)',
-                borderRadius: 2,
-                padding: '6px 8px',
+                fontSize: 11.5,
+                padding: '10px 12px',
+                background: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid rgba(239, 68, 68, 0.35)',
+                borderRadius: 4,
                 color: 'var(--text-primary)',
-                fontFamily: 'var(--mono-font)',
-                fontSize: 12,
+                lineHeight: 1.5,
               }}
-            />
-            <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
-              {isRename
-                ? 'Updates the tag path in the map tag index and marks changes as modified in-memory.'
-                : 'Clones the tag structure and allocates a new unique tag ID (0xE174xxxx) in the map tag index.'}
-            </span>
-          </div>
+            >
+              Are you sure you want to delete <strong>{tag.path}.{tag.primaryClassName}</strong> from the map?
+              <div style={{ marginTop: 6, fontSize: 10.5, color: 'var(--text-secondary)' }}>
+                • All incoming references to this tag across the entire map (including scenario palettes, shaders, and objects) will be safely nulled out (<code style={{ fontFamily: 'var(--mono-font)' }}>0xFFFFFFFF</code>) so the map does not crash.
+                <br />• The tag index slot will be tombstoned in-place so no other tag IDs shift. Use <strong>File &gt; Save</strong> to write changes to disk, or <strong>File &gt; Discard Changes</strong> to revert.
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <label htmlFor="tag-action-path" style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                {isRename ? 'New Tag Path' : 'Duplicate Tag Path'}
+              </label>
+              <input
+                id="tag-action-path"
+                ref={inputRef}
+                data-testid={`${testIdPrefix}-input`}
+                type="text"
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                disabled={isSubmitting}
+                style={{
+                  background: 'var(--bg-main)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 2,
+                  padding: '6px 8px',
+                  color: 'var(--text-primary)',
+                  fontFamily: 'var(--mono-font)',
+                  fontSize: 12,
+                }}
+              />
+              <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+                {isRename
+                  ? 'Updates the tag path in the map tag index and marks changes as modified in-memory.'
+                  : 'Clones the tag structure and allocates a new unique tag ID (0xE174xxxx) in the map tag index.'}
+              </span>
+            </div>
+          )}
 
           {error && (
             <div
@@ -217,17 +258,17 @@ export default function TagActionDialog({ action, tag, onClose, onSuccess }: Pro
             <button
               type="submit"
               data-testid={`${testIdPrefix}-submit`}
-              disabled={isSubmitting || !path.trim() || (isRename && path.trim() === tag.path)}
+              disabled={isSubmitting || (!isDelete && (!path.trim() || (isRename && path.trim() === tag.path)))}
               style={{
-                background: 'var(--accent-cyan)',
+                background: isDelete ? '#ef4444' : 'var(--accent-cyan)',
                 border: 'none',
-                color: '#06202c',
+                color: isDelete ? '#fff' : '#06202c',
                 borderRadius: 2,
                 padding: '6px 14px',
                 fontSize: 12,
                 fontWeight: 600,
                 cursor: isSubmitting ? 'wait' : 'pointer',
-                opacity: isSubmitting || !path.trim() || (isRename && path.trim() === tag.path) ? 0.6 : 1,
+                opacity: isSubmitting || (!isDelete && (!path.trim() || (isRename && path.trim() === tag.path))) ? 0.6 : 1,
               }}
             >
               {isSubmitting ? 'Processing...' : submitLabel}

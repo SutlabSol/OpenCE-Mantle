@@ -757,6 +757,114 @@ export const FIELD_EXPLANATIONS: Record<string, string> = {
   'cutscene camera points': 'Named 3D camera keyframes (position, orientation, roll, field of view) used by `camera_set` for cinematic flythroughs!',
   'cutscene titles': 'On-screen cinematic chapter titles (e.g. "Two Betrayals") with fade-in/hold/fade-out timers, colors, and screen bounds.',
   'structure bsps': 'List of `.scenario_structure_bsp` (`sbsp`) level geometry sections in this map.',
+
+  // Font (font) fields
+  'ascending height': 'Vertical height (in pixels) of characters above the text baseline.',
+  'descending height': 'Vertical depth (in pixels) of character descenders (like g, j, p, q, y) below the baseline.',
+  'leading height': 'Extra vertical line spacing (in pixels) added between lines of text.',
+  'leading width': 'Extra horizontal tracking space (in pixels) added between adjacent characters.',
+  'character tables': 'Lookup tables indexing Unicode character blocks (0x00..0xFF) into the characters glyph array.',
+  'characters': 'Individual rasterized character glyphs with width, height, baseline bearing, and pixel data offset.',
+  'character': 'UTF-16 Unicode codepoint value for this glyph (e.g. 65 = "A").',
+  'character width': 'Horizontal advance width (in pixels) to move the cursor after drawing this character.',
+  'bitmap width': 'Width of the glyph’s cropped monochrome bitmap in pixels.',
+  'bitmap height': 'Height of the glyph’s cropped monochrome bitmap in pixels.',
+  'bitmap origin x': 'Horizontal bearing offset from the cursor to the left edge of the glyph bitmap.',
+  'bitmap origin y': 'Vertical bearing offset from the baseline to the top edge of the glyph bitmap.',
+
+  // Shader Model (soso) & Shader Environment (senv) fields
+  'detail mask': 'Selects which multipurpose map channel masks the detail texture (none, reflection mask, self-illumination, change color).',
+  'detail map scale': 'UV tiling multiplier for the close-up detail texture (higher = finer grain).',
+  'detail map v-scale': 'Vertical UV aspect ratio multiplier for the detail texture.',
+  'u-animation period': 'Time (seconds) for one full horizontal UV scroll cycle.',
+  'v-animation period': 'Time (seconds) for one full vertical UV scroll cycle.',
+  'u-animation scale': 'Amplitude of horizontal texture scrolling/oscillation.',
+  'v-animation scale': 'Amplitude of vertical texture scrolling/oscillation.',
+  'self-illumination': 'Emissive glow settings that stay bright even in unlit dark areas.',
+  'primary on color': 'RGB emissive glow color when the primary self-illumination channel is active.',
+  'primary off color': 'RGB emissive color when the primary self-illumination channel is dimmed/off.',
+  'primary animation period': 'Pulse cycle time (seconds) for primary emissive glow.',
+  'perpendicular brightness': 'Reflection intensity [0..1] when viewing the surface straight-on (90°).',
+  'parallel brightness': 'Reflection intensity [0..1] when viewing the surface at a grazing Fresnel angle.',
+  'perpendicular tint color': 'RGB reflection tint when looking straight at the surface.',
+  'parallel tint color': 'RGB reflection tint at grazing Fresnel angles.',
+  'bump scale': 'Depth/strength of normal-map surface relief bumps.',
+  'primary detail map scale': 'UV tiling scale for the primary detail texture blended over the base diffuse map.',
+  'secondary detail map scale': 'UV tiling scale for the secondary detail texture.',
+  'micro-detail map scale': 'High-frequency close-up UV tiling scale for micro-detail grain.',
+  'material color': 'Diffuse RGB tint multiplied over the base texture.',
+  'material type': 'Physical surface material used for footsteps, bullet impacts, and tire traction (e.g. dirt, stone, metal, cyborg shield).',
+
+  // Globals (matg) fields
+  'sounds': 'Global engine UI/water sounds.',
+  'camera': 'Default 3rd-person camera track.',
+  'player Control': 'Look sensitivity, magnetism, autoaim, and controller look acceleration curves.',
+  'difficulty': 'Campaign difficulty multipliers (Easy, Normal, Heroic, Legendary) for enemy health, shields, damage, and perception.',
+  'grenades': 'Maximum carried and starting counts for Frag and Plasma grenades, plus throwing velocity.',
+  'interface bitmaps': 'Global UI fonts, color tables, and HUD elements.',
+  'weapon list': 'Master list of weapons available to script/cheat functions.',
+  'cheat powerups': 'Powerup equipment tags spawned by debug cheats.',
+  'multiplayer information': 'Multiplayer rules: flag, oddball, vehicles, weapons, and hill sounds.',
+  'player information': 'Master player Spartan settings: walking/running/crouching speeds, jump height, shield/health recharge, and first-person hands!',
+  'first person interface': 'First-person hands gbxmodel, base bitmap, and shield/health meter tags.',
+  'falling damage': 'Safe fall distance and lethal fall velocity thresholds.',
+  'walking speed': 'Forward walking speed in world units per second.',
+  'run forward': 'Maximum forward running speed in world units per second (default Spartan is 0.075).',
+  'run backward': 'Maximum backward running speed in world units per second.',
+  'run sideways': 'Maximum strafing speed in world units per second.',
+  'run acceleration': 'How quickly the player reaches top running speed.',
+  'sneak forward': 'Crouch-walking forward speed in world units per second.',
+  'sneak backward': 'Crouch-walking backward speed.',
+  'sneak sideways': 'Crouch-walking strafe speed.',
+  'airborne acceleration': 'Mid-air directional control acceleration while jumping or falling.',
+  'stun movement penalty': 'Movement speed reduction when hit by stunning gunfire or explosions [0..1].',
+  'stun turning penalty': 'Turning speed reduction when stunned [0..1].',
+  'stun jumping penalty': 'Jump height reduction when stunned [0..1].',
+
+  // Sky (sky ), Fog (fog ), & Light (ligh) fields
+  'outdoor ambient radiosity color': 'Ambient sky light RGB color illuminating outdoor BSP surfaces.',
+  'outdoor ambient radiosity power': 'Brightness multiplier for outdoor ambient sky lighting.',
+  'indoor ambient radiosity color': 'Ambient RGB light color inside indoor BSP clusters.',
+  'indoor ambient radiosity power': 'Brightness multiplier for indoor ambient lighting.',
+  'outdoor fog color': 'RGB color of distance atmospheric fog in outdoor areas.',
+  'outdoor fog maximum density': 'Maximum opacity [0..1] of outdoor distance fog.',
+  'outdoor fog start distance': 'Distance (world units) from the camera where outdoor fog begins fading in.',
+  'outdoor fog opaque distance': 'Distance (world units) where outdoor fog reaches maximum density.',
+  'indoor fog color': 'RGB color of indoor atmospheric fog.',
+  'indoor fog maximum density': 'Maximum opacity [0..1] of indoor fog.',
+  'indoor fog start distance': 'Distance where indoor fog begins.',
+  'indoor fog opaque distance': 'Distance where indoor fog reaches full density.',
+  'lights': 'Directional sun/moon light sources cast by the sky into the level.',
+  'cutoff angle': 'Outer cone angle (degrees) of a spotlight.',
+  'falloff angle': 'Inner full-brightness cone angle (degrees) before spotlight falloff.',
+  'duration': 'Lifetime (seconds) of a temporary dynamic light flash.',
+
+  // Actor (actr) & Actor Variant (actv) fields
+  'major upgrade': 'Probability [0..1] that this AI spawns upgraded to its major rank variant.',
+  'body vitality': 'Base health hit points for this AI actor variant.',
+  'shield vitality': 'Base energy shield hit points for this AI actor variant.',
+  'burst origin radius': 'Aiming inaccuracy offset at the start of an AI firing burst.',
+  'burst origin angle': 'Angular aim error at the start of an AI firing burst.',
+  'burst return length': 'How far the AI pulls its aim back toward the target during a burst.',
+  'burst duration': 'Minimum and maximum duration (seconds) of each firing burst.',
+  'burst separation': 'Pause delay (seconds) between consecutive firing bursts.',
+  'maximumrate of fire': 'Cap on shots per second when this AI fires its weapon.',
+  'grenade velocity': 'Launch speed (world units/sec) when this AI throws grenades.',
+  'grenade count': 'Starting number of grenades carried by this AI.',
+  'dont drop grenades chance': 'Probability [0..1] that the AI will NOT drop its remaining grenades when killed.',
+  'drop weapon loaded': 'Minimum and maximum rounds left in the magazine when the AI drops its weapon.',
+  'drop weapon ammo': 'Total reserve ammo on the weapon dropped when this AI dies.',
+
+  // Common placement & child block fields
+  'position': '3D world coordinates (X, Y, Z) in world units.',
+  'rotation': '3D orientation Euler angles (Yaw, Pitch, Roll) in degrees.',
+  'facing': 'Horizontal compass yaw facing angle in degrees.',
+  'name': 'Identifier name or index into the scenario Object Names table.',
+  'team index': 'Multiplayer team ownership (0 = Red / Default, 1 = Blue).',
+  'bsp index': 'Index of the Structure BSP containing this placement.',
+  'appearance player index': 'Player appearance slot index.',
+  'desired permutation': 'Model region permutation index to select (0 = default).',
+  'spawn time': 'Respawn interval in seconds (0 = default gametype timer).',
 };
 
 /**
@@ -777,8 +885,14 @@ export function getTagGroupExplanation(group: string): string | null {
 
 /**
  * Resolves a concise inline description for a tag field or reflexive block name.
+ * Always provides a clear plain-English explanation via exact lookup or contextual heuristics.
  */
-export function getFieldExplanation(fieldName: string, tagGroup?: string): string | null {
+export function getFieldExplanation(
+  fieldName: string,
+  tagGroup?: string,
+  fieldType?: string,
+  fieldKind?: string,
+): string | null {
   const cleanName = fieldName.trim().toLowerCase();
   if (tagGroup) {
     const scoped = FIELD_EXPLANATIONS[`${tagGroup.toLowerCase()}.${cleanName}`];
@@ -788,20 +902,68 @@ export function getFieldExplanation(fieldName: string, tagGroup?: string): strin
     return FIELD_EXPLANATIONS[cleanName];
   }
   // Heuristic fallback for common Halo field naming patterns
-  if (cleanName === 'flags') {
-    return 'Boolean behavior bitflags controlling engine behavior for this block.';
+  if (cleanName === 'flags' || cleanName.endsWith(' flags')) {
+    return 'Toggleable behavior checkboxes controlling how the Halo engine handles this item.';
   }
   if (cleanName.endsWith(' palette')) {
-    return `Palette of ${cleanName.replace(' palette', '')} tag references available to scenario instances.`;
+    return `List of ${cleanName.replace(' palette', '')} tag types available for placement in this level.`;
   }
-  if (cleanName.includes('vitality')) {
+  if (cleanName.includes('vitality') || cleanName.includes('health')) {
     return 'Hit point capacity before depletion or destruction.';
+  }
+  if (cleanName.includes('shield')) {
+    return 'Energy shield behavior, strength, or recharge timing.';
   }
   if (cleanName.includes('spawn time') || cleanName.includes('respawn')) {
     return 'Time in seconds before the item or vehicle respawns.';
   }
   if (cleanName.includes('field of view') || cleanName === 'fov') {
     return 'Camera horizontal field-of-view angle in degrees (default is 70°).';
+  }
+  if (cleanName.includes('color') || cleanName.includes('tint') || (fieldType && fieldType.toLowerCase().includes('color'))) {
+    return 'RGB color tint values (each channel ranges from 0.0 to 1.0).';
+  }
+  if (cleanName.includes('velocity') || cleanName.includes('speed')) {
+    return 'Movement or launch speed in world units per second.';
+  }
+  if (cleanName.includes('acceleration') || cleanName.includes('deceleration')) {
+    return 'Rate of speed change in world units per second squared.';
+  }
+  if (cleanName.includes('angle') || cleanName.includes('yaw') || cleanName.includes('pitch') || cleanName.includes('roll') || fieldType === 'Angle') {
+    return 'Rotation or cone angle measured in degrees (°).';
+  }
+  if (cleanName.includes('radius') || cleanName.includes('distance') || cleanName.includes('range')) {
+    return 'Distance or radius measured in Halo world units (~3 meters per unit).';
+  }
+  if (cleanName.includes('time') || cleanName.includes('delay') || cleanName.includes('duration') || cleanName.includes('period')) {
+    return 'Time duration or cycle interval measured in seconds.';
+  }
+  if (cleanName.includes('scale') || cleanName.includes('modifier') || cleanName.includes('multiplier') || cleanName.includes('fraction') || fieldType === 'Fraction') {
+    return 'Multiplier or proportional ratio (0.0 = none, 1.0 = 100% normal).';
+  }
+  if (cleanName.includes('offset') || cleanName.includes('position') || cleanName.includes('origin') || cleanName.includes('point')) {
+    return '3D/2D coordinate offset relative to the parent object or screen.';
+  }
+  if (cleanName.includes('marker')) {
+    return 'Name of the 3D attachment marker on the GBXModel where this effect or object connects.';
+  }
+  if (cleanName.includes('count') || cleanName.includes('maximum') || cleanName.includes('minimum')) {
+    return 'Numeric limit or quantity threshold used by the engine.';
+  }
+  if (fieldKind === 'reflexive') {
+    return `Expandable list of ${cleanName} entries stored inside this tag.`;
+  }
+  if (fieldKind === 'enum') {
+    return `Selects the ${cleanName} mode from Halo’s built-in preset options.`;
+  }
+  if (fieldKind === 'bounds') {
+    return `Minimum ("From") and maximum ("To") range for ${cleanName}.`;
+  }
+  if (fieldKind === 'string') {
+    return `Text identifier (up to 31 characters) for ${cleanName}.`;
+  }
+  if (fieldKind === 'number') {
+    return `Numeric tuning value for ${cleanName}.`;
   }
   return null;
 }

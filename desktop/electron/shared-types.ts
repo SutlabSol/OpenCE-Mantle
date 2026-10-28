@@ -17,6 +17,10 @@ import type { UnicodeStringItem, UnicodeStringListResult } from '../../core/src/
 import type { BspInfo, BspSwapPreflightResult, BspSwapOptions, BspSwapResult } from '../../core/src/map/bsp-swapper';
 import type { BitmapTagSummary, BitmapImageInfo, BitmapSequenceInfo } from '../../core/src/render/bitmap-codec';
 import type { SoundTagSummary, SoundPitchRangeInfo, SoundPermutationInfo } from '../../core/src/render/sound-codec';
+import type { WrlDiagnostics, WrlPoint, WrlSegment, WrlFace, WrlSubmeshMatch, ToolDiagnostic, ToolLogReview } from '../../core/src/render/wrl-diagnostics';
+import type { MeshIntegrityReview } from '../../core/src/render/mesh-integrity';
+import type { MapComparisonReport, MapDifferenceRow, MapDifferenceCategory } from '../../core/src/map/map-compare';
+import type { ClassConflictInfo } from '../../core/src/map/tag-injector';
 
 export type {
   TagFieldDescriptor,
@@ -44,6 +48,18 @@ export type {
   SoundTagSummary,
   SoundPitchRangeInfo,
   SoundPermutationInfo,
+  WrlDiagnostics,
+  WrlPoint,
+  WrlSegment,
+  WrlFace,
+  WrlSubmeshMatch,
+  ToolDiagnostic,
+  ToolLogReview,
+  MeshIntegrityReview,
+  MapComparisonReport,
+  MapDifferenceRow,
+  MapDifferenceCategory,
+  ClassConflictInfo,
 };
 
 export interface MapHeaderSummary {
@@ -166,6 +182,7 @@ export type ExtractTagsResult =
 /* ------------------------------- Roadmap Item C: Whole Map Batch Extract ------------------------------- */
 
 export type BatchExtractMode = 'skip' | 'replace';
+export type BatchExtractFormat = 'ocetags' | 'data_source';
 
 export interface BatchExtractManifestFileEntry {
   path: string;
@@ -345,6 +362,7 @@ export interface InjectPlanSummary {
   blockedOther: InjectPlanBlockedSummary[];
   externalRefStatuses: InjectPlanExternalRefSummary[];
   refusedRoots: InjectPlanRefusedRootSummary[];
+  classConflicts?: ClassConflictInfo[];
 }
 
 export type PlanInjectResult = { ok: true; plan: InjectPlanSummary } | { ok: false; code: string; message: string };
@@ -517,6 +535,7 @@ export type WorkerRequest =
       parentDir: string;
       sourceMapName: string;
       mode: BatchExtractMode;
+      extractFormat?: BatchExtractFormat;
       resourceMapPaths: Partial<Record<ResourceMapKind, string>>;
     }
   | { type: 'getTagFields'; requestId: string; tagIndex: number }
@@ -571,6 +590,7 @@ export type WorkerRequest =
   | { type: 'setUnicodeString'; requestId: string; tagIndex: number; stringIndex: number; newText: string }
   | { type: 'renameTag'; requestId: string; tagIndex: number; newPath: string }
   | { type: 'duplicateTag'; requestId: string; tagIndex: number; newPath: string }
+  | { type: 'deleteTag'; requestId: string; tagIndex: number }
   | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number; sourceBspIndices?: number[] }
   | { type: 'getSourceBspMesh'; requestId: string; sourceFilePath: string; bspIndex?: number }
   | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions; resourceMapPaths?: Partial<Record<ResourceMapKind, string | undefined>> }
@@ -608,6 +628,149 @@ export type WorkerRequest =
   | { type: 'cleanOpenSauceYelo'; requestId: string }
   | { type: 'scanMapTagErrors'; requestId: string }
   | { type: 'globalReplaceTagReference'; requestId: string; fromTagId: number; toTagId: number }
+  | {
+      type: 'exportOpenCeModFolder';
+      requestId: string;
+      rootTagIndices: number[];
+      modName: string;
+      version?: string;
+      author?: string;
+      description?: string;
+      includeDependencies?: boolean;
+      replaceTargetTagIndex?: number;
+      parentOutputDir: string;
+      bitmapsPath?: string;
+      soundsPath?: string;
+      locPath?: string;
+    }
+  | {
+      type: 'importLegacyTags';
+      requestId: string;
+      inputPaths: string[];
+      mode?: 'add' | 'swap';
+      bitmapsPath?: string;
+      soundsPath?: string;
+      locPath?: string;
+    }
+  | {
+      type: 'replaceBitmapFromPngBytes';
+      requestId: string;
+      tagIndex: number;
+      imageIndex: number;
+      pngBytes: Uint8Array;
+      targetFormat?: number;
+      bitmapsPath?: string;
+    }
+  | {
+      type: 'updateBspVertices';
+      requestId: string;
+      bspIndex: number;
+      submeshUpdates: Array<{
+        submeshIndex: number;
+        positions: Float32Array | number[];
+        normals?: Float32Array | number[];
+        uvs?: Float32Array | number[];
+        shaderTagId?: number;
+      }>;
+    }
+  | {
+      type: 'updateModelVertices';
+      requestId: string;
+      modelTagId: number;
+      lod?: number;
+      submeshUpdates: Array<{
+        submeshIndex: number;
+        positions: Float32Array | number[];
+        normals?: Float32Array | number[];
+        uvs?: Float32Array | number[];
+        shaderTagId?: number;
+      }>;
+    }
+  | { type: 'compareMaps'; requestId: string; otherFilePath: string }
+  | {
+      type: 'deployMccMod';
+      requestId: string;
+      parentOutputDir: string;
+      title: string;
+      description?: string;
+      author?: string;
+      isMultiplayer?: boolean;
+      registerInModManifest?: boolean;
+      modManifestPath?: string;
+    }
+  | {
+      type: 'globalReplaceTagFieldValue';
+      requestId: string;
+      fieldNameQuery: string;
+      tagGroupFilter?: string;
+      matchValue?: string;
+      newValue: string;
+    }
+  | {
+      type: 'compileJmaAnimation';
+      requestId: string;
+      targetAntrTagIndex: number;
+      jmaText: string;
+      animName?: string;
+    }
+  | {
+      type: 'compileJmsPhysics';
+      requestId: string;
+      targetPhysTagIndex: number;
+      jmsText: string;
+      totalMass?: number;
+    }
+  | {
+      type: 'decompileTagToSource';
+      requestId: string;
+      tagIndex: number;
+      animationIndex?: number;
+    }
+  | {
+      type: 'compileStringsTag';
+      requestId: string;
+      targetTagIndex: number;
+      textContent: string;
+    }
+  | {
+      type: 'inspectMeterTag';
+      requestId: string;
+      meterTagIndex: number;
+    }
+  | {
+      type: 'compileFontFromGlyphAtlas';
+      requestId: string;
+      targetFontTagIndex: number;
+      glyphSpec: {
+        ascendingHeight: number;
+        descendingHeight: number;
+        leadingHeight: number;
+        leadingWidth: number;
+        glyphs: Array<{
+          charCode: number;
+          characterWidth: number;
+          bitmapWidth: number;
+          bitmapHeight: number;
+          bitmapOriginX: number;
+          bitmapOriginY: number;
+          alphaPixels: number[];
+        }>;
+      };
+    }
+  | {
+      type: 'injectProceduralWorldBsp';
+      requestId: string;
+      worldMesh: any;
+      bspIndex?: number;
+      shaderBindings?: Record<string, { tagId: number; path: string; classFourCC: string }>;
+      collisionMode?: 'auto' | 'exact';
+    }
+  | {
+      type: 'scaleCoupledPhysics';
+      requestId: string;
+      objectTagId: number;
+      scaleFactor: number;
+    }
   | { type: 'cancel'; requestId: string };
 
 export interface DeprotectInspectionSummary {
@@ -665,8 +828,10 @@ export interface BuildCustomObjectRequest {
   tagPath: string;
   itemName?: string;
   objFilePath: string;
+  objSourceText?: string;
   collisionObjFilePath?: string;
   textureFilePath?: string;
+  texturePngDataUrl?: string;
   scale?: number;
   flipYz?: boolean;
   centerOrigin?: boolean;
@@ -680,6 +845,8 @@ export interface BuildCustomObjectRequest {
   templateTagIndex?: number;
   outputMode: 'inject' | 'ocetags' | 'both';
   outputOceTagsPath?: string;
+  placeAtPosition?: [number, number, number];
+  placeAtRotation?: [number, number, number];
 }
 
 export interface BuildCustomObjectSuccess {
@@ -721,6 +888,10 @@ export type RenameTagResult =
 
 export type DuplicateTagResult =
   | { ok: true; newTagIndex: number; newTagId: number; path: string; map: OpenMapSummary }
+  | { ok: false; code: string; message: string };
+
+export type DeleteTagResult =
+  | { ok: true; deletedPath: string; deletedGroup: string; scrubbedReferencesCount: number; map: OpenMapSummary }
   | { ok: false; code: string; message: string };
 
 export type GetBspRenderMeshResult =
@@ -836,7 +1007,7 @@ export interface OpenceApi {
   extractTags(request: ExtractTagsRequest): Promise<ExtractTagsResult>;
   cancelExtraction(): void;
   batchExtractPreflight(): Promise<BatchExtractPreflightResult | null>;
-  startBatchExtract(options: { parentDir: string; mode: BatchExtractMode }): Promise<BatchExtractResult>;
+  startBatchExtract(options: { parentDir: string; mode: BatchExtractMode; extractFormat?: BatchExtractFormat }): Promise<BatchExtractResult>;
   cancelBatchExtract(): void;
   finalizeBatchExtract(request: FinalizeBatchExtractRequest): Promise<{ ok: boolean; message?: string }>;
   pickResourceMap(kind: ResourceMapKind): Promise<ResourceMapPickResult>;
@@ -934,6 +1105,8 @@ export interface OpenceApi {
   renameTag(tagIndex: number, newPath: string): Promise<RenameTagResult>;
   /** Milestone 9: Duplicate a tag in the map. */
   duplicateTag(tagIndex: number, newPath: string): Promise<DuplicateTagResult>;
+  /** Delete a tag from the map and scrub all incoming references to NULL_TAG_ID. */
+  deleteTag(tagIndex: number): Promise<DeleteTagResult>;
   /** Milestone 10: BSP Swapper - pick a source map file. */
   pickBspSourceMap(): Promise<{ path: string | null }>;
   pickBspResource?(kind: 'bitmaps' | 'sounds'): Promise<{ path: string | null }>;
@@ -1012,6 +1185,8 @@ export interface OpenceApi {
       encounters: string[];
       recordedAnimations: string[];
     };
+    scripts?: Array<{ name: string; scriptType: string; returnType?: string; rootNodeIndex?: number; bodySource: string }>;
+    globals?: Array<{ name: string; type: string; initNodeIndex?: number; valueSource: string }>;
   } | { ok: false; message: string }>;
   compileHaloScript?(hscSource: string): Promise<{
     ok: true;
@@ -1094,12 +1269,279 @@ export interface OpenceApi {
     replacedCount: number;
     affectedTags: Array<{ tagIndex: number; tagPath: string; tagGroup: string; fieldPath: string }>;
   } | { ok: false; message: string }>;
+  globalReplaceTagFieldValue?(options: {
+    fieldNameQuery: string;
+    tagGroupFilter?: string;
+    matchValue?: string;
+    newValue: string;
+  }): Promise<
+    | {
+        ok: true;
+        replacedCount: number;
+        affectedFields: Array<{
+          tagIndex: number;
+          tagPath: string;
+          tagGroup: string;
+          fieldPath: string;
+          oldValue: string;
+          newValue: string;
+        }>;
+      }
+    | { ok: false; message: string }
+  >;
+  compileJmaAnimation?(
+    targetAntrTagIndex: number,
+    animName?: string,
+  ): Promise<
+    | {
+        ok: true;
+        fileName: string;
+        animationName: string;
+        frameCount: number;
+        nodeCount: number;
+        frameSize: number;
+        replacedExisting: boolean;
+      }
+    | { ok: false; cancelled?: boolean; message: string }
+  >;
+  compileJmsPhysics?(
+    targetPhysTagIndex: number,
+    totalMass?: number,
+  ): Promise<
+    | {
+        ok: true;
+        fileName: string;
+        massPointCount: number;
+        totalMass: number;
+        centerOfMass: [number, number, number];
+        moments: [number, number, number];
+      }
+    | { ok: false; cancelled?: boolean; message: string }
+  >;
+  decompileTagToSource?(
+    tagIndex: number,
+    animationIndex?: number,
+  ): Promise<
+    | {
+        ok: true;
+        outputPath: string;
+        kind: 'gbxmodel_jms' | 'animations_jma' | 'physics_jms';
+        tagPath: string;
+        summary: string;
+      }
+    | { ok: false; cancelled?: boolean; message: string }
+  >;
+  compileStringsTag?(
+    targetTagIndex: number,
+    textContent?: string,
+  ): Promise<
+    | {
+        ok: true;
+        tagPath: string;
+        tagGroup: string;
+        entryCount: number;
+        messageNames: string[];
+        fileName?: string;
+      }
+    | { ok: false; cancelled?: boolean; message: string }
+  >;
+  inspectMeterTag?(
+    meterTagIndex: number,
+  ): Promise<
+    | {
+        ok: true;
+        tagPath: string;
+        width: number;
+        height: number;
+        interpolateColors: number;
+        anchorColors: number;
+        emptyColorHex: string;
+        fullColorHex: string;
+        unmaskDistance: number;
+        maskDistance: number;
+        encodedBytes: number;
+        previewRgba: number[];
+      }
+    | { ok: false; message: string }
+  >;
+  compileFontFromGlyphAtlas?(
+    targetFontTagIndex: number,
+    glyphSpec: {
+      ascendingHeight: number;
+      descendingHeight: number;
+      leadingHeight: number;
+      leadingWidth: number;
+      glyphs: Array<{
+        charCode: number;
+        characterWidth: number;
+        bitmapWidth: number;
+        bitmapHeight: number;
+        bitmapOriginX: number;
+        bitmapOriginY: number;
+        alphaPixels: number[];
+      }>;
+    },
+  ): Promise<
+    | {
+        ok: true;
+        tagPath: string;
+        glyphCount: number;
+        totalPixelBytes: number;
+      }
+    | { ok: false; message: string }
+  >;
+  exportOpenCeModFolder?(options: {
+    rootTagIndices: number[];
+    modName: string;
+    version?: string;
+    author?: string;
+    description?: string;
+    includeDependencies?: boolean;
+    replaceTargetTagIndex?: number;
+  }): Promise<{
+    ok: true;
+    outputDir: string;
+    modFolderName: string;
+    tagCount: number;
+    writtenFiles: string[];
+  } | { ok: false; message: string }>;
+  importLegacyTags?(
+    sourceMode: 'file' | 'folder',
+    injectMode?: 'add' | 'swap',
+  ): Promise<{
+    ok: true;
+    sourcePath: string;
+    formatDetected: 'hek_loose' | 'hmt_meta_xml';
+    addedCount: number;
+    swappedCount: number;
+    reusedCount: number;
+    importedPaths: string[];
+    warnings: string[];
+    map: OpenMapSummary;
+  } | { ok: false; message: string }>;
+  replaceBitmapFromDataUrl?(
+    tagIndex: number,
+    imageIndex: number,
+    pngDataUrl: string,
+    targetFormat?: number,
+  ): Promise<ReplaceBitmapResult>;
+  getCustomBrushTextures?(): Promise<{
+    ok: true;
+    texturesDir: string;
+    textures: Array<{ name: string; filePath: string; dataUrl: string }>;
+  }>;
+  openCustomTexturesFolder?(): Promise<{ ok: boolean; texturesDir: string }>;
+  updateBspVertices?(
+    bspIndex: number,
+    submeshUpdates: Array<{
+      submeshIndex: number;
+      positions: Float32Array | number[];
+      normals?: Float32Array | number[];
+      uvs?: Float32Array | number[];
+      shaderTagId?: number;
+    }>,
+  ): Promise<{ ok: true; updatedVertices: number; updatedCollisionVertices: number; map: OpenMapSummary } | { ok: false; message: string }>;
+  updateModelVertices?(
+    modelTagId: number,
+    submeshUpdates: Array<{
+      submeshIndex: number;
+      positions: Float32Array | number[];
+      normals?: Float32Array | number[];
+      uvs?: Float32Array | number[];
+      shaderTagId?: number;
+    }>,
+    lod?: number,
+  ): Promise<{ ok: true; updatedVertices: number; updatedShaders?: number; map: OpenMapSummary } | { ok: false; message: string }>;
   tagTestSetAlwaysOnTop(flag: boolean): Promise<void>;
   tagTestIsAlwaysOnTop(): Promise<boolean>;
   tagTestTriggerFlycam(): Promise<{ ok: boolean; message?: string }>;
+  onTagTestHotkeyAction?(
+    cb: (payload: { action: string; flag?: string; value?: number; label?: string }) => void,
+  ): () => void;
   setAlwaysOnTop(flag: boolean): Promise<void>;
   isAlwaysOnTop(): Promise<boolean>;
   getPathForFile(file: File): string;
+  /** Guilty Spark Item 1: Pick and parse a .wrl (VRML 1.0) error geometry file or tool.exe build log. */
+  pickWrlOrToolLog?(): Promise<
+    | { ok: true; kind: 'wrl' | 'log'; fileName: string; wrl?: WrlDiagnostics; logReview?: ToolLogReview }
+    | { ok: false; cancelled?: boolean; message: string }
+  >;
+  /** Guilty Spark Item 7: Compare the currently open map with another .map file on disk. */
+  compareWithAnotherMap?(): Promise<
+    | { ok: true; leftFileName: string; rightFileName: string; report: MapComparisonReport }
+    | { ok: false; cancelled?: boolean; message: string }
+  >;
+  /** Guilty Spark Item 8: Discover Steam MCC installation & ModManifest.txt status. */
+  discoverSteamMcc?(): Promise<{
+    ok: true;
+    mccInstallPaths: string[];
+    defaultModManifestPath: string;
+    manifestExists: boolean;
+    registeredRoots: string[];
+  }>;
+  /** Guilty Spark Item 8: Package & deploy the open map as a Steam MCC mod and optionally register in ModManifest.txt. */
+  deployMccMod?(options: {
+    title: string;
+    description?: string;
+    author?: string;
+    isMultiplayer?: boolean;
+    registerInModManifest?: boolean;
+  }): Promise<
+    | {
+        ok: true;
+        modFolderPath: string;
+        mapOutputPath: string;
+        modInfoPath: string;
+        manifestRegistered: boolean;
+        manifestPath?: string;
+      }
+    | { ok: false; cancelled?: boolean; message: string }
+  >;
+  /** v0.6.8: Inject procedural Tunnel/Cave, Multi-Style Bridge, or QuickForge World mesh directly into the map's Structure BSP. */
+  injectProceduralWorldBsp?(options: {
+    worldMesh: any;
+    bspIndex?: number;
+    shaderBindings?: Record<string, { tagId: number; path: string; classFourCC: string }>;
+    collisionMode?: 'auto' | 'exact';
+  }): Promise<
+    | {
+        ok: true;
+        addedVertices: number;
+        addedTriangles: number;
+        addedSubmeshes: number;
+        addedCollisionSurfaces: number;
+        addedCollisionNodes3d: number;
+        newBspSize: number;
+        newBspAddress: number;
+        worldBounds: [number, number, number, number, number, number];
+        map: OpenMapSummary;
+      }
+    | { ok: false; message: string }
+  >;
+  /** v0.6.8: Coupled Vehicle, Weapon, Equipment & Scenery Dimensional Physics Resizer (0.1x - 5.0x). */
+  scaleCoupledPhysics?(
+    objectTagId: number,
+    scaleFactor: number,
+  ): Promise<
+    | {
+        ok: true;
+        summary: {
+          objectTagId: number;
+          objectPath: string;
+          objectClass: string;
+          scaleFactor: number;
+          scaledGbxmodelVertices: number;
+          scaledCollisionVertices: number;
+          scaledCollisionPlanes: number;
+          scaledPhysicsMassPoints: number;
+          scaledVehicleSuspensions: number;
+          updatedWeaponOrEquipmentScale: boolean;
+          newPhysicsMass?: number;
+        };
+        map: OpenMapSummary;
+      }
+    | { ok: false; message: string }
+  >;
 }
 
 declare global {
