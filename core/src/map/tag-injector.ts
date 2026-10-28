@@ -633,7 +633,7 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
           blockedReasons.get(li)!.push(`Depends on "${dep.path}" which could not be added (${(blockedReasons.get(dep.localTagIndex) ?? ['unresolvable']).join('; ')}).`);
           blocked.add(li);
           changed = true;
-        } else if (dep.kind === 'external') {
+        } else if (dep.kind === 'external' || (dep.kind === 'internal' && dep.localTagIndex === undefined)) {
           if (targetByKey.has(tagKey(dep.path, dep.group))) continue;
           if (!blockedReasons.has(li)) blockedReasons.set(li, []);
           blockedReasons.get(li)!.push(`Depends on "${dep.path}" (${dep.group}), a resource-map tag not present in the target map. Adding new resource-map references isn't supported this milestone.`);
@@ -1049,7 +1049,7 @@ function makeResolveDepTagId(t: OceContainerTag, plan: InjectionPlan, targetTagI
       if (resolved === undefined) throw new Error(`Internal error: dependency to local tag ${dep.localTagIndex} was not resolved before applying injection.`);
       return resolved;
     }
-    if (dep.kind === 'external') {
+    if (dep.kind === 'external' || (dep.kind === 'internal' && dep.localTagIndex === undefined)) {
       const match = targetTagIndex.entries.find((e) => normalizeTagPath(e.path) === normalizeTagPath(dep.path) && e.primaryClassName === dep.group);
       if (!match) throw new Error(`Internal error: external dependency to "${dep.path}" was not validated as present in the target before applying injection.`);
       return match.tagId;

@@ -241,6 +241,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
   const [outlinerFilter, setOutlinerFilter] = useState<'all' | ScenarioObjectKind>('all');
   const [outlinerSearch, setOutlinerSearch] = useState<string>('');
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
+  const contextMenuWorldHitRef = useRef<[number, number, number] | null>(null);
   const [addKind, setAddKind] = useState<
     | ScenarioObjectKind
     | 'teleporter'
@@ -810,6 +811,32 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       teamIndex?: number,
     ) => {
       try {
+        // Ensure the target layer is visible so the newly added object is immediately seen
+        setVisibleLayers((prev) => {
+          if ((kind === 'weapon' || kind === 'equipment' || kind === 'ctf_flag_item') && !prev.items) {
+            return { ...prev, items: true };
+          }
+          if (kind === 'vehicle' && !prev.vehicles) return { ...prev, vehicles: true };
+          if (kind === 'scenery' && !prev.scenery) return { ...prev, scenery: true };
+          if (kind === 'machine' && !prev.machines) return { ...prev, machines: true };
+          if (kind === 'spawn' && !prev.spawns) return { ...prev, spawns: true };
+          if (kind === 'trigger_volume' && !prev.triggerVolumes) return { ...prev, triggerVolumes: true };
+          if (
+            (kind === 'netgame_flag' ||
+              kind === 'ctf_flag' ||
+              kind === 'teleporter' ||
+              kind === 'teleport' ||
+              kind === 'teleport_2way' ||
+              kind === 'koth' ||
+              kind === 'race' ||
+              kind === 'oddball') &&
+            !prev.netgameFlags
+          ) {
+            return { ...prev, netgameFlags: true };
+          }
+          return prev;
+        });
+
         if (kind === 'ctf_flag') {
           // CTF Flag Stand (type 0 = CTF Flag, usageId = teamIndex 0 Red or 1 Blue)
           const res = await window.opence.addScenarioPlacement('netgame_flag', 0, position, rotation, teamIndex ?? 0);
@@ -1626,6 +1653,35 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           objGroup.add(flagMarker);
           targetLayer.add(objGroup);
         } else if (obj.modelTagId && obj.modelTagId !== 0xffffffff) {
+          // For weapons and equipment (which are 0.05 - 0.30 Halo units small), add a subtle glowing pickup pad ring
+          // so they are easy to spot and click on any terrain texture
+          if (obj.kind === 'weapon' || obj.kind === 'equipment') {
+            const padColor = obj.kind === 'weapon' ? 0xff9800 : 0x00e5ff;
+            const ringGeom = new THREE.RingGeometry(0.16, 0.26, 20);
+            ringGeom.translate(0, 0, 0.015);
+            const ringMat = new THREE.MeshBasicMaterial({
+              color: padColor,
+              side: THREE.DoubleSide,
+              transparent: true,
+              opacity: 0.75,
+            });
+            const ringMesh = new THREE.Mesh(ringGeom, ringMat);
+            ringMesh.userData = { id: obj.id };
+            objGroup.add(ringMesh);
+
+            const discGeom = new THREE.CircleGeometry(0.16, 20);
+            discGeom.translate(0, 0, 0.012);
+            const discMat = new THREE.MeshBasicMaterial({
+              color: padColor,
+              side: THREE.DoubleSide,
+              transparent: true,
+              opacity: 0.22,
+            });
+            const discMesh = new THREE.Mesh(discGeom, discMat);
+            discMesh.userData = { id: obj.id };
+            objGroup.add(discMesh);
+          }
+
           targetLayer.add(objGroup);
 
           loadModelGeometry(obj.modelTagId).then((modelGeom) => {
@@ -1642,6 +1698,21 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
                 objGroup.add(fallbackMesh);
               }
               return;
+            }
+
+            // Compute vertical zOffset for weapons/equipment so models centered at origin sit cleanly on the ground
+            let zLift = 0;
+            if (obj.kind === 'weapon' || obj.kind === 'equipment') {
+              let minZ = Infinity;
+              for (const submesh of modelGeom.submeshes) {
+                for (let vi = 0; vi < submesh.vertexCount; vi++) {
+                  const vz = submesh.vertices[vi * 8 + 2];
+                  if (vz < minZ) minZ = vz;
+                }
+              }
+              if (Number.isFinite(minZ) && minZ < 0.02) {
+                zLift = -minZ + 0.025;
+              }
             }
 
             const defaultColor =
@@ -1671,6 +1742,9 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
               });
 
               const mesh = new THREE.Mesh(geom, solidMat);
+              if (zLift !== 0) {
+                mesh.position.z = zLift;
+              }
               mesh.userData = { id: obj.id };
               objGroup.add(mesh);
 
@@ -2773,6 +2847,24 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       const dy = e.clientY - pointerDownPosRef.current.y;
       if (Math.hypot(dx, dy) < 6 && !e.shiftKey && !e.altKey) {
         const rect = container.getBoundingClientRect();
+        // Raycast onto BSP terrain so right-click "Quick Add Object" spawns where the user clicked
+        contextMenuWorldHitRef.current = null;
+        if (submeshMeshesRef.current.length > 0) {
+          const mouseX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+          const mouseY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+          const raycaster = new THREE.Raycaster();
+          raycaster.setFromCamera(new THREE.Vector2(mouseX, mouseY), camera);
+          const bspMeshesList = submeshMeshesRef.current.map((m) => m.mesh);
+          const hits = raycaster.intersectObjects(bspMeshesList, false);
+          const validHit = hits.find((h) => h.distance > 0.2 && h.distance < 250);
+          if (validHit) {
+            contextMenuWorldHitRef.current = [
+              validHit.point.x,
+              -validHit.point.z,
+              validHit.point.y + 0.03,
+            ];
+          }
+        }
         const x = Math.min(Math.max(8, e.clientX - rect.left), Math.max(8, rect.width - 200));
         const y = Math.min(Math.max(8, e.clientY - rect.top), Math.max(8, rect.height - 230));
         setViewportContextMenu({ x, y });
@@ -3328,7 +3420,10 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           {/* Add Object Button */}
           <button
             data-testid="viewport-add-object-btn"
-            onClick={() => setShowAddModal(true)}
+            onClick={() => {
+              contextMenuWorldHitRef.current = null;
+              setShowAddModal(true);
+            }}
             style={{
               background: '#2e7d32',
               color: '#fff',
@@ -5743,31 +5838,75 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
               <button
                 data-testid="add-modal-submit-btn"
                 onClick={() => {
-                  const { yaw, pitch } = camEulerRef.current;
-                  const camPos = camPosRef.current;
-                  // Forward vector in Three.js world space:
-                  const fwdX = -Math.sin(yaw) * Math.cos(pitch);
-                  const fwdY = Math.sin(pitch);
-                  const fwdZ = -Math.cos(yaw) * Math.cos(pitch);
-                  // 15 meters in front of the camera in Three.js world space:
-                  const spawnWorldX = camPos.x + fwdX * 15.0;
-                  const spawnWorldY = camPos.y + fwdY * 15.0;
-                  const spawnWorldZ = camPos.z + fwdZ * 15.0;
-                  // Convert Three.js world coordinates to Halo coordinates:
-                  // World X = Halo X, World Y = Halo Z (up), World Z = -Halo Y
-                  const spawnHaloPos: [number, number, number] = [
-                    spawnWorldX,
-                    -spawnWorldZ,
-                    spawnWorldY,
-                  ];
-                  // Keep the exact [0, 0, 0] rotation exported from Blender by default
-                  const spawnHaloRot: [number, number, number] = [0, 0, 0];
                   const effectiveKind =
                     addKind === 'netgame_flag'
                       ? addNetgameSubtype
                       : addKind === 'teleporter'
                         ? addTeleporterSubtype
                         : addKind;
+
+                  let spawnHaloPos: [number, number, number];
+                  if (contextMenuWorldHitRef.current) {
+                    spawnHaloPos = [...contextMenuWorldHitRef.current];
+                    contextMenuWorldHitRef.current = null;
+                  } else {
+                    const { yaw, pitch } = camEulerRef.current;
+                    const camPos = camPosRef.current;
+                    // Forward vector in Three.js world space:
+                    const fwdX = -Math.sin(yaw) * Math.cos(pitch);
+                    const fwdY = Math.sin(pitch);
+                    const fwdZ = -Math.cos(yaw) * Math.cos(pitch);
+                    const isSmallItem =
+                      effectiveKind === 'weapon' ||
+                      effectiveKind === 'equipment' ||
+                      effectiveKind === 'ctf_flag_item' ||
+                      effectiveKind === 'spawn' ||
+                      effectiveKind === 'biped';
+                    const defaultDist = isSmallItem ? 4.0 : 8.0;
+
+                    let hitHalo: [number, number, number] | null = null;
+                    if (submeshMeshesRef.current.length > 0) {
+                      const bspMeshesList = submeshMeshesRef.current.map((m) => m.mesh);
+                      const fwdRay = new THREE.Raycaster(
+                        camPos.clone(),
+                        new THREE.Vector3(fwdX, fwdY, fwdZ).normalize(),
+                        0.2,
+                        isSmallItem ? 14.0 : 25.0,
+                      );
+                      const fwdHits = fwdRay.intersectObjects(bspMeshesList, false);
+                      if (fwdHits.length > 0) {
+                        const h = fwdHits[0];
+                        hitHalo = [h.point.x, -h.point.z, h.point.y + 0.03];
+                      } else {
+                        const targetX = camPos.x + fwdX * defaultDist;
+                        const targetY = camPos.y + fwdY * defaultDist;
+                        const targetZ = camPos.z + fwdZ * defaultDist;
+                        const downRay = new THREE.Raycaster(
+                          new THREE.Vector3(targetX, targetY + 4.0, targetZ),
+                          new THREE.Vector3(0, -1, 0),
+                          0.1,
+                          30.0,
+                        );
+                        const downHits = downRay.intersectObjects(bspMeshesList, false);
+                        if (downHits.length > 0) {
+                          const dh = downHits[0];
+                          hitHalo = [targetX, -targetZ, dh.point.y + 0.03];
+                        }
+                      }
+                    }
+
+                    if (hitHalo) {
+                      spawnHaloPos = hitHalo;
+                    } else {
+                      const spawnWorldX = camPos.x + fwdX * defaultDist;
+                      const spawnWorldY = camPos.y + fwdY * defaultDist;
+                      const spawnWorldZ = camPos.z + fwdZ * defaultDist;
+                      spawnHaloPos = [spawnWorldX, -spawnWorldZ, spawnWorldY];
+                    }
+                  }
+
+                  // Keep the exact [0, 0, 0] rotation exported from Blender by default
+                  const spawnHaloRot: [number, number, number] = [0, 0, 0];
                   handleAddPlacement(effectiveKind, addPaletteIndex, spawnHaloPos, spawnHaloRot, addTeam);
                 }}
                 style={{

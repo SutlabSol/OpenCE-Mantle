@@ -36394,7 +36394,7 @@ function planInjection(mode, target, container, resourceMapConfig = {}, options 
           blockedReasons.get(li).push(`Depends on "${dep.path}" which could not be added (${(blockedReasons.get(dep.localTagIndex) ?? ["unresolvable"]).join("; ")}).`);
           blocked.add(li);
           changed = true;
-        } else if (dep.kind === "external") {
+        } else if (dep.kind === "external" || dep.kind === "internal" && dep.localTagIndex === void 0) {
           if (targetByKey.has(tagKey(dep.path, dep.group))) continue;
           if (!blockedReasons.has(li)) blockedReasons.set(li, []);
           blockedReasons.get(li).push(`Depends on "${dep.path}" (${dep.group}), a resource-map tag not present in the target map. Adding new resource-map references isn't supported this milestone.`);
@@ -36716,7 +36716,7 @@ function makeResolveDepTagId(t, plan, targetTagIndex) {
       if (resolved === void 0) throw new Error(`Internal error: dependency to local tag ${dep.localTagIndex} was not resolved before applying injection.`);
       return resolved;
     }
-    if (dep.kind === "external") {
+    if (dep.kind === "external" || dep.kind === "internal" && dep.localTagIndex === void 0) {
       const match = targetTagIndex.entries.find((e) => normalizeTagPath(e.path) === normalizeTagPath(dep.path) && e.primaryClassName === dep.group);
       if (!match) throw new Error(`Internal error: external dependency to "${dep.path}" was not validated as present in the target before applying injection.`);
       return match.tagId;
@@ -39032,6 +39032,9 @@ function resolveItemCollectionItemTagId(buffer, header, tagIndex, itmcTagId) {
   if (itmcTagId === 4294967295) return 4294967295;
   const entry = tagIndex.entries[itmcTagId & 65535];
   if (!entry || entry.isExternal) return 4294967295;
+  if (entry.primaryClassName === "weapon" || entry.primaryClassName === "equipment" || entry.primaryClassFourCC === 2003132784 || entry.primaryClassFourCC === 1701931376) {
+    return itmcTagId;
+  }
   try {
     const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
     const itmcStruct = decodeStruct(buffer, offset, "ItemCollection");
@@ -39053,12 +39056,14 @@ function resolveItemCollectionModelTagId(buffer, header, tagIndex, itmcTagId) {
   if (itemTagId !== 4294967295) {
     return resolveObjectModelTagId(buffer, header, tagIndex, itemTagId);
   }
-  return 4294967295;
+  return resolveObjectModelTagId(buffer, header, tagIndex, itmcTagId);
 }
 function getItemCollectionCategory(buffer, header, tagIndex, itmcTagId) {
   if (itmcTagId === 4294967295) return "equipment";
   const entry = tagIndex.entries[itmcTagId & 65535];
   if (!entry || entry.isExternal) return "equipment";
+  if (entry.primaryClassName === "weapon" || entry.primaryClassFourCC === 2003132784) return "weapon";
+  if (entry.primaryClassName === "equipment" || entry.primaryClassFourCC === 1701931376) return "equipment";
   try {
     const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
     const itmcStruct = decodeStruct(buffer, offset, "ItemCollection");
@@ -39070,18 +39075,18 @@ function getItemCollectionCategory(buffer, header, tagIndex, itmcTagId) {
       if (itemDep && itemDep.kind === "dependency" && itemDep.value.tagId !== 4294967295) {
         const itemEntry = tagIndex.entries[itemDep.value.tagId & 65535];
         if (itemEntry) {
-          if (itemEntry.primaryClassName === "weapon") return "weapon";
-          if (itemEntry.primaryClassName === "equipment") return "equipment";
+          if (itemEntry.primaryClassName === "weapon" || itemEntry.primaryClassFourCC === 2003132784) return "weapon";
+          if (itemEntry.primaryClassName === "equipment" || itemEntry.primaryClassFourCC === 1701931376) return "equipment";
         }
       }
     }
   } catch {
   }
   const lower = entry.path.toLowerCase();
-  if (lower.includes("grenade") || lower.includes("powerup") || lower.includes("health") || lower.includes("shield") || lower.includes("camo")) {
+  if (lower.includes("grenade") || lower.includes("powerup") || lower.includes("health") || lower.includes("shield") || lower.includes("camo") || lower.includes("ammo")) {
     return "equipment";
   }
-  if (lower.includes("weapon") || lower.includes("pistol") || lower.includes("rifle") || lower.includes("shotgun") || lower.includes("cannon") || lower.includes("thrower") || lower.includes("launcher")) {
+  if (lower.includes("weapon") || lower.includes("pistol") || lower.includes("rifle") || lower.includes("shotgun") || lower.includes("cannon") || lower.includes("thrower") || lower.includes("launcher") || lower.includes("needler") || lower.includes("ball") || lower.includes("flag")) {
     return "weapon";
   }
   return "equipment";
@@ -39502,12 +39507,17 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
   const itmcEntries = tagIndex.entries.filter(
     (e) => (e.primaryClassName === "item_collection" || e.primaryClassFourCC === 1769237859) && !e.isExternal
   );
-  const fullWeaponPal = weaponPal.map((p, i) => ({
-    paletteIndex: i,
-    tagId: p.tagId,
-    path: p.path,
-    name: p.path.split("\\").pop() || p.path || `Weapon ${i}`
-  }));
+  const fullWeaponPal = [];
+  for (const p of weaponPal) {
+    if (p.tagId === 4294967295) continue;
+    if (p.path.toLowerCase().startsWith("vehicles\\") && p.modelTagId === 4294967295) continue;
+    fullWeaponPal.push({
+      paletteIndex: fullWeaponPal.length,
+      tagId: p.tagId,
+      path: p.path,
+      name: p.path.split("\\").pop() || p.path || `Weapon ${fullWeaponPal.length}`
+    });
+  }
   const fullEquipmentPal = [];
   for (const ie of itmcEntries) {
     const cat = getItemCollectionCategory(buffer, header, tagIndex, ie.tagId);
@@ -39535,7 +39545,12 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
     (e) => (e.primaryClassName === "weapon" || e.primaryClassFourCC === 2003132784) && !e.isExternal
   );
   for (const we of weaponTagEntries) {
-    if (!fullWeaponPal.some((p) => p.tagId === we.tagId || p.path === we.path)) {
+    if (we.path.toLowerCase().startsWith("vehicles\\")) continue;
+    if (resolveObjectModelTagId(buffer, header, tagIndex, we.tagId) === 4294967295) continue;
+    const alreadyCovered = fullWeaponPal.some(
+      (p) => p.tagId === we.tagId || p.path === we.path || resolveItemCollectionItemTagId(buffer, header, tagIndex, p.tagId) === we.tagId
+    );
+    if (!alreadyCovered) {
       fullWeaponPal.push({
         paletteIndex: fullWeaponPal.length,
         tagId: we.tagId,
@@ -39548,7 +39563,11 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
     (e) => (e.primaryClassName === "equipment" || e.primaryClassFourCC === 1701931376) && !e.isExternal
   );
   for (const ee of equipmentTagEntries) {
-    if (!fullEquipmentPal.some((p) => p.tagId === ee.tagId || p.path === ee.path)) {
+    if (resolveObjectModelTagId(buffer, header, tagIndex, ee.tagId) === 4294967295) continue;
+    const alreadyCovered = fullEquipmentPal.some(
+      (p) => p.tagId === ee.tagId || p.path === ee.path || resolveItemCollectionItemTagId(buffer, header, tagIndex, p.tagId) === ee.tagId
+    );
+    if (!alreadyCovered) {
       fullEquipmentPal.push({
         paletteIndex: fullEquipmentPal.length,
         tagId: ee.tagId,
@@ -39974,10 +39993,21 @@ function updateScenarioPlacement(buffer, header, tagIndex, placementId, updates)
       const targetPal = isWeapon ? summary.palettes.weapons : summary.palettes.equipment;
       const chosen = targetPal[updates.paletteIndex];
       if (chosen) {
-        buffer.write("itmc", itemOffset + 80, 4, "ascii");
-        buffer.writeUInt32LE(0, itemOffset + 84);
+        let resolvedItmcId = chosen.tagId;
+        const chosenEntry = tagIndex.entries[chosen.tagId & 65535];
+        if (chosenEntry && chosenEntry.primaryClassName !== "item_collection") {
+          const matchingItmc = tagIndex.entries.find((e) => {
+            if (e.primaryClassName !== "item_collection" || e.isExternal) return false;
+            const itemId = resolveItemCollectionItemTagId(buffer, header, tagIndex, e.tagId);
+            return itemId !== 4294967295 && itemId === chosen.tagId;
+          });
+          if (matchingItmc) resolvedItmcId = matchingItmc.tagId;
+        }
+        const pathPtr = resolvedItmcId !== 4294967295 ? buffer.readUInt32LE(header.tagDataOffset + 40 + (resolvedItmcId & 65535) * 32 + 16) : 0;
+        buffer.writeUInt32LE(1769237859, itemOffset + 80);
+        buffer.writeUInt32LE(pathPtr, itemOffset + 84);
         buffer.writeUInt32LE(0, itemOffset + 88);
-        buffer.writeUInt32LE(chosen.tagId, itemOffset + 92);
+        buffer.writeUInt32LE(resolvedItmcId, itemOffset + 92);
       }
     }
   } else if (kindStr === "trigger_volume") {
@@ -40509,9 +40539,12 @@ function addScenarioPlacement(buffer, header, tagIndex, kind, paletteIndex, posi
         itmcBytes.writeUInt32LE(92, 4);
         itmcBytes.writeUInt32LE(0, 8);
         itmcBytes.writeInt16LE(30, 12);
+        const entryPathPtr = curBuf.readUInt32LE(curHdr.tagDataOffset + 40 + (chosen.tagId & 65535) * 32 + 16);
         itmcBytes.writeFloatLE(1, 92 + 32);
         itmcBytes.writeUInt32LE(entry.primaryClassName === "weapon" ? 2003132784 : 1701931376, 92 + 36);
-        itmcBytes.writeUInt32LE(4294967295, 92 + 48);
+        itmcBytes.writeUInt32LE(entryPathPtr, 92 + 40);
+        itmcBytes.writeUInt32LE(0, 92 + 44);
+        itmcBytes.writeUInt32LE(chosen.tagId, 92 + 48);
         const synthContainer = {
           magic: OCETAGS_MAGIC,
           formatVersion: OCETAGS_FORMAT_VERSION,
@@ -40536,7 +40569,7 @@ function addScenarioPlacement(buffer, header, tagIndex, kind, paletteIndex, posi
                   fieldPath: `${itmcPath}.permutations[0].item`,
                   group: entry.primaryClassName,
                   path: entry.path,
-                  kind: "internal"
+                  kind: "external"
                 }
               ],
               embeddedRawDataAssets: [],
@@ -40565,14 +40598,19 @@ function addScenarioPlacement(buffer, header, tagIndex, kind, paletteIndex, posi
   }
   const info = getScenarioReflexiveInfo(curBuf, curHdr, curTagIndex, "equipment");
   const newItemBytes = Buffer.alloc(info.structSize, 0);
-  newItemBytes.writeUInt32LE(1, 0);
+  const itmcEntryAfter = curTagIndex.entries[itmcTagId & 65535];
+  const isPowerupLevitate = !isWeaponKind && (itmcEntryAfter?.path.toLowerCase().includes("shield") || itmcEntryAfter?.path.toLowerCase().includes("camo") || itmcEntryAfter?.path.toLowerCase().includes("double speed") || itmcEntryAfter?.path.toLowerCase().includes("vision"));
+  newItemBytes.writeUInt32LE(isPowerupLevitate ? 1 : 0, 0);
   newItemBytes.writeInt16LE(12, 4);
   newItemBytes.writeUInt32LE(4294967295, 16);
   newItemBytes.writeFloatLE(position[0], 64);
   newItemBytes.writeFloatLE(position[1], 68);
   newItemBytes.writeFloatLE(position[2], 72);
   newItemBytes.writeFloatLE(rotation[0], 76);
-  newItemBytes.write("itmc", 80, 4, "ascii");
+  const itmcPathPtr = itmcTagId !== 4294967295 ? curBuf.readUInt32LE(curHdr.tagDataOffset + 40 + (itmcTagId & 65535) * 32 + 16) : 0;
+  newItemBytes.writeUInt32LE(1769237859, 80);
+  newItemBytes.writeUInt32LE(itmcPathPtr, 84);
+  newItemBytes.writeUInt32LE(0, 88);
   newItemBytes.writeUInt32LE(itmcTagId, 92);
   const appended = appendReflexiveElement(curBuf, curHdr, curTagIndex, info.reflexiveFieldOffset, newItemBytes);
   const summary = extractScenarioPlacements(appended.buffer, appended.header, curTagIndex);
@@ -64440,10 +64478,236 @@ function importLegacyTagsIntoMap(mapBuffer, inputPaths, resourceFiles, mode = "a
       t.data = rawBuf.toString("base64");
     }
   }
+  const scenarioTags = container.tags.filter((t) => t.group === "scenario");
+  for (const t of scenarioTags) {
+    const rawBuf = Buffer.from(t.data, "base64");
+    if (rawBuf.length < 1456) continue;
+    const scenarioType = rawBuf.readUInt16LE(60);
+    if (scenarioType !== 1) continue;
+    const equipCount = rawBuf.readUInt32LE(600);
+    const equipOff = rawBuf.readUInt32LE(604);
+    const weapCount = rawBuf.readUInt32LE(624);
+    const weapOff = rawBuf.readUInt32LE(628);
+    if (equipCount === 0 && weapCount === 0) continue;
+    const existingItmcByItemKey = /* @__PURE__ */ new Map();
+    const itemKeyByItmcPath = /* @__PURE__ */ new Map();
+    for (const e of tagIndex.entries) {
+      if (e.primaryClassName !== "item_collection" || e.isExternal) continue;
+      const itmcOff = header.tagDataOffset + (e.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+      if (itmcOff < 0 || itmcOff + 92 > currentBuf.length) continue;
+      const permCount = currentBuf.readUInt32LE(itmcOff + 0);
+      const permPtr = currentBuf.readUInt32LE(itmcOff + 4);
+      if (permCount !== 1) continue;
+      const permOff = header.tagDataOffset + (permPtr - tagIndex.baseMemoryAddress);
+      if (permOff < 0 || permOff + 84 > currentBuf.length) continue;
+      const itemTagId = currentBuf.readUInt32LE(permOff + 36 + 12);
+      const itemEntry = tagIndex.entries.find((x) => x.tagId === itemTagId);
+      if (itemEntry && itemEntry.primaryClassName) {
+        const itemKey = `${itemEntry.primaryClassName}:${itemEntry.path.toLowerCase()}`;
+        if (!existingItmcByItemKey.has(itemKey)) {
+          existingItmcByItemKey.set(itemKey, e.path);
+        }
+        itemKeyByItmcPath.set(e.path.toLowerCase(), itemKey);
+      }
+    }
+    const ensureItmcForItem = (group, itemPath) => {
+      const itemKey = `${group}:${itemPath.toLowerCase()}`;
+      const existing = existingItmcByItemKey.get(itemKey);
+      if (existing) return existing;
+      const leaf = itemPath.split("\\").pop() || itemPath;
+      const itmcPath = `item collections\\singleplayer_promoted\\${leaf}`;
+      const itmcBuf = Buffer.alloc(176, 0);
+      itmcBuf.writeUInt32LE(1, 0);
+      itmcBuf.writeUInt32LE(92, 4);
+      itmcBuf.writeUInt32LE(0, 8);
+      itmcBuf.writeInt16LE(30, 12);
+      itmcBuf.writeFloatLE(1, 92 + 32);
+      const itemFourCC = fourCCFromString(group === "weapon" ? "weap" : "eqip");
+      itmcBuf.writeUInt32LE(itemFourCC, 92 + 36);
+      itmcBuf.writeUInt32LE(0, 92 + 40);
+      itmcBuf.writeUInt32LE(0, 92 + 44);
+      itmcBuf.writeUInt32LE(0, 92 + 48);
+      container.tags.push({
+        originalIndex: container.tags.length,
+        group: "item_collection",
+        path: itmcPath,
+        structName: "ItemCollection",
+        data: itmcBuf.toString("base64"),
+        dependencies: [
+          {
+            fieldPath: `${itmcPath}.permutations[0].item`,
+            fieldOffset: 92 + 36,
+            kind: "external",
+            group,
+            path: itemPath
+          }
+        ],
+        secondaryClassFourCC: null,
+        tertiaryClassFourCC: null
+      });
+      existingItmcByItemKey.set(itemKey, itmcPath);
+      itemKeyByItmcPath.set(itmcPath.toLowerCase(), itemKey);
+      return itmcPath;
+    };
+    const netgameCount = rawBuf.readUInt32LE(900);
+    const netgameOff = rawBuf.readUInt32LE(904);
+    const existingNetgamePlacements = [];
+    if (netgameCount > 0 && netgameOff >= 1456 && netgameOff + netgameCount * 144 <= rawBuf.length) {
+      for (let k = 0; k < netgameCount; k++) {
+        const rowOff = netgameOff + k * 144;
+        const x = rawBuf.readFloatLE(rowOff + 64);
+        const y = rawBuf.readFloatLE(rowOff + 68);
+        const z = rawBuf.readFloatLE(rowOff + 72);
+        const dep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.netgame equipment[${k}].item collection`
+        );
+        const itemKey = dep ? itemKeyByItmcPath.get(dep.path.toLowerCase()) : void 0;
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+    const newNetgameEntries = [];
+    const keptWeapons = [];
+    const keptEquipment = [];
+    let skippedOverlapCount = 0;
+    if (weapCount > 0 && weapOff >= 1456 && weapOff + weapCount * 92 <= rawBuf.length) {
+      for (let w = 0; w < weapCount; w++) {
+        const rowOff = weapOff + w * 92;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const objNameIdx = rawBuf.readInt16LE(rowOff + 2);
+        const notPlaced = rawBuf.readUInt16LE(rowOff + 4);
+        if (objNameIdx >= 0) {
+          keptWeapons.push(Buffer.from(rawBuf.subarray(rowOff, rowOff + 92)));
+          continue;
+        }
+        if ((notPlaced & 1) !== 0 || palIdx < 0) continue;
+        const palDep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.weapon palette[${palIdx}].name`
+        );
+        if (!palDep) continue;
+        const x = rawBuf.readFloatLE(rowOff + 8);
+        const y = rawBuf.readFloatLE(rowOff + 12);
+        const z = rawBuf.readFloatLE(rowOff + 16);
+        const yaw = rawBuf.readFloatLE(rowOff + 20);
+        const itemKey = `${palDep.group}:${palDep.path.toLowerCase()}`;
+        const overlapsExisting = existingNetgamePlacements.some(
+          (e) => e.itemKey === itemKey && Math.hypot(e.x - x, e.y - y, e.z - z) < 0.5
+        );
+        if (overlapsExisting) {
+          skippedOverlapCount++;
+          continue;
+        }
+        const itmcPath = ensureItmcForItem(palDep.group, palDep.path);
+        newNetgameEntries.push({ x, y, z, yaw, itmcPath });
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+    if (equipCount > 0 && equipOff >= 1456 && equipOff + equipCount * 40 <= rawBuf.length) {
+      for (let eq = 0; eq < equipCount; eq++) {
+        const rowOff = equipOff + eq * 40;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const objNameIdx = rawBuf.readInt16LE(rowOff + 2);
+        const notPlaced = rawBuf.readUInt16LE(rowOff + 4);
+        if (objNameIdx >= 0) {
+          keptEquipment.push(Buffer.from(rawBuf.subarray(rowOff, rowOff + 40)));
+          continue;
+        }
+        if ((notPlaced & 1) !== 0 || palIdx < 0) continue;
+        const palDep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.equipment palette[${palIdx}].name`
+        );
+        if (!palDep) continue;
+        const x = rawBuf.readFloatLE(rowOff + 8);
+        const y = rawBuf.readFloatLE(rowOff + 12);
+        const z = rawBuf.readFloatLE(rowOff + 16);
+        const yaw = rawBuf.readFloatLE(rowOff + 20);
+        const itemKey = `${palDep.group}:${palDep.path.toLowerCase()}`;
+        const overlapsExisting = existingNetgamePlacements.some(
+          (e) => e.itemKey === itemKey && Math.hypot(e.x - x, e.y - y, e.z - z) < 0.5
+        );
+        if (overlapsExisting) {
+          skippedOverlapCount++;
+          continue;
+        }
+        const itmcPath = ensureItmcForItem(palDep.group, palDep.path);
+        newNetgameEntries.push({ x, y, z, yaw, itmcPath });
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+    if (newNetgameEntries.length > 0 || keptWeapons.length !== weapCount || keptEquipment.length !== equipCount) {
+      const totalNetgameCount = netgameCount + newNetgameEntries.length;
+      const combinedNetgameBuf = Buffer.alloc(totalNetgameCount * 144, 0);
+      if (netgameCount > 0 && netgameOff >= 1456 && netgameOff + netgameCount * 144 <= rawBuf.length) {
+        rawBuf.copy(combinedNetgameBuf, 0, netgameOff, netgameOff + netgameCount * 144);
+      }
+      const newNetgameOff = rawBuf.length;
+      for (let k = 0; k < netgameCount; k++) {
+        const dep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.netgame equipment[${k}].item collection`
+        );
+        if (dep) {
+          dep.fieldOffset = newNetgameOff + k * 144 + 80;
+        }
+      }
+      const itmcFourCC = fourCCFromString("itmc");
+      for (let idx = 0; idx < newNetgameEntries.length; idx++) {
+        const k = netgameCount + idx;
+        const entry = newNetgameEntries[idx];
+        const entryOff = k * 144;
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 0);
+        combinedNetgameBuf.writeInt16LE(12, entryOff + 4);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 6);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 8);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 10);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 12);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 14);
+        combinedNetgameBuf.writeUInt32LE(4294967295, entryOff + 16);
+        combinedNetgameBuf.writeFloatLE(entry.x, entryOff + 64);
+        combinedNetgameBuf.writeFloatLE(entry.y, entryOff + 68);
+        combinedNetgameBuf.writeFloatLE(entry.z, entryOff + 72);
+        combinedNetgameBuf.writeFloatLE(entry.yaw, entryOff + 76);
+        combinedNetgameBuf.writeUInt32LE(itmcFourCC, entryOff + 80);
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 84);
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 88);
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 92);
+        t.dependencies.push({
+          fieldPath: `${t.path}.netgame equipment[${k}].item collection`,
+          fieldOffset: newNetgameOff + entryOff + 80,
+          kind: "external",
+          group: "item_collection",
+          path: entry.itmcPath
+        });
+      }
+      const finalScnrBuf = Buffer.concat([rawBuf, combinedNetgameBuf]);
+      finalScnrBuf.writeUInt32LE(totalNetgameCount, 900);
+      finalScnrBuf.writeUInt32LE(totalNetgameCount > 0 ? newNetgameOff : 0, 904);
+      finalScnrBuf.writeUInt32LE(0, 908);
+      if (keptWeapons.length === 0) {
+        finalScnrBuf.writeUInt32LE(0, 624);
+        finalScnrBuf.writeUInt32LE(0, 628);
+        finalScnrBuf.writeUInt32LE(0, 632);
+      } else {
+        Buffer.concat(keptWeapons).copy(finalScnrBuf, weapOff);
+        finalScnrBuf.writeUInt32LE(keptWeapons.length, 624);
+      }
+      if (keptEquipment.length === 0) {
+        finalScnrBuf.writeUInt32LE(0, 600);
+        finalScnrBuf.writeUInt32LE(0, 604);
+        finalScnrBuf.writeUInt32LE(0, 608);
+      } else {
+        Buffer.concat(keptEquipment).copy(finalScnrBuf, equipOff);
+        finalScnrBuf.writeUInt32LE(keptEquipment.length, 600);
+      }
+      t.data = finalScnrBuf.toString("base64");
+      warnings.push(
+        `Promoted ${newNetgameEntries.length} singleplayer weapon/equipment placement(s) into Multiplayer Netgame Equipment (.item_collection)${skippedOverlapCount > 0 ? ` and skipped ${skippedOverlapCount} duplicate overlap(s)` : ""} so they persist and respawn in multiplayer.`
+      );
+    }
+  }
   let addedCount = 0;
   let swappedCount = 0;
   let reusedCount = 0;
   const importedPaths = [];
+  const addedLocalIndices = /* @__PURE__ */ new Set();
   const addPlan = planAddInjection(
     { buffer: currentBuf, header, tagIndex },
     container,
@@ -64460,26 +64724,55 @@ function importLegacyTagsIntoMap(mapBuffer, inputPaths, resourceFiles, mode = "a
       header = parseCacheFileHeader(currentBuf);
       tagIndex = parseTagIndex(currentBuf, header);
       addedCount += addPlan.toAdd.length;
+      for (const li of addPlan.toAddLocalIndices) addedLocalIndices.add(li);
       for (const a of addPlan.toAdd) importedPaths.push(`[+${a.group}] ${a.path}`);
     }
   }
   const hasScenarioTag = container.tags.some((t) => t.group === "scenario");
   if (mode === "swap" || addedCount === 0 || hasScenarioTag) {
+    const oldToNewIdx = /* @__PURE__ */ new Map();
+    const swapTags = [];
+    container.tags.forEach((t, oldIdx) => {
+      if (!addedLocalIndices.has(oldIdx)) {
+        oldToNewIdx.set(oldIdx, swapTags.length);
+        swapTags.push({
+          ...t,
+          dependencies: t.dependencies.map((d) => ({ ...d }))
+        });
+      }
+    });
+    for (const st of swapTags) {
+      for (const d of st.dependencies) {
+        if (d.kind === "internal" && d.localTagIndex !== void 0) {
+          if (addedLocalIndices.has(d.localTagIndex)) {
+            d.kind = "external";
+            delete d.localTagIndex;
+          } else {
+            d.localTagIndex = oldToNewIdx.get(d.localTagIndex);
+          }
+        }
+      }
+    }
+    const swapContainer = {
+      ...container,
+      tags: swapTags,
+      rootOriginalIndices: swapTags.map((t) => t.originalIndex)
+    };
     const swapPlan = planSwapInjection(
       { buffer: currentBuf, header, tagIndex },
-      container,
+      swapContainer,
       {},
       { allowEmbeddedRelocation: true }
     );
     if (swapPlan.kind === "ok" && swapPlan.toSwap.length > 0) {
-      const res = applyInjectionWithReport(currentBuf, header, tagIndex, container, swapPlan, {
+      const res = applyInjectionWithReport(currentBuf, header, tagIndex, swapContainer, swapPlan, {
         allowEmbeddedRelocation: true
       });
       currentBuf = Buffer.from(res.buffer);
       swappedCount += swapPlan.toSwap.length;
       reusedCount = Math.max(0, reusedCount - swapPlan.toSwap.length);
       for (const s of swapPlan.toSwap) {
-        const st = container.tags[s.localIndex];
+        const st = swapContainer.tags[s.localIndex];
         if (st) importedPaths.push(`[~${st.group}] ${st.path}`);
       }
     }

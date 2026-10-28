@@ -158,6 +158,14 @@ function resolveItemCollectionItemTagId(
   if (itmcTagId === 0xffffffff) return 0xffffffff;
   const entry = tagIndex.entries[itmcTagId & 0xffff];
   if (!entry || entry.isExternal) return 0xffffffff;
+  if (
+    entry.primaryClassName === 'weapon' ||
+    entry.primaryClassName === 'equipment' ||
+    entry.primaryClassFourCC === 0x77656170 ||
+    entry.primaryClassFourCC === 0x65716970
+  ) {
+    return itmcTagId;
+  }
   try {
     const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
     const itmcStruct = decodeStruct(buffer, offset, 'ItemCollection');
@@ -186,7 +194,7 @@ function resolveItemCollectionModelTagId(
   if (itemTagId !== 0xffffffff) {
     return resolveObjectModelTagId(buffer, header, tagIndex, itemTagId);
   }
-  return 0xffffffff;
+  return resolveObjectModelTagId(buffer, header, tagIndex, itmcTagId);
 }
 
 /**
@@ -201,6 +209,8 @@ export function getItemCollectionCategory(
   if (itmcTagId === 0xffffffff) return 'equipment';
   const entry = tagIndex.entries[itmcTagId & 0xffff];
   if (!entry || entry.isExternal) return 'equipment';
+  if (entry.primaryClassName === 'weapon' || entry.primaryClassFourCC === 0x77656170) return 'weapon';
+  if (entry.primaryClassName === 'equipment' || entry.primaryClassFourCC === 0x65716970) return 'equipment';
   try {
     const offset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
     const itmcStruct = decodeStruct(buffer, offset, 'ItemCollection');
@@ -212,8 +222,8 @@ export function getItemCollectionCategory(
       if (itemDep && itemDep.kind === 'dependency' && itemDep.value.tagId !== 0xffffffff) {
         const itemEntry = tagIndex.entries[itemDep.value.tagId & 0xffff];
         if (itemEntry) {
-          if (itemEntry.primaryClassName === 'weapon') return 'weapon';
-          if (itemEntry.primaryClassName === 'equipment') return 'equipment';
+          if (itemEntry.primaryClassName === 'weapon' || itemEntry.primaryClassFourCC === 0x77656170) return 'weapon';
+          if (itemEntry.primaryClassName === 'equipment' || itemEntry.primaryClassFourCC === 0x65716970) return 'equipment';
         }
       }
     }
@@ -227,7 +237,8 @@ export function getItemCollectionCategory(
     lower.includes('powerup') ||
     lower.includes('health') ||
     lower.includes('shield') ||
-    lower.includes('camo')
+    lower.includes('camo') ||
+    lower.includes('ammo')
   ) {
     return 'equipment';
   }
@@ -238,7 +249,10 @@ export function getItemCollectionCategory(
     lower.includes('shotgun') ||
     lower.includes('cannon') ||
     lower.includes('thrower') ||
-    lower.includes('launcher')
+    lower.includes('launcher') ||
+    lower.includes('needler') ||
+    lower.includes('ball') ||
+    lower.includes('flag')
   ) {
     return 'weapon';
   }
@@ -771,12 +785,17 @@ export function extractScenarioPlacements(
     (e) => (e.primaryClassName === 'item_collection' || e.primaryClassFourCC === 0x69746d63) && !e.isExternal,
   );
 
-  const fullWeaponPal: ScenarioPaletteItem[] = weaponPal.map((p, i) => ({
-    paletteIndex: i,
-    tagId: p.tagId,
-    path: p.path,
-    name: p.path.split('\\').pop() || p.path || `Weapon ${i}`,
-  }));
+  const fullWeaponPal: ScenarioPaletteItem[] = [];
+  for (const p of weaponPal) {
+    if (p.tagId === 0xffffffff) continue;
+    if (p.path.toLowerCase().startsWith('vehicles\\') && p.modelTagId === 0xffffffff) continue;
+    fullWeaponPal.push({
+      paletteIndex: fullWeaponPal.length,
+      tagId: p.tagId,
+      path: p.path,
+      name: p.path.split('\\').pop() || p.path || `Weapon ${fullWeaponPal.length}`,
+    });
+  }
   const fullEquipmentPal: ScenarioPaletteItem[] = [];
 
   for (const ie of itmcEntries) {
@@ -802,12 +821,20 @@ export function extractScenarioPlacements(
     }
   }
 
-  // Also include standalone weapon tags in map
+  // Also include standalone weapon tags in map (excluding vehicle turret guns with no 3D model and weapons already wrapped by an item_collection)
   const weaponTagEntries = tagIndex.entries.filter(
     (e) => (e.primaryClassName === 'weapon' || e.primaryClassFourCC === 0x77656170) && !e.isExternal,
   );
   for (const we of weaponTagEntries) {
-    if (!fullWeaponPal.some((p) => p.tagId === we.tagId || p.path === we.path)) {
+    if (we.path.toLowerCase().startsWith('vehicles\\')) continue;
+    if (resolveObjectModelTagId(buffer, header, tagIndex, we.tagId) === 0xffffffff) continue;
+    const alreadyCovered = fullWeaponPal.some(
+      (p) =>
+        p.tagId === we.tagId ||
+        p.path === we.path ||
+        resolveItemCollectionItemTagId(buffer, header, tagIndex, p.tagId) === we.tagId,
+    );
+    if (!alreadyCovered) {
       fullWeaponPal.push({
         paletteIndex: fullWeaponPal.length,
         tagId: we.tagId,
@@ -817,12 +844,19 @@ export function extractScenarioPlacements(
     }
   }
 
-  // Also include standalone equipment tags in map
+  // Also include standalone equipment tags in map (excluding equipment already wrapped by an item_collection)
   const equipmentTagEntries = tagIndex.entries.filter(
     (e) => (e.primaryClassName === 'equipment' || e.primaryClassFourCC === 0x65716970) && !e.isExternal,
   );
   for (const ee of equipmentTagEntries) {
-    if (!fullEquipmentPal.some((p) => p.tagId === ee.tagId || p.path === ee.path)) {
+    if (resolveObjectModelTagId(buffer, header, tagIndex, ee.tagId) === 0xffffffff) continue;
+    const alreadyCovered = fullEquipmentPal.some(
+      (p) =>
+        p.tagId === ee.tagId ||
+        p.path === ee.path ||
+        resolveItemCollectionItemTagId(buffer, header, tagIndex, p.tagId) === ee.tagId,
+    );
+    if (!alreadyCovered) {
       fullEquipmentPal.push({
         paletteIndex: fullEquipmentPal.length,
         tagId: ee.tagId,
@@ -1324,10 +1358,24 @@ export function updateScenarioPlacement(
       const targetPal = isWeapon ? summary.palettes.weapons : summary.palettes.equipment;
       const chosen = targetPal[updates.paletteIndex];
       if (chosen) {
-        buffer.write('itmc', itemOffset + 80, 4, 'ascii');
-        buffer.writeUInt32LE(0, itemOffset + 84);
+        let resolvedItmcId = chosen.tagId;
+        const chosenEntry = tagIndex.entries[chosen.tagId & 0xffff];
+        if (chosenEntry && chosenEntry.primaryClassName !== 'item_collection') {
+          const matchingItmc = tagIndex.entries.find((e) => {
+            if (e.primaryClassName !== 'item_collection' || e.isExternal) return false;
+            const itemId = resolveItemCollectionItemTagId(buffer, header, tagIndex, e.tagId);
+            return itemId !== 0xffffffff && itemId === chosen.tagId;
+          });
+          if (matchingItmc) resolvedItmcId = matchingItmc.tagId;
+        }
+        const pathPtr =
+          resolvedItmcId !== 0xffffffff
+            ? buffer.readUInt32LE(header.tagDataOffset + 0x28 + (resolvedItmcId & 0xffff) * 32 + 0x10)
+            : 0;
+        buffer.writeUInt32LE(0x69746d63, itemOffset + 80); // 'itmc' fourCC in little-endian ('cmti')
+        buffer.writeUInt32LE(pathPtr, itemOffset + 84);
         buffer.writeUInt32LE(0, itemOffset + 88);
-        buffer.writeUInt32LE(chosen.tagId, itemOffset + 92);
+        buffer.writeUInt32LE(resolvedItmcId, itemOffset + 92);
       }
     }
   } else if (kindStr === 'trigger_volume') {
@@ -1947,9 +1995,12 @@ export function addScenarioPlacement(
         itmcBytes.writeUInt32LE(0, 8);
         itmcBytes.writeInt16LE(30, 12);
         // ItemCollectionPermutation (84B at +92): weight=1.0 at +32, item TagDependency at +36
+        const entryPathPtr = curBuf.readUInt32LE(curHdr.tagDataOffset + 0x28 + (chosen.tagId & 0xffff) * 32 + 0x10);
         itmcBytes.writeFloatLE(1.0, 92 + 32);
         itmcBytes.writeUInt32LE(entry.primaryClassName === 'weapon' ? 0x77656170 : 0x65716970, 92 + 36);
-        itmcBytes.writeUInt32LE(0xffffffff, 92 + 48);
+        itmcBytes.writeUInt32LE(entryPathPtr, 92 + 40);
+        itmcBytes.writeUInt32LE(0, 92 + 44);
+        itmcBytes.writeUInt32LE(chosen.tagId, 92 + 48);
 
         const synthContainer: OceContainer = {
           magic: OCETAGS_MAGIC,
@@ -1975,7 +2026,7 @@ export function addScenarioPlacement(
                   fieldPath: `${itmcPath}.permutations[0].item`,
                   group: entry.primaryClassName,
                   path: entry.path,
-                  kind: 'internal',
+                  kind: 'external',
                 },
               ],
               embeddedRawDataAssets: [],
@@ -2007,14 +2058,27 @@ export function addScenarioPlacement(
 
   const info = getScenarioReflexiveInfo(curBuf, curHdr, curTagIndex, 'equipment');
   const newItemBytes = Buffer.alloc(info.structSize, 0);
-  newItemBytes.writeUInt32LE(1, 0); // flags: 1 = levitate
+  const itmcEntryAfter = curTagIndex.entries[itmcTagId & 0xffff];
+  const isPowerupLevitate =
+    !isWeaponKind &&
+    (itmcEntryAfter?.path.toLowerCase().includes('shield') ||
+      itmcEntryAfter?.path.toLowerCase().includes('camo') ||
+      itmcEntryAfter?.path.toLowerCase().includes('double speed') ||
+      itmcEntryAfter?.path.toLowerCase().includes('vision'));
+  newItemBytes.writeUInt32LE(isPowerupLevitate ? 1 : 0, 0); // flags: 0 = ground, 1 = levitate (for powerups)
   newItemBytes.writeInt16LE(12, 4); // type 0 = 12 (all games)
   newItemBytes.writeUInt32LE(0xffffffff, 16);
   newItemBytes.writeFloatLE(position[0], 64);
   newItemBytes.writeFloatLE(position[1], 68);
   newItemBytes.writeFloatLE(position[2], 72);
   newItemBytes.writeFloatLE(rotation[0], 76);
-  newItemBytes.write('itmc', 80, 4, 'ascii');
+  const itmcPathPtr =
+    itmcTagId !== 0xffffffff
+      ? curBuf.readUInt32LE(curHdr.tagDataOffset + 0x28 + (itmcTagId & 0xffff) * 32 + 0x10)
+      : 0;
+  newItemBytes.writeUInt32LE(0x69746d63, 80); // 'itmc' fourCC in little-endian ('cmti')
+  newItemBytes.writeUInt32LE(itmcPathPtr, 84);
+  newItemBytes.writeUInt32LE(0, 88);
   newItemBytes.writeUInt32LE(itmcTagId, 92);
 
   const appended = appendReflexiveElement(curBuf, curHdr, curTagIndex, info.reflexiveFieldOffset, newItemBytes);

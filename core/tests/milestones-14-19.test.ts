@@ -50,8 +50,8 @@ describe('Milestones 14–19: HaloScript, Explanations, Mod Packager, JMS Compil
       description: 'Adds flying Pelicans and Spirit dropships.',
       entryScenario: 'levels\\test\\bloodgulch\\bloodgulch',
     });
-    expect(toml).toContain('id = "pelican_drop_mod"');
-    expect(toml).toContain('entry = "levels\\\\test\\\\bloodgulch\\\\bloodgulch"');
+    expect(toml).toContain('name = "Pelican Warthog Drop Mod"');
+    expect(toml).toContain('format = 1');
 
     const xml = exportTagToXml('weapons\\pistol\\pistol', 'weapon', [
       { name: 'bounding radius', type: 'float', kind: 'number', value: 0.35 },

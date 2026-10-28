@@ -1754,10 +1754,280 @@ export function importLegacyTagsIntoMap(
     }
   }
 
+  // On multiplayer scenarios (Scenario.type === 1), items placed in singleplayer `Scenario.weapons`
+  // or `Scenario.equipment` blocks are garbage-collected by Halo CE after ~15 seconds and never respawn.
+  // Automatically promote unnamed SP weapon/equipment placements into `Scenario.netgame equipment`
+  // (synthesizing `.item_collection` tags for any weapons/equipment that don't have one in the map yet).
+  const scenarioTags = container.tags.filter((t) => t.group === 'scenario');
+  for (const t of scenarioTags) {
+    const rawBuf = Buffer.from(t.data, 'base64');
+    if (rawBuf.length < 1456) continue;
+    const scenarioType = rawBuf.readUInt16LE(60);
+    if (scenarioType !== 1) continue; // Only multiplayer maps
+
+    const equipCount = rawBuf.readUInt32LE(600);
+    const equipOff = rawBuf.readUInt32LE(604);
+    const weapCount = rawBuf.readUInt32LE(624);
+    const weapOff = rawBuf.readUInt32LE(628);
+    if (equipCount === 0 && weapCount === 0) continue;
+
+    // 1. Scan target map's existing item_collection (itmc) tags to map weapon/equipment -> itmc path
+    const existingItmcByItemKey = new Map<string, string>();
+    const itemKeyByItmcPath = new Map<string, string>();
+    for (const e of tagIndex.entries) {
+      if (e.primaryClassName !== 'item_collection' || e.isExternal) continue;
+      const itmcOff =
+        header.tagDataOffset + (e.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+      if (itmcOff < 0 || itmcOff + 92 > currentBuf.length) continue;
+      const permCount = currentBuf.readUInt32LE(itmcOff + 0);
+      const permPtr = currentBuf.readUInt32LE(itmcOff + 4);
+      if (permCount !== 1) continue;
+      const permOff = header.tagDataOffset + (permPtr - tagIndex.baseMemoryAddress);
+      if (permOff < 0 || permOff + 84 > currentBuf.length) continue;
+      const itemTagId = currentBuf.readUInt32LE(permOff + 36 + 12);
+      const itemEntry = tagIndex.entries.find((x) => x.tagId === itemTagId);
+      if (itemEntry && itemEntry.primaryClassName) {
+        const itemKey = `${itemEntry.primaryClassName}:${itemEntry.path.toLowerCase()}`;
+        if (!existingItmcByItemKey.has(itemKey)) {
+          existingItmcByItemKey.set(itemKey, e.path);
+        }
+        itemKeyByItmcPath.set(e.path.toLowerCase(), itemKey);
+      }
+    }
+
+    const ensureItmcForItem = (group: string, itemPath: string): string => {
+      const itemKey = `${group}:${itemPath.toLowerCase()}`;
+      const existing = existingItmcByItemKey.get(itemKey);
+      if (existing) return existing;
+
+      const leaf = itemPath.split('\\').pop() || itemPath;
+      const itmcPath = `item collections\\singleplayer_promoted\\${leaf}`;
+      const itmcBuf = Buffer.alloc(176, 0);
+      // Root ItemCollection (92 bytes): permutations TagReflexive at +0, default spawn time (int16) at +12
+      itmcBuf.writeUInt32LE(1, 0); // count = 1
+      itmcBuf.writeUInt32LE(92, 4); // local offset = 92
+      itmcBuf.writeUInt32LE(0, 8);
+      itmcBuf.writeInt16LE(30, 12); // default spawn time = 30 seconds
+      // ItemCollectionPermutation (84 bytes at +92): weight (float) at +32, item (TagDependency) at +36
+      itmcBuf.writeFloatLE(1.0, 92 + 32);
+      const itemFourCC = fourCCFromString(group === 'weapon' ? 'weap' : 'eqip');
+      itmcBuf.writeUInt32LE(itemFourCC, 92 + 36);
+      itmcBuf.writeUInt32LE(0, 92 + 40); // pathPointer
+      itmcBuf.writeUInt32LE(0, 92 + 44); // pathSize
+      itmcBuf.writeUInt32LE(0, 92 + 48); // non-null placeholder tagId
+
+      container.tags.push({
+        originalIndex: container.tags.length,
+        group: 'item_collection',
+        path: itmcPath,
+        structName: 'ItemCollection',
+        data: itmcBuf.toString('base64'),
+        dependencies: [
+          {
+            fieldPath: `${itmcPath}.permutations[0].item`,
+            fieldOffset: 92 + 36,
+            kind: 'external',
+            group,
+            path: itemPath,
+          },
+        ],
+        secondaryClassFourCC: null,
+        tertiaryClassFourCC: null,
+      });
+
+      existingItmcByItemKey.set(itemKey, itmcPath);
+      itemKeyByItmcPath.set(itmcPath.toLowerCase(), itemKey);
+      return itmcPath;
+    };
+
+    // 2. Collect existing Scenario.netgame equipment positions so overlapping SP items aren't duplicated
+    const netgameCount = rawBuf.readUInt32LE(900);
+    const netgameOff = rawBuf.readUInt32LE(904);
+    const existingNetgamePlacements: Array<{
+      x: number;
+      y: number;
+      z: number;
+      itemKey?: string;
+    }> = [];
+    if (netgameCount > 0 && netgameOff >= 1456 && netgameOff + netgameCount * 144 <= rawBuf.length) {
+      for (let k = 0; k < netgameCount; k++) {
+        const rowOff = netgameOff + k * 144;
+        const x = rawBuf.readFloatLE(rowOff + 64);
+        const y = rawBuf.readFloatLE(rowOff + 68);
+        const z = rawBuf.readFloatLE(rowOff + 72);
+        const dep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.netgame equipment[${k}].item collection`,
+        );
+        const itemKey = dep ? itemKeyByItmcPath.get(dep.path.toLowerCase()) : undefined;
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+
+    // 3. Convert unnamed Scenario.weapons and Scenario.equipment into ScenarioNetgameEquipment entries
+    const newNetgameEntries: Array<{
+      x: number;
+      y: number;
+      z: number;
+      yaw: number;
+      itmcPath: string;
+    }> = [];
+    const keptWeapons: Buffer[] = [];
+    const keptEquipment: Buffer[] = [];
+    let skippedOverlapCount = 0;
+
+    if (weapCount > 0 && weapOff >= 1456 && weapOff + weapCount * 92 <= rawBuf.length) {
+      for (let w = 0; w < weapCount; w++) {
+        const rowOff = weapOff + w * 92;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const objNameIdx = rawBuf.readInt16LE(rowOff + 2);
+        const notPlaced = rawBuf.readUInt16LE(rowOff + 4);
+        if (objNameIdx >= 0) {
+          keptWeapons.push(Buffer.from(rawBuf.subarray(rowOff, rowOff + 92)));
+          continue;
+        }
+        if ((notPlaced & 1) !== 0 || palIdx < 0) continue;
+        const palDep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.weapon palette[${palIdx}].name`,
+        );
+        if (!palDep) continue;
+        const x = rawBuf.readFloatLE(rowOff + 8);
+        const y = rawBuf.readFloatLE(rowOff + 12);
+        const z = rawBuf.readFloatLE(rowOff + 16);
+        const yaw = rawBuf.readFloatLE(rowOff + 20);
+        const itemKey = `${palDep.group}:${palDep.path.toLowerCase()}`;
+        const overlapsExisting = existingNetgamePlacements.some(
+          (e) => e.itemKey === itemKey && Math.hypot(e.x - x, e.y - y, e.z - z) < 0.5,
+        );
+        if (overlapsExisting) {
+          skippedOverlapCount++;
+          continue;
+        }
+        const itmcPath = ensureItmcForItem(palDep.group, palDep.path);
+        newNetgameEntries.push({ x, y, z, yaw, itmcPath });
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+
+    if (equipCount > 0 && equipOff >= 1456 && equipOff + equipCount * 40 <= rawBuf.length) {
+      for (let eq = 0; eq < equipCount; eq++) {
+        const rowOff = equipOff + eq * 40;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const objNameIdx = rawBuf.readInt16LE(rowOff + 2);
+        const notPlaced = rawBuf.readUInt16LE(rowOff + 4);
+        if (objNameIdx >= 0) {
+          keptEquipment.push(Buffer.from(rawBuf.subarray(rowOff, rowOff + 40)));
+          continue;
+        }
+        if ((notPlaced & 1) !== 0 || palIdx < 0) continue;
+        const palDep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.equipment palette[${palIdx}].name`,
+        );
+        if (!palDep) continue;
+        const x = rawBuf.readFloatLE(rowOff + 8);
+        const y = rawBuf.readFloatLE(rowOff + 12);
+        const z = rawBuf.readFloatLE(rowOff + 16);
+        const yaw = rawBuf.readFloatLE(rowOff + 20);
+        const itemKey = `${palDep.group}:${palDep.path.toLowerCase()}`;
+        const overlapsExisting = existingNetgamePlacements.some(
+          (e) => e.itemKey === itemKey && Math.hypot(e.x - x, e.y - y, e.z - z) < 0.5,
+        );
+        if (overlapsExisting) {
+          skippedOverlapCount++;
+          continue;
+        }
+        const itmcPath = ensureItmcForItem(palDep.group, palDep.path);
+        newNetgameEntries.push({ x, y, z, yaw, itmcPath });
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+
+    if (
+      newNetgameEntries.length > 0 ||
+      keptWeapons.length !== weapCount ||
+      keptEquipment.length !== equipCount
+    ) {
+      const totalNetgameCount = netgameCount + newNetgameEntries.length;
+      const combinedNetgameBuf = Buffer.alloc(totalNetgameCount * 144, 0);
+      if (netgameCount > 0 && netgameOff >= 1456 && netgameOff + netgameCount * 144 <= rawBuf.length) {
+        rawBuf.copy(combinedNetgameBuf, 0, netgameOff, netgameOff + netgameCount * 144);
+      }
+
+      const newNetgameOff = rawBuf.length;
+      for (let k = 0; k < netgameCount; k++) {
+        const dep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.netgame equipment[${k}].item collection`,
+        );
+        if (dep) {
+          dep.fieldOffset = newNetgameOff + k * 144 + 80;
+        }
+      }
+
+      const itmcFourCC = fourCCFromString('itmc');
+      for (let idx = 0; idx < newNetgameEntries.length; idx++) {
+        const k = netgameCount + idx;
+        const entry = newNetgameEntries[idx]!;
+        const entryOff = k * 144;
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 0); // flags
+        combinedNetgameBuf.writeInt16LE(12, entryOff + 4); // type 0 = 12 (all games)
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 6); // type 1
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 8); // type 2
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 10); // type 3
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 12); // team index = 0
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 14); // spawn time = 0 (use item_collection default / 30s)
+        combinedNetgameBuf.writeUInt32LE(0xffffffff, entryOff + 16); // unknown_ffffffff
+        combinedNetgameBuf.writeFloatLE(entry.x, entryOff + 64);
+        combinedNetgameBuf.writeFloatLE(entry.y, entryOff + 68);
+        combinedNetgameBuf.writeFloatLE(entry.z, entryOff + 72);
+        combinedNetgameBuf.writeFloatLE(entry.yaw, entryOff + 76);
+        combinedNetgameBuf.writeUInt32LE(itmcFourCC, entryOff + 80);
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 84); // pathPointer
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 88); // pathSize
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 92); // non-null placeholder tagId
+
+        t.dependencies.push({
+          fieldPath: `${t.path}.netgame equipment[${k}].item collection`,
+          fieldOffset: newNetgameOff + entryOff + 80,
+          kind: 'external',
+          group: 'item_collection',
+          path: entry.itmcPath,
+        });
+      }
+
+      const finalScnrBuf = Buffer.concat([rawBuf, combinedNetgameBuf]);
+      finalScnrBuf.writeUInt32LE(totalNetgameCount, 900);
+      finalScnrBuf.writeUInt32LE(totalNetgameCount > 0 ? newNetgameOff : 0, 904);
+      finalScnrBuf.writeUInt32LE(0, 908);
+
+      if (keptWeapons.length === 0) {
+        finalScnrBuf.writeUInt32LE(0, 624);
+        finalScnrBuf.writeUInt32LE(0, 628);
+        finalScnrBuf.writeUInt32LE(0, 632);
+      } else {
+        Buffer.concat(keptWeapons).copy(finalScnrBuf, weapOff);
+        finalScnrBuf.writeUInt32LE(keptWeapons.length, 624);
+      }
+
+      if (keptEquipment.length === 0) {
+        finalScnrBuf.writeUInt32LE(0, 600);
+        finalScnrBuf.writeUInt32LE(0, 604);
+        finalScnrBuf.writeUInt32LE(0, 608);
+      } else {
+        Buffer.concat(keptEquipment).copy(finalScnrBuf, equipOff);
+        finalScnrBuf.writeUInt32LE(keptEquipment.length, 600);
+      }
+
+      t.data = finalScnrBuf.toString('base64');
+      warnings.push(
+        `Promoted ${newNetgameEntries.length} singleplayer weapon/equipment placement(s) into Multiplayer Netgame Equipment (.item_collection)${skippedOverlapCount > 0 ? ` and skipped ${skippedOverlapCount} duplicate overlap(s)` : ''} so they persist and respawn in multiplayer.`,
+      );
+    }
+  }
+
   let addedCount = 0;
   let swappedCount = 0;
   let reusedCount = 0;
   const importedPaths: string[] = [];
+  const addedLocalIndices = new Set<number>();
 
   // Pass 1: Add any new tags that don't exist in the map yet
   const addPlan = planAddInjection(
@@ -1776,6 +2046,7 @@ export function importLegacyTagsIntoMap(
       header = parseCacheFileHeader(currentBuf);
       tagIndex = parseTagIndex(currentBuf, header);
       addedCount += addPlan.toAdd.length;
+      for (const li of addPlan.toAddLocalIndices) addedLocalIndices.add(li);
       for (const a of addPlan.toAdd) importedPaths.push(`[+${a.group}] ${a.path}`);
     }
   }
@@ -1783,21 +2054,50 @@ export function importLegacyTagsIntoMap(
   // Pass 2: If mode === 'swap', or no new tags were added, or a scenario tag is being imported, swap matching tags in-place
   const hasScenarioTag = container.tags.some((t) => t.group === 'scenario');
   if (mode === 'swap' || addedCount === 0 || hasScenarioTag) {
+    // Exclude tags that were just added in Pass 1 so they are not immediately re-swapped
+    const oldToNewIdx = new Map<number, number>();
+    const swapTags: OceContainerTag[] = [];
+    container.tags.forEach((t, oldIdx) => {
+      if (!addedLocalIndices.has(oldIdx)) {
+        oldToNewIdx.set(oldIdx, swapTags.length);
+        swapTags.push({
+          ...t,
+          dependencies: t.dependencies.map((d) => ({ ...d })),
+        });
+      }
+    });
+    for (const st of swapTags) {
+      for (const d of st.dependencies) {
+        if (d.kind === 'internal' && d.localTagIndex !== undefined) {
+          if (addedLocalIndices.has(d.localTagIndex)) {
+            d.kind = 'external';
+            delete d.localTagIndex;
+          } else {
+            d.localTagIndex = oldToNewIdx.get(d.localTagIndex);
+          }
+        }
+      }
+    }
+    const swapContainer: OceContainer = {
+      ...container,
+      tags: swapTags,
+      rootOriginalIndices: swapTags.map((t) => t.originalIndex),
+    };
     const swapPlan = planSwapInjection(
       { buffer: currentBuf, header, tagIndex },
-      container,
+      swapContainer,
       {},
       { allowEmbeddedRelocation: true },
     );
     if (swapPlan.kind === 'ok' && swapPlan.toSwap.length > 0) {
-      const res = applyInjectionWithReport(currentBuf, header, tagIndex, container, swapPlan, {
+      const res = applyInjectionWithReport(currentBuf, header, tagIndex, swapContainer, swapPlan, {
         allowEmbeddedRelocation: true,
       });
       currentBuf = Buffer.from(res.buffer);
       swappedCount += swapPlan.toSwap.length;
       reusedCount = Math.max(0, reusedCount - swapPlan.toSwap.length);
       for (const s of swapPlan.toSwap) {
-        const st = container.tags[s.localIndex];
+        const st = swapContainer.tags[s.localIndex];
         if (st) importedPaths.push(`[~${st.group}] ${st.path}`);
       }
     }
