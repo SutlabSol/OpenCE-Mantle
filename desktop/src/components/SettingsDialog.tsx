@@ -4,6 +4,7 @@ import type {
   HaloBitmapVersion,
   VersionResourceMaps,
   BitmapIdentificationResult,
+  UpdateCheckResult,
 } from '../../electron/shared-types';
 
 interface Props {
@@ -71,6 +72,10 @@ export default function SettingsDialog({ onClose }: Props) {
   const [versionSettings, setVersionSettings] = useState<Partial<Record<HaloBitmapVersion, VersionResourceMaps>>>({});
   const [inspectResults, setInspectResults] = useState<Record<string, BitmapIdentificationResult | null>>({});
   const [inspectingKey, setInspectingKey] = useState<string | null>(null);
+  const [checkUpdatesOnLaunch, setCheckUpdatesOnLaunch] = useState<boolean>(true);
+  const [appVersion, setAppVersion] = useState<string>('0.6.8');
+  const [checkingUpdates, setCheckingUpdates] = useState<boolean>(false);
+  const [updateCheckResult, setUpdateCheckResult] = useState<UpdateCheckResult | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -78,7 +83,31 @@ export default function SettingsDialog({ onClose }: Props) {
     window.opence.getVersionSettings?.().then((vs) => {
       if (vs) setVersionSettings(vs);
     }).catch(() => {});
+    window.opence.getSettings?.().then((s) => {
+      if (s && typeof s.checkForUpdatesOnLaunch === 'boolean') {
+        setCheckUpdatesOnLaunch(s.checkForUpdatesOnLaunch);
+      }
+    }).catch(() => {});
+    window.opence.getAppVersion?.().then((v) => {
+      if (v) setAppVersion(v);
+    }).catch(() => {});
   }, []);
+
+  const handleToggleAutoUpdate = async (enabled: boolean) => {
+    setCheckUpdatesOnLaunch(enabled);
+    await window.opence.setCheckForUpdatesOnLaunch?.(enabled);
+  };
+
+  const handleCheckUpdatesNow = async () => {
+    if (!window.opence.checkForUpdates) return;
+    setCheckingUpdates(true);
+    try {
+      const res = await window.opence.checkForUpdates();
+      setUpdateCheckResult(res);
+    } finally {
+      setCheckingUpdates(false);
+    }
+  };
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -93,7 +122,7 @@ export default function SettingsDialog({ onClose }: Props) {
   };
 
   const handlePickResourceFile = async (version: HaloBitmapVersion, kind: 'bitmaps' | 'sounds' | 'loc') => {
-    const res = await window.opence.pickConvertResource?.(kind);
+    const res = await window.opence.pickConvertResource?.(kind as 'bitmaps' | 'sounds');
     if (res?.path) {
       const updated = {
         ...(versionSettings[version] ?? { bitmaps: null, sounds: null, loc: null }),
@@ -130,7 +159,7 @@ export default function SettingsDialog({ onClose }: Props) {
           entryCount: 0,
           tableOffset: 0,
           detectedVersion: version,
-          versionMatchConfidence: 'unknown',
+          versionMatchConfidence: 'mismatch',
           entries: [],
         },
       }));
@@ -331,6 +360,177 @@ export default function SettingsDialog({ onClose }: Props) {
                     </div>
                   </div>
                 </div>
+              </div>
+
+              {/* Application Updates */}
+              <div style={{ marginBottom: 20, paddingBottom: 16, borderBottom: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                        Application Updates
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 10.5,
+                          fontFamily: 'var(--mono-font)',
+                          padding: '1px 6px',
+                          borderRadius: 3,
+                          background: 'rgba(0, 194, 255, 0.12)',
+                          color: 'var(--accent-cyan)',
+                          border: '1px solid rgba(0, 194, 255, 0.25)',
+                        }}
+                      >
+                        v{appVersion}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                      Automatically check GitHub Releases (SutlabSol/OpenCE-Mantle) on startup and notify when a newer version is available.
+                    </div>
+                  </div>
+                  <button
+                    data-testid="settings-check-updates-now"
+                    onClick={handleCheckUpdatesNow}
+                    disabled={checkingUpdates}
+                    style={{
+                      ...actionBtnStyle(),
+                      opacity: checkingUpdates ? 0.6 : 1,
+                    }}
+                  >
+                    {checkingUpdates ? 'Checking...' : 'Check for Updates Now'}
+                  </button>
+                </div>
+
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '10px 12px',
+                    background: 'rgba(255,255,255,0.03)',
+                    borderRadius: 4,
+                    border: '1px solid var(--border)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <input
+                      type="checkbox"
+                      data-testid="settings-toggle-auto-update"
+                      checked={checkUpdatesOnLaunch}
+                      onChange={(e) => void handleToggleAutoUpdate(e.target.checked)}
+                      style={{ width: 15, height: 15, accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                    />
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                        Check for updates automatically when OpenCE Mantle launches
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                        Disable this if you work offline or prefer to check for new releases manually.
+                      </div>
+                    </div>
+                  </div>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: checkUpdatesOnLaunch ? '#4ade80' : 'var(--text-dim)',
+                    }}
+                  >
+                    {checkUpdatesOnLaunch ? '● Enabled' : '○ Disabled'}
+                  </span>
+                </label>
+
+                {updateCheckResult && (
+                  <div
+                    data-testid="settings-update-check-result"
+                    style={{
+                      marginTop: 10,
+                      padding: '10px 12px',
+                      borderRadius: 4,
+                      background: !updateCheckResult.ok
+                        ? 'rgba(248, 113, 113, 0.08)'
+                        : updateCheckResult.updateAvailable
+                          ? 'rgba(0, 194, 255, 0.1)'
+                          : 'rgba(74, 222, 128, 0.08)',
+                      border: `1px solid ${
+                        !updateCheckResult.ok
+                          ? 'rgba(248, 113, 113, 0.25)'
+                          : updateCheckResult.updateAvailable
+                            ? 'rgba(0, 194, 255, 0.35)'
+                            : 'rgba(74, 222, 128, 0.25)'
+                      }`,
+                    }}
+                  >
+                    {!updateCheckResult.ok ? (
+                      <div style={{ fontSize: 11.5, color: '#f87171' }}>
+                        ✗ Update check failed: {updateCheckResult.error}
+                      </div>
+                    ) : updateCheckResult.updateAvailable ? (
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--accent-cyan)' }}>
+                            ★ New Release Available: {updateCheckResult.releaseName} (v{updateCheckResult.latestVersion})
+                          </div>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            {updateCheckResult.installerAsset && (
+                              <button
+                                onClick={() => void window.opence.openExternalUrl?.(updateCheckResult.installerAsset!.browserDownloadUrl)}
+                                style={actionBtnStyle(true)}
+                              >
+                                Download Installer (.exe)
+                              </button>
+                            )}
+                            {updateCheckResult.portableAsset && (
+                              <button
+                                onClick={() => void window.opence.openExternalUrl?.(updateCheckResult.portableAsset!.browserDownloadUrl)}
+                                style={actionBtnStyle()}
+                              >
+                                Download Portable (.exe)
+                              </button>
+                            )}
+                            <button
+                              onClick={() => void window.opence.openExternalUrl?.(updateCheckResult.htmlUrl)}
+                              style={actionBtnStyle()}
+                            >
+                              View on GitHub ↗
+                            </button>
+                          </div>
+                        </div>
+                        {updateCheckResult.releaseNotes && (
+                          <div
+                            style={{
+                              marginTop: 8,
+                              padding: '6px 8px',
+                              maxHeight: 110,
+                              overflowY: 'auto',
+                              background: 'rgba(0,0,0,0.25)',
+                              borderRadius: 3,
+                              fontSize: 11,
+                              color: 'var(--text-dim)',
+                              whiteSpace: 'pre-wrap',
+                              fontFamily: 'var(--mono-font)',
+                            }}
+                          >
+                            {updateCheckResult.releaseNotes}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span style={{ fontSize: 11.5, color: '#4ade80', fontWeight: 600 }}>
+                          ✓ You are running the latest version (v{updateCheckResult.currentVersion}).
+                        </span>
+                        <button
+                          onClick={() => void window.opence.openExternalUrl?.(updateCheckResult.htmlUrl)}
+                          style={{ ...actionBtnStyle(), padding: '3px 8px', fontSize: 11 }}
+                        >
+                          GitHub Releases ↗
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* About & Info */}

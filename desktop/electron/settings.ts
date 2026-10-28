@@ -13,6 +13,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   versionResourceMaps: {},
   openCeDirectory: null,
   openCeExecutablePath: null,
+  checkForUpdatesOnLaunch: true,
+  skippedUpdateVersion: null,
 };
 
 function migratePath(p: unknown): string | null {
@@ -66,6 +68,8 @@ export function getSettings(): AppSettings {
       versionResourceMaps,
       openCeDirectory: typeof parsed.openCeDirectory === "string" ? parsed.openCeDirectory : detectOpenCeDirectory(),
       openCeExecutablePath: typeof parsed.openCeExecutablePath === "string" ? parsed.openCeExecutablePath : null,
+      checkForUpdatesOnLaunch: typeof parsed.checkForUpdatesOnLaunch === "boolean" ? parsed.checkForUpdatesOnLaunch : true,
+      skippedUpdateVersion: typeof parsed.skippedUpdateVersion === "string" ? parsed.skippedUpdateVersion : null,
     };
 
     if (changed) {
@@ -74,7 +78,12 @@ export function getSettings(): AppSettings {
 
     return settings;
   } catch {
-    return { ...DEFAULT_SETTINGS, resourceMaps: { ...DEFAULT_SETTINGS.resourceMaps }, versionResourceMaps: {}, openCeDirectory: detectOpenCeDirectory() };
+    return {
+      ...DEFAULT_SETTINGS,
+      resourceMaps: { ...DEFAULT_SETTINGS.resourceMaps },
+      versionResourceMaps: {},
+      openCeDirectory: detectOpenCeDirectory(),
+    };
   }
 }
 
@@ -145,5 +154,21 @@ export function setOpenCeDirectory(dir: string | null): void {
     ...current,
     openCeDirectory: dir,
     openCeExecutablePath: exe && fs.existsSync(exe) ? exe : null,
+  });
+}
+
+export function setCheckForUpdatesOnLaunch(enabled: boolean): void {
+  const current = getSettings();
+  writeSettings({
+    ...current,
+    checkForUpdatesOnLaunch: Boolean(enabled),
+  });
+}
+
+export function setSkippedUpdateVersion(version: string | null): void {
+  const current = getSettings();
+  writeSettings({
+    ...current,
+    skippedUpdateVersion: version ? String(version).trim() : null,
   });
 }

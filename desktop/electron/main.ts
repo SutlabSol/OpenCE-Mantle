@@ -22,7 +22,16 @@ import {
 } from '../../core/src/index';
 import { discoverSteamMccInstallations, decodeMccModManifest } from './mcc-deploy';
 import { getRecentMaps, addRecentMap } from './recent-maps';
-import { getSettings, setLastExtractDir, setResourceMapPath, setVersionResourceMaps, setOpenCeDirectory } from './settings';
+import {
+  getSettings,
+  setLastExtractDir,
+  setResourceMapPath,
+  setVersionResourceMaps,
+  setOpenCeDirectory,
+  setCheckForUpdatesOnLaunch,
+  setSkippedUpdateVersion,
+} from './settings';
+import { checkForGitHubUpdates } from './update-checker';
 import { tagTestRunner } from './tag-test-runner';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
 import { saveMapAsFlow, registerSaveMapAsIpc, type SaveMapAsDeps } from './save-map-as';
@@ -2462,6 +2471,11 @@ function buildMenu() {
       label: 'Help',
       submenu: [
         {
+          label: 'Check for Updates...',
+          click: () => mainWindow?.webContents.send('menu:action', 'check-for-updates'),
+        },
+        { type: 'separator' },
+        {
           label: 'About OpenCE Mantle',
           click: () => showAboutDialog(),
         },
@@ -3925,6 +3939,51 @@ app.whenReady().then(() => {
       return res;
     },
   );
+
+  ipcMain.handle('app:checkForUpdates', async () => {
+    const curVer = getAppDisplayVersion();
+    const res = await checkForGitHubUpdates(curVer);
+    if (res.ok && res.updateAvailable) {
+      sendLog(
+        'info',
+        `Update available: OpenCE Mantle v${res.latestVersion} (current: v${res.currentVersion}).`,
+      );
+    }
+    return res;
+  });
+
+  ipcMain.handle('app:setCheckForUpdatesOnLaunch', (_evt, enabled: boolean) => {
+    const val = Boolean(enabled);
+    setCheckForUpdatesOnLaunch(val);
+    return { ok: true, checkForUpdatesOnLaunch: val };
+  });
+
+  ipcMain.handle('app:setSkippedUpdateVersion', (_evt, version: string | null) => {
+    const val = version ? String(version).trim() : null;
+    setSkippedUpdateVersion(val);
+    return { ok: true, skippedUpdateVersion: val };
+  });
+
+  ipcMain.handle('app:openExternalUrl', async (_evt, url: string) => {
+    if (typeof url !== 'string' || !url.startsWith('https://')) {
+      return { ok: false, message: 'Only HTTPS URLs are permitted.' };
+    }
+    try {
+      const parsed = new URL(url);
+      const allowedHosts = new Set([
+        'github.com',
+        'objects.githubusercontent.com',
+        'release-assets.githubusercontent.com',
+      ]);
+      if (!allowedHosts.has(parsed.hostname)) {
+        return { ok: false, message: `Host ${parsed.hostname} is not in the allowed release domain list.` };
+      }
+      await shell.openExternal(url);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, message: (err as Error).message };
+    }
+  });
 
   // Ensure any previous uncleaned init.txt from crashes is restored to normal
   try {

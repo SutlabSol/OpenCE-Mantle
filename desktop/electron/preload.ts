@@ -245,6 +245,12 @@ const api: OpenceApi = {
     ipcRenderer.invoke('map:injectProceduralWorldBsp', options),
   scaleCoupledPhysics: (objectTagId: number, scaleFactor: number) =>
     ipcRenderer.invoke('map:scaleCoupledPhysics', objectTagId, scaleFactor),
+  checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+  setCheckForUpdatesOnLaunch: (enabled: boolean) =>
+    ipcRenderer.invoke('app:setCheckForUpdatesOnLaunch', enabled),
+  setSkippedUpdateVersion: (version: string | null) =>
+    ipcRenderer.invoke('app:setSkippedUpdateVersion', version),
+  openExternalUrl: (url: string) => ipcRenderer.invoke('app:openExternalUrl', url),
 };
 
 contextBridge.exposeInMainWorld('opence', api);

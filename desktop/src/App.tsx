@@ -31,7 +31,7 @@ import BuildObjectTagDialog from './components/BuildObjectTagDialog';
 import ScriptEditorDialog from './components/ScriptEditorDialog';
 import ModdingStudioDialog from './components/ModdingStudioDialog';
 import MapCompareDialog from './components/MapCompareDialog';
-import type { BatchExtractPreflightResult, HaloBitmapVersion } from '../electron/shared-types';
+import type { BatchExtractPreflightResult, HaloBitmapVersion, UpdateCheckResult } from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
 const LARGE_SELECTION_CONFIRM_THRESHOLD = 200;
@@ -71,6 +71,7 @@ export default function App() {
     mapScenarioName: string;
   } | null>(null);
   const [skippedPromptMapPaths, setSkippedPromptMapPaths] = useState<Set<string>>(new Set());
+  const [updateBanner, setUpdateBanner] = useState<Extract<UpdateCheckResult, { ok: true }> | null>(null);
   const { logs, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
@@ -110,6 +111,50 @@ export default function App() {
     }
   };
 
+  const handleManualCheckForUpdates = async () => {
+    if (typeof window.opence.checkForUpdates !== 'function') return;
+    log('info', 'Checking GitHub Releases for updates...');
+    const res = await window.opence.checkForUpdates();
+    if (!res.ok) {
+      log('warn', `Update check failed: ${res.error}`);
+      setSettingsDialogOpen(true);
+      return;
+    }
+    if (res.updateAvailable) {
+      setUpdateBanner(res);
+      log('info', `New release available: ${res.releaseName} (v${res.latestVersion})!`);
+    } else {
+      log('info', `OpenCE Mantle is up to date (v${res.currentVersion}).`);
+      setSettingsDialogOpen(true);
+    }
+  };
+
+  // Automatic startup update check (honors Settings > General > Check for updates on launch)
+  useEffect(() => {
+    if (typeof window.opence.checkForUpdates !== 'function') return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const settings = window.opence.getSettings ? await window.opence.getSettings() : null;
+        if (cancelled) return;
+        if (settings && settings.checkForUpdatesOnLaunch === false) {
+          return;
+        }
+        const res = await window.opence.checkForUpdates!();
+        if (cancelled || !res.ok) return;
+        if (res.updateAvailable && res.latestVersion !== settings?.skippedUpdateVersion) {
+          setUpdateBanner(res);
+        }
+      } catch {
+        // Silent failure on startup background check
+      }
+    }, 1500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
   useEffect(() => {
     const offMenu = window.opence.onMenuAction((action) => {
       if (action === 'extract-tags') requestExtract(Array.from(selectedTagIndices));
@@ -121,6 +166,7 @@ export default function App() {
       else if (action === 'build-object-tag') setBuildObjectTagOpen(true);
       else if (action === 'compare-maps') setMapCompareOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
+      else if (action === 'check-for-updates') void handleManualCheckForUpdates();
       else if (action === 'convert-map') setConvertSource('pick');
       else if (action.startsWith('identify-bitmaps:')) {
         setSettingsDialogOpen(true);
@@ -298,7 +344,14 @@ export default function App() {
               { label: 'Settings...', onClick: () => setSettingsDialogOpen(true) },
             ],
           },
-          { label: 'Help', items: [{ label: 'About', onClick: () => window.opence.showAbout() }] },
+          {
+            label: 'Help',
+            items: [
+              { label: 'Check for Updates...', onClick: () => void handleManualCheckForUpdates() },
+              { label: '', separator: true },
+              { label: 'About', onClick: () => window.opence.showAbout() },
+            ],
+          },
         ]}
       />
       <Toolbar
@@ -310,6 +363,132 @@ export default function App() {
         onExtractWholeMap={() => void handleBatchExtract()}
         onInject={() => setInjectDialogOpen(true)}
       />
+
+      {updateBanner && (
+        <div
+          data-testid="update-available-banner"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 12,
+            padding: '7px 14px',
+            background: 'linear-gradient(90deg, rgba(0, 194, 255, 0.16), rgba(56, 189, 248, 0.08))',
+            borderBottom: '1px solid rgba(0, 194, 255, 0.35)',
+            fontSize: 12,
+            color: 'var(--text-primary)',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span
+              style={{
+                background: 'var(--accent-cyan)',
+                color: '#06202c',
+                fontWeight: 700,
+                fontSize: 10.5,
+                padding: '2px 7px',
+                borderRadius: 3,
+                textTransform: 'uppercase',
+              }}
+            >
+              Update Available
+            </span>
+            <span>
+              <strong>{updateBanner.releaseName}</strong> (v{updateBanner.latestVersion}) is now available on GitHub!{' '}
+              <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
+                (You are running v{updateBanner.currentVersion})
+              </span>
+            </span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {updateBanner.installerAsset && (
+              <button
+                data-testid="update-banner-download-installer"
+                onClick={() => void window.opence.openExternalUrl?.(updateBanner.installerAsset!.browserDownloadUrl)}
+                style={{
+                  background: 'var(--accent-cyan)',
+                  color: '#06202c',
+                  border: 'none',
+                  borderRadius: 3,
+                  padding: '4px 10px',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Download Installer (.exe)
+              </button>
+            )}
+            {updateBanner.portableAsset && (
+              <button
+                data-testid="update-banner-download-portable"
+                onClick={() => void window.opence.openExternalUrl?.(updateBanner.portableAsset!.browserDownloadUrl)}
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 3,
+                  padding: '4px 10px',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                Download Portable (.exe)
+              </button>
+            )}
+            <button
+              data-testid="update-banner-view-github"
+              onClick={() => void window.opence.openExternalUrl?.(updateBanner.htmlUrl)}
+              style={{
+                background: 'rgba(255,255,255,0.08)',
+                color: 'var(--text-primary)',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                padding: '4px 10px',
+                fontSize: 11,
+                cursor: 'pointer',
+              }}
+            >
+              Release Notes ↗
+            </button>
+            <button
+              data-testid="update-banner-skip-version"
+              onClick={() => {
+                void window.opence.setSkippedUpdateVersion?.(updateBanner.latestVersion);
+                setUpdateBanner(null);
+              }}
+              style={{
+                background: 'transparent',
+                color: 'var(--text-dim)',
+                border: 'none',
+                fontSize: 11,
+                cursor: 'pointer',
+                padding: '2px 6px',
+              }}
+              title="Don't remind me again for this specific version"
+            >
+              Skip v{updateBanner.latestVersion}
+            </button>
+            <button
+              data-testid="update-banner-dismiss"
+              onClick={() => setUpdateBanner(null)}
+              style={{
+                background: 'transparent',
+                color: 'var(--text-dim)',
+                border: 'none',
+                fontSize: 15,
+                lineHeight: 1,
+                cursor: 'pointer',
+                padding: '2px 6px',
+              }}
+              title="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
 
       {mapState?.status === 'compressed' && <CompressedBanner onDecompress={handleDecompress} />}
       {mapState?.status === 'unsupported' && <UnsupportedBanner message={mapState.message} onConvert={mapState.convertible ? () => setConvertSource('open') : undefined} />}

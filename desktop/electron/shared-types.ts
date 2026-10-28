@@ -287,7 +287,38 @@ export interface AppSettings {
   versionResourceMaps?: Partial<Record<HaloBitmapVersion, VersionResourceMaps>>;
   openCeDirectory?: string | null;
   openCeExecutablePath?: string | null;
+  /** Whether to automatically check GitHub Releases for a newer version when the app launches (default: true). */
+  checkForUpdatesOnLaunch?: boolean;
+  /** Version string the user clicked "Skip This Version" on, if any. */
+  skippedUpdateVersion?: string | null;
 }
+
+export interface UpdateReleaseAsset {
+  name: string;
+  browserDownloadUrl: string;
+  sizeBytes: number;
+}
+
+export type UpdateCheckResult =
+  | {
+      ok: true;
+      currentVersion: string;
+      latestVersion: string;
+      updateAvailable: boolean;
+      releaseName: string;
+      releaseNotes: string;
+      publishedAt: string | null;
+      htmlUrl: string;
+      installerAsset: UpdateReleaseAsset | null;
+      portableAsset: UpdateReleaseAsset | null;
+      checkedAt: string;
+    }
+  | {
+      ok: false;
+      currentVersion: string;
+      error: string;
+      checkedAt: string;
+    };
 
 /* ------------------------------- M5 Step A: ADD-mode injection ------------------------------- */
 
@@ -1542,6 +1573,14 @@ export interface OpenceApi {
       }
     | { ok: false; message: string }
   >;
+  /** Check GitHub Releases for a newer version of OpenCE Mantle. */
+  checkForUpdates?(): Promise<UpdateCheckResult>;
+  /** Toggle whether OpenCE Mantle checks for updates automatically on launch. */
+  setCheckForUpdatesOnLaunch?(enabled: boolean): Promise<{ ok: true; checkForUpdatesOnLaunch: boolean }>;
+  /** Record a release version string to skip automatic prompts for (or null to clear). */
+  setSkippedUpdateVersion?(version: string | null): Promise<{ ok: true; skippedUpdateVersion: string | null }>;
+  /** Open an external GitHub release / download URL in the system default browser. */
+  openExternalUrl?(url: string): Promise<{ ok: boolean; message?: string }>;
 }
 
 declare global {
