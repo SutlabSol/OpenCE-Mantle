@@ -174,19 +174,56 @@ if ($wshell.AppActivate('Halo')) {
     return { directory: dir, executable: exe, exists };
   }
 
-  public restoreInitBackupIfPresent(): void {
-    const cfg = this.getOpenCeConfig();
-    if (cfg.directory) {
-      const initPath = path.join(cfg.directory, 'init.txt');
-      const backupPath = path.join(cfg.directory, 'init.txt.opence_backup');
-      try {
-        if (fs.existsSync(backupPath)) {
-          fs.copyFileSync(backupPath, initPath);
-          fs.unlinkSync(backupPath);
-        }
-      } catch {
-        /* best effort */
+  private restoreInitForDir(dir: string): void {
+    const scriptPath = path.join(dir, '_opence_tag_test.txt');
+    try {
+      if (fs.existsSync(scriptPath)) {
+        fs.unlinkSync(scriptPath);
       }
+    } catch {
+      /* best effort */
+    }
+
+    const initPath = path.join(dir, 'init.txt');
+    const backupPath = path.join(dir, 'init.txt.opence_backup');
+    try {
+      if (fs.existsSync(backupPath)) {
+        const backupContent = fs.readFileSync(backupPath, 'utf-8');
+        if (!backupContent.includes('_opence_tag_test')) {
+          fs.copyFileSync(backupPath, initPath);
+        } else if (fs.existsSync(initPath)) {
+          fs.unlinkSync(initPath);
+        }
+        fs.unlinkSync(backupPath);
+      } else if (fs.existsSync(initPath)) {
+        const content = fs.readFileSync(initPath, 'utf-8');
+        if (
+          content.includes('_opence_tag_test') ||
+          (content.includes('game_console_log all') && content.includes('display_framerate true'))
+        ) {
+          fs.unlinkSync(initPath);
+        }
+      }
+    } catch {
+      /* best effort */
+    }
+  }
+
+  public restoreInitBackupIfPresent(): void {
+    const dirs = new Set<string>();
+    if (this.activeOpenCeDir) dirs.add(this.activeOpenCeDir);
+    const cfg = this.getOpenCeConfig();
+    if (cfg.directory) dirs.add(cfg.directory);
+    for (const candidate of [
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE',
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE',
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE',
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\CoreCE',
+    ]) {
+      if (fs.existsSync(candidate)) dirs.add(candidate);
+    }
+    for (const dir of dirs) {
+      this.restoreInitForDir(dir);
     }
   }
 
@@ -318,6 +355,12 @@ if ($wshell.AppActivate('Halo')) {
         }
       }, 1200);
 
+      // 8. Restore/remove temporary init.txt once halo.exe has booted (3s fallback in addition to Telnet connect)
+      // so that even if Halo CE or Mantle is force-closed or standard CE is launched later, init.txt is already clean.
+      setTimeout(() => {
+        this.restoreInitForDir(openCeDir);
+      }, 3000);
+
       return { ok: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -344,6 +387,9 @@ if ($wshell.AppActivate('Halo')) {
         this.telnetSocket = sock;
         this.telnetConnected = true;
         this.statusState = 'running';
+        if (this.activeOpenCeDir) {
+          this.restoreInitForDir(this.activeOpenCeDir);
+        }
         this.emitStatus();
         this.emitLog('telnet', '[Telnet Bridge] Connected to OpenCE telnet console on port 2323.');
       });
@@ -478,6 +524,9 @@ if ($wshell.AppActivate('Halo')) {
   }
 
   public stop(): Promise<{ ok: boolean; error?: string }> {
+    // Always restore/remove init.txt synchronously first so quitting the app never leaves init.txt behind
+    this.restoreInitBackupIfPresent();
+
     if (this.child === null) {
       this.cleanup();
       return Promise.resolve({ ok: true });
@@ -524,34 +573,9 @@ if ($wshell.AppActivate('Halo')) {
     this.child = null;
     this.stopDebugWatcher();
 
-    // Clean up _opence_tag_test.txt and restore any legacy init.txt if needed
-    if (this.activeOpenCeDir) {
-      const scriptPath = path.join(this.activeOpenCeDir, '_opence_tag_test.txt');
-      try {
-        if (fs.existsSync(scriptPath)) {
-          fs.unlinkSync(scriptPath);
-        }
-      } catch {
-        /* best effort */
-      }
-
-      const initPath = path.join(this.activeOpenCeDir, 'init.txt');
-      const backupPath = path.join(this.activeOpenCeDir, 'init.txt.opence_backup');
-      try {
-        if (fs.existsSync(backupPath)) {
-          fs.copyFileSync(backupPath, initPath);
-          fs.unlinkSync(backupPath);
-        } else if (fs.existsSync(initPath)) {
-          const content = fs.readFileSync(initPath, 'utf-8');
-          if (content.includes('_opence_tag_test')) {
-            fs.unlinkSync(initPath);
-          }
-        }
-      } catch {
-        /* best effort */
-      }
-      this.activeOpenCeDir = null;
-    }
+    // Clean up _opence_tag_test.txt and restore/remove any temporary init.txt
+    this.restoreInitBackupIfPresent();
+    this.activeOpenCeDir = null;
 
     this.emitStatus();
   }
@@ -559,3 +583,10 @@ if ($wshell.AppActivate('Halo')) {
 
 // Global runner singleton for the Electron main process
 export const tagTestRunner = new TagTestRunner();
+process.on('exit', () => {
+  try {
+    tagTestRunner.restoreInitBackupIfPresent();
+  } catch {
+    /* best effort */
+  }
+});

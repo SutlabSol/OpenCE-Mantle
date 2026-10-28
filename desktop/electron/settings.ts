@@ -130,6 +130,8 @@ export function detectOpenCeDirectory(): string | null {
   try {
     const home = app.getPath('home');
     const candidates = [
+      'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE',
+      path.join(home, 'Desktop', 'Halo CE Related', 'OpenCE'),
       'C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE',
       path.join(home, 'Desktop', 'Halo CE Related', 'Halo CE - OpenCE'),
       'C:\\Halo CE - OpenCE',
