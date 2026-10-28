@@ -1700,18 +1700,34 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
               return;
             }
 
-            // Compute vertical zOffset for weapons/equipment so models centered at origin sit cleanly on the ground
+            // Compute bounding box, visual preview scale, and vertical zLift for weapons/equipment
+            // so tiny item models (like ammo packs, grenades, and pistols which are 0.025–0.15u in Halo world units)
+            // render clearly above the pickup ring in the 3D Viewport without altering map tag data.
             let zLift = 0;
+            let viewScale = 1.0;
             if (obj.kind === 'weapon' || obj.kind === 'equipment') {
-              let minZ = Infinity;
+              let minX = Infinity, maxX = -Infinity;
+              let minY = Infinity, maxY = -Infinity;
+              let minZ = Infinity, maxZ = -Infinity;
               for (const submesh of modelGeom.submeshes) {
                 for (let vi = 0; vi < submesh.vertexCount; vi++) {
+                  const vx = submesh.vertices[vi * 8 + 0];
+                  const vy = submesh.vertices[vi * 8 + 1];
                   const vz = submesh.vertices[vi * 8 + 2];
+                  if (vx < minX) minX = vx;
+                  if (vx > maxX) maxX = vx;
+                  if (vy < minY) minY = vy;
+                  if (vy > maxY) maxY = vy;
                   if (vz < minZ) minZ = vz;
+                  if (vz > maxZ) maxZ = vz;
                 }
               }
-              if (Number.isFinite(minZ) && minZ < 0.02) {
-                zLift = -minZ + 0.025;
+              const maxDim = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+              if (Number.isFinite(maxDim) && maxDim > 0 && maxDim < 0.65) {
+                viewScale = Math.min(3.5, Math.max(1.0, 0.65 / maxDim));
+              }
+              if (Number.isFinite(minZ)) {
+                zLift = Math.max(0.03, -minZ * viewScale + 0.03);
               }
             }
 
@@ -1742,6 +1758,9 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
               });
 
               const mesh = new THREE.Mesh(geom, solidMat);
+              if (viewScale !== 1.0) {
+                mesh.scale.setScalar(viewScale);
+              }
               if (zLift !== 0) {
                 mesh.position.z = zLift;
               }
@@ -4241,11 +4260,16 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
                           <select
                             data-testid="inspector-palette-select"
                             value={selectedPlacement.paletteIndex}
-                            onChange={(e) =>
-                              handleUpdatePlacement(selectedPlacement.id, {
-                                paletteIndex: parseInt(e.target.value, 10),
-                              })
-                            }
+                            onChange={(e) => {
+                              const nextIdx = parseInt(e.target.value, 10);
+                              if (selectedPlacement.kind === 'weapon' || selectedPlacement.kind === 'equipment') {
+                                handleSwapPlacement(selectedPlacement.id, selectedPlacement.kind, nextIdx);
+                              } else {
+                                handleUpdatePlacement(selectedPlacement.id, {
+                                  paletteIndex: nextIdx,
+                                });
+                              }
+                            }}
                             style={{
                               background: 'var(--bg-main)',
                               color: 'var(--text-primary)',
