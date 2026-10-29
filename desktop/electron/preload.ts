@@ -261,6 +261,14 @@ const api: OpenceApi = {
     ipcRenderer.on('app:updateDownloadProgress', listener);
     return () => ipcRenderer.removeListener('app:updateDownloadProgress', listener);
   },
+  inspectLiveHudCatalog: () => ipcRenderer.invoke('hud:inspectCatalog'),
+  applyLiveHudEdit: (request) => ipcRenderer.invoke('hud:applyEdit', request),
+  applyLiveWeaponStatEdit: (request) => ipcRenderer.invoke('hud:applyWeaponStatEdit', request),
+  injectHudElementBitmap: (request) => ipcRenderer.invoke('hud:injectElementBitmap', request),
+  inspectUiWidgetCanvas: (widgetTagIndex) => ipcRenderer.invoke('ui:inspectWidgetCanvas', widgetTagIndex),
+  updateUiWidgetPlacement: (request) => ipcRenderer.invoke('ui:updateWidgetPlacement', request),
+  saveUnicodeStringTable: (ustrTagIndex, strings) =>
+    ipcRenderer.invoke('ui:saveUnicodeStringTable', ustrTagIndex, strings),
 };
 
 contextBridge.exposeInMainWorld('opence', api);

@@ -133,6 +133,13 @@ import {
   compareMaps,
   injectProceduralWorldIntoMapBsp,
   scaleObjectAndCoupledPhysicsInMap,
+  inspectMapHudAndUiTargets,
+  applyLiveHudEdit,
+  applyLiveWeaponStatEdit,
+  injectHudElementBitmap,
+  inspectUiWidgetCanvas,
+  updateUiWidgetPlacement,
+  saveUnicodeStringListTable,
 } from '../../core/src/index';
 import { deployMccModPackage } from './mcc-deploy';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
@@ -3501,6 +3508,191 @@ function runScaleCoupledPhysics(task: Extract<WorkerRequest, { type: 'scaleCoupl
   }
 }
 
+function runInspectLiveHudCatalog(task: Extract<WorkerRequest, { type: 'inspectLiveHudCatalog' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const catalog = inspectMapHudAndUiTargets(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+    );
+    sendResult(task.requestId, { ok: true, catalog });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runApplyLiveHudEdit(task: Extract<WorkerRequest, { type: 'applyLiveHudEdit' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = applyLiveHudEdit(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request,
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    const catalog = inspectMapHudAndUiTargets(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      effectiveHudTagIndex: res.effectiveHudTagIndex,
+      catalog,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runApplyLiveWeaponStatEdit(task: Extract<WorkerRequest, { type: 'applyLiveWeaponStatEdit' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = applyLiveWeaponStatEdit(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request,
+    );
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      writtenValue: res.writtenValue,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runInjectHudElementBitmap(task: Extract<WorkerRequest, { type: 'injectHudElementBitmap' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+    const res = injectHudElementBitmap(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request,
+      externalBitmaps,
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    const catalog = inspectMapHudAndUiTargets(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      bitmapTagIndex: res.bitmapTagIndex,
+      bitmapTagId: res.bitmapTagId,
+      bitmapPath: res.bitmapPath,
+      width: res.width,
+      height: res.height,
+      format: res.format,
+      catalog,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runInspectUiWidgetCanvas(task: Extract<WorkerRequest, { type: 'inspectUiWidgetCanvas' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const rootNode = inspectUiWidgetCanvas(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.widgetTagIndex,
+    );
+    if (!rootNode) {
+      return sendResult(task.requestId, {
+        ok: false,
+        message: `Tag #${task.widgetTagIndex} is not a readable ui_widget_definition (DeLa) tag.`,
+      });
+    }
+    sendResult(task.requestId, { ok: true, rootNode });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runUpdateUiWidgetPlacement(task: Extract<WorkerRequest, { type: 'updateUiWidgetPlacement' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    updateUiWidgetPlacement(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request,
+    );
+    currentMap.modified = true;
+    const rootTarget = task.request.parentTagIndex ?? task.request.widgetTagIndex;
+    const rootNode = inspectUiWidgetCanvas(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      rootTarget,
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      rootNode,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runSaveUnicodeStringTable(task: Extract<WorkerRequest, { type: 'saveUnicodeStringTable' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = saveUnicodeStringListTable(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.ustrTagIndex,
+      task.strings,
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      entryCount: res.entryCount,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -3583,6 +3775,13 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'compileFontFromGlyphAtlas') runCompileFontFromGlyphAtlas(task);
     else if (task.type === 'injectProceduralWorldBsp') runInjectProceduralWorldBsp(task);
     else if (task.type === 'scaleCoupledPhysics') runScaleCoupledPhysics(task);
+    else if (task.type === 'inspectLiveHudCatalog') runInspectLiveHudCatalog(task);
+    else if (task.type === 'applyLiveHudEdit') runApplyLiveHudEdit(task);
+    else if (task.type === 'applyLiveWeaponStatEdit') runApplyLiveWeaponStatEdit(task);
+    else if (task.type === 'injectHudElementBitmap') runInjectHudElementBitmap(task);
+    else if (task.type === 'inspectUiWidgetCanvas') runInspectUiWidgetCanvas(task);
+    else if (task.type === 'updateUiWidgetPlacement') runUpdateUiWidgetPlacement(task);
+    else if (task.type === 'saveUnicodeStringTable') runSaveUnicodeStringTable(task);
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

@@ -3287,8 +3287,8 @@ function syncScenarioObjectNamesForScripts(
             : 1;
     if (inferred !== undefined && !isVehicleName && !isBipedName && !isDoorName) {
       if (inferred === 7 && (t < 7 || t > 9)) t = 7;
-      else if (inferred === 1 && t !== 1 && t !== 0) t = 1;
-      else if (t < 0) t = inferred;
+      else if (inferred === 1 && curType < 0 && t !== 1 && t !== 0) t = 1;
+      else if (t < 0 && inferred >= 0) t = inferred;
     }
     if (!placementBlocks.some((pb) => pb.objType === t)) t = 1;
     targetTypes[i] = t;
@@ -4676,8 +4676,21 @@ export function compileHaloScriptIntoScenario(view: Buffer, hscSource: string): 
         });
       }
 
-      const enumTables: Record<number, Record<string, number>> = {
-        21: { default: 0, player: 1, flag_blue: 2, flag_red: 3, arrow: 0 },
+       const enumTables: Record<number, Record<string, number>> = {
+        21: {
+          default: 0,
+          default_red: 1,
+          player: 1,
+          flag_blue: 2,
+          flag_red: 3,
+          target_blue: 4,
+          target_red: 5,
+          ball_blue: 6,
+          ball_red: 7,
+          crown_blue: 8,
+          crown_red: 9,
+          arrow: 0,
+        },
         32: { easy: 0, normal: 1, hard: 2, impossible: 3 },
         33: { default: 0, player: 1, human: 2, covenant: 3, flood: 4, sentinel: 5, unused6: 6, unused7: 7, unused8: 8, unused9: 9 },
         34: {

@@ -170,7 +170,26 @@ var api = {
   inspectMeterTag: (meterTagIndex) => import_electron.ipcRenderer.invoke("map:inspectMeterTag", meterTagIndex),
   compileFontFromGlyphAtlas: (targetFontTagIndex, glyphSpec) => import_electron.ipcRenderer.invoke("map:compileFontFromGlyphAtlas", targetFontTagIndex, glyphSpec),
   injectProceduralWorldBsp: (options) => import_electron.ipcRenderer.invoke("map:injectProceduralWorldBsp", options),
-  scaleCoupledPhysics: (objectTagId, scaleFactor) => import_electron.ipcRenderer.invoke("map:scaleCoupledPhysics", objectTagId, scaleFactor)
+  scaleCoupledPhysics: (objectTagId, scaleFactor) => import_electron.ipcRenderer.invoke("map:scaleCoupledPhysics", objectTagId, scaleFactor),
+  checkForUpdates: () => import_electron.ipcRenderer.invoke("app:checkForUpdates"),
+  setCheckForUpdatesOnLaunch: (enabled) => import_electron.ipcRenderer.invoke("app:setCheckForUpdatesOnLaunch", enabled),
+  setAutoDownloadUpdates: (enabled) => import_electron.ipcRenderer.invoke("app:setAutoDownloadUpdates", enabled),
+  setSkippedUpdateVersion: (version) => import_electron.ipcRenderer.invoke("app:setSkippedUpdateVersion", version),
+  openExternalUrl: (url) => import_electron.ipcRenderer.invoke("app:openExternalUrl", url),
+  downloadUpdate: (options) => import_electron.ipcRenderer.invoke("app:downloadUpdate", options),
+  applyUpdateAndRestart: (downloadedFilePath, installMode) => import_electron.ipcRenderer.invoke("app:applyUpdateAndRestart", downloadedFilePath, installMode),
+  onUpdateDownloadProgress: (cb) => {
+    const listener = (_, data) => cb(data);
+    import_electron.ipcRenderer.on("app:updateDownloadProgress", listener);
+    return () => import_electron.ipcRenderer.removeListener("app:updateDownloadProgress", listener);
+  },
+  inspectLiveHudCatalog: () => import_electron.ipcRenderer.invoke("hud:inspectCatalog"),
+  applyLiveHudEdit: (request) => import_electron.ipcRenderer.invoke("hud:applyEdit", request),
+  applyLiveWeaponStatEdit: (request) => import_electron.ipcRenderer.invoke("hud:applyWeaponStatEdit", request),
+  injectHudElementBitmap: (request) => import_electron.ipcRenderer.invoke("hud:injectElementBitmap", request),
+  inspectUiWidgetCanvas: (widgetTagIndex) => import_electron.ipcRenderer.invoke("ui:inspectWidgetCanvas", widgetTagIndex),
+  updateUiWidgetPlacement: (request) => import_electron.ipcRenderer.invoke("ui:updateWidgetPlacement", request),
+  saveUnicodeStringTable: (ustrTagIndex, strings) => import_electron.ipcRenderer.invoke("ui:saveUnicodeStringTable", ustrTagIndex, strings)
 };
 import_electron.contextBridge.exposeInMainWorld("opence", api);
 //# sourceMappingURL=preload.js.map

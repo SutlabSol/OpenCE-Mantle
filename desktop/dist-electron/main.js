@@ -188,9 +188,9 @@ function classifyMapLayout(buffer) {
 }
 
 // electron/main.ts
-var import_electron3 = require("electron");
-var path11 = __toESM(require("path"));
-var fs9 = __toESM(require("fs"));
+var import_electron4 = require("electron");
+var path12 = __toESM(require("path"));
+var fs10 = __toESM(require("fs"));
 
 // ../core/src/map/tag-footprints.ts
 var SCENARIO_STRUCTURE_BSP_FOURCC = fourCCFromString("sbsp");
@@ -36881,7 +36881,10 @@ var DEFAULT_SETTINGS = {
   resourceMaps: { bitmaps: null, sounds: null, loc: null },
   versionResourceMaps: {},
   openCeDirectory: null,
-  openCeExecutablePath: null
+  openCeExecutablePath: null,
+  checkForUpdatesOnLaunch: true,
+  autoDownloadUpdates: false,
+  skippedUpdateVersion: null
 };
 function migratePath(p) {
   if (typeof p !== "string" || !p) return null;
@@ -36942,14 +36945,22 @@ function getSettings() {
       resourceMaps,
       versionResourceMaps,
       openCeDirectory: typeof parsed.openCeDirectory === "string" ? parsed.openCeDirectory : detectOpenCeDirectory(),
-      openCeExecutablePath: typeof parsed.openCeExecutablePath === "string" ? parsed.openCeExecutablePath : null
+      openCeExecutablePath: typeof parsed.openCeExecutablePath === "string" ? parsed.openCeExecutablePath : null,
+      checkForUpdatesOnLaunch: typeof parsed.checkForUpdatesOnLaunch === "boolean" ? parsed.checkForUpdatesOnLaunch : true,
+      autoDownloadUpdates: typeof parsed.autoDownloadUpdates === "boolean" ? parsed.autoDownloadUpdates : false,
+      skippedUpdateVersion: typeof parsed.skippedUpdateVersion === "string" ? parsed.skippedUpdateVersion : null
     };
     if (changed) {
       writeSettings(settings);
     }
     return settings;
   } catch {
-    return { ...DEFAULT_SETTINGS, resourceMaps: { ...DEFAULT_SETTINGS.resourceMaps }, versionResourceMaps: {}, openCeDirectory: detectOpenCeDirectory() };
+    return {
+      ...DEFAULT_SETTINGS,
+      resourceMaps: { ...DEFAULT_SETTINGS.resourceMaps },
+      versionResourceMaps: {},
+      openCeDirectory: detectOpenCeDirectory()
+    };
   }
 }
 function writeSettings(next) {
@@ -36986,6 +36997,8 @@ function detectOpenCeDirectory() {
   try {
     const home = import_electron2.app.getPath("home");
     const candidates = [
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE",
+      path3.join(home, "Desktop", "Halo CE Related", "OpenCE"),
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE",
       path3.join(home, "Desktop", "Halo CE Related", "Halo CE - OpenCE"),
       "C:\\Halo CE - OpenCE",
@@ -37010,22 +37023,496 @@ function setOpenCeDirectory(dir) {
     openCeExecutablePath: exe && fs3.existsSync(exe) ? exe : null
   });
 }
+function setCheckForUpdatesOnLaunch(enabled) {
+  const current = getSettings();
+  writeSettings({
+    ...current,
+    checkForUpdatesOnLaunch: Boolean(enabled)
+  });
+}
+function setAutoDownloadUpdates(enabled) {
+  const current = getSettings();
+  writeSettings({
+    ...current,
+    autoDownloadUpdates: Boolean(enabled)
+  });
+}
+function setSkippedUpdateVersion(version) {
+  const current = getSettings();
+  writeSettings({
+    ...current,
+    skippedUpdateVersion: version ? String(version).trim() : null
+  });
+}
+
+// electron/update-checker.ts
+var https = __toESM(require("https"));
+var fs4 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
+var import_child_process = require("child_process");
+var import_electron3 = require("electron");
+var GITHUB_REPO_OWNER = "SutlabSol";
+var GITHUB_REPO_NAME = "OpenCE-Mantle";
+var ALLOWED_DOWNLOAD_HOSTS = /* @__PURE__ */ new Set([
+  "github.com",
+  "api.github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+  "codeload.github.com"
+]);
+var lastStagedUpdate = null;
+function isRunningPortableBuild() {
+  if (process.env.PORTABLE_EXECUTABLE_FILE) return true;
+  try {
+    const exePath = import_electron3.app.getPath("exe").toLowerCase();
+    if (exePath.includes("appdata\\local\\programs\\") || exePath.includes("program files")) {
+      return false;
+    }
+  } catch {
+  }
+  return false;
+}
+function normalizeVersionString(raw) {
+  return String(raw || "").trim().replace(/^[vV]\s*/, "");
+}
+function compareSemver(currentRaw, candidateRaw) {
+  const curClean = normalizeVersionString(currentRaw);
+  const candClean = normalizeVersionString(candidateRaw);
+  if (!curClean || !candClean) return 0;
+  if (curClean === candClean) return 0;
+  const [curCore, curPre] = curClean.split("-", 2);
+  const [candCore, candPre] = candClean.split("-", 2);
+  const curParts = curCore.split(".").map((n) => parseInt(n, 10) || 0);
+  const candParts = candCore.split(".").map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(curParts.length, candParts.length, 3);
+  for (let i = 0; i < len; i++) {
+    const a = curParts[i] ?? 0;
+    const b = candParts[i] ?? 0;
+    if (b > a) return 1;
+    if (b < a) return -1;
+  }
+  if (curPre && !candPre) return 1;
+  if (!curPre && candPre) return -1;
+  if (curPre && candPre && curPre !== candPre) {
+    return candPre.localeCompare(curPre, void 0, { numeric: true }) > 0 ? 1 : -1;
+  }
+  return 0;
+}
+function fetchJson(url, currentVersion, timeoutMs = 6500) {
+  return new Promise((resolve5, reject) => {
+    const req = https.get(
+      url,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": `OpenCE-Mantle/${normalizeVersionString(currentVersion) || "0.6.8"}`,
+          "X-GitHub-Api-Version": "2022-11-28"
+        },
+        timeout: timeoutMs
+      },
+      (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          fetchJson(res.headers.location, currentVersion, timeoutMs).then(resolve5, reject);
+          return;
+        }
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          try {
+            const parsed = text ? JSON.parse(text) : null;
+            resolve5({ statusCode: res.statusCode ?? 0, data: parsed });
+          } catch {
+            resolve5({ statusCode: res.statusCode ?? 0, data: null });
+          }
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy(new Error("Update check request timed out."));
+    });
+    req.on("error", (err) => {
+      reject(err);
+    });
+  });
+}
+function classifyReleaseAssets(assets) {
+  if (!Array.isArray(assets)) {
+    return { installerAsset: null, portableAsset: null };
+  }
+  let installerAsset = null;
+  let portableAsset = null;
+  for (const a of assets) {
+    if (!a || typeof a.name !== "string" || typeof a.browser_download_url !== "string") continue;
+    const nameLower = a.name.toLowerCase();
+    if (!nameLower.endsWith(".exe")) continue;
+    const entry = {
+      name: a.name,
+      browserDownloadUrl: a.browser_download_url,
+      sizeBytes: typeof a.size === "number" ? a.size : 0
+    };
+    if (nameLower.includes("setup") || nameLower.includes("installer")) {
+      if (!installerAsset) installerAsset = entry;
+    } else {
+      if (!portableAsset) portableAsset = entry;
+    }
+  }
+  return { installerAsset, portableAsset };
+}
+async function checkForGitHubUpdates(currentVersion) {
+  const normCurrent = normalizeVersionString(currentVersion) || "0.6.8";
+  const latestUrl = `https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/releases/latest`;
+  const allReleasesUrl = `https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/releases?per_page=5`;
+  const repoReleasesPage = `https://github.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/releases`;
+  try {
+    let releaseObj = null;
+    const latestRes = await fetchJson(latestUrl, normCurrent);
+    if (latestRes.statusCode === 200 && latestRes.data && typeof latestRes.data.tag_name === "string") {
+      releaseObj = latestRes.data;
+    } else if (latestRes.statusCode === 404) {
+      const listRes = await fetchJson(allReleasesUrl, normCurrent);
+      if (listRes.statusCode === 200 && Array.isArray(listRes.data) && listRes.data.length > 0) {
+        releaseObj = listRes.data.find((r) => !r.draft && typeof r.tag_name === "string") ?? null;
+      }
+      if (!releaseObj) {
+        return {
+          ok: true,
+          currentVersion: normCurrent,
+          latestVersion: normCurrent,
+          updateAvailable: false,
+          releaseName: `OpenCE Mantle v${normCurrent}`,
+          releaseNotes: "No newer GitHub releases published yet.",
+          publishedAt: null,
+          htmlUrl: repoReleasesPage,
+          installerAsset: null,
+          portableAsset: null,
+          checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+      }
+    } else {
+      const apiMsg = latestRes.data && typeof latestRes.data.message === "string" ? latestRes.data.message : `GitHub API returned HTTP ${latestRes.statusCode}`;
+      return {
+        ok: false,
+        currentVersion: normCurrent,
+        error: apiMsg,
+        checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const latestVersion = normalizeVersionString(releaseObj.tag_name);
+    const isNewer = compareSemver(normCurrent, latestVersion) > 0;
+    const { installerAsset, portableAsset } = classifyReleaseAssets(releaseObj.assets);
+    return {
+      ok: true,
+      currentVersion: normCurrent,
+      latestVersion,
+      updateAvailable: isNewer,
+      releaseName: typeof releaseObj.name === "string" && releaseObj.name.trim() ? releaseObj.name.trim() : `OpenCE Mantle v${latestVersion}`,
+      releaseNotes: typeof releaseObj.body === "string" ? releaseObj.body : "",
+      publishedAt: typeof releaseObj.published_at === "string" ? releaseObj.published_at : null,
+      htmlUrl: typeof releaseObj.html_url === "string" ? releaseObj.html_url : repoReleasesPage,
+      installerAsset,
+      portableAsset,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      currentVersion: normCurrent,
+      error: err?.message || "Failed to connect to GitHub Releases.",
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+}
+function streamHttpsToFile(url, destPartPath, expectedTotalBytes, onProgress) {
+  return new Promise((resolve5, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      reject(new Error(`Invalid download URL: ${url}`));
+      return;
+    }
+    if (parsedUrl.protocol !== "https:" || !ALLOWED_DOWNLOAD_HOSTS.has(parsedUrl.hostname)) {
+      reject(new Error(`Untrusted download host: ${parsedUrl.hostname}`));
+      return;
+    }
+    const req = https.get(
+      url,
+      {
+        headers: {
+          "User-Agent": "OpenCE-Mantle-Updater",
+          Accept: "application/octet-stream,*/*"
+        },
+        timeout: 3e4
+      },
+      (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          streamHttpsToFile(res.headers.location, destPartPath, expectedTotalBytes, onProgress).then(resolve5, reject);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(new Error(`Download failed with HTTP status ${res.statusCode ?? 0}.`));
+          return;
+        }
+        const contentLen = parseInt(String(res.headers["content-length"] || "0"), 10);
+        const total = contentLen > 0 ? contentLen : expectedTotalBytes;
+        const fileStream = fs4.createWriteStream(destPartPath);
+        let transferred = 0;
+        const startTime = Date.now();
+        let lastEmitTime = 0;
+        res.on("data", (chunk) => {
+          transferred += chunk.length;
+          const now = Date.now();
+          if (now - lastEmitTime >= 100 || total > 0 && transferred >= total) {
+            lastEmitTime = now;
+            const elapsedSec = Math.max(0.1, (now - startTime) / 1e3);
+            const bps = Math.round(transferred / elapsedSec);
+            onProgress(transferred, total, bps);
+          }
+        });
+        res.pipe(fileStream);
+        fileStream.on("finish", () => {
+          fileStream.close(() => {
+            resolve5(transferred);
+          });
+        });
+        fileStream.on("error", (err) => {
+          res.destroy();
+          try {
+            if (fs4.existsSync(destPartPath)) fs4.unlinkSync(destPartPath);
+          } catch {
+          }
+          reject(err);
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy(new Error("Update download timed out."));
+    });
+    req.on("error", (err) => {
+      try {
+        if (fs4.existsSync(destPartPath)) fs4.unlinkSync(destPartPath);
+      } catch {
+      }
+      reject(err);
+    });
+  });
+}
+async function downloadUpdateAsset(currentVersion, options = {}, emitProgress) {
+  try {
+    let targetUrl = options.assetUrl;
+    let targetName = options.assetName;
+    let targetVersion = options.version ? normalizeVersionString(options.version) : "";
+    let expectedSize = 0;
+    const preferPortable = options.mode === "portable" || options.mode !== "installer" && isRunningPortableBuild();
+    let installMode = preferPortable ? "portable" : "installer";
+    if (!targetUrl || !targetName) {
+      const check = await checkForGitHubUpdates(currentVersion);
+      if (!check.ok) {
+        return { ok: false, error: check.error };
+      }
+      targetVersion = check.latestVersion;
+      const chosenAsset = preferPortable ? check.portableAsset ?? check.installerAsset : check.installerAsset ?? check.portableAsset;
+      if (!chosenAsset) {
+        return {
+          ok: false,
+          error: "No downloadable Windows .exe asset was found on the latest GitHub Release."
+        };
+      }
+      targetUrl = chosenAsset.browserDownloadUrl;
+      targetName = chosenAsset.name;
+      expectedSize = chosenAsset.sizeBytes;
+      const lower = targetName.toLowerCase();
+      installMode = lower.includes("setup") || lower.includes("installer") ? "installer" : "portable";
+    } else {
+      const lower = targetName.toLowerCase();
+      installMode = lower.includes("setup") || lower.includes("installer") ? "installer" : "portable";
+    }
+    const safeFileName = targetName.replace(/[<>:"/\\|?*]/g, "_");
+    const stagingDir = path4.join(import_electron3.app.getPath("temp"), "opence-mantle-updates");
+    fs4.mkdirSync(stagingDir, { recursive: true });
+    const finalPath = path4.join(stagingDir, safeFileName);
+    const partPath = `${finalPath}.part`;
+    emitProgress({
+      stage: "downloading",
+      version: targetVersion || currentVersion,
+      assetName: safeFileName,
+      installMode,
+      percent: 0,
+      transferredBytes: 0,
+      totalBytes: expectedSize,
+      bytesPerSecond: 0
+    });
+    const writtenBytes = await streamHttpsToFile(
+      targetUrl,
+      partPath,
+      expectedSize,
+      (transferred, total, bps) => {
+        const pct = total > 0 ? Math.min(99, Math.round(transferred / total * 100)) : 50;
+        emitProgress({
+          stage: "downloading",
+          version: targetVersion || currentVersion,
+          assetName: safeFileName,
+          installMode,
+          percent: pct,
+          transferredBytes: transferred,
+          totalBytes: total,
+          bytesPerSecond: bps
+        });
+      }
+    );
+    const stat = fs4.statSync(partPath);
+    if (stat.size < 512 * 1024) {
+      fs4.unlinkSync(partPath);
+      throw new Error(`Downloaded file is unexpectedly small (${stat.size} bytes).`);
+    }
+    const headerBuf = Buffer.alloc(2);
+    const fd = fs4.openSync(partPath, "r");
+    try {
+      fs4.readSync(fd, headerBuf, 0, 2, 0);
+    } finally {
+      fs4.closeSync(fd);
+    }
+    if (headerBuf[0] !== 77 || headerBuf[1] !== 90) {
+      fs4.unlinkSync(partPath);
+      throw new Error("Downloaded file is not a valid Windows executable (missing MZ header).");
+    }
+    if (fs4.existsSync(finalPath)) {
+      try {
+        fs4.unlinkSync(finalPath);
+      } catch {
+      }
+    }
+    fs4.renameSync(partPath, finalPath);
+    lastStagedUpdate = {
+      version: targetVersion || currentVersion,
+      assetName: safeFileName,
+      installMode,
+      downloadedFilePath: finalPath
+    };
+    emitProgress({
+      stage: "ready",
+      version: targetVersion || currentVersion,
+      assetName: safeFileName,
+      installMode,
+      percent: 100,
+      transferredBytes: writtenBytes,
+      totalBytes: writtenBytes,
+      bytesPerSecond: 0,
+      downloadedFilePath: finalPath
+    });
+    return {
+      ok: true,
+      version: targetVersion || currentVersion,
+      assetName: safeFileName,
+      installMode,
+      downloadedFilePath: finalPath,
+      sizeBytes: writtenBytes
+    };
+  } catch (err) {
+    const message = err?.message || "Failed to download update.";
+    emitProgress({
+      stage: "error",
+      version: options.version || currentVersion,
+      assetName: options.assetName || "OpenCE Mantle.exe",
+      installMode: isRunningPortableBuild() ? "portable" : "installer",
+      percent: 0,
+      transferredBytes: 0,
+      totalBytes: 0,
+      bytesPerSecond: 0,
+      error: message
+    });
+    return { ok: false, error: message };
+  }
+}
+function spawnUpdateApplyScript(downloadedFilePath, installMode) {
+  const targetFile = downloadedFilePath || lastStagedUpdate?.downloadedFilePath;
+  const mode = installMode || lastStagedUpdate?.installMode || (isRunningPortableBuild() ? "portable" : "installer");
+  if (!targetFile || !fs4.existsSync(targetFile)) {
+    return { ok: false, message: "No downloaded update file found to apply." };
+  }
+  const pid = process.pid;
+  const escapedStaged = targetFile.replace(/'/g, "''");
+  if (mode === "installer") {
+    const installedExe = path4.join(
+      process.env.LOCALAPPDATA || path4.join(import_electron3.app.getPath("home"), "AppData", "Local"),
+      "Programs",
+      "opence-desktop",
+      "OpenCE Mantle.exe"
+    );
+    const escapedInstalledExe = installedExe.replace(/'/g, "''");
+    const currentExe = import_electron3.app.getPath("exe").replace(/'/g, "''");
+    const psScript = `
+$ErrorActionPreference = 'SilentlyContinue'
+Wait-Process -Id ${pid} -Timeout 15
+Start-Sleep -Milliseconds 800
+Start-Process -FilePath '${escapedStaged}' -ArgumentList '/S' -Wait
+Start-Sleep -Milliseconds 500
+if (Test-Path '${escapedInstalledExe}') {
+  Start-Process -FilePath '${escapedInstalledExe}'
+} elseif (Test-Path '${currentExe}') {
+  Start-Process -FilePath '${currentExe}'
+}
+`;
+    const child = (0, import_child_process.spawn)(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", psScript],
+      {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      }
+    );
+    child.unref();
+    return { ok: true };
+  } else {
+    const portableTarget = (process.env.PORTABLE_EXECUTABLE_FILE || import_electron3.app.getPath("exe")).replace(/'/g, "''");
+    const psScript = `
+$ErrorActionPreference = 'SilentlyContinue'
+Wait-Process -Id ${pid} -Timeout 15
+for ($i = 0; $i -lt 25; $i++) {
+  Start-Sleep -Milliseconds 400
+  try {
+    Copy-Item -LiteralPath '${escapedStaged}' -Destination '${portableTarget}' -Force -ErrorAction Stop
+    break
+  } catch {
+    # Still releasing file lock from portable wrapper
+  }
+}
+Start-Process -FilePath '${portableTarget}'
+`;
+    const child = (0, import_child_process.spawn)(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", psScript],
+      {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true
+      }
+    );
+    child.unref();
+    return { ok: true };
+  }
+}
 
 // electron/tag-test-runner.ts
-var fs4 = __toESM(require("fs"));
-var path5 = __toESM(require("path"));
+var fs5 = __toESM(require("fs"));
+var path6 = __toESM(require("path"));
 var net = __toESM(require("net"));
-var import_child_process = require("child_process");
+var import_child_process2 = require("child_process");
 
 // electron/worker-manager.ts
 var import_worker_threads = require("worker_threads");
-var path4 = __toESM(require("path"));
+var path5 = __toESM(require("path"));
 var import_crypto2 = require("crypto");
 var worker = null;
 var pending = /* @__PURE__ */ new Map();
 function ensureWorker(onLog) {
   if (worker) return worker;
-  const instance = new import_worker_threads.Worker(path4.join(__dirname, "map-worker.js"));
+  const instance = new import_worker_threads.Worker(path5.join(__dirname, "map-worker.js"));
   worker = instance;
   instance.on("message", (msg) => {
     if (msg.type === "ready") {
@@ -37111,7 +37598,7 @@ foreach ($p in $procs) {
   }
 }
 `;
-    (0, import_child_process.spawn)("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    (0, import_child_process2.spawn)("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
       stdio: "ignore",
       windowsHide: true
     });
@@ -37127,7 +37614,7 @@ if ($wshell.AppActivate('Halo')) {
   $wshell.SendKeys('{BACKSPACE}')
 }
 `;
-    (0, import_child_process.spawn)("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    (0, import_child_process2.spawn)("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
       stdio: "ignore",
       windowsHide: true
     });
@@ -37204,22 +37691,53 @@ if ($wshell.AppActivate('Halo')) {
     if (!dir) {
       return { directory: null, executable: null, exists: false };
     }
-    const exe = path5.join(dir, "halo.exe");
-    const exists = fs4.existsSync(exe);
+    const exe = path6.join(dir, "halo.exe");
+    const exists = fs5.existsSync(exe);
     return { directory: dir, executable: exe, exists };
   }
-  restoreInitBackupIfPresent() {
-    const cfg = this.getOpenCeConfig();
-    if (cfg.directory) {
-      const initPath = path5.join(cfg.directory, "init.txt");
-      const backupPath = path5.join(cfg.directory, "init.txt.opence_backup");
-      try {
-        if (fs4.existsSync(backupPath)) {
-          fs4.copyFileSync(backupPath, initPath);
-          fs4.unlinkSync(backupPath);
-        }
-      } catch {
+  restoreInitForDir(dir) {
+    const scriptPath = path6.join(dir, "_opence_tag_test.txt");
+    try {
+      if (fs5.existsSync(scriptPath)) {
+        fs5.unlinkSync(scriptPath);
       }
+    } catch {
+    }
+    const initPath = path6.join(dir, "init.txt");
+    const backupPath = path6.join(dir, "init.txt.opence_backup");
+    try {
+      if (fs5.existsSync(backupPath)) {
+        const backupContent = fs5.readFileSync(backupPath, "utf-8");
+        if (!backupContent.includes("_opence_tag_test")) {
+          fs5.copyFileSync(backupPath, initPath);
+        } else if (fs5.existsSync(initPath)) {
+          fs5.unlinkSync(initPath);
+        }
+        fs5.unlinkSync(backupPath);
+      } else if (fs5.existsSync(initPath)) {
+        const content = fs5.readFileSync(initPath, "utf-8");
+        if (content.includes("_opence_tag_test") || content.includes("game_console_log all") && content.includes("display_framerate true")) {
+          fs5.unlinkSync(initPath);
+        }
+      }
+    } catch {
+    }
+  }
+  restoreInitBackupIfPresent() {
+    const dirs = /* @__PURE__ */ new Set();
+    if (this.activeOpenCeDir) dirs.add(this.activeOpenCeDir);
+    const cfg = this.getOpenCeConfig();
+    if (cfg.directory) dirs.add(cfg.directory);
+    for (const candidate of [
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE",
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE",
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE",
+      "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\CoreCE"
+    ]) {
+      if (fs5.existsSync(candidate)) dirs.add(candidate);
+    }
+    for (const dir of dirs) {
+      this.restoreInitForDir(dir);
     }
   }
   async launch(options = {}) {
@@ -37241,7 +37759,7 @@ if ($wshell.AppActivate('Halo')) {
     this.emitStatus();
     try {
       const mapSlot = this.stagedMapIndex === 0 ? "_opence_tag_test_a" : "_opence_tag_test_b";
-      const stagedMapPath = path5.join(openCeDir, "custom_maps", `${mapSlot}.map`);
+      const stagedMapPath = path6.join(openCeDir, "custom_maps", `${mapSlot}.map`);
       this.currentMapName = mapSlot;
       this.emitLog("stdout", `[TagTest] Staging in-memory map to ${mapSlot}.map...`);
       const settings = getSettings();
@@ -37259,13 +37777,13 @@ if ($wshell.AppActivate('Halo')) {
       }
       this.emitLog("stdout", `[TagTest] Map staged successfully (CRC32 0x${(stageResult.crc32 >>> 0).toString(16).padStart(8, "0")}).`);
       this.restoreInitBackupIfPresent();
-      const initPath = path5.join(openCeDir, "init.txt");
-      const backupPath = path5.join(openCeDir, "init.txt.opence_backup");
-      if (fs4.existsSync(initPath)) {
+      const initPath = path6.join(openCeDir, "init.txt");
+      const backupPath = path6.join(openCeDir, "init.txt.opence_backup");
+      if (fs5.existsSync(initPath)) {
         try {
-          const existing = fs4.readFileSync(initPath, "utf-8");
+          const existing = fs5.readFileSync(initPath, "utf-8");
           if (!existing.includes("_opence_tag_test")) {
-            fs4.copyFileSync(initPath, backupPath);
+            fs5.copyFileSync(initPath, backupPath);
           }
         } catch {
         }
@@ -37274,10 +37792,10 @@ if ($wshell.AppActivate('Halo')) {
 display_framerate true\r
 map_name custom_maps\\${mapSlot}\r
 `;
-      fs4.writeFileSync(initPath, initContent, "utf-8");
-      const debugTxtPath = path5.join(openCeDir, "debug.txt");
-      if (fs4.existsSync(debugTxtPath)) {
-        this.debugTxtLastSize = fs4.statSync(debugTxtPath).size;
+      fs5.writeFileSync(initPath, initContent, "utf-8");
+      const debugTxtPath = path6.join(openCeDir, "debug.txt");
+      if (fs5.existsSync(debugTxtPath)) {
+        this.debugTxtLastSize = fs5.statSync(debugTxtPath).size;
       } else {
         this.debugTxtLastSize = 0;
       }
@@ -37291,7 +37809,7 @@ map_name custom_maps\\${mapSlot}\r
       };
       const spawnArgs = ["-window", "-vidmode", "1280,960", "-console", "-devmode"];
       this.emitLog("stdout", `[TagTest] Spawning ${haloExe} ${spawnArgs.join(" ")}...`);
-      const child = (0, import_child_process.spawn)(haloExe, spawnArgs, {
+      const child = (0, import_child_process2.spawn)(haloExe, spawnArgs, {
         cwd: openCeDir,
         env,
         stdio: ["ignore", "pipe", "pipe"]
@@ -37327,6 +37845,9 @@ map_name custom_maps\\${mapSlot}\r
           this.setHaloAlwaysOnTop(true);
         }
       }, 1200);
+      setTimeout(() => {
+        this.restoreInitForDir(openCeDir);
+      }, 3e3);
       return { ok: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -37349,6 +37870,9 @@ map_name custom_maps\\${mapSlot}\r
         this.telnetSocket = sock;
         this.telnetConnected = true;
         this.statusState = "running";
+        if (this.activeOpenCeDir) {
+          this.restoreInitForDir(this.activeOpenCeDir);
+        }
         this.emitStatus();
         this.emitLog("telnet", "[Telnet Bridge] Connected to OpenCE telnet console on port 2323.");
       });
@@ -37382,10 +37906,10 @@ map_name custom_maps\\${mapSlot}\r
     this.stopDebugWatcher();
     this.debugTxtWatcher = setInterval(() => {
       try {
-        if (!fs4.existsSync(debugTxtPath)) return;
-        const stat = fs4.statSync(debugTxtPath);
+        if (!fs5.existsSync(debugTxtPath)) return;
+        const stat = fs5.statSync(debugTxtPath);
         if (stat.size > this.debugTxtLastSize) {
-          const stream = fs4.createReadStream(debugTxtPath, {
+          const stream = fs5.createReadStream(debugTxtPath, {
             start: this.debugTxtLastSize,
             end: stat.size,
             encoding: "utf-8"
@@ -37421,7 +37945,7 @@ map_name custom_maps\\${mapSlot}\r
     try {
       this.stagedMapIndex = this.stagedMapIndex === 0 ? 1 : 0;
       const nextSlot = this.stagedMapIndex === 0 ? "_opence_tag_test_a" : "_opence_tag_test_b";
-      const targetPath = path5.join(this.activeOpenCeDir, "custom_maps", `${nextSlot}.map`);
+      const targetPath = path6.join(this.activeOpenCeDir, "custom_maps", `${nextSlot}.map`);
       this.emitLog("stdout", `[TagTest] Hot-reloading map to ${nextSlot}.map...`);
       const settings = getSettings();
       const stageResult = await sendWorkerRequest(
@@ -37463,6 +37987,7 @@ map_name custom_maps\\${mapSlot}\r
     }
   }
   stop() {
+    this.restoreInitBackupIfPresent();
     if (this.child === null) {
       this.cleanup();
       return Promise.resolve({ ok: true });
@@ -37498,38 +38023,22 @@ map_name custom_maps\\${mapSlot}\r
     }
     this.child = null;
     this.stopDebugWatcher();
-    if (this.activeOpenCeDir) {
-      const scriptPath = path5.join(this.activeOpenCeDir, "_opence_tag_test.txt");
-      try {
-        if (fs4.existsSync(scriptPath)) {
-          fs4.unlinkSync(scriptPath);
-        }
-      } catch {
-      }
-      const initPath = path5.join(this.activeOpenCeDir, "init.txt");
-      const backupPath = path5.join(this.activeOpenCeDir, "init.txt.opence_backup");
-      try {
-        if (fs4.existsSync(backupPath)) {
-          fs4.copyFileSync(backupPath, initPath);
-          fs4.unlinkSync(backupPath);
-        } else if (fs4.existsSync(initPath)) {
-          const content = fs4.readFileSync(initPath, "utf-8");
-          if (content.includes("_opence_tag_test")) {
-            fs4.unlinkSync(initPath);
-          }
-        }
-      } catch {
-      }
-      this.activeOpenCeDir = null;
-    }
+    this.restoreInitBackupIfPresent();
+    this.activeOpenCeDir = null;
     this.emitStatus();
   }
 };
 var tagTestRunner = new TagTestRunner();
+process.on("exit", () => {
+  try {
+    tagTestRunner.restoreInitBackupIfPresent();
+  } catch {
+  }
+});
 
 // electron/save-map-as.ts
-var path7 = __toESM(require("path"));
-var fs5 = __toESM(require("fs"));
+var path8 = __toESM(require("path"));
+var fs6 = __toESM(require("fs"));
 
 // electron/map-file-rules.ts
 function isBackupFilePath(filePath) {
@@ -37542,7 +38051,7 @@ var COMPRESSED_MAP_MESSAGE = "This map is compressed, so it cannot be edited, in
 var BACKUP_FILE_SAVE_MESSAGE = "This map was opened from a backup (.bak) file. Use File > Save As to write it under a new name; Save would overwrite the backup.";
 
 // electron/save-map.ts
-var path6 = __toESM(require("path"));
+var path7 = __toESM(require("path"));
 var SAVE_MAP_CHANNEL = "map:save";
 var hex = (n) => `0x${(n >>> 0).toString(16).padStart(8, "0")}`;
 function logSaved(log, result) {
@@ -37569,7 +38078,7 @@ async function saveMapFlow(deps) {
   if (!open.backedUp && !open.overwriteConfirmed) {
     if (!await deps.confirmOverwriteWithoutBackup(open.filePath)) return cancelled;
     deps.markOverwriteConfirmed();
-    deps.log("warn", `Overwriting ${path6.basename(open.filePath)} without a backup (confirmed).`);
+    deps.log("warn", `Overwriting ${path7.basename(open.filePath)} without a backup (confirmed).`);
   }
   if (!await deps.confirmScenarioName(open.filePath)) return cancelled;
   deps.log("info", `Saving ${open.filePath}`);
@@ -37599,7 +38108,7 @@ async function confirmUnsavedChanges(deps) {
 // electron/save-map-as.ts
 var SAVE_MAP_AS_CHANNEL = "map:saveAs";
 function isSamePath(a, b) {
-  return path7.resolve(a).toLowerCase() === path7.resolve(b).toLowerCase();
+  return path8.resolve(a).toLowerCase() === path8.resolve(b).toLowerCase();
 }
 async function saveMapAsFlow(deps) {
   const openMap = deps.getOpenMap();
@@ -37611,14 +38120,14 @@ async function saveMapAsFlow(deps) {
   }
   const filePath = await deps.showSaveDialog(openMap.filePath.replace(/(\.map)?$/i, "_copy.map"));
   if (!filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  const resolvedTarget = path7.resolve(filePath);
+  const resolvedTarget = path8.resolve(filePath);
   if (isSamePath(resolvedTarget, openMap.filePath)) {
     const message = "Save As cannot overwrite the open map. Use File > Save, or choose a different file name.";
     deps.log("error", `Save As refused: ${resolvedTarget} is the open map.`);
     await deps.showError("Save As cannot overwrite the open map.", "Use File > Save to overwrite it, or choose a different file name.");
     return { ok: false, code: "REFUSED_SOURCE_PATH", message };
   }
-  const exists = deps.fileExists ?? fs5.existsSync;
+  const exists = deps.fileExists ?? fs6.existsSync;
   if (exists(resolvedTarget) && !await deps.confirmOverwrite(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   if (!await deps.confirmScenarioName(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   deps.log("info", `Saving map as ${resolvedTarget}`);
@@ -37644,8 +38153,8 @@ function registerSaveMapAsIpc(ipc, deps, onResult = () => {
 }
 
 // electron/backup-on-open.ts
-var path8 = __toESM(require("path"));
-var fs6 = __toESM(require("fs"));
+var path9 = __toESM(require("path"));
+var fs7 = __toESM(require("fs"));
 var import_crypto3 = require("crypto");
 function isBackedUp(outcome) {
   return outcome === "created" || outcome === "replaced" || outcome === "kept-existing" || outcome === "up-to-date";
@@ -37658,14 +38167,14 @@ function describeBackupError(err, backupName) {
   return `${backupName} could not be created: ${err instanceof Error ? err.message : String(err)}`;
 }
 async function backupOnOpenFlow(mapPath, deps) {
-  const f = deps.fs ?? fs6;
+  const f = deps.fs ?? fs7;
   if (isBackupFilePath(mapPath)) {
-    deps.log("info", `Opened a backup file (${path8.basename(mapPath)}): no backup prompt, and File > Save is disabled for it - use Save As.`);
+    deps.log("info", `Opened a backup file (${path9.basename(mapPath)}): no backup prompt, and File > Save is disabled for it - use Save As.`);
     return "not-applicable";
   }
   const backupPath = backupPathFor(mapPath);
-  const mapName = path8.basename(mapPath);
-  const backupName = path8.basename(backupPath);
+  const mapName = path9.basename(mapPath);
+  const backupName = path9.basename(backupPath);
   try {
     const exists = f.existsSync(backupPath);
     if (exists && f.statSync(backupPath).size === f.statSync(mapPath).size && f.readFileSync(backupPath).equals(f.readFileSync(mapPath))) {
@@ -37716,12 +38225,12 @@ ${mapName} is still open and unchanged. File > Save will ask before overwriting 
 }
 
 // electron/convert-map.ts
-var path9 = __toESM(require("path"));
-var fs7 = __toESM(require("fs"));
+var path10 = __toESM(require("path"));
+var fs8 = __toESM(require("fs"));
 function defaultConvertOutputPath(sourcePath) {
-  const dir = path9.dirname(sourcePath);
-  const stem = path9.basename(sourcePath).replace(/\.map$/i, "");
-  return path9.join(dir, `${stem}_ce.map`);
+  const dir = path10.dirname(sourcePath);
+  const stem = path10.basename(sourcePath).replace(/\.map$/i, "");
+  return path10.join(dir, `${stem}_ce.map`);
 }
 var REPAIR_IDS = TAG_DATA_REPAIR_IDS;
 function sanitizeRepairChoice(value) {
@@ -37737,7 +38246,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
   if (!await deps.confirmUnsavedChanges()) return cancelled2();
   const filePath = await deps.showSaveDialog(defaultConvertOutputPath(sourcePath));
   if (!filePath) return cancelled2();
-  const target = path9.resolve(filePath);
+  const target = path10.resolve(filePath);
   const refuse = async (code, message) => {
     deps.log("error", `Convert refused: ${message}`);
     await deps.showError("The map was not converted.", message);
@@ -37747,7 +38256,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
   const openMap = deps.getOpenMapPath();
   if (openMap && isSamePath(target, openMap)) return refuse("REFUSED_OPEN_MAP", "The converted map cannot overwrite the map that is open in the app. Choose a different file name.");
   if (isBackupFilePath(target)) return refuse("REFUSED_BACKUP_FILE", "The converted map cannot be written as a .bak file. Choose a .map file name.");
-  const exists = deps.fileExists ?? fs7.existsSync;
+  const exists = deps.fileExists ?? fs8.existsSync;
   if (exists(target) && !await deps.confirmOverwrite(target)) return cancelled2();
   if (!await deps.confirmScenarioName(target)) return cancelled2();
   deps.log("info", `Converting ${sourcePath} to a Custom Edition map: ${target}`);
@@ -37755,7 +38264,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
     const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts, repairs, resourcePaths);
     if (result.ok) {
       const hex2 = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
-      deps.log("info", `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex2(result.previousCrc32)} -> ${hex2(result.crc32)}. ${path9.basename(sourcePath)} was not changed.`);
+      deps.log("info", `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex2(result.previousCrc32)} -> ${hex2(result.crc32)}. ${path10.basename(sourcePath)} was not changed.`);
       for (const w of result.warnings) deps.log("warn", w);
       deps.log("info", result.staleChecksumWarning);
     } else {
@@ -37771,8 +38280,8 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
 }
 
 // electron/batch-extract-fs.ts
-var fs8 = __toESM(require("fs"));
-var path10 = __toESM(require("path"));
+var fs9 = __toESM(require("fs"));
+var path11 = __toESM(require("path"));
 var WINDOWS_RESERVED_NAMES = /* @__PURE__ */ new Set([
   "CON",
   "PRN",
@@ -37798,7 +38307,7 @@ var WINDOWS_RESERVED_NAMES = /* @__PURE__ */ new Set([
   "LPT9"
 ]);
 function sanitizeMapName(mapFileNameOrPath) {
-  const base = path10.basename(mapFileNameOrPath);
+  const base = path11.basename(mapFileNameOrPath);
   const withoutExt = base.replace(/\.bak$/i, "").replace(/\.map$/i, "");
   let sanitized = withoutExt.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").replace(/[. ]+$/, "").trim();
   if (WINDOWS_RESERVED_NAMES.has(sanitized.toUpperCase())) {
@@ -37807,16 +38316,16 @@ function sanitizeMapName(mapFileNameOrPath) {
   return sanitized || "exported_map";
 }
 function countExistingOcetagsFiles(targetDir) {
-  if (!fs8.existsSync(targetDir)) return 0;
+  if (!fs9.existsSync(targetDir)) return 0;
   let count = 0;
   const queue = [targetDir];
   while (queue.length > 0) {
     const current = queue.pop();
     try {
-      const entries = fs8.readdirSync(current, { withFileTypes: true });
+      const entries = fs9.readdirSync(current, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.name.startsWith(".")) continue;
-        const full = path10.join(current, entry.name);
+        const full = path11.join(current, entry.name);
         if (entry.isDirectory()) {
           queue.push(full);
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".ocetags")) {
@@ -37830,14 +38339,14 @@ function countExistingOcetagsFiles(targetDir) {
 }
 function getDriveFreeSpace(dirPath) {
   try {
-    const stat = fs8.statfsSync(dirPath);
+    const stat = fs9.statfsSync(dirPath);
     return stat.bavail * stat.bsize;
   } catch {
     return null;
   }
 }
 function commitStagedFiles(stagingDir, targetDir) {
-  if (!fs8.existsSync(stagingDir)) return 0;
+  if (!fs9.existsSync(stagingDir)) return 0;
   let count = 0;
   const queue = [stagingDir];
   const filesToMove = [];
@@ -37845,12 +38354,12 @@ function commitStagedFiles(stagingDir, targetDir) {
     const current = queue.pop();
     let entries = [];
     try {
-      entries = fs8.readdirSync(current, { withFileTypes: true });
+      entries = fs9.readdirSync(current, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const entry of entries) {
-      const full = path10.join(current, entry.name);
+      const full = path11.join(current, entry.name);
       if (entry.isDirectory()) {
         queue.push(full);
       } else if (entry.isFile()) {
@@ -37859,28 +38368,28 @@ function commitStagedFiles(stagingDir, targetDir) {
     }
   }
   for (const stagedFile of filesToMove) {
-    const rel = path10.relative(stagingDir, stagedFile);
-    const dest = path10.join(targetDir, rel);
-    fs8.mkdirSync(path10.dirname(dest), { recursive: true });
-    if (fs8.existsSync(dest)) {
+    const rel = path11.relative(stagingDir, stagedFile);
+    const dest = path11.join(targetDir, rel);
+    fs9.mkdirSync(path11.dirname(dest), { recursive: true });
+    if (fs9.existsSync(dest)) {
       try {
-        fs8.unlinkSync(dest);
+        fs9.unlinkSync(dest);
       } catch {
       }
     }
-    fs8.renameSync(stagedFile, dest);
+    fs9.renameSync(stagedFile, dest);
     count++;
   }
   try {
-    fs8.rmSync(stagingDir, { recursive: true, force: true });
+    fs9.rmSync(stagingDir, { recursive: true, force: true });
   } catch {
   }
   return count;
 }
 function discardStagedFiles(stagingDir) {
-  if (fs8.existsSync(stagingDir)) {
+  if (fs9.existsSync(stagingDir)) {
     try {
-      fs8.rmSync(stagingDir, { recursive: true, force: true });
+      fs9.rmSync(stagingDir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -37923,11 +38432,11 @@ function generateBatchReportText(manifest) {
   return lines.join("\n");
 }
 function writeManifestAndReport(targetDir, manifest, reportText) {
-  fs8.mkdirSync(targetDir, { recursive: true });
-  const manifestPath = path10.join(targetDir, "manifest.json");
-  const reportPath = path10.join(targetDir, "batch-extract-report.txt");
-  fs8.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
-  fs8.writeFileSync(reportPath, reportText, "utf-8");
+  fs9.mkdirSync(targetDir, { recursive: true });
+  const manifestPath = path11.join(targetDir, "manifest.json");
+  const reportPath = path11.join(targetDir, "batch-extract-report.txt");
+  fs9.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  fs9.writeFileSync(reportPath, reportText, "utf-8");
   return { manifestPath, reportPath };
 }
 
@@ -37945,19 +38454,19 @@ var currentBatchExtractRequestId = null;
 var currentInjectContainerPath = null;
 var lastConvertiblePath = null;
 var convertSourcePath = null;
-var isDev = !import_electron3.app.isPackaged;
+var isDev = !import_electron4.app.isPackaged;
 function sendLog(level, message) {
   mainWindow?.webContents.send("app:log", { level, message, timestamp: Date.now() });
 }
 function getAppIconPath() {
-  const icoCandidate = path11.join(__dirname, "../build/icon.ico");
-  const pngCandidate = path11.join(__dirname, "../build/icon.png");
-  if (process.platform === "win32" && fs9.existsSync(icoCandidate)) return icoCandidate;
-  if (fs9.existsSync(pngCandidate)) return pngCandidate;
+  const icoCandidate = path12.join(__dirname, "../build/icon.ico");
+  const pngCandidate = path12.join(__dirname, "../build/icon.png");
+  if (process.platform === "win32" && fs10.existsSync(icoCandidate)) return icoCandidate;
+  if (fs10.existsSync(pngCandidate)) return pngCandidate;
   return void 0;
 }
 function createWindow() {
-  mainWindow = new import_electron3.BrowserWindow({
+  mainWindow = new import_electron4.BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 960,
@@ -37965,7 +38474,7 @@ function createWindow() {
     backgroundColor: "#15171c",
     icon: getAppIconPath(),
     webPreferences: {
-      preload: path11.join(__dirname, "preload.js"),
+      preload: path12.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -37974,7 +38483,7 @@ function createWindow() {
   if (isDev) {
     mainWindow.loadURL("http://localhost:5173");
   } else {
-    mainWindow.loadFile(path11.join(__dirname, "../dist/index.html"));
+    mainWindow.loadFile(path12.join(__dirname, "../dist/index.html"));
   }
   buildMenu();
   updateTitle();
@@ -37991,7 +38500,7 @@ function createWindow() {
 }
 function updateTitle() {
   if (!mainWindow) return;
-  const name = currentMapPath ? `${path11.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
+  const name = currentMapPath ? `${path12.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
   mainWindow.setTitle(`${name}OpenCE Mantle`);
 }
 function setOpenMapState(map) {
@@ -38005,9 +38514,9 @@ function setOpenMapState(map) {
 }
 var unsavedChangesDeps = {
   isModified: () => currentMapModified,
-  fileName: () => currentMapPath ? path11.basename(currentMapPath) : "the open map",
+  fileName: () => currentMapPath ? path12.basename(currentMapPath) : "the open map",
   ask: async (fileName) => {
-    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+    const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Save", "Don't save", "Cancel"],
       defaultId: 0,
@@ -38028,7 +38537,7 @@ async function openMapGuarded(filePath) {
 async function askBackup(filePath) {
   const outcome = await backupOnOpenFlow(filePath, {
     askCreateBackup: async (mapName, backupName) => {
-      const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+      const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
         type: "question",
         buttons: ["Create backup", "Skip"],
         defaultId: 0,
@@ -38040,7 +38549,7 @@ async function askBackup(filePath) {
       return response === 0 ? "create" : "skip";
     },
     askExistingBackup: async (backupName) => {
-      const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+      const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
         type: "warning",
         buttons: ["Keep existing", "Replace", "Skip"],
         defaultId: 0,
@@ -38058,7 +38567,7 @@ async function askBackup(filePath) {
   overwriteConfirmed = false;
 }
 async function showErrorBox(message, detail) {
-  await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message, detail });
+  await import_electron4.dialog.showMessageBox(mainWindow, { type: "error", message, detail });
 }
 async function loadMapAtPath(filePath, options) {
   sendLog("info", `Opening ${filePath}`);
@@ -38115,7 +38624,7 @@ async function loadMapAtPath(filePath, options) {
 async function openMapDialogFlow() {
   if (!mainWindow) return null;
   if (!await confirmUnsavedChanges(unsavedChangesDeps)) return null;
-  const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Open Halo CE Map",
     filters: [
       { name: "Halo CE Map", extensions: ["map"] },
@@ -38133,7 +38642,7 @@ async function openMapFlow() {
 async function decompressFlow() {
   if (!mainWindow || !currentMapPath) return;
   const defaultPath = currentMapPath.replace(/\.map$/i, "_decompressed.map");
-  const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+  const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
     title: "Save decompressed map as",
     defaultPath,
     filters: [{ name: "Halo CE Map", extensions: ["map"] }]
@@ -38157,7 +38666,7 @@ async function recompressFlow() {
     return null;
   }
   const defaultPath = currentMapPath.replace(/\.map$/i, "_compressed.map");
-  const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+  const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
     title: "Save recompressed map as",
     defaultPath,
     filters: [{ name: "Halo CE Map", extensions: ["map"] }]
@@ -38203,47 +38712,47 @@ async function extractTagsFlow(request) {
     return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before extracting tags." };
   }
   const settings = getSettings();
-  const defaultDir = settings.lastExtractDir && fs9.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
+  const defaultDir = settings.lastExtractDir && fs10.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron4.app.getPath("documents");
   const safeName = String(request.suggestedFileName || "extracted_tags").replace(/[<>:"/\\|?*]/g, "_") || "extracted_tags";
-  const defaultPath = path11.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
+  const defaultPath = path12.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
   let resolvedTarget;
   if (request.originalIndices.length > 1) {
-    const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
       title: "Choose folder to save extracted tags to...",
       defaultPath: defaultDir,
       properties: ["openDirectory", "createDirectory"]
     });
     if (canceled || filePaths.length === 0) return { ok: false, code: "CANCELLED", message: "Extraction was cancelled." };
-    resolvedTarget = path11.resolve(filePaths[0]);
+    resolvedTarget = path12.resolve(filePaths[0]);
   } else {
-    const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
       title: "Extract tags to...",
       defaultPath,
       filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }]
     });
     if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-    resolvedTarget = path11.resolve(filePath);
+    resolvedTarget = path12.resolve(filePath);
   }
-  const resolvedSourceMap = path11.resolve(currentMapPath);
-  const resolvedAppDir = path11.resolve(import_electron3.app.getAppPath());
+  const resolvedSourceMap = path12.resolve(currentMapPath);
+  const resolvedAppDir = path12.resolve(import_electron4.app.getAppPath());
   if (resolvedTarget === resolvedSourceMap) {
     return { ok: false, code: "REFUSED_SOURCE_PATH", message: "You cannot overwrite the source map file. Choose a different location." };
   }
-  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path11.sep)) {
+  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path12.sep)) {
     return { ok: false, code: "REFUSED_APP_PATH", message: "You cannot save inside the application install directory. Choose a different location." };
   }
-  if (fs9.existsSync(resolvedTarget)) {
-    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+  if (fs10.existsSync(resolvedTarget)) {
+    const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path11.basename(resolvedTarget)}" already exists.`,
+      message: `"${path12.basename(resolvedTarget)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   }
-  setLastExtractDir(path11.dirname(resolvedTarget));
+  setLastExtractDir(path12.dirname(resolvedTarget));
   sendLog("info", `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
   const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
   const resourceMapPaths = {
@@ -38257,7 +38766,7 @@ async function extractTagsFlow(request) {
       type: "extractTags",
       originalIndices: request.originalIndices,
       outputPath: resolvedTarget,
-      sourceMapName: currentMapScenarioName ?? path11.basename(currentMapPath, ".map"),
+      sourceMapName: currentMapScenarioName ?? path12.basename(currentMapPath, ".map"),
       resourceMapPaths,
       itemName: request.itemName,
       itemNames: request.itemNames,
@@ -38290,23 +38799,23 @@ async function batchExtractPreflightFlow() {
     return null;
   }
   const settings = getSettings();
-  const defaultDir = settings.lastExtractDir && fs9.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron3.app.getPath("documents");
-  const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const defaultDir = settings.lastExtractDir && fs10.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron4.app.getPath("documents");
+  const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Choose parent folder to export map to...",
     defaultPath: defaultDir,
     properties: ["openDirectory", "createDirectory"]
   });
   if (canceled || filePaths.length === 0) return null;
-  const parentDir = path11.resolve(filePaths[0]);
-  const mapName = sanitizeMapName(currentMapScenarioName ?? path11.basename(currentMapPath, ".map"));
-  const targetDir = path11.join(parentDir, mapName);
-  const resolvedSourceMap = path11.resolve(currentMapPath);
-  const resolvedAppDir = path11.resolve(import_electron3.app.getAppPath());
+  const parentDir = path12.resolve(filePaths[0]);
+  const mapName = sanitizeMapName(currentMapScenarioName ?? path12.basename(currentMapPath, ".map"));
+  const targetDir = path12.join(parentDir, mapName);
+  const resolvedSourceMap = path12.resolve(currentMapPath);
+  const resolvedAppDir = path12.resolve(import_electron4.app.getAppPath());
   if (targetDir === resolvedSourceMap) {
     await showErrorBox("Invalid location", "You cannot extract into the source map file location. Choose a different folder.");
     return null;
   }
-  if (targetDir === resolvedAppDir || targetDir.startsWith(resolvedAppDir + path11.sep)) {
+  if (targetDir === resolvedAppDir || targetDir.startsWith(resolvedAppDir + path12.sep)) {
     await showErrorBox("Invalid location", "You cannot save inside the application install directory. Choose a different folder.");
     return null;
   }
@@ -38365,7 +38874,7 @@ async function startBatchExtractFlow(options) {
     const p = settings.resourceMaps[kind];
     if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
-  const sourceMapName = currentMapScenarioName ?? path11.basename(currentMapPath, ".map");
+  const sourceMapName = currentMapScenarioName ?? path12.basename(currentMapPath, ".map");
   sendLog(
     "info",
     `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode}, format: ${options.extractFormat ?? "ocetags"})...`
@@ -38417,7 +38926,7 @@ async function finalizeBatchExtractFlow(request) {
           toolVersion: "0.1.0",
           containerVersion: OCETAGS_FORMAT_VERSION,
           extractedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          mapFileName: path11.basename(currentMapPath ?? request.summary.mapName),
+          mapFileName: path12.basename(currentMapPath ?? request.summary.mapName),
           scenarioName: currentMapScenarioName ?? request.summary.mapName,
           summary: {
             totalTagsInMap: request.summary.totalTagsInMap,
@@ -38431,7 +38940,7 @@ async function finalizeBatchExtractFlow(request) {
           files: request.summary.tags.filter((t) => t.status === "extracted").map((t) => ({
             path: t.path,
             group: t.group,
-            relativePath: path11.relative(request.targetDir, t.outputPath ?? ""),
+            relativePath: path12.relative(request.targetDir, t.outputPath ?? ""),
             sizeBytes: t.sizeBytes ?? 0,
             tagCount: t.tagCount ?? 1
           })),
@@ -38465,7 +38974,7 @@ var RESOURCE_MAP_FILTER_NAMES = { bitmaps: "bitmaps.map", sounds: "sounds.map", 
 function readResourceMapStatus(kind, filePath) {
   if (!filePath) return { state: "not-configured" };
   try {
-    const buffer = fs9.readFileSync(filePath);
+    const buffer = fs10.readFileSync(filePath);
     const result = validateResourceMapFile(buffer, kind);
     if (!result.ok) return { state: "missing-or-unreadable", path: filePath, error: result.error };
     return { state: "ok", path: filePath, fileSizeBytes: buffer.length, entryCount: result.identity.entryCount };
@@ -38475,7 +38984,7 @@ function readResourceMapStatus(kind, filePath) {
 }
 async function pickResourceMapFlow(kind) {
   if (!mainWindow) return { ok: false, code: "NO_WINDOW", message: "Application window is not available." };
-  const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: `Pick ${RESOURCE_MAP_FILTER_NAMES[kind]}`,
     filters: [{ name: "Halo CE Resource Map", extensions: ["map"] }],
     properties: ["openFile"]
@@ -38500,20 +39009,20 @@ function getResourceMapStatusesFlow() {
 }
 function openRandomAccessFile(filePath) {
   try {
-    const fd = fs9.openSync(filePath, "r");
-    const size = fs9.fstatSync(fd).size;
-    const label = path11.basename(filePath);
+    const fd = fs10.openSync(filePath, "r");
+    const size = fs10.fstatSync(fd).size;
+    const label = path12.basename(filePath);
     return {
       file: {
         label,
         size,
         read: (offset, length) => {
           const buf = Buffer.alloc(length);
-          fs9.readSync(fd, buf, 0, length, offset);
+          fs10.readSync(fd, buf, 0, length, offset);
           return buf;
         }
       },
-      close: () => fs9.closeSync(fd)
+      close: () => fs10.closeSync(fd)
     };
   } catch {
     return null;
@@ -38554,7 +39063,7 @@ function identifyResourceMapFlow(filePath, expectedVersion, expectedKind) {
     let kind = "bitmaps";
     if (expectedKind) {
       kind = expectedKind;
-    } else if (type === 2 || path11.basename(filePath).toLowerCase().includes("sounds")) {
+    } else if (type === 2 || path12.basename(filePath).toLowerCase().includes("sounds")) {
       kind = "sounds";
     } else {
       kind = "bitmaps";
@@ -38651,9 +39160,9 @@ function getSearchRoots() {
   const cwd = process.cwd();
   return [
     cwd,
-    path11.resolve(cwd, ".."),
-    path11.resolve(__dirname, ".."),
-    path11.resolve(__dirname, "../.."),
+    path12.resolve(cwd, ".."),
+    path12.resolve(__dirname, ".."),
+    path12.resolve(__dirname, "../.."),
     "C:\\Users\\LeviB\\Projects\\OpenCE-Mantle"
   ];
 }
@@ -38663,36 +39172,36 @@ function detectDefaultResourceMapPathsFlow() {
   const searchRoots = getSearchRoots();
   const candidates = {
     halomd: [
-      ...searchRoots.map((r) => path11.join(r, "sample_maps/HaloMD/bitmaps.map")),
-      path11.join(home, "Library/Application Support/HaloMD/GameData/Maps/bitmaps.map"),
-      path11.join(cwd, "bitmaps.map")
+      ...searchRoots.map((r) => path12.join(r, "sample_maps/HaloMD/bitmaps.map")),
+      path12.join(home, "Library/Application Support/HaloMD/GameData/Maps/bitmaps.map"),
+      path12.join(cwd, "bitmaps.map")
     ],
     ce: [
-      ...searchRoots.map((r) => path11.join(r, "sample_maps/custom edition/bitmaps.map")),
+      ...searchRoots.map((r) => path12.join(r, "sample_maps/custom edition/bitmaps.map")),
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE\\custom_maps\\bitmaps.map",
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE\\custom_maps\\bitmaps.map",
       "C:\\Users\\LeviB\\Projects\\OpenCE-MapExp\\build\\windows\\custom_maps\\bitmaps.map",
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\CUSTOM EDITION DEFAULT MAPS\\bitmaps.map",
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
-      path11.join(cwd, "maps/bitmaps.map")
+      path12.join(cwd, "maps/bitmaps.map")
     ],
     pc: [
-      ...searchRoots.map((r) => path11.join(r, "sample_maps/PC/bitmaps.map")),
-      ...searchRoots.map((r) => path11.join(r, "sample_maps/HaloMD/bitmaps.map")),
+      ...searchRoots.map((r) => path12.join(r, "sample_maps/PC/bitmaps.map")),
+      ...searchRoots.map((r) => path12.join(r, "sample_maps/HaloMD/bitmaps.map")),
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\bitmaps.map",
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\bitmaps.map",
       "C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo\\maps\\bitmaps.map"
     ],
     demo: [
-      ...searchRoots.map((r) => path11.join(r, "sample_maps/MacDemo/bitmaps.map")),
-      ...searchRoots.map((r) => path11.join(r, "sample_maps/Base Siege/bitmaps.map")),
+      ...searchRoots.map((r) => path12.join(r, "sample_maps/MacDemo/bitmaps.map")),
+      ...searchRoots.map((r) => path12.join(r, "sample_maps/Base Siege/bitmaps.map")),
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map",
-      path11.join(home, "Applications/Halo Demo/Maps/bitmaps.map")
+      path12.join(home, "Applications/Halo Demo/Maps/bitmaps.map")
     ],
     mcc: [
-      ...searchRoots.map((r) => path11.join(r, "sample_maps/MCC/bitmaps.map")),
+      ...searchRoots.map((r) => path12.join(r, "sample_maps/MCC/bitmaps.map")),
       "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
@@ -38711,7 +39220,7 @@ function detectDefaultResourceMapPathsFlow() {
   for (const ver of Object.keys(candidates)) {
     for (const p of candidates[ver]) {
       try {
-        if (fs9.existsSync(p)) {
+        if (fs10.existsSync(p)) {
           result[ver] = p;
           break;
         }
@@ -38723,7 +39232,7 @@ function detectDefaultResourceMapPathsFlow() {
 }
 async function pickInjectContainerFlow() {
   if (!mainWindow) return null;
-  const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Inject tags from...",
     filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }],
     properties: ["openFile", "multiSelections"]
@@ -38748,12 +39257,12 @@ async function planInjectFlow(containerPath, mode) {
   const pcBitmaps = settings.versionResourceMaps?.pc?.bitmaps ?? settings.versionResourceMaps?.halomd?.bitmaps ?? defaults.pc ?? defaults.halomd ?? void 0;
   let pcSounds = settings.versionResourceMaps?.pc?.sounds ?? settings.versionResourceMaps?.halomd?.sounds ?? void 0;
   if (!pcSounds && pcBitmaps) {
-    const sib = path11.join(path11.dirname(pcBitmaps), "sounds.map");
-    if (fs9.existsSync(sib)) pcSounds = sib;
+    const sib = path12.join(path12.dirname(pcBitmaps), "sounds.map");
+    if (fs10.existsSync(sib)) pcSounds = sib;
   }
   const fallbackPcResourcePaths = {};
-  if (pcBitmaps && fs9.existsSync(pcBitmaps)) fallbackPcResourcePaths.bitmaps = pcBitmaps;
-  if (pcSounds && fs9.existsSync(pcSounds)) fallbackPcResourcePaths.sounds = pcSounds;
+  if (pcBitmaps && fs10.existsSync(pcBitmaps)) fallbackPcResourcePaths.bitmaps = pcBitmaps;
+  if (pcSounds && fs10.existsSync(pcSounds)) fallbackPcResourcePaths.sounds = pcSounds;
   sendLog("info", `Planning ${mode === "swap" ? "swap" : "add"} injection from ${containerPath}`);
   const { promise } = sendWorkerRequest(
     { type: "planInject", containerPath, mode, resourceMapPaths, fallbackPcResourcePaths },
@@ -38771,13 +39280,13 @@ async function planInjectFlow(containerPath, mode) {
 async function confirmScenarioName(filePath) {
   let warnings;
   try {
-    warnings = scenarioNameFromFileName(path11.basename(filePath)).warnings;
+    warnings = scenarioNameFromFileName(path12.basename(filePath)).warnings;
   } catch (err) {
-    await import_electron3.dialog.showMessageBox(mainWindow, { type: "error", message: "This file name cannot be used for a map.", detail: err.message });
+    await import_electron4.dialog.showMessageBox(mainWindow, { type: "error", message: "This file name cannot be used for a map.", detail: err.message });
     return false;
   }
   if (warnings.length === 0) return true;
-  const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+  const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
     type: "warning",
     buttons: ["Save anyway", "Cancel"],
     defaultId: 1,
@@ -38939,7 +39448,7 @@ async function getModelGeometryFlow(modelTagId, lod) {
 async function pickExportBitmapPathFlow(defaultName, format) {
   if (!mainWindow) return { path: null };
   const ext = format === "dds" ? "dds" : "png";
-  const res = await import_electron3.dialog.showSaveDialog(mainWindow, {
+  const res = await import_electron4.dialog.showSaveDialog(mainWindow, {
     title: `Export Bitmap as ${format.toUpperCase()}`,
     defaultPath: `${defaultName}.${ext}`,
     filters: [{ name: format.toUpperCase(), extensions: [ext] }]
@@ -38948,7 +39457,7 @@ async function pickExportBitmapPathFlow(defaultName, format) {
 }
 async function pickImportBitmapPathFlow() {
   if (!mainWindow) return { path: null };
-  const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const res = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Import Bitmap Image",
     filters: [{ name: "Bitmap Images (PNG, DDS)", extensions: ["png", "dds"] }],
     properties: ["openFile"]
@@ -39009,7 +39518,7 @@ async function replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat) 
 }
 async function pickExportSoundPathFlow(defaultName) {
   if (!mainWindow) return { path: null };
-  const res = await import_electron3.dialog.showSaveDialog(mainWindow, {
+  const res = await import_electron4.dialog.showSaveDialog(mainWindow, {
     title: "Export Sound as WAV",
     defaultPath: `${defaultName}.wav`,
     filters: [{ name: "WAV Audio (*.wav)", extensions: ["wav"] }]
@@ -39018,7 +39527,7 @@ async function pickExportSoundPathFlow(defaultName) {
 }
 async function pickImportSoundPathFlow() {
   if (!mainWindow) return { path: null };
-  const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const res = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Import WAV Audio",
     filters: [{ name: "WAV Audio (*.wav)", extensions: ["wav"] }],
     properties: ["openFile"]
@@ -39088,7 +39597,7 @@ async function pickExport3dPathFlow(defaultName, format) {
     { name: "glTF 2.0 Binary (*.glb)", extensions: ["glb"] },
     { name: "All Files (*.*)", extensions: ["*"] }
   ];
-  const res = await import_electron3.dialog.showSaveDialog(mainWindow, {
+  const res = await import_electron4.dialog.showSaveDialog(mainWindow, {
     title: "Export 3D Model / BSP",
     defaultPath: defaultName,
     filters
@@ -39099,14 +39608,14 @@ async function pickExport3dPathFlow(defaultName, format) {
 }
 async function pickExportDirectoryFlow() {
   if (!mainWindow) return { path: null };
-  const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const res = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Select Destination Folder for Hierarchy Export",
     properties: ["openDirectory", "createDirectory"]
   });
   return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
 function read3dMeshSourceAsObjText(filePath) {
-  const raw = fs9.readFileSync(filePath, "utf8");
+  const raw = fs10.readFileSync(filePath, "utf8");
   const low = filePath.toLowerCase();
   if (low.endsWith(".jms")) {
     return convertJmsToObjText(raw).objText;
@@ -39118,7 +39627,7 @@ function read3dMeshSourceAsObjText(filePath) {
 }
 async function pickObjFileFlow() {
   if (!mainWindow) return { path: null };
-  const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const res = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Select 3D Model (.obj / .jms / .dae)",
     filters: [
       { name: "3D Models (*.obj;*.jms;*.dae)", extensions: ["obj", "jms", "dae"] },
@@ -39148,7 +39657,7 @@ async function analyzeCollisionObjFlow(filePath, options) {
 }
 async function exportUvTemplateFlow(options) {
   try {
-    if (!options.objFilePath || !fs9.existsSync(options.objFilePath)) {
+    if (!options.objFilePath || !fs10.existsSync(options.objFilePath)) {
       return { ok: false, error: "Select a valid .obj / .jms / .dae model file first." };
     }
     const objText = read3dMeshSourceAsObjText(options.objFilePath);
@@ -39165,9 +39674,9 @@ async function exportUvTemplateFlow(options) {
       return { ok: true, usedAutoUv, previewDataUrl };
     }
     if (!mainWindow) return { ok: false, error: "Application window is not available." };
-    const baseName = path11.basename(options.objFilePath, path11.extname(options.objFilePath));
-    const defaultPath = path11.join(path11.dirname(options.objFilePath), `${baseName}_uv_template.png`);
-    const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    const baseName = path12.basename(options.objFilePath, path12.extname(options.objFilePath));
+    const defaultPath = path12.join(path12.dirname(options.objFilePath), `${baseName}_uv_template.png`);
+    const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
       title: "Save UV Template Image (.png)",
       defaultPath,
       filters: [{ name: "PNG Image (*.png)", extensions: ["png"] }]
@@ -39175,7 +39684,7 @@ async function exportUvTemplateFlow(options) {
     if (canceled || !filePath) {
       return { ok: false, error: "Cancelled" };
     }
-    fs9.writeFileSync(filePath, pngBuffer);
+    fs10.writeFileSync(filePath, pngBuffer);
     sendLog("info", `Saved UV wireframe template to ${filePath}`);
     return { ok: true, outputPath: filePath, usedAutoUv, previewDataUrl };
   } catch (err) {
@@ -39185,15 +39694,15 @@ async function exportUvTemplateFlow(options) {
 async function pickSaveOceTagsPathFlow(defaultName) {
   if (!mainWindow) return { path: null };
   const settings = getSettings();
-  const baseDir = settings.lastExtractDir ?? (currentMapPath ? path11.dirname(currentMapPath) : import_electron3.app.getPath("documents"));
+  const baseDir = settings.lastExtractDir ?? (currentMapPath ? path12.dirname(currentMapPath) : import_electron4.app.getPath("documents"));
   const cleanFile = defaultName.endsWith(OCETAGS_EXTENSION) ? defaultName : `${defaultName}${OCETAGS_EXTENSION}`;
-  const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+  const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
     title: "Save Custom Object Tag Set (.ocetags)",
-    defaultPath: path11.join(baseDir, cleanFile),
+    defaultPath: path12.join(baseDir, cleanFile),
     filters: [{ name: "OpenCE Tag Set (*.ocetags)", extensions: ["ocetags"] }]
   });
   if (canceled || !filePath) return { path: null };
-  setLastExtractDir(path11.dirname(filePath));
+  setLastExtractDir(path12.dirname(filePath));
   return { path: filePath };
 }
 async function buildCustomObjectTagFlow(request) {
@@ -39207,7 +39716,7 @@ async function buildCustomObjectTagFlow(request) {
     const p = settings.resourceMaps[kind];
     if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
-  sendLog("info", `Building custom ${request.tagGroup} tag "${request.tagPath}" from ${path11.basename(request.objFilePath)}...`);
+  sendLog("info", `Building custom ${request.tagGroup} tag "${request.tagPath}" from ${path12.basename(request.objFilePath)}...`);
   const { promise } = sendWorkerRequest(
     { type: "buildCustomObjectTag", request, resourceMapPaths },
     sendLog,
@@ -39455,7 +39964,7 @@ async function deleteTagFlow(tagIndex) {
 }
 async function pickBspSourceMapFlow() {
   if (!mainWindow) return { path: null };
-  const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+  const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Select Source Map for BSP Swap",
     filters: [
       { name: "Halo Map Files (*.map)", extensions: ["map"] },
@@ -39470,9 +39979,9 @@ function detectSourceMapEdition(filePath) {
   const fpLower = (filePath || "").toLowerCase();
   let buf = Buffer.alloc(2048);
   try {
-    const fd = fs9.openSync(filePath, "r");
-    fs9.readSync(fd, buf, 0, 2048, 0);
-    fs9.closeSync(fd);
+    const fd = fs10.openSync(filePath, "r");
+    fs10.readSync(fd, buf, 0, 2048, 0);
+    fs10.closeSync(fd);
   } catch {
     return "ce";
   }
@@ -39499,9 +40008,9 @@ var EDITION_DISPLAY_NAMES = {
   xbox: "Halo Xbox Retail (v5)"
 };
 function isResourceMapCompatibleWithEdition(filePath, edition, kind) {
-  if (!filePath || !fs9.existsSync(filePath)) return false;
+  if (!filePath || !fs10.existsSync(filePath)) return false;
   try {
-    const stat = fs9.statSync(filePath);
+    const stat = fs10.statSync(filePath);
     if (kind === "bitmaps") {
       if (edition === "ce" && stat.size > 240 * 1024 * 1024) return false;
       if ((edition === "pc" || edition === "halomd") && stat.size < 240 * 1024 * 1024) return false;
@@ -39541,13 +40050,13 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
       soundsPath = settings.resourceMaps.sounds;
     }
   }
-  const donorDir = path11.dirname(sourceFilePath);
+  const donorDir = path12.dirname(sourceFilePath);
   if (!bitmapsPath) {
-    const localBmp = path11.join(donorDir, "bitmaps.map");
+    const localBmp = path12.join(donorDir, "bitmaps.map");
     if (isResourceMapCompatibleWithEdition(localBmp, edition, "bitmaps")) bitmapsPath = localBmp;
   }
   if (!soundsPath) {
-    const localSnd = path11.join(donorDir, "sounds.map");
+    const localSnd = path12.join(donorDir, "sounds.map");
     if (isResourceMapCompatibleWithEdition(localSnd, edition, "sounds")) soundsPath = localSnd;
   }
   if (!bitmapsPath && isResourceMapCompatibleWithEdition(defaults[edition], edition, "bitmaps")) {
@@ -39557,12 +40066,12 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
     bitmapsPath = defaults.halomd;
   }
   if (!soundsPath && bitmapsPath) {
-    const siblingSnd = path11.join(path11.dirname(bitmapsPath), "sounds.map");
+    const siblingSnd = path12.join(path12.dirname(bitmapsPath), "sounds.map");
     if (isResourceMapCompatibleWithEdition(siblingSnd, edition, "sounds")) soundsPath = siblingSnd;
   }
   if (!soundsPath && edition === "pc") {
     const pcSoundsCandidates = [
-      ...getSearchRoots().map((r) => path11.join(r, "sample_maps/PC/sounds.map")),
+      ...getSearchRoots().map((r) => path12.join(r, "sample_maps/PC/sounds.map")),
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\sounds.map",
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\sounds.map"
     ];
@@ -39575,7 +40084,7 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
   }
   if (edition === "mcc" && !soundsPath) {
     const ceSounds = settings.versionResourceMaps?.ce?.sounds || settings.resourceMaps.sounds;
-    if (ceSounds && fs9.existsSync(ceSounds)) {
+    if (ceSounds && fs10.existsSync(ceSounds)) {
       soundsPath = ceSounds;
     }
   }
@@ -39635,13 +40144,13 @@ async function performBspSwapFlow(sourceFilePath, options) {
 var saveMapDeps = {
   getOpenMap: () => mainWindow && currentMapPath ? { filePath: currentMapPath, compressed: currentMapCompressed, modified: currentMapModified, backedUp: currentMapBackedUp, overwriteConfirmed } : null,
   confirmOverwriteWithoutBackup: async (filePath) => {
-    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+    const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
       noLink: true,
-      message: `Overwrite ${path11.basename(filePath)} without a backup?`,
+      message: `Overwrite ${path12.basename(filePath)} without a backup?`,
       detail: "You skipped the backup copy when you opened this map, so the current file cannot be restored afterwards. Use File > Save As to keep it."
     });
     return response === 0;
@@ -39673,13 +40182,13 @@ async function runSaveMapAs() {
 }
 async function discardChangesFlow() {
   if (!mainWindow || !currentMapPath || !currentMapModified) return null;
-  const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+  const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
     type: "warning",
     buttons: ["Discard changes", "Cancel"],
     defaultId: 1,
     cancelId: 1,
     noLink: true,
-    message: `Discard all unsaved changes to ${path11.basename(currentMapPath)}?`,
+    message: `Discard all unsaved changes to ${path12.basename(currentMapPath)}?`,
     detail: "The map is reopened from the file on disk. Injected tags that were not saved are lost."
   });
   if (response !== 0) return null;
@@ -39695,7 +40204,7 @@ async function discardChangesFlow() {
 var saveMapAsDeps = {
   getOpenMap: () => mainWindow && currentMapPath ? { filePath: currentMapPath, compressed: currentMapCompressed } : null,
   showSaveDialog: async (defaultPath) => {
-    const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
       title: "Save map as",
       defaultPath,
       filters: [{ name: "Halo CE Map", extensions: ["map"] }]
@@ -39703,12 +40212,12 @@ var saveMapAsDeps = {
     return canceled || !filePath ? null : filePath;
   },
   confirmOverwrite: async (filePath) => {
-    const { response } = await import_electron3.dialog.showMessageBox(mainWindow, {
+    const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path11.basename(filePath)}" already exists.`,
+      message: `"${path12.basename(filePath)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     return response === 0;
@@ -39731,7 +40240,7 @@ function canSaveMap() {
 function pickConvertResourceFlow(kind) {
   if (!mainWindow) return Promise.resolve(null);
   const title = kind === "bitmaps" ? "Choose the source game's bitmaps.map" : "Choose the source game's sounds.map";
-  return import_electron3.dialog.showOpenDialog(mainWindow, {
+  return import_electron4.dialog.showOpenDialog(mainWindow, {
     title,
     filters: [{ name: "Halo map", extensions: ["map"] }],
     properties: ["openFile"]
@@ -39744,7 +40253,7 @@ async function convertPreflightFlow(source, resourcePaths) {
     sourcePath = lastConvertiblePath;
     if (!sourcePath) return { ok: false, code: "NO_SOURCE", message: "No convertible map is open. Use File > Convert to Custom Edition... to choose one." };
   } else {
-    const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
       title: "Convert to Custom Edition: choose a retail-layout (HaloMD) map",
       filters: [{ name: "Halo map", extensions: ["map"] }],
       properties: ["openFile"]
@@ -39777,7 +40286,7 @@ var convertMapDeps = {
   getOpenMapPath: () => currentMapPath,
   confirmUnsavedChanges: () => confirmUnsavedChanges(unsavedChangesDeps),
   showSaveDialog: async (defaultPath) => {
-    const { canceled, filePath } = await import_electron3.dialog.showSaveDialog(mainWindow, {
+    const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
       title: "Save converted Custom Edition map as",
       defaultPath,
       filters: [{ name: "Halo CE Map", extensions: ["map"] }]
@@ -39833,9 +40342,9 @@ async function verifyEmbeddedDataFlow() {
 }
 function getAppDisplayVersion() {
   try {
-    const pkgPath = path11.join(__dirname, "../package.json");
-    if (fs9.existsSync(pkgPath)) {
-      const pkg = JSON.parse(fs9.readFileSync(pkgPath, "utf8"));
+    const pkgPath = path12.join(__dirname, "../package.json");
+    if (fs10.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs10.readFileSync(pkgPath, "utf8"));
       if (typeof pkg.displayVersion === "string" && pkg.displayVersion.trim()) {
         return pkg.displayVersion.trim();
       }
@@ -39845,15 +40354,15 @@ function getAppDisplayVersion() {
     }
   } catch {
   }
-  return import_electron3.app.getVersion();
+  return import_electron4.app.getVersion();
 }
 function showAboutDialog() {
   if (!mainWindow) return;
-  const pngIcon = path11.join(__dirname, "../build/icon.png");
-  import_electron3.dialog.showMessageBox(mainWindow, {
+  const pngIcon = path12.join(__dirname, "../build/icon.png");
+  import_electron4.dialog.showMessageBox(mainWindow, {
     type: "info",
     title: "About",
-    icon: fs9.existsSync(pngIcon) ? pngIcon : void 0,
+    icon: fs10.existsSync(pngIcon) ? pngIcon : void 0,
     message: `OpenCE Mantle v${getAppDisplayVersion()}`,
     detail: "A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\nFormat references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\nCompression reference: Chimera.\nTarget runtime: OpenCE (OpenCommunityEdition/OpenCE).\n\nNo Bungie/Microsoft assets are bundled; this tool only operates on files you supply."
   });
@@ -39898,6 +40407,10 @@ function buildMenu() {
         { label: "Swap BSP...", click: () => mainWindow?.webContents.send("menu:action", "swap-bsp") },
         { label: "Compare With Another .map File...", click: () => mainWindow?.webContents.send("menu:action", "compare-maps") },
         { type: "separator" },
+        { label: "Live HUD Editing & Weapon Tag Editor...", click: () => mainWindow?.webContents.send("menu:action", "live-hud-editor") },
+        { label: "Inject / Replace HUD Bitmap...", click: () => mainWindow?.webContents.send("menu:action", "hud-bitmap-injector") },
+        { label: "UI.map Menu (DeLa) & String (ustr) Studio...", click: () => mainWindow?.webContents.send("menu:action", "ui-map-studio") },
+        { type: "separator" },
         {
           label: "Identify Resource Maps",
           submenu: [
@@ -39916,46 +40429,51 @@ function buildMenu() {
       label: "Help",
       submenu: [
         {
+          label: "Check for Updates...",
+          click: () => mainWindow?.webContents.send("menu:action", "check-for-updates")
+        },
+        { type: "separator" },
+        {
           label: "About OpenCE Mantle",
           click: () => showAboutDialog()
         },
         {
           label: "View format references",
-          click: () => import_electron3.shell.openExternal("https://github.com/SnowyMouse/invader/wiki")
+          click: () => import_electron4.shell.openExternal("https://github.com/SnowyMouse/invader/wiki")
         }
       ]
     }
   ];
-  import_electron3.Menu.setApplicationMenu(import_electron3.Menu.buildFromTemplate(template));
+  import_electron4.Menu.setApplicationMenu(import_electron4.Menu.buildFromTemplate(template));
 }
-import_electron3.app.whenReady().then(() => {
+import_electron4.app.whenReady().then(() => {
   startWorker(sendLog);
-  import_electron3.ipcMain.handle("dialog:openMap", () => openMapDialogFlow());
-  import_electron3.ipcMain.handle("map:load", (_e, filePath) => openMapGuarded(filePath));
-  import_electron3.ipcMain.handle("map:decompress", () => decompressFlow());
-  import_electron3.ipcMain.handle("map:recompress", () => recompressFlow());
-  import_electron3.ipcMain.handle("deps:get", (_e, originalIndices) => getDependenciesFlow(originalIndices));
-  import_electron3.ipcMain.handle("tags:extract", (_e, request) => extractTagsFlow(request));
-  import_electron3.ipcMain.on("tags:cancelExtract", () => {
+  import_electron4.ipcMain.handle("dialog:openMap", () => openMapDialogFlow());
+  import_electron4.ipcMain.handle("map:load", (_e, filePath) => openMapGuarded(filePath));
+  import_electron4.ipcMain.handle("map:decompress", () => decompressFlow());
+  import_electron4.ipcMain.handle("map:recompress", () => recompressFlow());
+  import_electron4.ipcMain.handle("deps:get", (_e, originalIndices) => getDependenciesFlow(originalIndices));
+  import_electron4.ipcMain.handle("tags:extract", (_e, request) => extractTagsFlow(request));
+  import_electron4.ipcMain.on("tags:cancelExtract", () => {
     if (currentExtractRequestId) cancelWorkerRequest(currentExtractRequestId, sendLog);
   });
-  import_electron3.ipcMain.handle("tags:batchExtractPreflight", () => batchExtractPreflightFlow());
-  import_electron3.ipcMain.handle("tags:startBatchExtract", (_e, options) => startBatchExtractFlow(options));
-  import_electron3.ipcMain.on("tags:cancelBatchExtract", () => cancelBatchExtractFlow());
-  import_electron3.ipcMain.handle("tags:finalizeBatchExtract", (_e, request) => finalizeBatchExtractFlow(request));
-  import_electron3.ipcMain.handle("resourceMaps:pick", (_e, kind) => pickResourceMapFlow(kind));
-  import_electron3.ipcMain.handle("resourceMaps:getStatuses", () => getResourceMapStatusesFlow());
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("tags:batchExtractPreflight", () => batchExtractPreflightFlow());
+  import_electron4.ipcMain.handle("tags:startBatchExtract", (_e, options) => startBatchExtractFlow(options));
+  import_electron4.ipcMain.on("tags:cancelBatchExtract", () => cancelBatchExtractFlow());
+  import_electron4.ipcMain.handle("tags:finalizeBatchExtract", (_e, request) => finalizeBatchExtractFlow(request));
+  import_electron4.ipcMain.handle("resourceMaps:pick", (_e, kind) => pickResourceMapFlow(kind));
+  import_electron4.ipcMain.handle("resourceMaps:getStatuses", () => getResourceMapStatusesFlow());
+  import_electron4.ipcMain.handle(
     "resourceMaps:identify",
     (_e, filePath, expectedVersion, expectedKind) => identifyResourceMapFlow(filePath, expectedVersion, expectedKind)
   );
-  import_electron3.ipcMain.handle("resourceMaps:setPath", (_e, kind, filePath) => {
+  import_electron4.ipcMain.handle("resourceMaps:setPath", (_e, kind, filePath) => {
     setResourceMapPath(kind, filePath);
     return { ok: true };
   });
-  import_electron3.ipcMain.handle("resourceMaps:detectDefaultPaths", () => detectDefaultResourceMapPathsFlow());
-  import_electron3.ipcMain.handle("resourceMaps:getVersionSettings", () => getSettings().versionResourceMaps ?? {});
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("resourceMaps:detectDefaultPaths", () => detectDefaultResourceMapPathsFlow());
+  import_electron4.ipcMain.handle("resourceMaps:getVersionSettings", () => getSettings().versionResourceMaps ?? {});
+  import_electron4.ipcMain.handle(
     "resourceMaps:setVersionSettings",
     (_e, version, maps) => {
       setVersionResourceMaps(version, maps);
@@ -39970,28 +40488,28 @@ import_electron3.app.whenReady().then(() => {
       return { ok: true };
     }
   );
-  import_electron3.ipcMain.handle("tags:pickInjectContainer", () => pickInjectContainerFlow());
-  import_electron3.ipcMain.handle("tags:planInject", (_e, containerPath, mode) => planInjectFlow(containerPath, mode));
-  import_electron3.ipcMain.handle("tags:applyInject", () => applyInjectFlow());
-  import_electron3.ipcMain.handle("tags:verifyEmbeddedData", () => verifyEmbeddedDataFlow());
-  import_electron3.ipcMain.handle("tags:getFields", (_e, tagIndex) => getTagFieldsFlow(tagIndex));
-  import_electron3.ipcMain.handle("tags:updateField", (_e, tagIndex, fieldName, newValue) => updateTagFieldFlow(tagIndex, fieldName, newValue));
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("tags:pickInjectContainer", () => pickInjectContainerFlow());
+  import_electron4.ipcMain.handle("tags:planInject", (_e, containerPath, mode) => planInjectFlow(containerPath, mode));
+  import_electron4.ipcMain.handle("tags:applyInject", () => applyInjectFlow());
+  import_electron4.ipcMain.handle("tags:verifyEmbeddedData", () => verifyEmbeddedDataFlow());
+  import_electron4.ipcMain.handle("tags:getFields", (_e, tagIndex) => getTagFieldsFlow(tagIndex));
+  import_electron4.ipcMain.handle("tags:updateField", (_e, tagIndex, fieldName, newValue) => updateTagFieldFlow(tagIndex, fieldName, newValue));
+  import_electron4.ipcMain.handle(
     "tags:addReflexiveChunk",
     (_e, tagIndex, reflexiveFieldPath, cloneFromIndex) => addReflexiveChunkFlow(tagIndex, reflexiveFieldPath, cloneFromIndex)
   );
-  import_electron3.ipcMain.handle("tags:getDependencySlots", (_e, tagIndex) => getDependencySlotsFlow(tagIndex));
-  import_electron3.ipcMain.handle("tags:setDependencySlot", (_e, tagIndex, fieldPath, newTagId) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
-  import_electron3.ipcMain.handle("tags:getReferencingTags", (_e, tagIndex) => getReferencingTagsFlow(tagIndex));
-  import_electron3.ipcMain.handle("tags:getUnicodeStrings", (_e, tagIndex) => getUnicodeStringsFlow(tagIndex));
-  import_electron3.ipcMain.handle("tags:setUnicodeString", (_e, tagIndex, stringIndex, newText) => setUnicodeStringFlow(tagIndex, stringIndex, newText));
-  import_electron3.ipcMain.handle("tags:renameTag", (_e, tagIndex, newPath) => renameTagFlow(tagIndex, newPath));
-  import_electron3.ipcMain.handle("tags:duplicateTag", (_e, tagIndex, newPath) => duplicateTagFlow(tagIndex, newPath));
-  import_electron3.ipcMain.handle("tags:deleteTag", (_e, tagIndex) => deleteTagFlow(tagIndex));
-  import_electron3.ipcMain.handle("dialog:pickBspSourceMap", () => pickBspSourceMapFlow());
-  import_electron3.ipcMain.handle("dialog:pickBspResource", async (_e, kind) => {
+  import_electron4.ipcMain.handle("tags:getDependencySlots", (_e, tagIndex) => getDependencySlotsFlow(tagIndex));
+  import_electron4.ipcMain.handle("tags:setDependencySlot", (_e, tagIndex, fieldPath, newTagId) => setDependencySlotFlow(tagIndex, fieldPath, newTagId));
+  import_electron4.ipcMain.handle("tags:getReferencingTags", (_e, tagIndex) => getReferencingTagsFlow(tagIndex));
+  import_electron4.ipcMain.handle("tags:getUnicodeStrings", (_e, tagIndex) => getUnicodeStringsFlow(tagIndex));
+  import_electron4.ipcMain.handle("tags:setUnicodeString", (_e, tagIndex, stringIndex, newText) => setUnicodeStringFlow(tagIndex, stringIndex, newText));
+  import_electron4.ipcMain.handle("tags:renameTag", (_e, tagIndex, newPath) => renameTagFlow(tagIndex, newPath));
+  import_electron4.ipcMain.handle("tags:duplicateTag", (_e, tagIndex, newPath) => duplicateTagFlow(tagIndex, newPath));
+  import_electron4.ipcMain.handle("tags:deleteTag", (_e, tagIndex) => deleteTagFlow(tagIndex));
+  import_electron4.ipcMain.handle("dialog:pickBspSourceMap", () => pickBspSourceMapFlow());
+  import_electron4.ipcMain.handle("dialog:pickBspResource", async (_e, kind) => {
     if (!mainWindow) return { path: null };
-    const { canceled, filePaths } = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
       title: `Select ${kind === "bitmaps" ? "bitmaps.map" : "sounds.map"} for Donor Map`,
       filters: [{ name: "Halo Resource Map", extensions: ["map"] }],
       properties: ["openFile"]
@@ -39999,71 +40517,71 @@ import_electron3.app.whenReady().then(() => {
     if (canceled || filePaths.length === 0) return { path: null };
     return { path: filePaths[0] };
   });
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "bsp:swapPreflight",
     (_e, sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices) => bspSwapPreflightFlow(sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices)
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "bsp:getSourceMesh",
     (_e, sourceFilePath, bspIndex) => getSourceBspMeshFlow(sourceFilePath, bspIndex)
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "bsp:performSwap",
     (_e, sourceFilePath, options) => performBspSwapFlow(sourceFilePath, options)
   );
-  import_electron3.ipcMain.handle("render:getBspMesh", (_e, bspIndex) => getBspRenderMeshFlow(bspIndex));
-  import_electron3.ipcMain.handle("render:getBitmapTexture", (_e, bitmapTagId, imageIndex) => getBitmapTextureFlow(bitmapTagId, imageIndex));
-  import_electron3.ipcMain.handle("render:getScenarioObjects", () => getScenarioObjectsFlow());
-  import_electron3.ipcMain.handle("render:getModelGeometry", (_e, modelTagId, lod) => getModelGeometryFlow(modelTagId, lod));
-  import_electron3.ipcMain.handle("render:updateScenarioPlacement", (_e, placementId, updates) => updateScenarioPlacementFlow(placementId, updates));
-  import_electron3.ipcMain.handle("render:duplicateScenarioPlacement", (_e, placementId, offsetDelta) => duplicateScenarioPlacementFlow(placementId, offsetDelta));
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("render:getBspMesh", (_e, bspIndex) => getBspRenderMeshFlow(bspIndex));
+  import_electron4.ipcMain.handle("render:getBitmapTexture", (_e, bitmapTagId, imageIndex) => getBitmapTextureFlow(bitmapTagId, imageIndex));
+  import_electron4.ipcMain.handle("render:getScenarioObjects", () => getScenarioObjectsFlow());
+  import_electron4.ipcMain.handle("render:getModelGeometry", (_e, modelTagId, lod) => getModelGeometryFlow(modelTagId, lod));
+  import_electron4.ipcMain.handle("render:updateScenarioPlacement", (_e, placementId, updates) => updateScenarioPlacementFlow(placementId, updates));
+  import_electron4.ipcMain.handle("render:duplicateScenarioPlacement", (_e, placementId, offsetDelta) => duplicateScenarioPlacementFlow(placementId, offsetDelta));
+  import_electron4.ipcMain.handle(
     "render:addScenarioPlacement",
     (_e, kind, paletteIndex, position, rotation, teamIndex) => addScenarioPlacementFlow(kind, paletteIndex, position, rotation, teamIndex)
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "render:swapScenarioPlacement",
     (_e, placementId, newKind, newPaletteIndex) => swapScenarioPlacementFlow(placementId, newKind, newPaletteIndex)
   );
-  import_electron3.ipcMain.handle("render:deleteScenarioPlacement", (_e, placementId) => deleteScenarioPlacementFlow(placementId));
-  import_electron3.ipcMain.handle("bitmap:getInfo", (_e, tagIndex) => getBitmapInfoFlow(tagIndex));
-  import_electron3.ipcMain.handle("bitmap:getRgba", (_e, tagIndex, imageIndex) => getBitmapRgbaFlow(tagIndex, imageIndex));
-  import_electron3.ipcMain.handle("dialog:pickExportBitmapPath", (_e, defaultName, format) => pickExportBitmapPathFlow(defaultName, format));
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("render:deleteScenarioPlacement", (_e, placementId) => deleteScenarioPlacementFlow(placementId));
+  import_electron4.ipcMain.handle("bitmap:getInfo", (_e, tagIndex) => getBitmapInfoFlow(tagIndex));
+  import_electron4.ipcMain.handle("bitmap:getRgba", (_e, tagIndex, imageIndex) => getBitmapRgbaFlow(tagIndex, imageIndex));
+  import_electron4.ipcMain.handle("dialog:pickExportBitmapPath", (_e, defaultName, format) => pickExportBitmapPathFlow(defaultName, format));
+  import_electron4.ipcMain.handle(
     "bitmap:export",
     (_e, tagIndex, imageIndex, format, outputPath) => exportBitmapFlow(tagIndex, imageIndex, format, outputPath)
   );
-  import_electron3.ipcMain.handle("dialog:pickImportBitmapPath", () => pickImportBitmapPathFlow());
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("dialog:pickImportBitmapPath", () => pickImportBitmapPathFlow());
+  import_electron4.ipcMain.handle(
     "bitmap:replace",
     (_e, tagIndex, imageIndex, inputPath, targetFormat) => replaceBitmapFlow(tagIndex, imageIndex, inputPath, targetFormat)
   );
-  import_electron3.ipcMain.handle("sound:getInfo", (_e, tagIndex) => getSoundInfoFlow(tagIndex));
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("sound:getInfo", (_e, tagIndex) => getSoundInfoFlow(tagIndex));
+  import_electron4.ipcMain.handle(
     "sound:getWav",
     (_e, tagIndex, pitchRangeIndex, permutationIndex) => getSoundWavFlow(tagIndex, pitchRangeIndex, permutationIndex)
   );
-  import_electron3.ipcMain.handle("dialog:pickExportSoundPath", (_e, defaultName) => pickExportSoundPathFlow(defaultName));
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("dialog:pickExportSoundPath", (_e, defaultName) => pickExportSoundPathFlow(defaultName));
+  import_electron4.ipcMain.handle(
     "sound:export",
     (_e, tagIndex, pitchRangeIndex, permutationIndex, outputPath) => exportSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, outputPath)
   );
-  import_electron3.ipcMain.handle("dialog:pickImportSoundPath", () => pickImportSoundPathFlow());
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("dialog:pickImportSoundPath", () => pickImportSoundPathFlow());
+  import_electron4.ipcMain.handle(
     "sound:replace",
     (_e, tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat) => replaceSoundFlow(tagIndex, pitchRangeIndex, permutationIndex, inputPath, targetFormat)
   );
-  import_electron3.ipcMain.handle("dialog:pickExport3dPath", (_e, defaultName, format) => pickExport3dPathFlow(defaultName, format));
-  import_electron3.ipcMain.handle("dialog:pickExportDirectory", () => pickExportDirectoryFlow());
-  import_electron3.ipcMain.handle("dialog:pickObjFile", () => pickObjFileFlow());
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle("dialog:pickExport3dPath", (_e, defaultName, format) => pickExport3dPathFlow(defaultName, format));
+  import_electron4.ipcMain.handle("dialog:pickExportDirectory", () => pickExportDirectoryFlow());
+  import_electron4.ipcMain.handle("dialog:pickObjFile", () => pickObjFileFlow());
+  import_electron4.ipcMain.handle(
     "collision:analyzeObj",
     (_e, filePath, options) => analyzeCollisionObjFlow(filePath, options)
   );
-  import_electron3.ipcMain.handle("objectBuilder:exportUvTemplate", (_e, options) => exportUvTemplateFlow(options));
-  import_electron3.ipcMain.handle("objectBuilder:pickSaveOceTagsPath", (_e, defaultName) => pickSaveOceTagsPathFlow(defaultName));
-  import_electron3.ipcMain.handle("objectBuilder:build", (_e, request) => buildCustomObjectTagFlow(request));
-  import_electron3.ipcMain.handle("deprotect:inspect", async () => {
+  import_electron4.ipcMain.handle("objectBuilder:exportUvTemplate", (_e, options) => exportUvTemplateFlow(options));
+  import_electron4.ipcMain.handle("objectBuilder:pickSaveOceTagsPath", (_e, defaultName) => pickSaveOceTagsPathFlow(defaultName));
+  import_electron4.ipcMain.handle("objectBuilder:build", (_e, request) => buildCustomObjectTagFlow(request));
+  import_electron4.ipcMain.handle("deprotect:inspect", async () => {
     if (!currentMapPath || currentMapCompressed) {
       return { ok: false, code: "NO_MAP_LOADED", message: "No uncompressed map is open." };
     }
@@ -40075,7 +40593,7 @@ import_electron3.app.whenReady().then(() => {
       return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
     }
   });
-  import_electron3.ipcMain.handle("deprotect:run", async (_e, options) => {
+  import_electron4.ipcMain.handle("deprotect:run", async (_e, options) => {
     if (!currentMapPath || currentMapCompressed) {
       return { ok: false, code: "NO_MAP_LOADED", message: "No uncompressed map is open." };
     }
@@ -40097,7 +40615,7 @@ import_electron3.app.whenReady().then(() => {
       return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
     }
   });
-  import_electron3.ipcMain.handle("deprotect:spoofCrc32", async (_e, targetCrc32) => {
+  import_electron4.ipcMain.handle("deprotect:spoofCrc32", async (_e, targetCrc32) => {
     if (!currentMapPath || currentMapCompressed) {
       return { ok: false, code: "NO_MAP_LOADED", message: "No uncompressed map is open." };
     }
@@ -40122,20 +40640,20 @@ import_electron3.app.whenReady().then(() => {
       return { ok: false, code: e.code ?? "UNEXPECTED_ERROR", message: e.message };
     }
   });
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "3d:exportModel",
     (_e, modelTagId, lod, format, outputPath) => exportModel3dFlow(modelTagId, lod, format, outputPath)
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "3d:exportBsp",
     (_e, bspIndex, format, outputPath) => exportBsp3dFlow(bspIndex, format, outputPath)
   );
-  import_electron3.ipcMain.handle("hs:decompile", async () => {
+  import_electron4.ipcMain.handle("hs:decompile", async () => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     const { promise } = sendWorkerRequest({ type: "decompileHaloScript" }, sendLog);
     return promise;
   });
-  import_electron3.ipcMain.handle("hs:compile", async (_e, hscSource) => {
+  import_electron4.ipcMain.handle("hs:compile", async (_e, hscSource) => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
     const { promise } = sendWorkerRequest(
@@ -40149,7 +40667,7 @@ import_electron3.app.whenReady().then(() => {
     }
     return res;
   });
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "hs:setupEntities",
     async (_e, required) => {
       if (!currentMapPath) return { ok: false, message: "No map is open." };
@@ -40166,12 +40684,12 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle("coll:extractWireframe", async (_e, collTagIndex) => {
+  import_electron4.ipcMain.handle("coll:extractWireframe", async (_e, collTagIndex) => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     const { promise } = sendWorkerRequest({ type: "extractCollisionWireframe", collTagIndex }, sendLog);
     return promise;
   });
-  import_electron3.ipcMain.handle("convert:collToGbxmodel", async (_e, collTagIndex, targetPath) => {
+  import_electron4.ipcMain.handle("convert:collToGbxmodel", async (_e, collTagIndex, targetPath) => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
     const { promise } = sendWorkerRequest({ type: "convertCollisionToGbxmodel", collTagIndex, targetPath }, sendLog);
@@ -40182,7 +40700,7 @@ import_electron3.app.whenReady().then(() => {
     }
     return res;
   });
-  import_electron3.ipcMain.handle("convert:sbspToScenery", async (_e, bspTagIndex, targetPath) => {
+  import_electron4.ipcMain.handle("convert:sbspToScenery", async (_e, bspTagIndex, targetPath) => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
     const { promise } = sendWorkerRequest({ type: "convertSbspToScenery", bspTagIndex, targetPath }, sendLog);
@@ -40193,7 +40711,7 @@ import_electron3.app.whenReady().then(() => {
     }
     return res;
   });
-  import_electron3.ipcMain.handle("convert:objectTagClass", async (_e, sourceTagIndex, targetGroup, targetPath) => {
+  import_electron4.ipcMain.handle("convert:objectTagClass", async (_e, sourceTagIndex, targetGroup, targetPath) => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
     const { promise } = sendWorkerRequest(
@@ -40207,7 +40725,7 @@ import_electron3.app.whenReady().then(() => {
     }
     return res;
   });
-  import_electron3.ipcMain.handle("map:cleanOpenSauceYelo", async () => {
+  import_electron4.ipcMain.handle("map:cleanOpenSauceYelo", async () => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
     const { promise } = sendWorkerRequest({ type: "cleanOpenSauceYelo" }, sendLog);
@@ -40218,12 +40736,12 @@ import_electron3.app.whenReady().then(() => {
     }
     return res;
   });
-  import_electron3.ipcMain.handle("map:scanTagErrors", async () => {
+  import_electron4.ipcMain.handle("map:scanTagErrors", async () => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     const { promise } = sendWorkerRequest({ type: "scanMapTagErrors" }, sendLog);
     return promise;
   });
-  import_electron3.ipcMain.handle("map:globalReplaceTagReference", async (_e, fromTagId, toTagId) => {
+  import_electron4.ipcMain.handle("map:globalReplaceTagReference", async (_e, fromTagId, toTagId) => {
     if (!currentMapPath) return { ok: false, message: "No map is open." };
     if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
     const { promise } = sendWorkerRequest({ type: "globalReplaceTagReference", fromTagId, toTagId }, sendLog);
@@ -40234,13 +40752,13 @@ import_electron3.app.whenReady().then(() => {
     }
     return res;
   });
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "mod:exportOpenCeModFolder",
     async (_e, options) => {
       if (!currentMapPath) return { ok: false, message: "No map is open." };
       if (currentMapCompressed) return { ok: false, message: COMPRESSED_MAP_MESSAGE };
       if (!mainWindow) return { ok: false, message: "Main window unavailable." };
-      const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+      const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
         title: "Select Output Parent Directory for OpenCE Mod Folder (creates <mod_name>/mod.toml + tags/...)",
         properties: ["openDirectory", "createDirectory"]
       });
@@ -40276,7 +40794,7 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "mod:importLegacyTags",
     async (_e, sourceMode, injectMode = "add") => {
       if (!currentMapPath) return { ok: false, message: "No map is open." };
@@ -40285,7 +40803,7 @@ import_electron3.app.whenReady().then(() => {
       let sourcePathLabel = "";
       let inputPaths = [];
       if (sourceMode === "folder") {
-        const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+        const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
           title: "Select Legacy Tag Folder (legacy_tags, sample_mods, or HMT Extract folder)",
           properties: ["openDirectory"]
         });
@@ -40295,7 +40813,7 @@ import_electron3.app.whenReady().then(() => {
         sourcePathLabel = pick.filePaths[0];
         inputPaths = pick.filePaths;
       } else {
-        const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+        const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
           title: "Select Legacy Tag File(s) (HEK loose tags or HMT .meta / .xml files)",
           properties: ["openFile", "multiSelections"]
         });
@@ -40330,7 +40848,7 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "bitmap:replaceFromDataUrl",
     async (_e, tagIndex, imageIndex, pngDataUrl, targetFormat) => {
       if (!currentMapPath || currentMapCompressed) {
@@ -40365,11 +40883,11 @@ import_electron3.app.whenReady().then(() => {
     }
   );
   const resolveCustomTexturesDirectory = () => {
-    const baseDir = process.env.PORTABLE_EXECUTABLE_DIR ? process.env.PORTABLE_EXECUTABLE_DIR : import_electron3.app.isPackaged ? path11.dirname(process.execPath) : process.cwd();
-    const texturesDir = path11.join(baseDir, "textures");
-    fs9.mkdirSync(texturesDir, { recursive: true });
+    const baseDir = process.env.PORTABLE_EXECUTABLE_DIR ? process.env.PORTABLE_EXECUTABLE_DIR : import_electron4.app.isPackaged ? path12.dirname(process.execPath) : process.cwd();
+    const texturesDir = path12.join(baseDir, "textures");
+    fs10.mkdirSync(texturesDir, { recursive: true });
     try {
-      const existing = fs9.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+      const existing = fs10.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
       if (existing.length === 0) {
         const presets = [
           {
@@ -40435,24 +40953,24 @@ import_electron3.app.whenReady().then(() => {
             }
           }
           const png = encodeRgbaToPng(rgba, 64, 64);
-          fs9.writeFileSync(path11.join(texturesDir, p.name), png);
+          fs10.writeFileSync(path12.join(texturesDir, p.name), png);
         }
       }
     } catch {
     }
     return texturesDir;
   };
-  import_electron3.ipcMain.handle("bitmap:getCustomBrushTextures", async () => {
+  import_electron4.ipcMain.handle("bitmap:getCustomBrushTextures", async () => {
     const texturesDir = resolveCustomTexturesDirectory();
     const textures = [];
     try {
-      const files = fs9.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+      const files = fs10.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
       for (const file of files) {
-        const fullPath = path11.join(texturesDir, file);
-        const ext = path11.extname(file).toLowerCase();
+        const fullPath = path12.join(texturesDir, file);
+        const ext = path12.extname(file).toLowerCase();
         const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png";
-        const buf = fs9.readFileSync(fullPath);
-        const cleanName = path11.basename(file, ext).replace(/[_-]+/g, " ");
+        const buf = fs10.readFileSync(fullPath);
+        const cleanName = path12.basename(file, ext).replace(/[_-]+/g, " ");
         textures.push({
           name: cleanName,
           filePath: fullPath,
@@ -40463,12 +40981,12 @@ import_electron3.app.whenReady().then(() => {
     }
     return { ok: true, texturesDir, textures };
   });
-  import_electron3.ipcMain.handle("bitmap:openCustomTexturesFolder", async () => {
+  import_electron4.ipcMain.handle("bitmap:openCustomTexturesFolder", async () => {
     const texturesDir = resolveCustomTexturesDirectory();
-    await import_electron3.shell.openPath(texturesDir);
+    await import_electron4.shell.openPath(texturesDir);
     return { ok: true, texturesDir };
   });
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "render:updateBspVertices",
     async (_e, bspIndex, submeshUpdates) => {
       try {
@@ -40491,7 +41009,7 @@ import_electron3.app.whenReady().then(() => {
       }
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "render:updateModelVertices",
     async (_e, modelTagId, submeshUpdates, lod) => {
       try {
@@ -40515,23 +41033,23 @@ import_electron3.app.whenReady().then(() => {
       }
     }
   );
-  import_electron3.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
-  registerSaveMapAsIpc(import_electron3.ipcMain, saveMapAsDeps, afterSaveAs);
-  import_electron3.ipcMain.handle("map:discard", () => discardChangesFlow());
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(SAVE_MAP_CHANNEL, () => runSaveMap());
+  registerSaveMapAsIpc(import_electron4.ipcMain, saveMapAsDeps, afterSaveAs);
+  import_electron4.ipcMain.handle("map:discard", () => discardChangesFlow());
+  import_electron4.ipcMain.handle(
     "map:convertPreflight",
     (_e, source, resourcePaths) => convertPreflightFlow(source, resourcePaths && typeof resourcePaths === "object" ? resourcePaths : void 0)
   );
-  import_electron3.ipcMain.handle("map:convert", (_e, acknowledgeScripts, repairs, resourcePaths) => runConvertMap(acknowledgeScripts, repairs, resourcePaths));
-  import_electron3.ipcMain.handle("dialog:pickConvertResource", (_e, kind) => pickConvertResourceFlow(kind));
-  import_electron3.ipcMain.handle("app:openContainingFolder", (_e, filePath) => {
-    if (typeof filePath === "string" && filePath) import_electron3.shell.showItemInFolder(filePath);
+  import_electron4.ipcMain.handle("map:convert", (_e, acknowledgeScripts, repairs, resourcePaths) => runConvertMap(acknowledgeScripts, repairs, resourcePaths));
+  import_electron4.ipcMain.handle("dialog:pickConvertResource", (_e, kind) => pickConvertResourceFlow(kind));
+  import_electron4.ipcMain.handle("app:openContainingFolder", (_e, filePath) => {
+    if (typeof filePath === "string" && filePath) import_electron4.shell.showItemInFolder(filePath);
   });
-  import_electron3.ipcMain.handle("app:getSettings", () => getSettings());
-  import_electron3.ipcMain.handle("app:version", () => getAppDisplayVersion());
-  import_electron3.ipcMain.handle("app:recentMaps", () => getRecentMaps());
-  import_electron3.ipcMain.on("app:notImplemented", (_e, feature) => sendLog("warn", `${feature} is not implemented yet (coming in a later milestone).`));
-  import_electron3.ipcMain.handle("app:showAbout", () => showAboutDialog());
+  import_electron4.ipcMain.handle("app:getSettings", () => getSettings());
+  import_electron4.ipcMain.handle("app:version", () => getAppDisplayVersion());
+  import_electron4.ipcMain.handle("app:recentMaps", () => getRecentMaps());
+  import_electron4.ipcMain.on("app:notImplemented", (_e, feature) => sendLog("warn", `${feature} is not implemented yet (coming in a later milestone).`));
+  import_electron4.ipcMain.handle("app:showAbout", () => showAboutDialog());
   let devOverlayWindow = null;
   const inGameHotkeysState = {
     overlayPinned: false,
@@ -40545,8 +41063,8 @@ import_electron3.app.whenReady().then(() => {
   };
   const registerTagTestGlobalHotkeys = () => {
     try {
-      if (!import_electron3.globalShortcut.isRegistered("F7")) {
-        import_electron3.globalShortcut.register("F7", () => {
+      if (!import_electron4.globalShortcut.isRegistered("F7")) {
+        import_electron4.globalShortcut.register("F7", () => {
           inGameHotkeysState.godMode = !inGameHotkeysState.godMode;
           const v = inGameHotkeysState.godMode ? 1 : 0;
           tagTestRunner.sendCommand(`cheat_deathless_player ${v}`);
@@ -40554,8 +41072,8 @@ import_electron3.app.whenReady().then(() => {
           mainWindow?.webContents.send("tagTest:hotkeyAction", { action: "godMode", value: inGameHotkeysState.godMode });
         });
       }
-      if (!import_electron3.globalShortcut.isRegistered("F8")) {
-        import_electron3.globalShortcut.register("F8", () => {
+      if (!import_electron4.globalShortcut.isRegistered("F8")) {
+        import_electron4.globalShortcut.register("F8", () => {
           inGameHotkeysState.infiniteAmmo = !inGameHotkeysState.infiniteAmmo;
           const v = inGameHotkeysState.infiniteAmmo ? 1 : 0;
           tagTestRunner.sendCommand(`cheat_infinite_ammo ${v}`);
@@ -40564,8 +41082,8 @@ import_electron3.app.whenReady().then(() => {
           mainWindow?.webContents.send("tagTest:hotkeyAction", { action: "infiniteAmmo", value: inGameHotkeysState.infiniteAmmo });
         });
       }
-      if (!import_electron3.globalShortcut.isRegistered("F9")) {
-        import_electron3.globalShortcut.register("F9", () => {
+      if (!import_electron4.globalShortcut.isRegistered("F9")) {
+        import_electron4.globalShortcut.register("F9", () => {
           inGameHotkeysState.wireframe = !inGameHotkeysState.wireframe;
           const v = inGameHotkeysState.wireframe ? 1 : 0;
           tagTestRunner.sendCommand(`rasterizer_wireframe ${v}`);
@@ -40574,8 +41092,8 @@ import_electron3.app.whenReady().then(() => {
           mainWindow?.webContents.send("tagTest:hotkeyAction", { action: "wireframe", value: inGameHotkeysState.wireframe });
         });
       }
-      if (!import_electron3.globalShortcut.isRegistered("F10")) {
-        import_electron3.globalShortcut.register("F10", () => {
+      if (!import_electron4.globalShortcut.isRegistered("F10")) {
+        import_electron4.globalShortcut.register("F10", () => {
           inGameHotkeysState.aiDebug = !inGameHotkeysState.aiDebug;
           const v = inGameHotkeysState.aiDebug ? 1 : 0;
           tagTestRunner.sendCommand(`ai_render ${v}`);
@@ -40590,8 +41108,8 @@ import_electron3.app.whenReady().then(() => {
   const unregisterTagTestGlobalHotkeys = () => {
     try {
       for (const key of ["F6", "F7", "F8", "F9", "F10"]) {
-        if (import_electron3.globalShortcut.isRegistered(key)) {
-          import_electron3.globalShortcut.unregister(key);
+        if (import_electron4.globalShortcut.isRegistered(key)) {
+          import_electron4.globalShortcut.unregister(key);
         }
       }
       if (devOverlayWindow && !devOverlayWindow.isDestroyed()) {
@@ -40613,28 +41131,28 @@ import_electron3.app.whenReady().then(() => {
   tagTestRunner.onLog((entry) => {
     mainWindow?.webContents.send("tagTest:log", entry);
   });
-  import_electron3.ipcMain.handle("tagTest:launch", (_e, options) => tagTestRunner.launch(options));
-  import_electron3.ipcMain.handle("tagTest:stop", () => tagTestRunner.stop());
-  import_electron3.ipcMain.handle("tagTest:sendCommand", (_e, cmd) => tagTestRunner.sendCommand(cmd));
-  import_electron3.ipcMain.handle("tagTest:hotReload", () => tagTestRunner.hotReload());
-  import_electron3.ipcMain.handle("tagTest:getStatus", () => tagTestRunner.getStatus());
-  import_electron3.ipcMain.handle("tagTest:getConfig", () => tagTestRunner.getOpenCeConfig());
-  import_electron3.ipcMain.handle("tagTest:setAlwaysOnTop", (_e, flag) => {
+  import_electron4.ipcMain.handle("tagTest:launch", (_e, options) => tagTestRunner.launch(options));
+  import_electron4.ipcMain.handle("tagTest:stop", () => tagTestRunner.stop());
+  import_electron4.ipcMain.handle("tagTest:sendCommand", (_e, cmd) => tagTestRunner.sendCommand(cmd));
+  import_electron4.ipcMain.handle("tagTest:hotReload", () => tagTestRunner.hotReload());
+  import_electron4.ipcMain.handle("tagTest:getStatus", () => tagTestRunner.getStatus());
+  import_electron4.ipcMain.handle("tagTest:getConfig", () => tagTestRunner.getOpenCeConfig());
+  import_electron4.ipcMain.handle("tagTest:setAlwaysOnTop", (_e, flag) => {
     tagTestRunner.setHaloAlwaysOnTop(flag);
     return tagTestRunner.isHaloAlwaysOnTop();
   });
-  import_electron3.ipcMain.handle("tagTest:isAlwaysOnTop", () => tagTestRunner.isHaloAlwaysOnTop());
-  import_electron3.ipcMain.handle("tagTest:triggerFlycam", () => {
+  import_electron4.ipcMain.handle("tagTest:isAlwaysOnTop", () => tagTestRunner.isHaloAlwaysOnTop());
+  import_electron4.ipcMain.handle("tagTest:triggerFlycam", () => {
     tagTestRunner.triggerFlycamToggle();
     return { ok: true };
   });
-  import_electron3.ipcMain.handle("tagTest:setDir", (_e, dir) => {
+  import_electron4.ipcMain.handle("tagTest:setDir", (_e, dir) => {
     setOpenCeDirectory(dir);
     return { ok: true };
   });
-  import_electron3.ipcMain.handle("tagTest:pickDir", async () => {
+  import_electron4.ipcMain.handle("tagTest:pickDir", async () => {
     if (!mainWindow) return { path: null };
-    const res = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    const res = await import_electron4.dialog.showOpenDialog(mainWindow, {
       title: "Select OpenCE Directory (containing halo.exe)",
       properties: ["openDirectory"]
     });
@@ -40643,16 +41161,16 @@ import_electron3.app.whenReady().then(() => {
     setOpenCeDirectory(dir);
     return { path: dir };
   });
-  import_electron3.ipcMain.handle("window:setAlwaysOnTop", (_e, flag) => {
+  import_electron4.ipcMain.handle("window:setAlwaysOnTop", (_e, flag) => {
     mainWindow?.setAlwaysOnTop(flag, "floating");
     return mainWindow?.isAlwaysOnTop() ?? false;
   });
-  import_electron3.ipcMain.handle("window:isAlwaysOnTop", () => {
+  import_electron4.ipcMain.handle("window:isAlwaysOnTop", () => {
     return mainWindow?.isAlwaysOnTop() ?? false;
   });
-  import_electron3.ipcMain.handle("wrl:pickAndParse", async () => {
+  import_electron4.ipcMain.handle("wrl:pickAndParse", async () => {
     if (!mainWindow) return { ok: false, message: "Main window unavailable." };
-    const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
       title: "Load .WRL (VRML 1.0 Error Geometry) or tool.exe / debug.txt Build Log",
       filters: [
         { name: "Halo WRL & Tool Logs (*.wrl, *.txt, *.log)", extensions: ["wrl", "txt", "log"] },
@@ -40665,9 +41183,9 @@ import_electron3.app.whenReady().then(() => {
       return { ok: false, cancelled: true, message: "Cancelled." };
     }
     const filePath = pick.filePaths[0];
-    const fileName = path11.basename(filePath);
+    const fileName = path12.basename(filePath);
     try {
-      const text = fs9.readFileSync(filePath, "utf8");
+      const text = fs10.readFileSync(filePath, "utf8");
       if (filePath.toLowerCase().endsWith(".wrl") || text.trimStart().startsWith("#VRML")) {
         const wrl = parseHaloWrl(text);
         sendLog(
@@ -40687,12 +41205,12 @@ import_electron3.app.whenReady().then(() => {
       return { ok: false, message: err instanceof Error ? err.message : String(err) };
     }
   });
-  import_electron3.ipcMain.handle("map:compareWithAnother", async () => {
+  import_electron4.ipcMain.handle("map:compareWithAnother", async () => {
     if (!currentMapPath || currentMapCompressed) {
       return { ok: false, message: "Open an uncompressed map first before comparing." };
     }
     if (!mainWindow) return { ok: false, message: "Main window unavailable." };
-    const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+    const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
       title: "Select Second .map File to Compare Against Open Map",
       filters: [{ name: "Halo Map (*.map, *.bak)", extensions: ["map", "bak"] }],
       properties: ["openFile"]
@@ -40715,7 +41233,7 @@ import_electron3.app.whenReady().then(() => {
     }
     return res;
   });
-  import_electron3.ipcMain.handle("mcc:discover", async () => {
+  import_electron4.ipcMain.handle("mcc:discover", async () => {
     const info = discoverSteamMccInstallations();
     return {
       ok: true,
@@ -40725,14 +41243,14 @@ import_electron3.app.whenReady().then(() => {
       registeredRoots: info.registeredRoots
     };
   });
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "mcc:deployMod",
     async (_e, options) => {
       if (!currentMapPath || currentMapCompressed) {
         return { ok: false, message: "Open an uncompressed map before deploying to Steam MCC." };
       }
       if (!mainWindow) return { ok: false, message: "Main window unavailable." };
-      const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+      const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
         title: "Select Output Parent Directory for Steam MCC Mod Package",
         properties: ["openDirectory", "createDirectory"]
       });
@@ -40763,7 +41281,7 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "map:globalReplaceTagFieldValue",
     async (_evt, options) => {
       if (!currentMapPath || currentMapCompressed) {
@@ -40787,14 +41305,14 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "map:compileJmaAnimation",
     async (_evt, targetAntrTagIndex, animName) => {
       if (!currentMapPath || currentMapCompressed) {
         return { ok: false, message: "Open an uncompressed map first." };
       }
       if (!mainWindow) return { ok: false, message: "Main window unavailable." };
-      const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+      const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
         title: "Select Halo CE Skeletal Animation (.jma / .jmm / .jmo / .jmr)",
         filters: [
           { name: "Halo Animation Source (*.jma;*.jmm;*.jmo;*.jmr;*.jmw;*.jmz)", extensions: ["jma", "jmm", "jmo", "jmr", "jmw", "jmz"] },
@@ -40806,9 +41324,9 @@ import_electron3.app.whenReady().then(() => {
         return { ok: false, cancelled: true, message: "Cancelled." };
       }
       const filePath = pick.filePaths[0];
-      const fileName = path11.basename(filePath);
-      const inferredAnimName = animName?.trim() || path11.basename(filePath, path11.extname(filePath));
-      const jmaText = fs9.readFileSync(filePath, "utf8");
+      const fileName = path12.basename(filePath);
+      const inferredAnimName = animName?.trim() || path12.basename(filePath, path12.extname(filePath));
+      const jmaText = fs10.readFileSync(filePath, "utf8");
       const { promise } = sendWorkerRequest(
         {
           type: "compileJmaAnimation",
@@ -40830,14 +41348,14 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "map:compileJmsPhysics",
     async (_evt, targetPhysTagIndex, totalMass) => {
       if (!currentMapPath || currentMapCompressed) {
         return { ok: false, message: "Open an uncompressed map first." };
       }
       if (!mainWindow) return { ok: false, message: "Main window unavailable." };
-      const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+      const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
         title: "Select Halo CE .JMS File with Mass Points / Markers",
         filters: [
           { name: "Halo CE JMS (*.jms)", extensions: ["jms"] },
@@ -40849,8 +41367,8 @@ import_electron3.app.whenReady().then(() => {
         return { ok: false, cancelled: true, message: "Cancelled." };
       }
       const filePath = pick.filePaths[0];
-      const fileName = path11.basename(filePath);
-      const jmsText = fs9.readFileSync(filePath, "utf8");
+      const fileName = path12.basename(filePath);
+      const jmsText = fs10.readFileSync(filePath, "utf8");
       const { promise } = sendWorkerRequest(
         {
           type: "compileJmsPhysics",
@@ -40872,7 +41390,7 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "map:decompileTagToSource",
     async (_evt, tagIndex, animationIndex) => {
       if (!currentMapPath || currentMapCompressed) {
@@ -40891,7 +41409,7 @@ import_electron3.app.whenReady().then(() => {
       if (!res.ok) return res;
       const leaf = (res.tagPath.split("\\").pop() || "exported").replace(/[^a-zA-Z0-9_-]/g, "_");
       const suggestedName = res.kind === "physics_jms" ? "physics.jms" : res.kind === "animations_jma" ? `${res.animationName || leaf}.jma` : `${leaf}.jms`;
-      const save = await import_electron3.dialog.showSaveDialog(mainWindow, {
+      const save = await import_electron4.dialog.showSaveDialog(mainWindow, {
         title: `Save Decompiled Source File (${suggestedName})`,
         defaultPath: suggestedName,
         filters: [
@@ -40902,7 +41420,7 @@ import_electron3.app.whenReady().then(() => {
       if (save.canceled || !save.filePath) {
         return { ok: false, cancelled: true, message: "Save cancelled." };
       }
-      fs9.writeFileSync(save.filePath, res.sourceText, "utf8");
+      fs10.writeFileSync(save.filePath, res.sourceText, "utf8");
       sendLog("info", `Decompiled "${res.tagPath}" -> ${save.filePath} (${res.summary}).`);
       return {
         ok: true,
@@ -40913,7 +41431,7 @@ import_electron3.app.whenReady().then(() => {
       };
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "map:compileStringsTag",
     async (_evt, targetTagIndex, textContent) => {
       if (!currentMapPath || currentMapCompressed) {
@@ -40923,7 +41441,7 @@ import_electron3.app.whenReady().then(() => {
       let fileName;
       if (!finalContent || !finalContent.trim()) {
         if (!mainWindow) return { ok: false, message: "Main window unavailable." };
-        const pick = await import_electron3.dialog.showOpenDialog(mainWindow, {
+        const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
           title: "Select Halo String Source File (.txt / .hmt)",
           filters: [
             { name: "Halo String Source (*.txt;*.hmt)", extensions: ["txt", "hmt"] },
@@ -40935,8 +41453,8 @@ import_electron3.app.whenReady().then(() => {
           return { ok: false, cancelled: true, message: "Cancelled." };
         }
         const fp = pick.filePaths[0];
-        fileName = path11.basename(fp);
-        const rawBuf = fs9.readFileSync(fp);
+        fileName = path12.basename(fp);
+        const rawBuf = fs10.readFileSync(fp);
         if (rawBuf.length >= 2 && rawBuf[0] === 255 && rawBuf[1] === 254) {
           finalContent = rawBuf.subarray(2).toString("utf16le");
         } else {
@@ -40963,7 +41481,7 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle("map:inspectMeterTag", async (_evt, meterTagIndex) => {
+  import_electron4.ipcMain.handle("map:inspectMeterTag", async (_evt, meterTagIndex) => {
     if (!currentMapPath || currentMapCompressed) {
       return { ok: false, message: "Open an uncompressed map first." };
     }
@@ -40976,7 +41494,7 @@ import_electron3.app.whenReady().then(() => {
     );
     return promise;
   });
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "map:compileFontFromGlyphAtlas",
     async (_evt, targetFontTagIndex, glyphSpec) => {
       if (!currentMapPath || currentMapCompressed) {
@@ -41001,7 +41519,7 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "map:injectProceduralWorldBsp",
     async (_evt, options) => {
       if (!currentMapPath || currentMapCompressed) {
@@ -41028,7 +41546,7 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
-  import_electron3.ipcMain.handle(
+  import_electron4.ipcMain.handle(
     "map:scaleCoupledPhysics",
     async (_evt, objectTagId, scaleFactor) => {
       if (!currentMapPath || currentMapCompressed) {
@@ -41054,23 +41572,210 @@ import_electron3.app.whenReady().then(() => {
       return res;
     }
   );
+  import_electron4.ipcMain.handle("hud:inspectCatalog", async () => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "inspectLiveHudCatalog" },
+      sendLog
+    );
+    return promise;
+  });
+  import_electron4.ipcMain.handle("hud:applyEdit", async (_evt, request) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "applyLiveHudEdit", request },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send("map:updated", res.map);
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("hud:applyWeaponStatEdit", async (_evt, request) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "applyLiveWeaponStatEdit", request },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send("map:updated", res.map);
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("hud:injectElementBitmap", async (_evt, request) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const settings = getSettings();
+    const { promise } = sendWorkerRequest(
+      {
+        type: "injectHudElementBitmap",
+        request,
+        bitmapsPath: settings.resourceMaps.bitmaps ?? void 0
+      },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send("map:updated", res.map);
+      sendLog(
+        "info",
+        `Injected custom HUD bitmap (${res.width}\xD7${res.height}) into map-local tag "${res.bitmapPath}". bitmaps.map was not modified.`
+      );
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("ui:inspectWidgetCanvas", async (_evt, widgetTagIndex) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "inspectUiWidgetCanvas", widgetTagIndex },
+      sendLog
+    );
+    return promise;
+  });
+  import_electron4.ipcMain.handle("ui:updateWidgetPlacement", async (_evt, request) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "updateUiWidgetPlacement", request },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send("map:updated", res.map);
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("ui:saveUnicodeStringTable", async (_evt, ustrTagIndex, strings) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "saveUnicodeStringTable", ustrTagIndex, strings },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send("map:updated", res.map);
+      sendLog("info", `Saved ${res.entryCount} Unicode string(s) into ustr tag #${ustrTagIndex}.`);
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("app:checkForUpdates", async () => {
+    const curVer = getAppDisplayVersion();
+    const res = await checkForGitHubUpdates(curVer);
+    if (res.ok && res.updateAvailable) {
+      sendLog(
+        "info",
+        `Update available: OpenCE Mantle v${res.latestVersion} (current: v${res.currentVersion}).`
+      );
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("app:setCheckForUpdatesOnLaunch", (_evt, enabled) => {
+    const val = Boolean(enabled);
+    setCheckForUpdatesOnLaunch(val);
+    return { ok: true, checkForUpdatesOnLaunch: val };
+  });
+  import_electron4.ipcMain.handle("app:setAutoDownloadUpdates", (_evt, enabled) => {
+    const val = Boolean(enabled);
+    setAutoDownloadUpdates(val);
+    return { ok: true, autoDownloadUpdates: val };
+  });
+  import_electron4.ipcMain.handle("app:setSkippedUpdateVersion", (_evt, version) => {
+    const val = version ? String(version).trim() : null;
+    setSkippedUpdateVersion(val);
+    return { ok: true, skippedUpdateVersion: val };
+  });
+  import_electron4.ipcMain.handle(
+    "app:downloadUpdate",
+    async (_evt, options) => {
+      const curVer = getAppDisplayVersion();
+      sendLog("info", `Downloading OpenCE Mantle update in background...`);
+      const res = await downloadUpdateAsset(curVer, options, (progress) => {
+        mainWindow?.webContents.send("app:updateDownloadProgress", progress);
+      });
+      if (res.ok) {
+        sendLog(
+          "info",
+          `Update downloaded and ready (${res.assetName}, ${(res.sizeBytes / (1024 * 1024)).toFixed(1)} MB). Click "Restart to Apply" to install.`
+        );
+      } else {
+        sendLog("warn", `Update download failed: ${res.error}`);
+      }
+      return res;
+    }
+  );
+  import_electron4.ipcMain.handle(
+    "app:applyUpdateAndRestart",
+    async (_evt, downloadedFilePath, installMode) => {
+      if (!await confirmUnsavedChanges(unsavedChangesDeps)) {
+        return { ok: false, message: "Cancelled by user." };
+      }
+      const spawned = spawnUpdateApplyScript(downloadedFilePath, installMode);
+      if (!spawned.ok) {
+        return spawned;
+      }
+      currentMapModified = false;
+      setTimeout(() => {
+        import_electron4.app.quit();
+      }, 150);
+      return { ok: true };
+    }
+  );
+  import_electron4.ipcMain.handle("app:openExternalUrl", async (_evt, url) => {
+    if (typeof url !== "string" || !url.startsWith("https://")) {
+      return { ok: false, message: "Only HTTPS URLs are permitted." };
+    }
+    try {
+      const parsed = new URL(url);
+      const allowedHosts = /* @__PURE__ */ new Set([
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com"
+      ]);
+      if (!allowedHosts.has(parsed.hostname)) {
+        return { ok: false, message: `Host ${parsed.hostname} is not in the allowed release domain list.` };
+      }
+      await import_electron4.shell.openExternal(url);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, message: err.message };
+    }
+  });
   try {
     tagTestRunner.restoreInitBackupIfPresent();
   } catch {
   }
   createWindow();
-  import_electron3.app.on("activate", () => {
-    if (import_electron3.BrowserWindow.getAllWindows().length === 0) createWindow();
+  import_electron4.app.on("activate", () => {
+    if (import_electron4.BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
-import_electron3.app.on("before-quit", () => {
+import_electron4.app.on("before-quit", () => {
   tagTestRunner.stop();
 });
-import_electron3.app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") import_electron3.app.quit();
+import_electron4.app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") import_electron4.app.quit();
 });
-import_electron3.app.on("open-file", (_event, filePath) => {
-  if (fs9.existsSync(filePath)) {
+import_electron4.app.on("open-file", (_event, filePath) => {
+  if (fs10.existsSync(filePath)) {
     openMapGuarded(filePath).then((r) => r && mainWindow?.webContents.send("map:loaded", r));
   }
 });

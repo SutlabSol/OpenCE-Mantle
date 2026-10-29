@@ -21,6 +21,20 @@ import type { WrlDiagnostics, WrlPoint, WrlSegment, WrlFace, WrlSubmeshMatch, To
 import type { MeshIntegrityReview } from '../../core/src/render/mesh-integrity';
 import type { MapComparisonReport, MapDifferenceRow, MapDifferenceCategory } from '../../core/src/map/map-compare';
 import type { ClassConflictInfo } from '../../core/src/map/tag-injector';
+import type {
+  LiveHudCatalog,
+  LiveWeaponEntry,
+  LiveVehicleEntry,
+  LiveHudLevel,
+  LiveHudElementItem,
+  LiveWeaponStatField,
+  LiveUiWidgetSummary,
+  ApplyLiveHudEditRequest,
+  ApplyLiveWeaponStatEditRequest,
+  GuidedHudBitmapInjectRequest,
+  UiWidgetCanvasNode,
+  UpdateUiWidgetPlacementRequest,
+} from '../../core/src/map/live-hud-editor';
 
 export type {
   TagFieldDescriptor,
@@ -60,6 +74,18 @@ export type {
   MapDifferenceRow,
   MapDifferenceCategory,
   ClassConflictInfo,
+  LiveHudCatalog,
+  LiveWeaponEntry,
+  LiveVehicleEntry,
+  LiveHudLevel,
+  LiveHudElementItem,
+  LiveWeaponStatField,
+  LiveUiWidgetSummary,
+  ApplyLiveHudEditRequest,
+  ApplyLiveWeaponStatEditRequest,
+  GuidedHudBitmapInjectRequest,
+  UiWidgetCanvasNode,
+  UpdateUiWidgetPlacementRequest,
 };
 
 export interface MapHeaderSummary {
@@ -832,6 +858,42 @@ export type WorkerRequest =
       requestId: string;
       objectTagId: number;
       scaleFactor: number;
+    }
+  | {
+      type: 'inspectLiveHudCatalog';
+      requestId: string;
+    }
+  | {
+      type: 'applyLiveHudEdit';
+      requestId: string;
+      request: ApplyLiveHudEditRequest;
+    }
+  | {
+      type: 'applyLiveWeaponStatEdit';
+      requestId: string;
+      request: ApplyLiveWeaponStatEditRequest;
+    }
+  | {
+      type: 'injectHudElementBitmap';
+      requestId: string;
+      request: GuidedHudBitmapInjectRequest;
+      bitmapsPath?: string;
+    }
+  | {
+      type: 'inspectUiWidgetCanvas';
+      requestId: string;
+      widgetTagIndex: number;
+    }
+  | {
+      type: 'updateUiWidgetPlacement';
+      requestId: string;
+      request: UpdateUiWidgetPlacementRequest;
+    }
+  | {
+      type: 'saveUnicodeStringTable';
+      requestId: string;
+      ustrTagIndex: number;
+      strings: string[];
     }
   | { type: 'cancel'; requestId: string };
 
@@ -1628,6 +1690,64 @@ export interface OpenceApi {
   ): Promise<{ ok: boolean; message?: string }>;
   /** Subscribe to live download progress events from the background updater. */
   onUpdateDownloadProgress?(cb: (evt: UpdateDownloadProgressEvent) => void): () => void;
+  /** v0.6.8: Inspect all Weapon HUDs, Vehicle HUDs, Unit HUDs, Global HUDs, UI Widgets (DeLa), and Unicode String Lists (ustr) in the open map. */
+  inspectLiveHudCatalog?(): Promise<
+    | { ok: true; catalog: LiveHudCatalog }
+    | { ok: false; message: string }
+  >;
+  /** v0.6.8: Apply a live HUD placement, scale, visibility, or anchor edit in-place (with automatic shared wphi forking when scope='this_one'). */
+  applyLiveHudEdit?(
+    request: ApplyLiveHudEditRequest,
+  ): Promise<
+    | { ok: true; effectiveHudTagIndex: number; catalog: LiveHudCatalog; map: OpenMapSummary }
+    | { ok: false; message: string }
+  >;
+  /** v0.6.8: Apply a live weapon/trigger/magazine/projectile/damage stat edit in-place. */
+  applyLiveWeaponStatEdit?(
+    request: ApplyLiveWeaponStatEditRequest,
+  ): Promise<
+    | { ok: true; writtenValue: unknown; map: OpenMapSummary }
+    | { ok: false; message: string }
+  >;
+  /** v0.6.8: Guided HUD Bitmap Injector — embeds/replaces a HUD element's bitmap in the open map buffer (never modifying bitmaps.map). */
+  injectHudElementBitmap?(
+    request: GuidedHudBitmapInjectRequest,
+  ): Promise<
+    | {
+        ok: true;
+        bitmapTagIndex: number;
+        bitmapTagId: number;
+        bitmapPath: string;
+        width: number;
+        height: number;
+        format: number;
+        catalog: LiveHudCatalog;
+        map: OpenMapSummary;
+      }
+    | { ok: false; message: string }
+  >;
+  /** v0.6.8: Visual ui.map Studio — inspect a ui_widget_definition ('DeLa') tag's 640x480 layout tree. */
+  inspectUiWidgetCanvas?(
+    widgetTagIndex: number,
+  ): Promise<
+    | { ok: true; rootNode: UiWidgetCanvasNode }
+    | { ok: false; message: string }
+  >;
+  /** v0.6.8: Visual ui.map Studio — update a ui_widget_definition ('DeLa') bounds and/or child_widgets offset in-place. */
+  updateUiWidgetPlacement?(
+    request: UpdateUiWidgetPlacementRequest,
+  ): Promise<
+    | { ok: true; rootNode: UiWidgetCanvasNode | null; map: OpenMapSummary }
+    | { ok: false; message: string }
+  >;
+  /** v0.6.8: Save an entire array of UTF-16LE strings into a unicode_string_list ('ustr') tag. */
+  saveUnicodeStringTable?(
+    ustrTagIndex: number,
+    strings: string[],
+  ): Promise<
+    | { ok: true; entryCount: number; map: OpenMapSummary }
+    | { ok: false; message: string }
+  >;
 }
 
 declare global {

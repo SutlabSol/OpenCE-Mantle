@@ -31,6 +31,9 @@ import BuildObjectTagDialog from './components/BuildObjectTagDialog';
 import ScriptEditorDialog from './components/ScriptEditorDialog';
 import ModdingStudioDialog from './components/ModdingStudioDialog';
 import MapCompareDialog from './components/MapCompareDialog';
+import { LiveHudEditorDialog } from './components/LiveHudEditorDialog';
+import { HudBitmapInjectorDialog } from './components/HudBitmapInjectorDialog';
+import { UiMapStudioDialog } from './components/UiMapStudioDialog';
 import type {
   BatchExtractPreflightResult,
   HaloBitmapVersion,
@@ -57,6 +60,15 @@ export default function App() {
   const [scriptEditorOpen, setScriptEditorOpen] = useState(false);
   const [moddingStudioOpen, setModdingStudioOpen] = useState(false);
   const [mapCompareOpen, setMapCompareOpen] = useState(false);
+  const [liveHudEditorOpen, setLiveHudEditorOpen] = useState(false);
+  const [hudBitmapInjectorOpen, setHudBitmapInjectorOpen] = useState(false);
+  const [hudBitmapInjectorInitial, setHudBitmapInjectorInitial] = useState<{
+    category?: 'weapon' | 'vehicle' | 'general';
+    targetTagIndex?: number;
+    hudTagIndex?: number;
+    elementId?: string;
+  } | null>(null);
+  const [uiMapStudioOpen, setUiMapStudioOpen] = useState(false);
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
@@ -200,6 +212,12 @@ export default function App() {
       else if (action === 'extract-to-forge') setForgeExportOpen(true);
       else if (action === 'build-object-tag') setBuildObjectTagOpen(true);
       else if (action === 'compare-maps') setMapCompareOpen(true);
+      else if (action === 'live-hud-editor') setLiveHudEditorOpen(true);
+      else if (action === 'hud-bitmap-injector') {
+        setHudBitmapInjectorInitial(null);
+        setHudBitmapInjectorOpen(true);
+      }
+      else if (action === 'ui-map-studio') setUiMapStudioOpen(true);
       else if (action === 'settings') setSettingsDialogOpen(true);
       else if (action === 'check-for-updates') void handleManualCheckForUpdates();
       else if (action === 'convert-map') setConvertSource('pick');
@@ -368,6 +386,17 @@ export default function App() {
           {
             label: 'Tools',
             items: [
+              { label: '🎯 Live HUD & Weapon Tag Editor...', onClick: () => setLiveHudEditorOpen(true), disabled: !canExtract },
+              {
+                label: '🖼️ Guided HUD Bitmap Injector (Weapons / Vehicles / HUD)...',
+                onClick: () => {
+                  setHudBitmapInjectorInitial(null);
+                  setHudBitmapInjectorOpen(true);
+                },
+                disabled: !canInject,
+              },
+              { label: '🖥️ UI.map & Menu Widget Studio (DeLa / ustr)...', onClick: () => setUiMapStudioOpen(true), disabled: !canExtract },
+              { label: '', separator: true },
               { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
               { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
               { label: 'HaloScript (.hsc) IDE & Sample Scripts...', onClick: () => setScriptEditorOpen(true), disabled: !canExtract },
@@ -397,6 +426,12 @@ export default function App() {
         onExtract={() => requestExtract(Array.from(selectedTagIndices))}
         onExtractWholeMap={() => void handleBatchExtract()}
         onInject={() => setInjectDialogOpen(true)}
+        onOpenLiveHudEditor={() => setLiveHudEditorOpen(true)}
+        onOpenHudBitmapInjector={() => {
+          setHudBitmapInjectorInitial(null);
+          setHudBitmapInjectorOpen(true);
+        }}
+        onOpenUiMapStudio={() => setUiMapStudioOpen(true)}
       />
 
       {updateBanner && (
@@ -848,6 +883,44 @@ export default function App() {
               setFocusedTag(found);
               setSelectedTagIndices(new Set([found.index]));
             }
+          }}
+        />
+      )}
+
+      {liveHudEditorOpen && mapState?.status === 'ok' && (
+        <LiveHudEditorDialog
+          open={liveHudEditorOpen}
+          onClose={() => setLiveHudEditorOpen(false)}
+          onOpenBitmapInjector={(opts) => {
+            setHudBitmapInjectorInitial(opts ?? null);
+            setHudBitmapInjectorOpen(true);
+          }}
+          onOpenUiMapStudio={() => setUiMapStudioOpen(true)}
+          onMapUpdated={(updatedMap) => {
+            setMapState(updatedMap);
+          }}
+        />
+      )}
+
+      {hudBitmapInjectorOpen && mapState?.status === 'ok' && (
+        <HudBitmapInjectorDialog
+          open={hudBitmapInjectorOpen}
+          onClose={() => setHudBitmapInjectorOpen(false)}
+          initialSelection={hudBitmapInjectorInitial}
+          onMapUpdated={(updatedMap) => {
+            setMapState(updatedMap);
+          }}
+        />
+      )}
+
+      {uiMapStudioOpen && mapState?.status === 'ok' && (
+        <UiMapStudioDialog
+          open={uiMapStudioOpen}
+          onClose={() => setUiMapStudioOpen(false)}
+          initialWidgetTagIndex={focusedTag?.primaryClassName === 'DeLa' ? focusedTag.index : null}
+          initialUstrTagIndex={focusedTag?.primaryClassName === 'ustr' ? focusedTag.index : null}
+          onTagsChanged={async () => {
+            setMapState((prev) => (prev && prev.status === 'ok' ? { ...prev, modified: true } : prev));
           }}
         />
       )}

@@ -56323,8 +56323,8 @@ function syncScenarioObjectNamesForScripts(view, inferredObjectTypesByNameIdx, a
     let t = isVehicleName ? 1 : isDoorName ? 7 : isBipedName ? 0 : curType >= 0 ? curType : 1;
     if (inferred !== void 0 && !isVehicleName && !isBipedName && !isDoorName) {
       if (inferred === 7 && (t < 7 || t > 9)) t = 7;
-      else if (inferred === 1 && t !== 1 && t !== 0) t = 1;
-      else if (t < 0) t = inferred;
+      else if (inferred === 1 && curType < 0 && t !== 1 && t !== 0) t = 1;
+      else if (t < 0 && inferred >= 0) t = inferred;
     }
     if (!placementBlocks.some((pb) => pb.objType === t)) t = 1;
     targetTypes[i] = t;
@@ -57499,7 +57499,20 @@ function compileHaloScriptIntoScenario(view, hscSource) {
         });
       }
       const enumTables = {
-        21: { default: 0, player: 1, flag_blue: 2, flag_red: 3, arrow: 0 },
+        21: {
+          default: 0,
+          default_red: 1,
+          player: 1,
+          flag_blue: 2,
+          flag_red: 3,
+          target_blue: 4,
+          target_red: 5,
+          ball_blue: 6,
+          ball_red: 7,
+          crown_blue: 8,
+          crown_red: 9,
+          arrow: 0
+        },
         32: { easy: 0, normal: 1, hard: 2, impossible: 3 },
         33: { default: 0, player: 1, human: 2, covenant: 3, flood: 4, sentinel: 5, unused6: 6, unused7: 7, unused8: 8, unused9: 9 },
         34: {
@@ -64478,17 +64491,59 @@ function importLegacyTagsIntoMap(mapBuffer, inputPaths, resourceFiles, mode = "a
       t.data = rawBuf.toString("base64");
     }
   }
+  const defaultWeaponAmmoByPath = /* @__PURE__ */ new Map();
+  for (const e of tagIndex.entries) {
+    if (e.primaryClassName !== "weapon" || e.isExternal) continue;
+    const weapTagOff = header.tagDataOffset + (e.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+    if (weapTagOff < 0 || weapTagOff + 1288 > currentBuf.length) continue;
+    const magCount = currentBuf.readUInt32LE(weapTagOff + 1264);
+    const magPtr = currentBuf.readUInt32LE(weapTagOff + 1268);
+    if (magCount === 0) continue;
+    const magOff = header.tagDataOffset + (magPtr - tagIndex.baseMemoryAddress);
+    if (magOff < 0 || magOff + 112 > currentBuf.length) continue;
+    const initTotal = currentBuf.readInt16LE(magOff + 6);
+    const maxLoaded = currentBuf.readInt16LE(magOff + 10);
+    if (initTotal > 0 || maxLoaded > 0) {
+      defaultWeaponAmmoByPath.set(e.path.toLowerCase(), {
+        roundsLoaded: maxLoaded,
+        roundsLeft: Math.max(0, initTotal - maxLoaded)
+      });
+    }
+  }
   const scenarioTags = container.tags.filter((t) => t.group === "scenario");
   for (const t of scenarioTags) {
     const rawBuf = Buffer.from(t.data, "base64");
     if (rawBuf.length < 1456) continue;
     const scenarioType = rawBuf.readUInt16LE(60);
-    if (scenarioType !== 1) continue;
     const equipCount = rawBuf.readUInt32LE(600);
     const equipOff = rawBuf.readUInt32LE(604);
     const weapCount = rawBuf.readUInt32LE(624);
     const weapOff = rawBuf.readUInt32LE(628);
     if (equipCount === 0 && weapCount === 0) continue;
+    let ammoPatchedCount = 0;
+    if (weapCount > 0 && weapOff >= 1456 && weapOff + weapCount * 92 <= rawBuf.length) {
+      for (let w = 0; w < weapCount; w++) {
+        const rowOff = weapOff + w * 92;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const roundsLeft = rawBuf.readInt16LE(rowOff + 66);
+        const roundsLoaded = rawBuf.readInt16LE(rowOff + 68);
+        if (roundsLeft === 0 && roundsLoaded === 0 && palIdx >= 0) {
+          const palDep = t.dependencies.find(
+            (d) => d.fieldPath === `${t.path}.weapon palette[${palIdx}].name`
+          );
+          const defAmmo = palDep ? defaultWeaponAmmoByPath.get(palDep.path.toLowerCase()) : void 0;
+          if (defAmmo) {
+            rawBuf.writeInt16LE(defAmmo.roundsLeft, rowOff + 66);
+            rawBuf.writeInt16LE(defAmmo.roundsLoaded, rowOff + 68);
+            ammoPatchedCount++;
+          }
+        }
+      }
+    }
+    if (ammoPatchedCount > 0) {
+      t.data = rawBuf.toString("base64");
+    }
+    if (scenarioType !== 1) continue;
     const existingItmcByItemKey = /* @__PURE__ */ new Map();
     const itemKeyByItmcPath = /* @__PURE__ */ new Map();
     for (const e of tagIndex.entries) {
@@ -64521,7 +64576,7 @@ function importLegacyTagsIntoMap(mapBuffer, inputPaths, resourceFiles, mode = "a
       itmcBuf.writeUInt32LE(92, 4);
       itmcBuf.writeUInt32LE(0, 8);
       itmcBuf.writeInt16LE(30, 12);
-      itmcBuf.writeFloatLE(1, 92 + 32);
+      itmcBuf.writeFloatLE(100, 92 + 32);
       const itemFourCC = fourCCFromString(group === "weapon" ? "weap" : "eqip");
       itmcBuf.writeUInt32LE(itemFourCC, 92 + 36);
       itmcBuf.writeUInt32LE(0, 92 + 40);
@@ -64659,7 +64714,7 @@ function importLegacyTagsIntoMap(mapBuffer, inputPaths, resourceFiles, mode = "a
         combinedNetgameBuf.writeInt16LE(0, entryOff + 8);
         combinedNetgameBuf.writeInt16LE(0, entryOff + 10);
         combinedNetgameBuf.writeInt16LE(0, entryOff + 12);
-        combinedNetgameBuf.writeInt16LE(0, entryOff + 14);
+        combinedNetgameBuf.writeInt16LE(30, entryOff + 14);
         combinedNetgameBuf.writeUInt32LE(4294967295, entryOff + 16);
         combinedNetgameBuf.writeFloatLE(entry.x, entryOff + 64);
         combinedNetgameBuf.writeFloatLE(entry.y, entryOff + 68);
@@ -65067,6 +65122,1901 @@ function compareMaps(leftBuffer, rightBuffer, maxDifferenceRows = 2500) {
     removedTags,
     changedTags,
     rows
+  };
+}
+
+// ../core/src/map/live-hud-editor.ts
+var HUD_ANCHOR_NAMES = [
+  "TOP LEFT",
+  "TOP RIGHT",
+  "BOTTOM LEFT",
+  "BOTTOM RIGHT",
+  "CENTRE"
+];
+function getLeafName(tagPath) {
+  if (!tagPath) return "";
+  const norm = tagPath.replace(/\//g, "\\");
+  const idx = norm.lastIndexOf("\\");
+  return idx >= 0 ? norm.slice(idx + 1) : norm;
+}
+function formatDisplayName(tagPath) {
+  const leaf = getLeafName(tagPath);
+  if (!leaf) return tagPath;
+  return leaf.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+function findField(fields, name) {
+  return fields.find((f) => f.name === name);
+}
+function getNumberVal(fields, name, fallback = 0) {
+  const f = findField(fields, name);
+  if (!f) return fallback;
+  if (typeof f.value === "number" && Number.isFinite(f.value)) return f.value;
+  return fallback;
+}
+function getPoint2DVal(fields, name) {
+  const f = findField(fields, name);
+  if (f && Array.isArray(f.value) && f.value.length >= 2) {
+    return [Number(f.value[0]) || 0, Number(f.value[1]) || 0];
+  }
+  return [0, 0];
+}
+function getRect2DVal(fields, name) {
+  const f = findField(fields, name);
+  if (f && Array.isArray(f.value) && f.value.length >= 4) {
+    return [
+      Number(f.value[0]) || 0,
+      Number(f.value[1]) || 0,
+      Number(f.value[2]) || 0,
+      Number(f.value[3]) || 0
+    ];
+  }
+  return [0, 0, 480, 640];
+}
+function getDepTarget(fields, name, tagIndex) {
+  const f = findField(fields, name);
+  const dep = f?.dependencyTarget;
+  if (!dep || dep.tagId === NULL_TAG_ID || dep.tagId === -1) {
+    return { tagIndex: null, tagId: null, path: "", leaf: "", isExternal: false };
+  }
+  const entry = tagIndex.entries.find((e) => e.tagId === dep.tagId) ?? tagIndex.entries[dep.tagId & 65535];
+  return {
+    tagIndex: entry ? entry.index : null,
+    tagId: dep.tagId,
+    path: entry?.path ?? dep.path ?? "",
+    leaf: getLeafName(entry?.path ?? dep.path ?? ""),
+    isExternal: Boolean(entry?.isExternal)
+  };
+}
+function parseWeaponHudLevel(buffer, header, tagIndex, wphiTagIndex, level, sharedByPaths) {
+  const entry = tagIndex.entries[wphiTagIndex];
+  if (!entry || entry.primaryClassName !== "weapon_hud_interface") return null;
+  let decoded;
+  try {
+    decoded = readTagFieldValues(buffer, header, tagIndex, wphiTagIndex);
+  } catch {
+    return null;
+  }
+  const anchorIdx = Math.max(0, Math.min(4, getNumberVal(decoded.fields, "anchor", 0)));
+  const anchorName = HUD_ANCHOR_NAMES[anchorIdx] ?? "TOP LEFT";
+  const elements = [];
+  const staticsField = findField(decoded.fields, "static elements");
+  const staticChildren = staticsField?.children ?? [];
+  staticChildren.forEach((child, elemIdx) => {
+    const [x, y] = getPoint2DVal(child.fields, "anchor offset");
+    const scaleX = getNumberVal(child.fields, "width scale", 1);
+    const scaleY = getNumberVal(child.fields, "height scale", 1);
+    const viewType = getNumberVal(child.fields, "allowed view type", 0);
+    const hidden = viewType === 15;
+    const bitm = getDepTarget(child.fields, "interface bitmap", tagIndex);
+    const seqIdx = getNumberVal(child.fields, "sequence index", 0);
+    const color = getNumberVal(child.fields, "default color", 4283222512);
+    const label = bitm.leaf ? `Static ${elemIdx + 1} (${bitm.leaf})` : `Static ${elemIdx + 1}`;
+    elements.push({
+      id: `l${level}.static.${elemIdx}`,
+      hudTagIndex: wphiTagIndex,
+      hudTagId: entry.tagId,
+      hudTagPath: entry.path,
+      hudGroup: "weapon_hud_interface",
+      level,
+      kind: "static",
+      elementIndex: elemIdx,
+      itemIndex: -1,
+      label,
+      categoryLabel: "Static Frame",
+      x,
+      y,
+      scaleX: scaleX || 1,
+      scaleY: scaleY || 1,
+      hidden,
+      rawVisibilityValue: hidden ? 0 : viewType,
+      bitmapTagIndex: bitm.tagIndex,
+      bitmapTagId: bitm.tagId,
+      bitmapPath: bitm.path,
+      bitmapLeaf: bitm.leaf,
+      bitmapIsExternal: bitm.isExternal,
+      sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
+      defaultColorArgb: color,
+      offsetFieldPath: `static elements[${elemIdx}].anchor offset`,
+      scaleXFieldPath: `static elements[${elemIdx}].width scale`,
+      scaleYFieldPath: `static elements[${elemIdx}].height scale`,
+      visibilityFieldPath: `static elements[${elemIdx}].allowed view type`,
+      visibilityMode: "map_type_15",
+      bitmapFieldPath: `static elements[${elemIdx}].interface bitmap`,
+      sequenceFieldPath: `static elements[${elemIdx}].sequence index`
+    });
+  });
+  const metersField = findField(decoded.fields, "meter elements");
+  const meterChildren = metersField?.children ?? [];
+  meterChildren.forEach((child, elemIdx) => {
+    const [x, y] = getPoint2DVal(child.fields, "anchor offset");
+    const scaleX = getNumberVal(child.fields, "width scale", 1);
+    const scaleY = getNumberVal(child.fields, "height scale", 1);
+    const viewType = getNumberVal(child.fields, "allowed view type", 0);
+    const hidden = viewType === 15;
+    const bitm = getDepTarget(child.fields, "meter bitmap", tagIndex);
+    const seqIdx = getNumberVal(child.fields, "sequence index", 0);
+    const color = getNumberVal(child.fields, "color at meter maximum", 4283222512);
+    const label = bitm.leaf ? `Meter ${elemIdx + 1} (${bitm.leaf})` : `Meter ${elemIdx + 1}`;
+    elements.push({
+      id: `l${level}.meter.${elemIdx}`,
+      hudTagIndex: wphiTagIndex,
+      hudTagId: entry.tagId,
+      hudTagPath: entry.path,
+      hudGroup: "weapon_hud_interface",
+      level,
+      kind: "meter",
+      elementIndex: elemIdx,
+      itemIndex: -1,
+      label,
+      categoryLabel: "HUD Meter",
+      x,
+      y,
+      scaleX: scaleX || 1,
+      scaleY: scaleY || 1,
+      hidden,
+      rawVisibilityValue: hidden ? 0 : viewType,
+      bitmapTagIndex: bitm.tagIndex,
+      bitmapTagId: bitm.tagId,
+      bitmapPath: bitm.path,
+      bitmapLeaf: bitm.leaf,
+      bitmapIsExternal: bitm.isExternal,
+      sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
+      defaultColorArgb: color,
+      offsetFieldPath: `meter elements[${elemIdx}].anchor offset`,
+      scaleXFieldPath: `meter elements[${elemIdx}].width scale`,
+      scaleYFieldPath: `meter elements[${elemIdx}].height scale`,
+      visibilityFieldPath: `meter elements[${elemIdx}].allowed view type`,
+      visibilityMode: "map_type_15",
+      bitmapFieldPath: `meter elements[${elemIdx}].meter bitmap`,
+      sequenceFieldPath: `meter elements[${elemIdx}].sequence index`
+    });
+  });
+  const numbersField = findField(decoded.fields, "number elements");
+  const numberChildren = numbersField?.children ?? [];
+  numberChildren.forEach((child, elemIdx) => {
+    const [x, y] = getPoint2DVal(child.fields, "anchor offset");
+    const scaleX = getNumberVal(child.fields, "width scale", 1);
+    const scaleY = getNumberVal(child.fields, "height scale", 1);
+    const viewType = getNumberVal(child.fields, "allowed view type", 0);
+    const hidden = viewType === 15;
+    const color = getNumberVal(child.fields, "default color", 4283222512);
+    elements.push({
+      id: `l${level}.number.${elemIdx}`,
+      hudTagIndex: wphiTagIndex,
+      hudTagId: entry.tagId,
+      hudTagPath: entry.path,
+      hudGroup: "weapon_hud_interface",
+      level,
+      kind: "number",
+      elementIndex: elemIdx,
+      itemIndex: -1,
+      label: `Number ${elemIdx + 1}`,
+      categoryLabel: "Ammo / Counter Number",
+      x,
+      y,
+      scaleX: scaleX || 1,
+      scaleY: scaleY || 1,
+      hidden,
+      rawVisibilityValue: hidden ? 0 : viewType,
+      bitmapTagIndex: null,
+      bitmapTagId: null,
+      bitmapPath: "",
+      bitmapLeaf: "",
+      bitmapIsExternal: false,
+      sequenceIndex: 0,
+      defaultColorArgb: color,
+      offsetFieldPath: `number elements[${elemIdx}].anchor offset`,
+      scaleXFieldPath: `number elements[${elemIdx}].width scale`,
+      scaleYFieldPath: `number elements[${elemIdx}].height scale`,
+      visibilityFieldPath: `number elements[${elemIdx}].allowed view type`,
+      visibilityMode: "map_type_15"
+    });
+  });
+  const crosshairsField = findField(decoded.fields, "crosshairs");
+  const crosshairChildren = crosshairsField?.children ?? [];
+  crosshairChildren.forEach((child, elemIdx) => {
+    const bitm = getDepTarget(child.fields, "crosshair bitmap", tagIndex);
+    const overlaysField2 = findField(child.fields, "crosshair overlays");
+    const items = overlaysField2?.children ?? [];
+    items.forEach((item, itemIdx) => {
+      const [x, y] = getPoint2DVal(item.fields, "anchor offset");
+      const scaleX = getNumberVal(item.fields, "width scale", 1);
+      const scaleY = getNumberVal(item.fields, "height scale", 1);
+      const flags = getNumberVal(item.fields, "flags", 0);
+      const hidden = (flags & 1 << 7) !== 0;
+      const seqIdx = getNumberVal(item.fields, "sequence index", 0);
+      const color = getNumberVal(item.fields, "default color", 4283222512);
+      const numPart = crosshairChildren.length === 1 && items.length === 1 ? "1" : items.length === 1 ? `${elemIdx + 1}` : `${elemIdx + 1}.${itemIdx + 1}`;
+      const label = bitm.leaf ? `Crosshair ${numPart} (${bitm.leaf})` : `Crosshair ${numPart}`;
+      elements.push({
+        id: `l${level}.crosshair.${elemIdx}.${itemIdx}`,
+        hudTagIndex: wphiTagIndex,
+        hudTagId: entry.tagId,
+        hudTagPath: entry.path,
+        hudGroup: "weapon_hud_interface",
+        level,
+        kind: "crosshair",
+        elementIndex: elemIdx,
+        itemIndex: itemIdx,
+        label,
+        categoryLabel: "Reticle / Crosshair",
+        x,
+        y,
+        scaleX: scaleX || 1,
+        scaleY: scaleY || 1,
+        hidden,
+        rawVisibilityValue: flags & ~(1 << 7),
+        bitmapTagIndex: bitm.tagIndex,
+        bitmapTagId: bitm.tagId,
+        bitmapPath: bitm.path,
+        bitmapLeaf: bitm.leaf,
+        bitmapIsExternal: bitm.isExternal,
+        sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
+        defaultColorArgb: color,
+        offsetFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].anchor offset`,
+        scaleXFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].width scale`,
+        scaleYFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].height scale`,
+        visibilityFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].flags`,
+        visibilityMode: "crosshair_bit7",
+        bitmapFieldPath: `crosshairs[${elemIdx}].crosshair bitmap`,
+        sequenceFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].sequence index`
+      });
+    });
+  });
+  const overlaysField = findField(decoded.fields, "overlay elements");
+  const overlayChildren = overlaysField?.children ?? [];
+  overlayChildren.forEach((child, elemIdx) => {
+    const bitm = getDepTarget(child.fields, "overlay bitmap", tagIndex);
+    const subOverlaysField = findField(child.fields, "overlays");
+    const items = subOverlaysField?.children ?? [];
+    items.forEach((item, itemIdx) => {
+      const [x, y] = getPoint2DVal(item.fields, "anchor offset");
+      const scaleX = getNumberVal(item.fields, "width scale", 1);
+      const scaleY = getNumberVal(item.fields, "height scale", 1);
+      const flags = getNumberVal(item.fields, "flags", 0);
+      const hidden = (flags & 1 << 1) !== 0;
+      const seqIdx = getNumberVal(item.fields, "sequence index", 0);
+      const color = getNumberVal(item.fields, "default color", 4283222512);
+      const numPart = overlayChildren.length === 1 && items.length === 1 ? "1" : items.length === 1 ? `${elemIdx + 1}` : `${elemIdx + 1}.${itemIdx + 1}`;
+      const label = bitm.leaf ? `Overlay ${numPart} (${bitm.leaf})` : `Overlay ${numPart}`;
+      elements.push({
+        id: `l${level}.overlay.${elemIdx}.${itemIdx}`,
+        hudTagIndex: wphiTagIndex,
+        hudTagId: entry.tagId,
+        hudTagPath: entry.path,
+        hudGroup: "weapon_hud_interface",
+        level,
+        kind: "overlay",
+        elementIndex: elemIdx,
+        itemIndex: itemIdx,
+        label,
+        categoryLabel: "HUD Overlay / Scope",
+        x,
+        y,
+        scaleX: scaleX || 1,
+        scaleY: scaleY || 1,
+        hidden,
+        rawVisibilityValue: flags & ~(1 << 1),
+        bitmapTagIndex: bitm.tagIndex,
+        bitmapTagId: bitm.tagId,
+        bitmapPath: bitm.path,
+        bitmapLeaf: bitm.leaf,
+        bitmapIsExternal: bitm.isExternal,
+        sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
+        defaultColorArgb: color,
+        offsetFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].anchor offset`,
+        scaleXFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].width scale`,
+        scaleYFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].height scale`,
+        visibilityFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].flags`,
+        visibilityMode: "overlay_bit1",
+        bitmapFieldPath: `overlay elements[${elemIdx}].overlay bitmap`,
+        sequenceFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].sequence index`
+      });
+    });
+  });
+  const leaf = getLeafName(entry.path);
+  const title = level === 0 ? `HUD (${leaf})` : `Parent HUD ${level} (${leaf})`;
+  return {
+    level,
+    title,
+    hudTagIndex: wphiTagIndex,
+    hudTagId: entry.tagId,
+    hudTagPath: entry.path,
+    hudGroup: "weapon_hud_interface",
+    anchorIndex: anchorIdx,
+    anchorName,
+    anchorFieldPath: "anchor",
+    sharedByPaths,
+    elements
+  };
+}
+function parseUnitHudLevel(buffer, header, tagIndex, unhiTagIndex, sharedByPaths = []) {
+  const entry = tagIndex.entries[unhiTagIndex];
+  if (!entry || entry.primaryClassName !== "unit_hud_interface") return null;
+  let decoded;
+  try {
+    decoded = readTagFieldValues(buffer, header, tagIndex, unhiTagIndex);
+  } catch {
+    return null;
+  }
+  const anchorIdx = Math.max(0, Math.min(4, getNumberVal(decoded.fields, "anchor", 0)));
+  const anchorName = HUD_ANCHOR_NAMES[anchorIdx] ?? "TOP LEFT";
+  const elements = [];
+  const panelSpecs = [
+    {
+      key: "hud_bg",
+      name: "HUD Background",
+      category: "Unit Panel Static",
+      offsetField: "hud background anchor offset",
+      scaleXField: "hud background width scale",
+      scaleYField: "hud background height scale",
+      bitmapField: "hud background interface bitmap",
+      seqField: "hud background sequence index",
+      colorField: "hud background default color"
+    },
+    {
+      key: "shield_bg",
+      name: "Shield Panel Background",
+      category: "Shield Panel",
+      offsetField: "shield panel background anchor offset",
+      scaleXField: "shield panel background width scale",
+      scaleYField: "shield panel background height scale",
+      bitmapField: "shield panel background interface bitmap",
+      seqField: "shield panel background sequence index",
+      colorField: "shield panel background default color"
+    },
+    {
+      key: "shield_meter",
+      name: "Shield Bar Meter",
+      category: "Shield Meter",
+      offsetField: "shield panel meter anchor offset",
+      scaleXField: "shield panel meter width scale",
+      scaleYField: "shield panel meter height scale",
+      bitmapField: "shield panel meter meter bitmap",
+      seqField: "shield panel meter sequence index",
+      colorField: "shield panel meter color at meter maximum"
+    },
+    {
+      key: "health_bg",
+      name: "Health Panel Background",
+      category: "Health Panel",
+      offsetField: "health panel background anchor offset",
+      scaleXField: "health panel background width scale",
+      scaleYField: "health panel background height scale",
+      bitmapField: "health panel background interface bitmap",
+      seqField: "health panel background sequence index",
+      colorField: "health panel background default color"
+    },
+    {
+      key: "health_meter",
+      name: "Health Wedges Meter",
+      category: "Health Meter",
+      offsetField: "health panel meter anchor offset",
+      scaleXField: "health panel meter width scale",
+      scaleYField: "health panel meter height scale",
+      bitmapField: "health panel meter meter bitmap",
+      seqField: "health panel meter sequence index",
+      colorField: "health panel meter color at meter maximum"
+    },
+    {
+      key: "motion_bg",
+      name: "Motion Sensor Background",
+      category: "Motion Sensor",
+      offsetField: "motion sensor background anchor offset",
+      scaleXField: "motion sensor background width scale",
+      scaleYField: "motion sensor background height scale",
+      bitmapField: "motion sensor background interface bitmap",
+      seqField: "motion sensor background sequence index",
+      colorField: "motion sensor background default color"
+    },
+    {
+      key: "motion_fg",
+      name: "Motion Sensor Foreground",
+      category: "Motion Sensor",
+      offsetField: "motion sensor foreground anchor offset",
+      scaleXField: "motion sensor foreground width scale",
+      scaleYField: "motion sensor foreground height scale",
+      bitmapField: "motion sensor foreground interface bitmap",
+      seqField: "motion sensor foreground sequence index",
+      colorField: "motion sensor foreground default color"
+    }
+  ];
+  panelSpecs.forEach((spec, idx) => {
+    const bitm = getDepTarget(decoded.fields, spec.bitmapField, tagIndex);
+    const [x, y] = getPoint2DVal(decoded.fields, spec.offsetField);
+    const scaleX = getNumberVal(decoded.fields, spec.scaleXField, 1);
+    const scaleY = getNumberVal(decoded.fields, spec.scaleYField, 1);
+    const seqIdx = getNumberVal(decoded.fields, spec.seqField, 0);
+    const color = getNumberVal(decoded.fields, spec.colorField, 4283222512);
+    if (!bitm.path && x === 0 && y === 0) return;
+    elements.push({
+      id: `unhi.${spec.key}`,
+      hudTagIndex: unhiTagIndex,
+      hudTagId: entry.tagId,
+      hudTagPath: entry.path,
+      hudGroup: "unit_hud_interface",
+      level: 0,
+      kind: "unit_panel",
+      elementIndex: idx,
+      itemIndex: -1,
+      label: bitm.leaf ? `${spec.name} (${bitm.leaf})` : spec.name,
+      categoryLabel: spec.category,
+      x,
+      y,
+      scaleX: scaleX || 1,
+      scaleY: scaleY || 1,
+      hidden: scaleX === 0 && scaleY === 0,
+      rawVisibilityValue: 1,
+      bitmapTagIndex: bitm.tagIndex,
+      bitmapTagId: bitm.tagId,
+      bitmapPath: bitm.path,
+      bitmapLeaf: bitm.leaf,
+      bitmapIsExternal: bitm.isExternal,
+      sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
+      defaultColorArgb: color,
+      offsetFieldPath: spec.offsetField,
+      scaleXFieldPath: spec.scaleXField,
+      scaleYFieldPath: spec.scaleYField,
+      visibilityMode: "scaling_hide",
+      bitmapFieldPath: spec.bitmapField,
+      sequenceFieldPath: spec.seqField
+    });
+  });
+  const auxOverlays = findField(decoded.fields, "overlays")?.children ?? [];
+  auxOverlays.forEach((child, elemIdx) => {
+    const [x, y] = getPoint2DVal(child.fields, "anchor offset");
+    const scaleX = getNumberVal(child.fields, "width scale", 1);
+    const scaleY = getNumberVal(child.fields, "height scale", 1);
+    const bitm = getDepTarget(child.fields, "interface bitmap", tagIndex);
+    const seqIdx = getNumberVal(child.fields, "sequence index", 0);
+    const color = getNumberVal(child.fields, "default color", 4283222512);
+    elements.push({
+      id: `unhi.aux_overlay.${elemIdx}`,
+      hudTagIndex: unhiTagIndex,
+      hudTagId: entry.tagId,
+      hudTagPath: entry.path,
+      hudGroup: "unit_hud_interface",
+      level: 0,
+      kind: "unit_panel",
+      elementIndex: 100 + elemIdx,
+      itemIndex: -1,
+      label: bitm.leaf ? `Aux Overlay ${elemIdx + 1} (${bitm.leaf})` : `Aux Overlay ${elemIdx + 1}`,
+      categoryLabel: "Unit Aux Overlay",
+      x,
+      y,
+      scaleX: scaleX || 1,
+      scaleY: scaleY || 1,
+      hidden: scaleX === 0 && scaleY === 0,
+      rawVisibilityValue: 1,
+      bitmapTagIndex: bitm.tagIndex,
+      bitmapTagId: bitm.tagId,
+      bitmapPath: bitm.path,
+      bitmapLeaf: bitm.leaf,
+      bitmapIsExternal: bitm.isExternal,
+      sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
+      defaultColorArgb: color,
+      offsetFieldPath: `overlays[${elemIdx}].anchor offset`,
+      scaleXFieldPath: `overlays[${elemIdx}].width scale`,
+      scaleYFieldPath: `overlays[${elemIdx}].height scale`,
+      visibilityMode: "scaling_hide",
+      bitmapFieldPath: `overlays[${elemIdx}].interface bitmap`,
+      sequenceFieldPath: `overlays[${elemIdx}].sequence index`
+    });
+  });
+  const auxMeters = findField(decoded.fields, "meters")?.children ?? [];
+  auxMeters.forEach((child, elemIdx) => {
+    const [x, y] = getPoint2DVal(child.fields, "meter anchor offset");
+    const scaleX = getNumberVal(child.fields, "meter width scale", 1);
+    const scaleY = getNumberVal(child.fields, "meter height scale", 1);
+    const bitm = getDepTarget(child.fields, "meter meter bitmap", tagIndex);
+    const seqIdx = getNumberVal(child.fields, "meter sequence index", 0);
+    const color = getNumberVal(child.fields, "meter color at meter maximum", 4283222512);
+    elements.push({
+      id: `unhi.aux_meter.${elemIdx}`,
+      hudTagIndex: unhiTagIndex,
+      hudTagId: entry.tagId,
+      hudTagPath: entry.path,
+      hudGroup: "unit_hud_interface",
+      level: 0,
+      kind: "unit_panel",
+      elementIndex: 200 + elemIdx,
+      itemIndex: -1,
+      label: bitm.leaf ? `Aux Meter ${elemIdx + 1} (${bitm.leaf})` : `Aux Meter ${elemIdx + 1}`,
+      categoryLabel: "Unit Aux Meter",
+      x,
+      y,
+      scaleX: scaleX || 1,
+      scaleY: scaleY || 1,
+      hidden: scaleX === 0 && scaleY === 0,
+      rawVisibilityValue: 1,
+      bitmapTagIndex: bitm.tagIndex,
+      bitmapTagId: bitm.tagId,
+      bitmapPath: bitm.path,
+      bitmapLeaf: bitm.leaf,
+      bitmapIsExternal: bitm.isExternal,
+      sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
+      defaultColorArgb: color,
+      offsetFieldPath: `meters[${elemIdx}].meter anchor offset`,
+      scaleXFieldPath: `meters[${elemIdx}].meter width scale`,
+      scaleYFieldPath: `meters[${elemIdx}].meter height scale`,
+      visibilityMode: "scaling_hide",
+      bitmapFieldPath: `meters[${elemIdx}].meter meter bitmap`,
+      sequenceFieldPath: `meters[${elemIdx}].meter sequence index`
+    });
+  });
+  return {
+    level: 0,
+    title: `Unit HUD (${getLeafName(entry.path)})`,
+    hudTagIndex: unhiTagIndex,
+    hudTagId: entry.tagId,
+    hudTagPath: entry.path,
+    hudGroup: "unit_hud_interface",
+    anchorIndex: anchorIdx,
+    anchorName,
+    anchorFieldPath: "anchor",
+    sharedByPaths,
+    elements
+  };
+}
+function parseGlobalHudLevel(buffer, header, tagIndex, hudgTagIndex) {
+  const entry = tagIndex.entries[hudgTagIndex];
+  if (!entry || entry.primaryClassName !== "hud_globals") return null;
+  let decoded;
+  try {
+    decoded = readTagFieldValues(buffer, header, tagIndex, hudgTagIndex);
+  } catch {
+    return null;
+  }
+  const anchorIdx = Math.max(0, Math.min(4, getNumberVal(decoded.fields, "anchor", 0)));
+  const anchorName = HUD_ANCHOR_NAMES[anchorIdx] ?? "TOP LEFT";
+  const elements = [];
+  const grenBitm = getDepTarget(decoded.fields, "interface bitmap", tagIndex);
+  const [gx, gy] = getPoint2DVal(decoded.fields, "anchor offset");
+  const gScaleX = getNumberVal(decoded.fields, "width scale", 1);
+  const gScaleY = getNumberVal(decoded.fields, "height scale", 1);
+  const gSeq = getNumberVal(decoded.fields, "sequence index", 0);
+  const gColor = getNumberVal(decoded.fields, "default color", 4283222512);
+  if (grenBitm.path || gx !== 0 || gy !== 0) {
+    elements.push({
+      id: "hudg.grenade_bg",
+      hudTagIndex: hudgTagIndex,
+      hudTagId: entry.tagId,
+      hudTagPath: entry.path,
+      hudGroup: "hud_globals",
+      level: 0,
+      kind: "global_element",
+      elementIndex: 0,
+      itemIndex: -1,
+      label: grenBitm.leaf ? `Grenade Panel (${grenBitm.leaf})` : "Grenade Panel",
+      categoryLabel: "Global HUD / Grenades",
+      x: gx,
+      y: gy,
+      scaleX: gScaleX || 1,
+      scaleY: gScaleY || 1,
+      hidden: gScaleX === 0 && gScaleY === 0,
+      rawVisibilityValue: 1,
+      bitmapTagIndex: grenBitm.tagIndex,
+      bitmapTagId: grenBitm.tagId,
+      bitmapPath: grenBitm.path,
+      bitmapLeaf: grenBitm.leaf,
+      bitmapIsExternal: grenBitm.isExternal,
+      sequenceIndex: gSeq === 65535 ? 0 : gSeq,
+      defaultColorArgb: gColor,
+      offsetFieldPath: "anchor offset",
+      scaleXFieldPath: "width scale",
+      scaleYFieldPath: "height scale",
+      visibilityMode: "scaling_hide",
+      bitmapFieldPath: "interface bitmap",
+      sequenceFieldPath: "sequence index"
+    });
+  }
+  const wpBitm = getDepTarget(decoded.fields, "waypoint arrows bitmap", tagIndex);
+  if (wpBitm.path) {
+    elements.push({
+      id: "hudg.waypoint_arrows",
+      hudTagIndex: hudgTagIndex,
+      hudTagId: entry.tagId,
+      hudTagPath: entry.path,
+      hudGroup: "hud_globals",
+      level: 0,
+      kind: "global_element",
+      elementIndex: 1,
+      itemIndex: -1,
+      label: `Waypoint Arrows (${wpBitm.leaf})`,
+      categoryLabel: "Global HUD / Waypoints",
+      x: 0,
+      y: 0,
+      scaleX: 1,
+      scaleY: 1,
+      hidden: false,
+      rawVisibilityValue: 1,
+      bitmapTagIndex: wpBitm.tagIndex,
+      bitmapTagId: wpBitm.tagId,
+      bitmapPath: wpBitm.path,
+      bitmapLeaf: wpBitm.leaf,
+      bitmapIsExternal: wpBitm.isExternal,
+      sequenceIndex: 0,
+      defaultColorArgb: 4283222512,
+      offsetFieldPath: "anchor offset",
+      scaleXFieldPath: "width scale",
+      scaleYFieldPath: "height scale",
+      bitmapFieldPath: "waypoint arrows bitmap"
+    });
+  }
+  return {
+    level: 0,
+    title: `Global HUD (${getLeafName(entry.path)})`,
+    hudTagIndex: hudgTagIndex,
+    hudTagId: entry.tagId,
+    hudTagPath: entry.path,
+    hudGroup: "hud_globals",
+    anchorIndex: anchorIdx,
+    anchorName,
+    anchorFieldPath: "anchor",
+    sharedByPaths: [],
+    elements
+  };
+}
+function extractWeaponStats(buffer, header, tagIndex, weapTagIndex, weapFields) {
+  const weapEntry = tagIndex.entries[weapTagIndex];
+  if (!weapEntry) return [];
+  const stats = [];
+  const RAD_TO_DEG = 180 / Math.PI;
+  const TICKS_PER_SEC = 30;
+  const zoomField = findField(weapFields, "zoom magnification range");
+  const zoomBounds = Array.isArray(zoomField?.value) ? zoomField.value : [1, 1];
+  stats.push(
+    {
+      key: "weapon.zoom_min",
+      label: "Zoom (first)",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "zoom magnification range",
+      boundsIndex: 0,
+      value: Number((zoomBounds[0] ?? 1).toFixed(2)),
+      step: 0.1,
+      min: 1,
+      max: 20,
+      unit: "x"
+    },
+    {
+      key: "weapon.zoom_max",
+      label: "Zoom (last)",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "zoom magnification range",
+      boundsIndex: 1,
+      value: Number((zoomBounds[1] ?? 1).toFixed(2)),
+      step: 0.1,
+      min: 1,
+      max: 20,
+      unit: "x"
+    },
+    {
+      key: "weapon.heat_overheat",
+      label: "Overheats at",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "overheated threshold",
+      value: Number(getNumberVal(weapFields, "overheated threshold", 1).toFixed(2)),
+      step: 0.05,
+      min: 0,
+      max: 1
+    },
+    {
+      key: "weapon.heat_recover",
+      label: "Cools down to",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "heat recovery threshold",
+      value: Number(getNumberVal(weapFields, "heat recovery threshold", 0.5).toFixed(2)),
+      step: 0.05,
+      min: 0,
+      max: 1
+    },
+    {
+      key: "weapon.heat_loss",
+      label: "Heat lost a second",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "heat loss rate",
+      value: Number(getNumberVal(weapFields, "heat loss rate", 0.2).toFixed(2)),
+      step: 0.05,
+      min: 0,
+      max: 10,
+      unit: "/s"
+    },
+    {
+      key: "weapon.autoaim_angle",
+      label: "Autoaim angle (deg)",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "autoaim angle",
+      value: Number((getNumberVal(weapFields, "autoaim angle", 0) * RAD_TO_DEG).toFixed(1)),
+      step: 0.5,
+      min: 0,
+      max: 45,
+      unit: "deg",
+      conversion: "rad_to_deg"
+    },
+    {
+      key: "weapon.autoaim_range",
+      label: "Autoaim range",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "autoaim range",
+      value: Number(getNumberVal(weapFields, "autoaim range", 10).toFixed(1)),
+      step: 1,
+      min: 0,
+      max: 1e3,
+      unit: "wu"
+    },
+    {
+      key: "weapon.magnetism_angle",
+      label: "Magnetism angle (deg)",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "magnetism angle",
+      value: Number((getNumberVal(weapFields, "magnetism angle", 0) * RAD_TO_DEG).toFixed(1)),
+      step: 0.5,
+      min: 0,
+      max: 45,
+      unit: "deg",
+      conversion: "rad_to_deg"
+    },
+    {
+      key: "weapon.magnetism_range",
+      label: "Magnetism range",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "magnetism range",
+      value: Number(getNumberVal(weapFields, "magnetism range", 10).toFixed(1)),
+      step: 1,
+      min: 0,
+      max: 1e3,
+      unit: "wu"
+    },
+    {
+      key: "weapon.move_penalty_forward",
+      label: "Slows walking",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "forward movement penalty",
+      value: Number(getNumberVal(weapFields, "forward movement penalty", 0).toFixed(2)),
+      step: 0.05,
+      min: 0,
+      max: 1
+    },
+    {
+      key: "weapon.move_penalty_sideways",
+      label: "Slows strafing",
+      category: "weapon",
+      targetTagIndex: weapTagIndex,
+      targetTagPath: weapEntry.path,
+      fieldPath: "sideways movement penalty",
+      value: Number(getNumberVal(weapFields, "sideways movement penalty", 0).toFixed(2)),
+      step: 0.05,
+      min: 0,
+      max: 1
+    }
+  );
+  const triggers = findField(weapFields, "triggers")?.children ?? [];
+  triggers.slice(0, 2).forEach((trig, trigIdx) => {
+    const cat = trigIdx === 0 ? "trigger0" : "trigger1";
+    const rofField = findField(trig.fields, "maximum rate of fire");
+    const rofBounds = Array.isArray(rofField?.value) ? rofField.value : [0, 0];
+    const errAngleField = findField(trig.fields, "error angle");
+    const errAngleBounds = Array.isArray(errAngleField?.value) ? errAngleField.value : [0, 0];
+    stats.push(
+      {
+        key: `trigger${trigIdx}.rate_of_fire_min`,
+        label: "Rate of fire (first)",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].maximum rate of fire`,
+        boundsIndex: 0,
+        value: Number((rofBounds[0] ?? 0).toFixed(1)),
+        step: 0.5,
+        min: 0,
+        max: 120,
+        unit: "/s"
+      },
+      {
+        key: `trigger${trigIdx}.rate_of_fire_max`,
+        label: "Rate of fire (held)",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].maximum rate of fire`,
+        boundsIndex: 1,
+        value: Number((rofBounds[1] ?? 0).toFixed(1)),
+        step: 0.5,
+        min: 0,
+        max: 120,
+        unit: "/s"
+      },
+      {
+        key: `trigger${trigIdx}.rounds_per_shot`,
+        label: "Rounds a shot",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].rounds per shot`,
+        value: getNumberVal(trig.fields, "rounds per shot", 1),
+        step: 1,
+        min: 0,
+        max: 100
+      },
+      {
+        key: `trigger${trigIdx}.projectiles_per_shot`,
+        label: "Projectiles a shot",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].projectiles per shot`,
+        value: getNumberVal(trig.fields, "projectiles per shot", 1),
+        step: 1,
+        min: 1,
+        max: 64
+      },
+      {
+        key: `trigger${trigIdx}.spread_min`,
+        label: "Spread (first, deg)",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].error angle`,
+        boundsIndex: 0,
+        value: Number(((errAngleBounds[0] ?? 0) * RAD_TO_DEG).toFixed(2)),
+        step: 0.1,
+        min: 0,
+        max: 45,
+        unit: "deg",
+        conversion: "rad_to_deg"
+      },
+      {
+        key: `trigger${trigIdx}.spread_max`,
+        label: "Spread (held, deg)",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].error angle`,
+        boundsIndex: 1,
+        value: Number(((errAngleBounds[1] ?? 0) * RAD_TO_DEG).toFixed(2)),
+        step: 0.1,
+        min: 0,
+        max: 45,
+        unit: "deg",
+        conversion: "rad_to_deg"
+      },
+      {
+        key: `trigger${trigIdx}.distribution_angle`,
+        label: "Pellet spread (deg)",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].distribution angle`,
+        value: Number((getNumberVal(trig.fields, "distribution angle", 0) * RAD_TO_DEG).toFixed(2)),
+        step: 0.5,
+        min: 0,
+        max: 90,
+        unit: "deg",
+        conversion: "rad_to_deg"
+      },
+      {
+        key: `trigger${trigIdx}.heat_per_round`,
+        label: "Heat a round",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].heat generated per round`,
+        value: Number(getNumberVal(trig.fields, "heat generated per round", 0).toFixed(2)),
+        step: 0.01,
+        min: 0,
+        max: 1
+      },
+      {
+        key: `trigger${trigIdx}.charging_time`,
+        label: "Charging time (s)",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `triggers[${trigIdx}].charging time`,
+        value: Number(getNumberVal(trig.fields, "charging time", 0).toFixed(2)),
+        step: 0.1,
+        min: 0,
+        max: 10,
+        unit: "s"
+      }
+    );
+    const projDep = getDepTarget(trig.fields, "projectile", tagIndex);
+    if (projDep.tagIndex !== null) {
+      try {
+        const projDecoded = readTagFieldValues(buffer, header, tagIndex, projDep.tagIndex);
+        const projCat = trigIdx === 0 ? "projectile0" : "projectile1";
+        const dmgRangeField = findField(projDecoded.fields, "air damage range");
+        const dmgRange = Array.isArray(dmgRangeField?.value) ? dmgRangeField.value : [0, 0];
+        const timerField = findField(projDecoded.fields, "timer");
+        const timerBounds = Array.isArray(timerField?.value) ? timerField.value : [0, 0];
+        stats.push(
+          {
+            key: `projectile${trigIdx}.speed`,
+            label: "Speed",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "initial velocity",
+            value: Number((getNumberVal(projDecoded.fields, "initial velocity", 0) * TICKS_PER_SEC).toFixed(1)),
+            step: 5,
+            min: 0,
+            max: 3e3,
+            unit: "wu/s",
+            conversion: "tick_to_sec"
+          },
+          {
+            key: `projectile${trigIdx}.final_speed`,
+            label: "Speed (slowed to)",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "final velocity",
+            value: Number((getNumberVal(projDecoded.fields, "final velocity", 0) * TICKS_PER_SEC).toFixed(1)),
+            step: 5,
+            min: 0,
+            max: 3e3,
+            unit: "wu/s",
+            conversion: "tick_to_sec"
+          },
+          {
+            key: `projectile${trigIdx}.gravity`,
+            label: "Gravity",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "air gravity scale",
+            value: Number(getNumberVal(projDecoded.fields, "air gravity scale", 1).toFixed(2)),
+            step: 0.05,
+            min: 0,
+            max: 10
+          },
+          {
+            key: `projectile${trigIdx}.range`,
+            label: "Range",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "maximum range",
+            value: Number(getNumberVal(projDecoded.fields, "maximum range", 100).toFixed(1)),
+            step: 5,
+            min: 0,
+            max: 1e4,
+            unit: "wu"
+          },
+          {
+            key: `projectile${trigIdx}.falloff_start`,
+            label: "Damage falls from",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "air damage range",
+            boundsIndex: 0,
+            value: Number((dmgRange[0] ?? 0).toFixed(1)),
+            step: 1,
+            min: 0,
+            max: 1e4,
+            unit: "wu"
+          },
+          {
+            key: `projectile${trigIdx}.falloff_end`,
+            label: "Damage gone at",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "air damage range",
+            boundsIndex: 1,
+            value: Number((dmgRange[1] ?? 0).toFixed(1)),
+            step: 1,
+            min: 0,
+            max: 1e4,
+            unit: "wu"
+          },
+          {
+            key: `projectile${trigIdx}.arming_time`,
+            label: "Arming time (s)",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "arming time",
+            value: Number(getNumberVal(projDecoded.fields, "arming time", 0).toFixed(2)),
+            step: 0.05,
+            min: 0,
+            max: 10,
+            unit: "s"
+          },
+          {
+            key: `projectile${trigIdx}.timer_min`,
+            label: "Fuse (shortest, s)",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "timer",
+            boundsIndex: 0,
+            value: Number((timerBounds[0] ?? 0).toFixed(2)),
+            step: 0.1,
+            min: 0,
+            max: 30,
+            unit: "s"
+          },
+          {
+            key: `projectile${trigIdx}.timer_max`,
+            label: "Fuse (longest, s)",
+            category: projCat,
+            targetTagIndex: projDep.tagIndex,
+            targetTagPath: projDep.path,
+            fieldPath: "timer",
+            boundsIndex: 1,
+            value: Number((timerBounds[1] ?? 0).toFixed(2)),
+            step: 0.1,
+            min: 0,
+            max: 30,
+            unit: "s"
+          }
+        );
+        const impactDep = getDepTarget(projDecoded.fields, "impact damage", tagIndex);
+        if (impactDep.tagIndex !== null) {
+          appendDamageEffectStats(
+            buffer,
+            header,
+            tagIndex,
+            impactDep.tagIndex,
+            impactDep.path,
+            `projectile${trigIdx}.impact`,
+            trigIdx === 0 ? "damage_impact0" : "damage_impact1",
+            stats
+          );
+        }
+        const stuckDep = getDepTarget(projDecoded.fields, "attached detonation damage", tagIndex);
+        if (stuckDep.tagIndex !== null) {
+          appendDamageEffectStats(
+            buffer,
+            header,
+            tagIndex,
+            stuckDep.tagIndex,
+            stuckDep.path,
+            `projectile${trigIdx}.stuck`,
+            trigIdx === 0 ? "damage_stuck0" : "damage_stuck1",
+            stats
+          );
+        }
+      } catch {
+      }
+    }
+  });
+  const magazines = findField(weapFields, "magazines")?.children ?? [];
+  magazines.slice(0, 2).forEach((mag, magIdx) => {
+    const cat = magIdx === 0 ? "magazine0" : "magazine1";
+    stats.push(
+      {
+        key: `magazine${magIdx}.size`,
+        label: "Magazine",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `magazines[${magIdx}].rounds loaded maximum`,
+        value: getNumberVal(mag.fields, "rounds loaded maximum", 1),
+        step: 1,
+        min: 1,
+        max: 999
+      },
+      {
+        key: `magazine${magIdx}.total_initial`,
+        label: "Ammo picked up",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `magazines[${magIdx}].rounds total initial`,
+        value: getNumberVal(mag.fields, "rounds total initial", 0),
+        step: 1,
+        min: 0,
+        max: 9999
+      },
+      {
+        key: `magazine${magIdx}.total_maximum`,
+        label: "Ammo carried",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `magazines[${magIdx}].rounds reserved maximum`,
+        value: getNumberVal(mag.fields, "rounds reserved maximum", 0),
+        step: 1,
+        min: 0,
+        max: 9999
+      },
+      {
+        key: `magazine${magIdx}.rounds_reloaded`,
+        label: "Rounds a reload",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `magazines[${magIdx}].rounds reloaded`,
+        value: getNumberVal(mag.fields, "rounds reloaded", 1),
+        step: 1,
+        min: 1,
+        max: 999
+      },
+      {
+        key: `magazine${magIdx}.recharge`,
+        label: "Recharged a second",
+        category: cat,
+        targetTagIndex: weapTagIndex,
+        targetTagPath: weapEntry.path,
+        fieldPath: `magazines[${magIdx}].rounds recharged`,
+        value: getNumberVal(mag.fields, "rounds recharged", 0),
+        step: 1,
+        min: 0,
+        max: 999
+      }
+    );
+  });
+  const meleeDep = getDepTarget(weapFields, "player melee damage", tagIndex);
+  if (meleeDep.tagIndex !== null) {
+    appendDamageEffectStats(
+      buffer,
+      header,
+      tagIndex,
+      meleeDep.tagIndex,
+      meleeDep.path,
+      "melee",
+      "damage_melee",
+      stats
+    );
+  }
+  return stats;
+}
+function appendDamageEffectStats(buffer, header, tagIndex, jptTagIndex, jptPath, keyPrefix, category, outStats) {
+  try {
+    const decoded = readTagFieldValues(buffer, header, tagIndex, jptTagIndex);
+    const radiusField = findField(decoded.fields, "radius");
+    const radiusBounds = Array.isArray(radiusField?.value) ? radiusField.value : [0, 0];
+    const upperDmgField = findField(decoded.fields, "damage upper bound");
+    const upperDmgBounds = Array.isArray(upperDmgField?.value) ? upperDmgField.value : [0, 0];
+    outStats.push(
+      {
+        key: `${keyPrefix}.damage_min`,
+        label: "Damage (least)",
+        category,
+        targetTagIndex: jptTagIndex,
+        targetTagPath: jptPath,
+        fieldPath: "damage lower bound",
+        value: Number(getNumberVal(decoded.fields, "damage lower bound", 0).toFixed(1)),
+        step: 0.5,
+        min: 0,
+        max: 1e4
+      },
+      {
+        key: `${keyPrefix}.damage_max`,
+        label: "Damage (most)",
+        category,
+        targetTagIndex: jptTagIndex,
+        targetTagPath: jptPath,
+        fieldPath: "damage upper bound",
+        boundsIndex: 0,
+        value: Number((upperDmgBounds[0] ?? 0).toFixed(1)),
+        step: 0.5,
+        min: 0,
+        max: 1e4
+      },
+      {
+        key: `${keyPrefix}.falloff`,
+        label: "Full damage within",
+        category,
+        targetTagIndex: jptTagIndex,
+        targetTagPath: jptPath,
+        fieldPath: "radius",
+        boundsIndex: 0,
+        value: Number((radiusBounds[0] ?? 0).toFixed(2)),
+        step: 0.1,
+        min: 0,
+        max: 100,
+        unit: "wu"
+      },
+      {
+        key: `${keyPrefix}.radius`,
+        label: "Radius",
+        category,
+        targetTagIndex: jptTagIndex,
+        targetTagPath: jptPath,
+        fieldPath: "radius",
+        boundsIndex: 1,
+        value: Number((radiusBounds[1] ?? 0).toFixed(2)),
+        step: 0.1,
+        min: 0,
+        max: 100,
+        unit: "wu"
+      },
+      {
+        key: `${keyPrefix}.stun`,
+        label: "Stun",
+        category,
+        targetTagIndex: jptTagIndex,
+        targetTagPath: jptPath,
+        fieldPath: "damage stun",
+        value: Number(getNumberVal(decoded.fields, "damage stun", 0).toFixed(2)),
+        step: 0.05,
+        min: 0,
+        max: 1
+      }
+    );
+  } catch {
+  }
+}
+function resolveWeaponHudChainIndices(buffer, header, tagIndex, firstWphiTagIndex) {
+  const chain = [];
+  let cur = firstWphiTagIndex;
+  const visited = /* @__PURE__ */ new Set();
+  while (cur !== null && chain.length < 16 && !visited.has(cur)) {
+    visited.add(cur);
+    const entry = tagIndex.entries[cur];
+    if (!entry || entry.primaryClassName !== "weapon_hud_interface") break;
+    chain.push(cur);
+    try {
+      const decoded = readTagFieldValues(buffer, header, tagIndex, cur);
+      const parentDep = getDepTarget(decoded.fields, "child hud", tagIndex);
+      cur = parentDep.tagIndex;
+    } catch {
+      break;
+    }
+  }
+  return chain;
+}
+function inspectMapHudAndUiTargets(buffer, header, tagIndex) {
+  const wphiSharers = /* @__PURE__ */ new Map();
+  const weaponRawChains = /* @__PURE__ */ new Map();
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "weapon" || entry.isExternal) continue;
+    try {
+      const decoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const hudDep = getDepTarget(decoded.fields, "hud interface", tagIndex);
+      const chain = hudDep.tagIndex !== null ? resolveWeaponHudChainIndices(buffer, header, tagIndex, hudDep.tagIndex) : [];
+      weaponRawChains.set(entry.index, { fields: decoded.fields, chain });
+      for (const wphiIdx of chain) {
+        const list = wphiSharers.get(wphiIdx) ?? [];
+        if (!list.includes(entry.path)) list.push(entry.path);
+        wphiSharers.set(wphiIdx, list);
+      }
+    } catch {
+    }
+  }
+  const weapons = [];
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "weapon" || entry.isExternal) continue;
+    const raw = weaponRawChains.get(entry.index);
+    if (!raw) continue;
+    const hudChain = [];
+    raw.chain.forEach((wphiIdx, level) => {
+      const sharers = (wphiSharers.get(wphiIdx) ?? []).filter((p) => p !== entry.path);
+      const parsed = parseWeaponHudLevel(buffer, header, tagIndex, wphiIdx, level, sharers);
+      if (parsed) hudChain.push(parsed);
+    });
+    const pickupMsgIdx = getNumberVal(raw.fields, "pickup message index", 0);
+    const stats = extractWeaponStats(buffer, header, tagIndex, entry.index, raw.fields);
+    weapons.push({
+      tagIndex: entry.index,
+      tagId: entry.tagId,
+      path: entry.path,
+      displayName: formatDisplayName(entry.path),
+      pickupMessageIndex: pickupMsgIdx === 65535 ? 0 : pickupMsgIdx,
+      hudChain,
+      stats
+    });
+  }
+  const vehicles = [];
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "vehicle" || entry.isExternal) continue;
+    try {
+      const decoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      let unitHud = null;
+      const newUnitHuds = findField(decoded.fields, "new unit hud interface")?.children ?? [];
+      if (newUnitHuds.length > 0) {
+        const unhiDep = getDepTarget(newUnitHuds[0].fields, "unit hud interface", tagIndex);
+        if (unhiDep.tagIndex !== null) {
+          unitHud = parseUnitHudLevel(buffer, header, tagIndex, unhiDep.tagIndex);
+        }
+      }
+      const weaponHudChain = [];
+      const vehWeapons = findField(decoded.fields, "weapons")?.children ?? [];
+      if (vehWeapons.length > 0) {
+        const weapDep = getDepTarget(vehWeapons[0].fields, "weapon", tagIndex);
+        if (weapDep.tagIndex !== null) {
+          const foundWeap = weapons.find((w) => w.tagIndex === weapDep.tagIndex);
+          if (foundWeap) {
+            weaponHudChain.push(...foundWeap.hudChain);
+          } else {
+            const weapDecoded = readTagFieldValues(buffer, header, tagIndex, weapDep.tagIndex);
+            const hudDep = getDepTarget(weapDecoded.fields, "hud interface", tagIndex);
+            if (hudDep.tagIndex !== null) {
+              const chain = resolveWeaponHudChainIndices(buffer, header, tagIndex, hudDep.tagIndex);
+              chain.forEach((wphiIdx, lvl) => {
+                const p = parseWeaponHudLevel(buffer, header, tagIndex, wphiIdx, lvl, []);
+                if (p) weaponHudChain.push(p);
+              });
+            }
+          }
+        }
+      }
+      vehicles.push({
+        tagIndex: entry.index,
+        tagId: entry.tagId,
+        path: entry.path,
+        displayName: formatDisplayName(entry.path),
+        unitHud,
+        weaponHudChain
+      });
+    } catch {
+    }
+  }
+  const unitHuds = [];
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "unit_hud_interface" || entry.isExternal) continue;
+    const parsed = parseUnitHudLevel(buffer, header, tagIndex, entry.index);
+    if (parsed) unitHuds.push(parsed);
+  }
+  const globalHuds = [];
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "hud_globals" || entry.isExternal) continue;
+    const parsed = parseGlobalHudLevel(buffer, header, tagIndex, entry.index);
+    if (parsed) globalHuds.push(parsed);
+  }
+  const uiWidgets = [];
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "ui_widget_definition" || entry.isExternal) continue;
+    try {
+      const decoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const typeVal = getNumberVal(decoded.fields, "widget type", 0);
+      const typeNames = ["Container", "Text Box", "Spinner List", "Column List"];
+      const bounds = getRect2DVal(decoded.fields, "bounds");
+      const children = findField(decoded.fields, "child widgets")?.children ?? [];
+      const bgBitm = getDepTarget(decoded.fields, "background bitmap", tagIndex);
+      const strList = getDepTarget(decoded.fields, "text label unicode strings list", tagIndex);
+      uiWidgets.push({
+        tagIndex: entry.index,
+        tagId: entry.tagId,
+        path: entry.path,
+        displayName: formatDisplayName(entry.path),
+        widgetType: typeNames[typeVal] ?? `Type ${typeVal}`,
+        bounds,
+        childCount: children.length,
+        backgroundBitmapPath: bgBitm.path,
+        stringListPath: strList.path
+      });
+    } catch {
+    }
+  }
+  const unicodeStringLists = tagIndex.entries.filter((e) => e.primaryClassName === "unicode_string_list").map((e) => ({
+    tagIndex: e.index,
+    tagId: e.tagId,
+    path: e.path,
+    isExternal: e.isExternal
+  }));
+  return {
+    mapName: header.scenarioName,
+    weapons,
+    vehicles,
+    unitHuds,
+    globalHuds,
+    uiWidgets,
+    unicodeStringLists
+  };
+}
+function applyLiveHudEdit(buffer, header, tagIndex, req) {
+  let curBuf = buffer;
+  let curHeader = header;
+  let curTagIndex = tagIndex;
+  let targetHudIndex = req.hudTagIndex;
+  if (req.scope === "this_one" && typeof req.ownerWeaponTagIndex === "number" && (req.hudLevel ?? 0) === 0) {
+    const weapEntry = curTagIndex.entries[req.ownerWeaponTagIndex];
+    const hudEntry = curTagIndex.entries[targetHudIndex];
+    if (weapEntry && hudEntry && hudEntry.primaryClassName === "weapon_hud_interface") {
+      let otherUsers = 0;
+      for (const e of curTagIndex.entries) {
+        if (e.primaryClassName !== "weapon" || e.index === weapEntry.index || e.isExternal) continue;
+        try {
+          const d = readTagFieldValues(curBuf, curHeader, curTagIndex, e.index);
+          const dep = getDepTarget(d.fields, "hud interface", curTagIndex);
+          if (dep.tagIndex === targetHudIndex) otherUsers++;
+        } catch {
+        }
+      }
+      if (otherUsers > 0) {
+        const customHudPath = `${hudEntry.path}_${getLeafName(weapEntry.path).replace(/\s+/g, "_")}`;
+        const existingFork = curTagIndex.entries.find(
+          (e) => e.primaryClassName === "weapon_hud_interface" && e.path.toLowerCase() === customHudPath.toLowerCase()
+        );
+        if (existingFork) {
+          targetHudIndex = existingFork.index;
+          writeTagFieldValue(curBuf, curHeader, curTagIndex, weapEntry.index, "hud interface", existingFork.tagId);
+        } else {
+          const dup = duplicateTagInMap(curBuf, curHeader, curTagIndex, targetHudIndex, customHudPath);
+          curBuf = dup.buffer;
+          curHeader = parseCacheFileHeader(curBuf);
+          curTagIndex = parseTagIndex(curBuf, curHeader);
+          targetHudIndex = dup.newTagIndex;
+          writeTagFieldValue(curBuf, curHeader, curTagIndex, weapEntry.index, "hud interface", dup.newTagId);
+        }
+      }
+    }
+  }
+  if (req.editType === "anchor" && typeof req.anchorIndex === "number") {
+    const clamped = Math.max(0, Math.min(4, Math.round(req.anchorIndex)));
+    writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, "anchor", clamped);
+    return { buffer: curBuf, header: curHeader, tagIndex: curTagIndex, effectiveHudTagIndex: targetHudIndex };
+  }
+  if (req.offsetFieldPath && typeof req.x === "number" && typeof req.y === "number") {
+    const clampedX = Math.max(-640, Math.min(640, Math.round(req.x)));
+    const clampedY = Math.max(-480, Math.min(480, Math.round(req.y)));
+    writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, req.offsetFieldPath, [clampedX, clampedY]);
+  }
+  if (req.scaleXFieldPath && typeof req.scaleX === "number") {
+    const clampedSx = Math.max(0, Math.min(8, Number(req.scaleX)));
+    writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, req.scaleXFieldPath, clampedSx);
+  }
+  if (req.scaleYFieldPath && typeof req.scaleY === "number") {
+    const clampedSy = Math.max(0, Math.min(8, Number(req.scaleY)));
+    writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, req.scaleYFieldPath, clampedSy);
+  }
+  if (typeof req.hidden === "boolean") {
+    if (req.visibilityMode === "map_type_15" && req.visibilityFieldPath) {
+      const decoded = readTagFieldValues(curBuf, curHeader, curTagIndex, targetHudIndex);
+      const m = req.visibilityFieldPath.match(/^(.+)\[(\d+)\]\.(.+)$/);
+      if (m) {
+        const refField = findField(decoded.fields, m[1]);
+        const child = refField?.children?.[Number(m[2])];
+        const leaf = child ? findField(child.fields, m[3]) : void 0;
+        if (leaf) {
+          const valToWrite = req.hidden ? 15 : req.rawVisibilityValue ?? 0;
+          curBuf.writeInt16LE(valToWrite, leaf.offset);
+        }
+      }
+    } else if (req.visibilityMode === "crosshair_bit7" && req.visibilityFieldPath) {
+      const baseFlags = (req.rawVisibilityValue ?? 0) & ~(1 << 7);
+      const nextFlags = req.hidden ? baseFlags | 1 << 7 : baseFlags;
+      writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, req.visibilityFieldPath, nextFlags >>> 0);
+    } else if (req.visibilityMode === "overlay_bit1" && req.visibilityFieldPath) {
+      const baseFlags = (req.rawVisibilityValue ?? 0) & ~(1 << 1);
+      const nextFlags = req.hidden ? baseFlags | 1 << 1 : baseFlags;
+      writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, req.visibilityFieldPath, nextFlags >>> 0);
+    } else if (req.visibilityMode === "scaling_hide" && req.scaleXFieldPath && req.scaleYFieldPath) {
+      const nextScale = req.hidden ? 0 : req.scaleX && req.scaleX > 0 ? req.scaleX : 1;
+      writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, req.scaleXFieldPath, nextScale);
+      writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, req.scaleYFieldPath, nextScale);
+    }
+  }
+  return { buffer: curBuf, header: curHeader, tagIndex: curTagIndex, effectiveHudTagIndex: targetHudIndex };
+}
+function applyLiveWeaponStatEdit(buffer, header, tagIndex, req) {
+  let rawVal = Number(req.value);
+  if (req.conversion === "rad_to_deg") {
+    rawVal = rawVal * Math.PI / 180;
+  } else if (req.conversion === "tick_to_sec") {
+    rawVal = rawVal / 30;
+  }
+  if (req.boundsIndex === 0 || req.boundsIndex === 1) {
+    const decoded = readTagFieldValues(buffer, header, tagIndex, req.targetTagIndex);
+    let currentBounds = [0, 0];
+    const m = req.fieldPath.match(/^(.+)\[(\d+)\]\.(.+)$/);
+    if (m) {
+      const refField = findField(decoded.fields, m[1]);
+      const child = refField?.children?.[Number(m[2])];
+      const leaf = child ? findField(child.fields, m[3]) : void 0;
+      if (leaf && Array.isArray(leaf.value) && leaf.value.length >= 2) {
+        currentBounds = [Number(leaf.value[0]) || 0, Number(leaf.value[1]) || 0];
+      }
+    } else {
+      const leaf = findField(decoded.fields, req.fieldPath);
+      if (leaf && Array.isArray(leaf.value) && leaf.value.length >= 2) {
+        currentBounds = [Number(leaf.value[0]) || 0, Number(leaf.value[1]) || 0];
+      }
+    }
+    currentBounds[req.boundsIndex] = rawVal;
+    writeTagFieldValue(buffer, header, tagIndex, req.targetTagIndex, req.fieldPath, currentBounds);
+    return { ok: true, writtenValue: currentBounds };
+  }
+  writeTagFieldValue(buffer, header, tagIndex, req.targetTagIndex, req.fieldPath, rawVal);
+  return { ok: true, writtenValue: rawVal };
+}
+function injectHudElementBitmap(buffer, header, tagIndex, req, externalBitmapsBuffer) {
+  let curBuf = buffer;
+  let curHeader = header;
+  let curTagIndex = tagIndex;
+  let pngBuf;
+  if (typeof req.pngDataUrlOrBuffer === "string") {
+    const base64Match = req.pngDataUrlOrBuffer.match(/^data:image\/[a-zA-Z0-9+.-]+;base64,(.+)$/);
+    pngBuf = Buffer.from(base64Match ? base64Match[1] : req.pngDataUrlOrBuffer, "base64");
+  } else {
+    pngBuf = req.pngDataUrlOrBuffer;
+  }
+  const decodedPng = decodePngToRgba(pngBuf);
+  const srcEntry = curTagIndex.entries[req.bitmapTagIndex];
+  if (!srcEntry) {
+    throw new Error(`Bitmap tag #${req.bitmapTagIndex} not found in open map.`);
+  }
+  let targetBitmapIndex = req.bitmapTagIndex;
+  let targetBitmapTagId = srcEntry.tagId;
+  let targetBitmapPath = srcEntry.path;
+  if (req.cloneDedicatedBitmapTag) {
+    const hudEntry = curTagIndex.entries[req.hudTagIndex];
+    const desiredPath = req.customBitmapTagPath?.trim() || `${srcEntry.path}_${hudEntry ? getLeafName(hudEntry.path).replace(/\s+/g, "_") : "custom"}`;
+    if (srcEntry.isExternal) {
+      const created = createDedicatedInternalBitmapTag(
+        curBuf,
+        curHeader,
+        curTagIndex,
+        desiredPath,
+        decodedPng.width,
+        decodedPng.height
+      );
+      curBuf = created.buffer;
+      curHeader = parseCacheFileHeader(curBuf);
+      curTagIndex = parseTagIndex(curBuf, curHeader);
+      targetBitmapIndex = created.newTagIndex;
+      targetBitmapTagId = created.newTagId;
+      targetBitmapPath = created.path;
+    } else {
+      const dup = duplicateTagInMap(curBuf, curHeader, curTagIndex, targetBitmapIndex, desiredPath);
+      curBuf = dup.buffer;
+      curHeader = parseCacheFileHeader(curBuf);
+      curTagIndex = parseTagIndex(curBuf, curHeader);
+      targetBitmapIndex = dup.newTagIndex;
+      targetBitmapTagId = dup.newTagId;
+      targetBitmapPath = dup.path;
+    }
+    writeTagFieldValue(curBuf, curHeader, curTagIndex, req.hudTagIndex, req.bitmapFieldPath, targetBitmapTagId);
+  }
+  let targetFormat = req.targetFormat ?? BitmapFormat.A8R8G8B8;
+  let imageIndex = req.imageIndex ?? 0;
+  try {
+    const info = inspectBitmapTag(curBuf, curHeader, curTagIndex, targetBitmapTagId, externalBitmapsBuffer);
+    if (imageIndex >= info.images.length) imageIndex = 0;
+    if (req.targetFormat === void 0 && info.images[imageIndex]) {
+      const origFmt = info.images[imageIndex].format;
+      if (origFmt === BitmapFormat.DXT1 || origFmt === BitmapFormat.DXT5 || origFmt === BitmapFormat.A8R8G8B8 || origFmt === BitmapFormat.X8R8G8B8) {
+        targetFormat = origFmt;
+      }
+    }
+  } catch {
+  }
+  const encoded = encodeBitmapWithMipmaps(
+    decodedPng.rgba,
+    decodedPng.width,
+    decodedPng.height,
+    targetFormat,
+    false
+    // HUD bitmaps do not need mipmap chains
+  );
+  curBuf = replaceBitmapImageData(
+    curBuf,
+    curHeader,
+    curTagIndex,
+    targetBitmapTagId,
+    imageIndex,
+    encoded.pixelData,
+    decodedPng.width,
+    decodedPng.height,
+    targetFormat,
+    externalBitmapsBuffer,
+    0
+  );
+  curHeader = parseCacheFileHeader(curBuf);
+  curTagIndex = parseTagIndex(curBuf, curHeader);
+  return {
+    buffer: curBuf,
+    header: curHeader,
+    tagIndex: curTagIndex,
+    bitmapTagIndex: targetBitmapIndex,
+    bitmapTagId: targetBitmapTagId,
+    bitmapPath: targetBitmapPath,
+    width: decodedPng.width,
+    height: decodedPng.height,
+    format: targetFormat
+  };
+}
+function createDedicatedInternalBitmapTag(buffer, header, tagIndex, newPath, width, height) {
+  const cleanPath = newPath.trim().replace(/\//g, "\\");
+  const rootSize = 108;
+  const seqOffset = 108;
+  const spriteOffset = 172;
+  const imgOffset = 204;
+  const totalBytes = 252;
+  const tagBuf = Buffer.alloc(totalBytes, 0);
+  tagBuf.writeUInt16LE(0, 0);
+  tagBuf.writeUInt16LE(4, 2);
+  tagBuf.writeUInt16LE(0, 4);
+  tagBuf.writeUInt32LE(1, 84);
+  tagBuf.writeUInt32LE(seqOffset, 88);
+  tagBuf.writeUInt32LE(1, 96);
+  tagBuf.writeUInt32LE(imgOffset, 100);
+  tagBuf.write("hud_seq", seqOffset, "ascii");
+  tagBuf.writeUInt16LE(0, seqOffset + 32);
+  tagBuf.writeUInt16LE(1, seqOffset + 34);
+  tagBuf.writeUInt32LE(1, seqOffset + 52);
+  tagBuf.writeUInt32LE(spriteOffset, seqOffset + 56);
+  tagBuf.writeUInt16LE(0, spriteOffset + 0);
+  tagBuf.writeFloatLE(0, spriteOffset + 8);
+  tagBuf.writeFloatLE(1, spriteOffset + 12);
+  tagBuf.writeFloatLE(0, spriteOffset + 16);
+  tagBuf.writeFloatLE(1, spriteOffset + 20);
+  tagBuf.writeFloatLE(0.5, spriteOffset + 24);
+  tagBuf.writeFloatLE(0.5, spriteOffset + 28);
+  tagBuf.write("bitm", imgOffset + 0, "ascii");
+  tagBuf.writeUInt16LE(width, imgOffset + 4);
+  tagBuf.writeUInt16LE(height, imgOffset + 6);
+  tagBuf.writeUInt16LE(1, imgOffset + 8);
+  tagBuf.writeUInt16LE(0, imgOffset + 10);
+  tagBuf.writeUInt16LE(BitmapFormat.A8R8G8B8, imgOffset + 12);
+  tagBuf.writeUInt16LE(128, imgOffset + 14);
+  tagBuf.writeUInt16LE(Math.floor(width / 2), imgOffset + 16);
+  tagBuf.writeUInt16LE(Math.floor(height / 2), imgOffset + 18);
+  tagBuf.writeUInt16LE(0, imgOffset + 20);
+  tagBuf.writeUInt32LE(0, imgOffset + 24);
+  tagBuf.writeUInt32LE(0, imgOffset + 28);
+  const container = {
+    magic: OCETAGS_MAGIC,
+    formatVersion: OCETAGS_FORMAT_VERSION,
+    sourceMapName: header.scenarioName,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    hasUnresolvedBspReferences: false,
+    rootOriginalIndices: [0],
+    tags: [
+      {
+        originalIndex: 0,
+        group: "bitmap",
+        path: cleanPath,
+        structName: "Bitmap",
+        data: tagBuf.toString("base64"),
+        dependencies: [],
+        secondaryClassFourCC: 4294967295,
+        tertiaryClassFourCC: 4294967295,
+        embeddedRawDataAssets: [],
+        embeddedRawDataPatches: [],
+        injectionBlockers: []
+      }
+    ],
+    notExtracted: [],
+    warnings: [],
+    resourceMapIdentities: {},
+    externalResourceRefs: [],
+    externalData: "referenced"
+  };
+  const plan = planAddInjection({ buffer, header, tagIndex }, container, {}, { allowEmbeddedRelocation: true });
+  if (plan.kind === "refused") {
+    throw new Error(`Could not allocate dedicated bitmap tag "${cleanPath}": ${plan.reason}`);
+  }
+  const report = applyInjectionWithReport(buffer, header, tagIndex, container, plan, {
+    allowEmbeddedRelocation: true
+  });
+  const newTagId = plan.resolvedTagIdByLocalIndex.get(0) ?? computeNewTagId(tagIndex.entries.length);
+  const newTagIndex = newTagId & 65535;
+  return {
+    buffer: report.buffer,
+    newTagIndex,
+    newTagId,
+    path: cleanPath
+  };
+}
+function inspectUiWidgetCanvas(buffer, header, tagIndex, widgetTagIndex, maxDepth = 3) {
+  const visited = /* @__PURE__ */ new Set();
+  const buildNode = (curTagIdx, parentTagIdx, childIdx, accOffsetX, accOffsetY, depth) => {
+    const entry = tagIndex.entries[curTagIdx];
+    if (!entry || entry.primaryClassName !== "ui_widget_definition" || entry.isExternal) return null;
+    let decoded;
+    try {
+      decoded = readTagFieldValues(buffer, header, tagIndex, curTagIdx);
+    } catch {
+      return null;
+    }
+    const typeVal = getNumberVal(decoded.fields, "widget type", 0);
+    const typeNames = ["Container", "Text Box", "Spinner List", "Column List"];
+    const nameField = findField(decoded.fields, "name");
+    const widgetName = typeof nameField?.value === "string" && nameField.value.trim() ? nameField.value.trim() : getLeafName(entry.path);
+    const localBounds = getRect2DVal(decoded.fields, "bounds");
+    const screenBounds = [
+      localBounds[0] + accOffsetY,
+      localBounds[1] + accOffsetX,
+      localBounds[2] + accOffsetY,
+      localBounds[3] + accOffsetX
+    ];
+    const bgBitm = getDepTarget(decoded.fields, "background bitmap", tagIndex);
+    const ustrDep = getDepTarget(decoded.fields, "text label unicode strings list", tagIndex);
+    const strIdx = getNumberVal(decoded.fields, "string list index", 0);
+    let resolvedTextLabel = "";
+    if (ustrDep.tagIndex !== null && strIdx !== 65535) {
+      try {
+        const ustrList = readUnicodeStringList(buffer, header, tagIndex, ustrDep.tagIndex);
+        if (ustrList.strings[strIdx]?.text) {
+          resolvedTextLabel = ustrList.strings[strIdx].text;
+        }
+      } catch {
+      }
+    }
+    const colorField = findField(decoded.fields, "text color");
+    let textColorHex = "#2896ff";
+    if (colorField && Array.isArray(colorField.value) && colorField.value.length >= 4) {
+      const r = Math.max(0, Math.min(255, Math.round((Number(colorField.value[1]) || 0) * 255)));
+      const g = Math.max(0, Math.min(255, Math.round((Number(colorField.value[2]) || 0) * 255)));
+      const b = Math.max(0, Math.min(255, Math.round((Number(colorField.value[3]) || 0) * 255)));
+      if (r > 0 || g > 0 || b > 0) {
+        textColorHex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+      }
+    }
+    const justVal = getNumberVal(decoded.fields, "justification", 0);
+    const justification = justVal === 1 ? "right" : justVal === 2 ? "center" : "left";
+    let opensWidgetTagIndex = null;
+    let opensWidgetPath = "";
+    const handlers = findField(decoded.fields, "event handlers")?.children ?? [];
+    for (const h of handlers) {
+      const targetDep = getDepTarget(h.fields, "widget tag", tagIndex);
+      if (targetDep.tagIndex !== null) {
+        opensWidgetTagIndex = targetDep.tagIndex;
+        opensWidgetPath = targetDep.path;
+        break;
+      }
+    }
+    const childrenNodes = [];
+    if (depth < maxDepth && !visited.has(curTagIdx)) {
+      visited.add(curTagIdx);
+      const childRefs = findField(decoded.fields, "child widgets")?.children ?? [];
+      childRefs.forEach((cRef, cIdx) => {
+        const cDep = getDepTarget(cRef.fields, "widget tag", tagIndex);
+        if (cDep.tagIndex === null) return;
+        const hOff = getNumberVal(cRef.fields, "horizontal offset", 0);
+        const vOff = getNumberVal(cRef.fields, "vertical offset", 0);
+        const childNode = buildNode(
+          cDep.tagIndex,
+          curTagIdx,
+          cIdx,
+          accOffsetX + hOff,
+          accOffsetY + vOff,
+          depth + 1
+        );
+        if (childNode) {
+          childNode.horizontalOffset = hOff;
+          childNode.verticalOffset = vOff;
+          childrenNodes.push(childNode);
+        }
+      });
+      visited.delete(curTagIdx);
+    }
+    return {
+      id: parentTagIdx !== null ? `w_${parentTagIdx}_c_${childIdx}_${curTagIdx}` : `root_${curTagIdx}`,
+      tagIndex: curTagIdx,
+      tagId: entry.tagId,
+      path: entry.path,
+      name: widgetName,
+      widgetType: typeNames[typeVal] ?? "Container",
+      localBounds,
+      screenBounds,
+      horizontalOffset: 0,
+      verticalOffset: 0,
+      parentTagIndex: parentTagIdx,
+      childWidgetIndex: childIdx,
+      backgroundBitmapTagIndex: bgBitm.tagIndex,
+      backgroundBitmapTagId: bgBitm.tagId,
+      backgroundBitmapPath: bgBitm.path,
+      unicodeStringListTagIndex: ustrDep.tagIndex,
+      unicodeStringListPath: ustrDep.path,
+      stringListIndex: strIdx === 65535 ? -1 : strIdx,
+      resolvedTextLabel,
+      textColorHex,
+      justification,
+      opensWidgetTagIndex,
+      opensWidgetPath,
+      children: childrenNodes
+    };
+  };
+  return buildNode(widgetTagIndex, null, null, 0, 0, 0);
+}
+function updateUiWidgetPlacement(buffer, header, tagIndex, req) {
+  if (req.bounds && req.bounds.length === 4) {
+    const clampedBounds = [
+      Math.round(req.bounds[0]),
+      Math.round(req.bounds[1]),
+      Math.round(req.bounds[2]),
+      Math.round(req.bounds[3])
+    ];
+    writeTagFieldValue(buffer, header, tagIndex, req.widgetTagIndex, "bounds", clampedBounds);
+  }
+  if (typeof req.parentTagIndex === "number" && typeof req.childWidgetIndex === "number" && req.childWidgetIndex >= 0) {
+    if (typeof req.horizontalOffset === "number") {
+      writeTagFieldValue(
+        buffer,
+        header,
+        tagIndex,
+        req.parentTagIndex,
+        `child widgets[${req.childWidgetIndex}].horizontal offset`,
+        Math.round(req.horizontalOffset)
+      );
+    }
+    if (typeof req.verticalOffset === "number") {
+      writeTagFieldValue(
+        buffer,
+        header,
+        tagIndex,
+        req.parentTagIndex,
+        `child widgets[${req.childWidgetIndex}].vertical offset`,
+        Math.round(req.verticalOffset)
+      );
+    }
+  }
+  return { ok: true };
+}
+function saveUnicodeStringListTable(buffer, header, tagIndex, ustrTagIndex, strings) {
+  let curBuf = buffer;
+  let curHeader = header;
+  let curTagIndex = tagIndex;
+  const internalized = ensureExternalTagInternalized(curBuf, curHeader, curTagIndex, ustrTagIndex);
+  curBuf = internalized.buffer;
+  curHeader = internalized.header;
+  curTagIndex = internalized.tagIndex;
+  try {
+    const existing = readUnicodeStringList(curBuf, curHeader, curTagIndex, ustrTagIndex);
+    if (!existing.isExternal && existing.strings.length === strings.length && strings.length > 0) {
+      let allFit = true;
+      for (let i = 0; i < strings.length; i++) {
+        const byteLen = Buffer.byteLength(strings[i], "utf16le");
+        if (byteLen > existing.strings[i].allocatedBytes || existing.strings[i].fileOffset <= 0) {
+          allFit = false;
+          break;
+        }
+      }
+      if (allFit) {
+        for (let i = 0; i < strings.length; i++) {
+          writeUnicodeString(curBuf, curHeader, curTagIndex, ustrTagIndex, i, strings[i]);
+        }
+        return { buffer: curBuf, header: curHeader, tagIndex: curTagIndex, entryCount: strings.length };
+      }
+    }
+  } catch {
+  }
+  const joined = strings.join("\r\n###END-STRING###\r\n") + "\r\n###END-STRING###\r\n";
+  const compiled = compileStringsIntoTag(curBuf, ustrTagIndex, joined);
+  const newHeader = parseCacheFileHeader(compiled.buffer);
+  const newTagIndex = parseTagIndex(compiled.buffer, newHeader);
+  return {
+    buffer: compiled.buffer,
+    header: newHeader,
+    tagIndex: newTagIndex,
+    entryCount: compiled.entryCount
   };
 }
 
@@ -68222,6 +70172,184 @@ function runScaleCoupledPhysics(task) {
     sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
   }
 }
+function runInspectLiveHudCatalog(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const catalog = inspectMapHudAndUiTargets(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex
+    );
+    sendResult(task.requestId, { ok: true, catalog });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runApplyLiveHudEdit(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = applyLiveHudEdit(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    const catalog = inspectMapHudAndUiTargets(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      effectiveHudTagIndex: res.effectiveHudTagIndex,
+      catalog,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runApplyLiveWeaponStatEdit(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = applyLiveWeaponStatEdit(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request
+    );
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      writtenValue: res.writtenValue,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runInjectHudElementBitmap(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
+    const res = injectHudElementBitmap(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request,
+      externalBitmaps
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    const catalog = inspectMapHudAndUiTargets(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      bitmapTagIndex: res.bitmapTagIndex,
+      bitmapTagId: res.bitmapTagId,
+      bitmapPath: res.bitmapPath,
+      width: res.width,
+      height: res.height,
+      format: res.format,
+      catalog,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runInspectUiWidgetCanvas(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const rootNode = inspectUiWidgetCanvas(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.widgetTagIndex
+    );
+    if (!rootNode) {
+      return sendResult(task.requestId, {
+        ok: false,
+        message: `Tag #${task.widgetTagIndex} is not a readable ui_widget_definition (DeLa) tag.`
+      });
+    }
+    sendResult(task.requestId, { ok: true, rootNode });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runUpdateUiWidgetPlacement(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    updateUiWidgetPlacement(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request
+    );
+    currentMap.modified = true;
+    const rootTarget = task.request.parentTagIndex ?? task.request.widgetTagIndex;
+    const rootNode = inspectUiWidgetCanvas(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      rootTarget
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      rootNode,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runSaveUnicodeStringTable(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = saveUnicodeStringListTable(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.ustrTagIndex,
+      task.strings
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      entryCount: res.entryCount,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
     if (task.type === "cancel") {
@@ -68304,6 +70432,13 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "compileFontFromGlyphAtlas") runCompileFontFromGlyphAtlas(task);
     else if (task.type === "injectProceduralWorldBsp") runInjectProceduralWorldBsp(task);
     else if (task.type === "scaleCoupledPhysics") runScaleCoupledPhysics(task);
+    else if (task.type === "inspectLiveHudCatalog") runInspectLiveHudCatalog(task);
+    else if (task.type === "applyLiveHudEdit") runApplyLiveHudEdit(task);
+    else if (task.type === "applyLiveWeaponStatEdit") runApplyLiveWeaponStatEdit(task);
+    else if (task.type === "injectHudElementBitmap") runInjectHudElementBitmap(task);
+    else if (task.type === "inspectUiWidgetCanvas") runInspectUiWidgetCanvas(task);
+    else if (task.type === "updateUiWidgetPlacement") runUpdateUiWidgetPlacement(task);
+    else if (task.type === "saveUnicodeStringTable") runSaveUnicodeStringTable(task);
   } catch (err) {
     handleTaskError(task.requestId, err);
   }

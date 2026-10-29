@@ -1754,22 +1754,70 @@ export function importLegacyTagsIntoMap(
     }
   }
 
-  // On multiplayer scenarios (Scenario.type === 1), items placed in singleplayer `Scenario.weapons`
-  // or `Scenario.equipment` blocks are garbage-collected by Halo CE after ~15 seconds and never respawn.
-  // Automatically promote unnamed SP weapon/equipment placements into `Scenario.netgame equipment`
-  // (synthesizing `.item_collection` tags for any weapons/equipment that don't have one in the map yet).
+  // Populate default pickup ammo (`rounds left` / `rounds loaded`) for any ScenarioWeapon entries
+  // where both fields were left at 0 (which otherwise causes Halo CE's `weapon_place` to strip all
+  // initial ammo from magazine-based weapons). Also, on multiplayer scenarios (`Scenario.type === 1`),
+  // promote unnamed singleplayer `Scenario.weapons` and `Scenario.equipment` placements into
+  // `Scenario.netgame equipment` (`.item_collection`) so they persist, spawn with full default ammo,
+  // and respawn every 30 seconds.
+  const defaultWeaponAmmoByPath = new Map<string, { roundsLeft: number; roundsLoaded: number }>();
+  for (const e of tagIndex.entries) {
+    if (e.primaryClassName !== 'weapon' || e.isExternal) continue;
+    const weapTagOff =
+      header.tagDataOffset + (e.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+    if (weapTagOff < 0 || weapTagOff + 1288 > currentBuf.length) continue;
+    const magCount = currentBuf.readUInt32LE(weapTagOff + 1264);
+    const magPtr = currentBuf.readUInt32LE(weapTagOff + 1268);
+    if (magCount === 0) continue;
+    const magOff = header.tagDataOffset + (magPtr - tagIndex.baseMemoryAddress);
+    if (magOff < 0 || magOff + 112 > currentBuf.length) continue;
+    const initTotal = currentBuf.readInt16LE(magOff + 6);
+    const maxLoaded = currentBuf.readInt16LE(magOff + 10);
+    if (initTotal > 0 || maxLoaded > 0) {
+      defaultWeaponAmmoByPath.set(e.path.toLowerCase(), {
+        roundsLoaded: maxLoaded,
+        roundsLeft: Math.max(0, initTotal - maxLoaded),
+      });
+    }
+  }
+
   const scenarioTags = container.tags.filter((t) => t.group === 'scenario');
   for (const t of scenarioTags) {
     const rawBuf = Buffer.from(t.data, 'base64');
     if (rawBuf.length < 1456) continue;
     const scenarioType = rawBuf.readUInt16LE(60);
-    if (scenarioType !== 1) continue; // Only multiplayer maps
 
     const equipCount = rawBuf.readUInt32LE(600);
     const equipOff = rawBuf.readUInt32LE(604);
     const weapCount = rawBuf.readUInt32LE(624);
     const weapOff = rawBuf.readUInt32LE(628);
     if (equipCount === 0 && weapCount === 0) continue;
+
+    let ammoPatchedCount = 0;
+    if (weapCount > 0 && weapOff >= 1456 && weapOff + weapCount * 92 <= rawBuf.length) {
+      for (let w = 0; w < weapCount; w++) {
+        const rowOff = weapOff + w * 92;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const roundsLeft = rawBuf.readInt16LE(rowOff + 66);
+        const roundsLoaded = rawBuf.readInt16LE(rowOff + 68);
+        if (roundsLeft === 0 && roundsLoaded === 0 && palIdx >= 0) {
+          const palDep = t.dependencies.find(
+            (d) => d.fieldPath === `${t.path}.weapon palette[${palIdx}].name`,
+          );
+          const defAmmo = palDep ? defaultWeaponAmmoByPath.get(palDep.path.toLowerCase()) : undefined;
+          if (defAmmo) {
+            rawBuf.writeInt16LE(defAmmo.roundsLeft, rowOff + 66);
+            rawBuf.writeInt16LE(defAmmo.roundsLoaded, rowOff + 68);
+            ammoPatchedCount++;
+          }
+        }
+      }
+    }
+    if (ammoPatchedCount > 0) {
+      t.data = rawBuf.toString('base64');
+    }
+
+    if (scenarioType !== 1) continue; // Promotion to netgame equipment applies to multiplayer maps only
 
     // 1. Scan target map's existing item_collection (itmc) tags to map weapon/equipment -> itmc path
     const existingItmcByItemKey = new Map<string, string>();
@@ -1809,7 +1857,7 @@ export function importLegacyTagsIntoMap(
       itmcBuf.writeUInt32LE(0, 8);
       itmcBuf.writeInt16LE(30, 12); // default spawn time = 30 seconds
       // ItemCollectionPermutation (84 bytes at +92): weight (float) at +32, item (TagDependency) at +36
-      itmcBuf.writeFloatLE(1.0, 92 + 32);
+      itmcBuf.writeFloatLE(100.0, 92 + 32);
       const itemFourCC = fourCCFromString(group === 'weapon' ? 'weap' : 'eqip');
       itmcBuf.writeUInt32LE(itemFourCC, 92 + 36);
       itmcBuf.writeUInt32LE(0, 92 + 40); // pathPointer
@@ -1973,7 +2021,7 @@ export function importLegacyTagsIntoMap(
         combinedNetgameBuf.writeInt16LE(0, entryOff + 8); // type 2
         combinedNetgameBuf.writeInt16LE(0, entryOff + 10); // type 3
         combinedNetgameBuf.writeInt16LE(0, entryOff + 12); // team index = 0
-        combinedNetgameBuf.writeInt16LE(0, entryOff + 14); // spawn time = 0 (use item_collection default / 30s)
+        combinedNetgameBuf.writeInt16LE(30, entryOff + 14); // spawn time = 30 seconds
         combinedNetgameBuf.writeUInt32LE(0xffffffff, entryOff + 16); // unknown_ffffffff
         combinedNetgameBuf.writeFloatLE(entry.x, entryOff + 64);
         combinedNetgameBuf.writeFloatLE(entry.y, entryOff + 68);

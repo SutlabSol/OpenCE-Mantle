@@ -2458,6 +2458,10 @@ function buildMenu() {
         { label: 'Swap BSP...', click: () => mainWindow?.webContents.send('menu:action', 'swap-bsp') },
         { label: 'Compare With Another .map File...', click: () => mainWindow?.webContents.send('menu:action', 'compare-maps') },
         { type: 'separator' },
+        { label: 'Live HUD Editing & Weapon Tag Editor...', click: () => mainWindow?.webContents.send('menu:action', 'live-hud-editor') },
+        { label: 'Inject / Replace HUD Bitmap...', click: () => mainWindow?.webContents.send('menu:action', 'hud-bitmap-injector') },
+        { label: 'UI.map Menu (DeLa) & String (ustr) Studio...', click: () => mainWindow?.webContents.send('menu:action', 'ui-map-studio') },
+        { type: 'separator' },
         {
           label: 'Identify Resource Maps',
           submenu: [
@@ -3944,6 +3948,118 @@ app.whenReady().then(() => {
       return res;
     },
   );
+
+  ipcMain.handle('hud:inspectCatalog', async () => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'inspectLiveHudCatalog' },
+      sendLog,
+    );
+    return promise;
+  });
+
+  ipcMain.handle('hud:applyEdit', async (_evt, request: any) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'applyLiveHudEdit', request },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send('map:updated', res.map);
+    }
+    return res;
+  });
+
+  ipcMain.handle('hud:applyWeaponStatEdit', async (_evt, request: any) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'applyLiveWeaponStatEdit', request },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send('map:updated', res.map);
+    }
+    return res;
+  });
+
+  ipcMain.handle('hud:injectElementBitmap', async (_evt, request: any) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const settings = getSettings();
+    const { promise } = sendWorkerRequest<any>(
+      {
+        type: 'injectHudElementBitmap',
+        request,
+        bitmapsPath: settings.resourceMaps.bitmaps ?? undefined,
+      },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send('map:updated', res.map);
+      sendLog(
+        'info',
+        `Injected custom HUD bitmap (${res.width}×${res.height}) into map-local tag "${res.bitmapPath}". bitmaps.map was not modified.`,
+      );
+    }
+    return res;
+  });
+
+  ipcMain.handle('ui:inspectWidgetCanvas', async (_evt, widgetTagIndex: number) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'inspectUiWidgetCanvas', widgetTagIndex },
+      sendLog,
+    );
+    return promise;
+  });
+
+  ipcMain.handle('ui:updateWidgetPlacement', async (_evt, request: any) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'updateUiWidgetPlacement', request },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send('map:updated', res.map);
+    }
+    return res;
+  });
+
+  ipcMain.handle('ui:saveUnicodeStringTable', async (_evt, ustrTagIndex: number, strings: string[]) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'saveUnicodeStringTable', ustrTagIndex, strings },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send('map:updated', res.map);
+      sendLog('info', `Saved ${res.entryCount} Unicode string(s) into ustr tag #${ustrTagIndex}.`);
+    }
+    return res;
+  });
 
   ipcMain.handle('app:checkForUpdates', async () => {
     const curVer = getAppDisplayVersion();
