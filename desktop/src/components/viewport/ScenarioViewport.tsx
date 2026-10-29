@@ -312,6 +312,12 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
   const [walkMode, setWalkMode] = useState<boolean>(false);
   const walkModeRef = useRef<boolean>(false);
   walkModeRef.current = walkMode;
+  const [autoSnapToGround, setAutoSnapToGround] = useState<boolean>(true);
+  const autoSnapToGroundRef = useRef<boolean>(true);
+  autoSnapToGroundRef.current = autoSnapToGround;
+  const prevSelectedIdsRef = useRef<string[]>([]);
+  const prevAutoSnapRef = useRef<boolean>(true);
+  const sessionTouchedIdsRef = useRef<Set<string>>(new Set());
   const collisionWorldRef = useRef<SourceCollisionWorld | null>(null);
   const walkStateRef = useRef<SourceWalkState>({
     position: [0, 0, 5],
@@ -1026,6 +1032,47 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     [],
   );
 
+  // Ground-bound object kinds that follow terrain when dragged and auto-snap when left unselected in the air
+  const GROUND_BOUND_KINDS = useMemo(() => new Set<string>(['vehicle', 'weapon', 'equipment', 'spawn']), []);
+
+  // Samples the BSP ground surface height (Halo Z) at Halo horizontal coordinates (hx, hy) near reference height refZ.
+  // Filters for upward-facing BSP surfaces (normal Z >= 0.2) to ignore ceilings and steep vertical walls.
+  const sampleGroundHeightAt = useCallback((hx: number, hy: number, refZ: number): number | null => {
+    if (submeshMeshesRef.current.length === 0) return null;
+    const bspMeshesList = submeshMeshesRef.current
+      .filter((s) => s.mesh.parent?.visible !== false)
+      .map((s) => s.mesh);
+    if (bspMeshesList.length === 0) return null;
+
+    sceneRef.current?.updateMatrixWorld(true);
+
+    // World space conversion:
+    // Halo +X is World +X, Halo +Z (up) is World +Y, Halo +Y is World -Z
+    // Cast a vertical downward ray along World -Y (Halo -Z)
+    const worldOrigin = new THREE.Vector3(hx, Math.max(refZ + 100, 200), -hy);
+    const worldDir = new THREE.Vector3(0, -1, 0);
+    const raycaster = new THREE.Raycaster(worldOrigin, worldDir, 0.001, 2000);
+    const hits = raycaster.intersectObjects(bspMeshesList, false);
+
+    // Filter for upward-facing ground surfaces (Halo vertex normal Z >= 0.2) to exclude ceilings and steep walls
+    const groundHits = hits.filter((h) => {
+      if (!h.face) return true;
+      const normAttr = (h.object as THREE.Mesh).geometry?.getAttribute('normal');
+      if (!normAttr) return true;
+      const vnz = (normAttr.getZ(h.face.a) + normAttr.getZ(h.face.b) + normAttr.getZ(h.face.c)) / 3;
+      return vnz >= 0.2;
+    });
+
+    if (groundHits.length === 0) return null;
+
+    // Prefer ground at or below the object (with 4 unit upward tolerance for terrain slopes & sunken objects)
+    const belowHits = groundHits.filter((h) => h.point.y <= refZ + 4.0);
+    const bestHit = (belowHits.length > 0 ? belowHits : groundHits)
+      .sort((a, b) => Math.abs(a.point.y - refZ) - Math.abs(b.point.y - refZ))[0];
+
+    return bestHit.point.y + 0.02; // World Y is Halo Z (height)
+  }, []);
+
   // Ground Snapping: casts a ray straight down from above the object onto the BSP ground geometry
   // Can snap upwards (for objects sunken into terrain) or downwards (for hovering objects), while ignoring ceilings
   const snapSelectedToGround = useCallback(async () => {
@@ -1035,56 +1082,79 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       : (selectedObjectId ? [selectedObjectId] : []);
     if (targetIds.length === 0) return;
 
-    const bspMeshesList = submeshMeshesRef.current
-      .filter((s) => s.mesh.parent?.visible !== false)
-      .map((s) => s.mesh);
-    if (bspMeshesList.length === 0) return;
-
-    sceneRef.current?.updateMatrixWorld(true);
-
     for (const id of targetIds) {
       const placement = scenarioData.objects.find((o) => o.id === id);
       if (!placement) continue;
 
-      const [curX, curY, curZ] = placement.position;
-      // World space conversion:
-      // Halo +X is World +X, Halo +Z (up) is World +Y, Halo +Y is World -Z
-      // Cast a vertical downward ray along World -Y (Halo -Z)
-      const worldOrigin = new THREE.Vector3(curX, Math.max(curZ + 100, 200), -curY);
-      const worldDir = new THREE.Vector3(0, -1, 0);
-      const raycaster = new THREE.Raycaster(worldOrigin, worldDir, 0.001, 2000);
+      const targetGroup = sceneRef.current?.getObjectByName(id);
+      const curX = targetGroup ? targetGroup.position.x : placement.position[0];
+      const curY = targetGroup ? targetGroup.position.y : placement.position[1];
+      const curZ = targetGroup ? targetGroup.position.z : placement.position[2];
 
-      const hits = raycaster.intersectObjects(bspMeshesList, false);
-
-      // Filter for upward-facing ground surfaces (Halo vertex normal Z >= 0.2) to exclude ceilings and steep walls
-      const groundHits = hits.filter((h) => {
-        if (!h.face) return true;
-        const normAttr = (h.object as THREE.Mesh).geometry?.getAttribute('normal');
-        if (!normAttr) return true;
-        const vnz = (normAttr.getZ(h.face.a) + normAttr.getZ(h.face.b) + normAttr.getZ(h.face.c)) / 3;
-        return vnz >= 0.2;
-      });
-
-      if (groundHits.length > 0) {
-        // Prefer ground at or below the object (with 3 unit tolerance for sunken objects)
-        const belowHits = groundHits.filter((h) => h.point.y <= curZ + 3.0);
-        const bestHit = (belowHits.length > 0 ? belowHits : groundHits)
-          .sort((a, b) => Math.abs(a.point.y - curZ) - Math.abs(b.point.y - curZ))[0];
-
-        const groundZ = bestHit.point.y + 0.02; // World Y is Halo Z (height)
-
-        const targetGroup = sceneRef.current?.getObjectByName(id);
+      const groundZ = sampleGroundHeightAt(curX, curY, curZ);
+      if (groundZ !== null) {
         if (targetGroup) {
           targetGroup.position.z = groundZ;
         }
-
         await handleUpdatePlacement(id, {
           position: [curX, curY, groundZ],
         });
       }
     }
     selectionBoxHelperRef.current?.update();
-  }, [selectedObjectId, scenarioData, handleUpdatePlacement]);
+  }, [selectedObjectId, scenarioData, handleUpdatePlacement, sampleGroundHeightAt]);
+
+  // Auto-Snap to Ground when ground-bound items (spawns, weapons, vehicles, equipment) become UNSELECTED
+  // Important: never auto-snap while an item is currently selected!
+  useEffect(() => {
+    for (const id of selectedObjectIds) {
+      sessionTouchedIdsRef.current.add(id);
+    }
+
+    const newlyUnselectedIds = prevSelectedIdsRef.current.filter((id) => !selectedObjectIds.includes(id));
+    const toggledOn = autoSnapToGround && !prevAutoSnapRef.current;
+
+    prevSelectedIdsRef.current = [...selectedObjectIds];
+    prevAutoSnapRef.current = autoSnapToGround;
+
+    if (!autoSnapToGround || !scenarioData) return;
+
+    const candidateIds = new Set<string>(newlyUnselectedIds);
+    if (toggledOn) {
+      for (const id of sessionTouchedIdsRef.current) {
+        if (!selectedObjectIds.includes(id)) {
+          candidateIds.add(id);
+        }
+      }
+    }
+
+    if (candidateIds.size === 0) return;
+
+    void (async () => {
+      for (const id of candidateIds) {
+        // Double-check the item is still unselected
+        if (selectedObjectIdsRef.current.includes(id)) continue;
+
+        const placement = scenarioData.objects.find((o) => o.id === id);
+        if (!placement || !GROUND_BOUND_KINDS.has(placement.kind)) continue;
+
+        const targetGroup = sceneRef.current?.getObjectByName(id);
+        const curX = targetGroup ? targetGroup.position.x : placement.position[0];
+        const curY = targetGroup ? targetGroup.position.y : placement.position[1];
+        const curZ = targetGroup ? targetGroup.position.z : placement.position[2];
+
+        const groundZ = sampleGroundHeightAt(curX, curY, curZ);
+        if (groundZ !== null && Math.abs(curZ - groundZ) > 0.03) {
+          if (targetGroup) {
+            targetGroup.position.z = groundZ;
+          }
+          await handleUpdatePlacement(id, {
+            position: [curX, curY, groundZ],
+          });
+        }
+      }
+    })();
+  }, [selectedObjectIds, autoSnapToGround, scenarioData, GROUND_BOUND_KINDS, sampleGroundHeightAt, handleUpdatePlacement]);
 
   const callbacksRef = useRef({
     handleUpdatePlacement,
@@ -1095,6 +1165,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     handlePastePlacement,
     handleUndo,
     snapSelectedToGround,
+    sampleGroundHeightAt,
     focusOnObject,
     frameScene,
   });
@@ -1107,6 +1178,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     handlePastePlacement,
     handleUndo,
     snapSelectedToGround,
+    sampleGroundHeightAt,
     focusOnObject,
     frameScene,
   };
@@ -2593,10 +2665,41 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       }
     });
 
+    transformControls.addEventListener('objectChange', () => {
+      const attached = transformControls.object;
+      if (!attached || !attached.userData?.id) return;
+      const objKind = attached.userData.kind as string | undefined;
+      if (
+        objKind &&
+        (objKind === 'vehicle' || objKind === 'weapon' || objKind === 'equipment' || objKind === 'spawn') &&
+        transformControls.mode === 'translate'
+      ) {
+        const groundZ = callbacksRef.current.sampleGroundHeightAt(
+          attached.position.x,
+          attached.position.y,
+          attached.position.z,
+        );
+        if (groundZ !== null) {
+          const activeAxis = (transformControls as unknown as { axis?: string | null }).axis || '';
+          if (activeAxis.includes('Z')) {
+            // Vertical Z drag while selected: allow lifting into the air, but never allow pushing below the ground
+            if (attached.position.z < groundZ) {
+              attached.position.z = groundZ;
+            }
+          } else {
+            // Horizontal X / Y / XY drag: force follow the ground terrain contour
+            attached.position.z = groundZ;
+          }
+        }
+      }
+      selectionBoxHelperRef.current?.update();
+    });
+
     transformControls.addEventListener('mouseUp', async () => {
       const attached = transformControls.object;
       if (!attached || !attached.userData?.id) return;
       const primaryId = attached.userData.id as string;
+      const activeAxis = (transformControls as unknown as { axis?: string | null }).axis || '';
 
       const start = dragStartPositionsRef.current.get(primaryId);
       const deltaPos = start ? attached.position.clone().sub(start.pos) : new THREE.Vector3();
@@ -2634,6 +2737,20 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           }
           if (id !== primaryId && start && myStart) {
             grp.position.copy(myStart.pos.clone().add(deltaPos));
+            const grpKind = grp.userData?.kind as string | undefined;
+            if (
+              grpKind &&
+              (grpKind === 'vehicle' || grpKind === 'weapon' || grpKind === 'equipment' || grpKind === 'spawn')
+            ) {
+              const gZ = callbacksRef.current.sampleGroundHeightAt(grp.position.x, grp.position.y, grp.position.z);
+              if (gZ !== null) {
+                if (activeAxis.includes('Z')) {
+                  if (grp.position.z < gZ) grp.position.z = gZ;
+                } else {
+                  grp.position.z = gZ;
+                }
+              }
+            }
           }
           const newPos: [number, number, number] = [grp.position.x, grp.position.y, grp.position.z];
           const euler = new THREE.Euler().setFromQuaternion(grp.quaternion, 'XYZ');
@@ -2933,7 +3050,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
         return;
       }
 
-      // 3. MMB drag: drag selected item around on horizontal plane
+      // 3. MMB drag: drag selected item around on horizontal plane (ground-bound items follow terrain contour)
       if (isMiddleDraggingRef.current && targetGroup) {
         dragHasMovedRef.current = true;
         const yaw = camEulerRef.current.yaw;
@@ -2941,6 +3058,20 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
         const moveFwd = -e.movementY * 0.05;
         targetGroup.position.x += moveRight * Math.cos(yaw) + moveFwd * (-Math.sin(yaw));
         targetGroup.position.y += moveRight * Math.sin(yaw) + moveFwd * Math.cos(yaw);
+        const objKind = targetGroup.userData?.kind as string | undefined;
+        if (
+          objKind &&
+          (objKind === 'vehicle' || objKind === 'weapon' || objKind === 'equipment' || objKind === 'spawn')
+        ) {
+          const groundZ = callbacksRef.current.sampleGroundHeightAt(
+            targetGroup.position.x,
+            targetGroup.position.y,
+            targetGroup.position.z,
+          );
+          if (groundZ !== null) {
+            targetGroup.position.z = groundZ;
+          }
+        }
         selectionBoxHelperRef.current?.update();
         return;
       }
@@ -3662,6 +3793,28 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
             title="Center camera on map (R key)"
           >
             [R] Frame Scene
+          </button>
+
+          {/* Auto-Snap Unselected Ground-Bound Items (Spawns/Weapons/Vehicles/Equipment) to Ground */}
+          <button
+            data-testid="viewport-auto-snap-ground-btn"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              setAutoSnapToGround((prev) => !prev);
+            }}
+            style={{
+              background: autoSnapToGround ? 'rgba(0, 229, 255, 0.18)' : 'var(--bg-panel)',
+              color: autoSnapToGround ? 'var(--accent-cyan)' : 'var(--text-primary)',
+              border: `1px solid ${autoSnapToGround ? 'var(--accent-cyan)' : 'var(--border)'}`,
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Auto-snap unselected spawns, weapons, vehicles, and equipment left in the air to the ground (selected items stay where placed until unselected)"
+          >
+            {autoSnapToGround ? '🧲 Auto-Snap: ON' : '🧲 Auto-Snap: OFF'}
           </button>
 
           {/* Guilty Spark Item 2: Walk Mode (Master Chief Collision + Gravity + Jump) */}
