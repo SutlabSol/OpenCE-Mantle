@@ -289,6 +289,8 @@ export interface AppSettings {
   openCeExecutablePath?: string | null;
   /** Whether to automatically check GitHub Releases for a newer version when the app launches (default: true). */
   checkForUpdatesOnLaunch?: boolean;
+  /** Whether to automatically download a newer release in the background once detected (default: false). */
+  autoDownloadUpdates?: boolean;
   /** Version string the user clicked "Skip This Version" on, if any. */
   skippedUpdateVersion?: string | null;
 }
@@ -298,6 +300,35 @@ export interface UpdateReleaseAsset {
   browserDownloadUrl: string;
   sizeBytes: number;
 }
+
+export type UpdateDownloadStage = 'downloading' | 'ready' | 'applying' | 'error';
+
+export interface UpdateDownloadProgressEvent {
+  stage: UpdateDownloadStage;
+  version: string;
+  assetName: string;
+  installMode: 'installer' | 'portable';
+  percent: number;
+  transferredBytes: number;
+  totalBytes: number;
+  bytesPerSecond: number;
+  downloadedFilePath?: string;
+  error?: string;
+}
+
+export type DownloadUpdateResult =
+  | {
+      ok: true;
+      version: string;
+      assetName: string;
+      installMode: 'installer' | 'portable';
+      downloadedFilePath: string;
+      sizeBytes: number;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
 
 export type UpdateCheckResult =
   | {
@@ -1577,10 +1608,26 @@ export interface OpenceApi {
   checkForUpdates?(): Promise<UpdateCheckResult>;
   /** Toggle whether OpenCE Mantle checks for updates automatically on launch. */
   setCheckForUpdatesOnLaunch?(enabled: boolean): Promise<{ ok: true; checkForUpdatesOnLaunch: boolean }>;
+  /** Toggle whether OpenCE Mantle automatically downloads detected updates in the background. */
+  setAutoDownloadUpdates?(enabled: boolean): Promise<{ ok: true; autoDownloadUpdates: boolean }>;
   /** Record a release version string to skip automatic prompts for (or null to clear). */
   setSkippedUpdateVersion?(version: string | null): Promise<{ ok: true; skippedUpdateVersion: string | null }>;
   /** Open an external GitHub release / download URL in the system default browser. */
   openExternalUrl?(url: string): Promise<{ ok: boolean; message?: string }>;
+  /** Stream and stage the update binary (Installer or Portable) in the background with live progress events. */
+  downloadUpdate?(options?: {
+    mode?: 'auto' | 'installer' | 'portable';
+    assetUrl?: string;
+    assetName?: string;
+    version?: string;
+  }): Promise<DownloadUpdateResult>;
+  /** Apply the staged update binary (silent NSIS install or self-replacing portable swap) and restart OpenCE Mantle. */
+  applyUpdateAndRestart?(
+    downloadedFilePath?: string,
+    installMode?: 'installer' | 'portable',
+  ): Promise<{ ok: boolean; message?: string }>;
+  /** Subscribe to live download progress events from the background updater. */
+  onUpdateDownloadProgress?(cb: (evt: UpdateDownloadProgressEvent) => void): () => void;
 }
 
 declare global {

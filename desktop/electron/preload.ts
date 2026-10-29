@@ -248,9 +248,19 @@ const api: OpenceApi = {
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
   setCheckForUpdatesOnLaunch: (enabled: boolean) =>
     ipcRenderer.invoke('app:setCheckForUpdatesOnLaunch', enabled),
+  setAutoDownloadUpdates: (enabled: boolean) =>
+    ipcRenderer.invoke('app:setAutoDownloadUpdates', enabled),
   setSkippedUpdateVersion: (version: string | null) =>
     ipcRenderer.invoke('app:setSkippedUpdateVersion', version),
   openExternalUrl: (url: string) => ipcRenderer.invoke('app:openExternalUrl', url),
+  downloadUpdate: (options) => ipcRenderer.invoke('app:downloadUpdate', options),
+  applyUpdateAndRestart: (downloadedFilePath, installMode) =>
+    ipcRenderer.invoke('app:applyUpdateAndRestart', downloadedFilePath, installMode),
+  onUpdateDownloadProgress: (cb) => {
+    const listener = (_: unknown, data: any) => cb(data);
+    ipcRenderer.on('app:updateDownloadProgress', listener);
+    return () => ipcRenderer.removeListener('app:updateDownloadProgress', listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('opence', api);

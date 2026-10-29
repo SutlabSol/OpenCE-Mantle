@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   openCeDirectory: null,
   openCeExecutablePath: null,
   checkForUpdatesOnLaunch: true,
+  autoDownloadUpdates: false,
   skippedUpdateVersion: null,
 };
 
@@ -69,6 +70,7 @@ export function getSettings(): AppSettings {
       openCeDirectory: typeof parsed.openCeDirectory === "string" ? parsed.openCeDirectory : detectOpenCeDirectory(),
       openCeExecutablePath: typeof parsed.openCeExecutablePath === "string" ? parsed.openCeExecutablePath : null,
       checkForUpdatesOnLaunch: typeof parsed.checkForUpdatesOnLaunch === "boolean" ? parsed.checkForUpdatesOnLaunch : true,
+      autoDownloadUpdates: typeof parsed.autoDownloadUpdates === "boolean" ? parsed.autoDownloadUpdates : false,
       skippedUpdateVersion: typeof parsed.skippedUpdateVersion === "string" ? parsed.skippedUpdateVersion : null,
     };
 
@@ -164,6 +166,14 @@ export function setCheckForUpdatesOnLaunch(enabled: boolean): void {
   writeSettings({
     ...current,
     checkForUpdatesOnLaunch: Boolean(enabled),
+  });
+}
+
+export function setAutoDownloadUpdates(enabled: boolean): void {
+  const current = getSettings();
+  writeSettings({
+    ...current,
+    autoDownloadUpdates: Boolean(enabled),
   });
 }
 

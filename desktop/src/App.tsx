@@ -31,7 +31,12 @@ import BuildObjectTagDialog from './components/BuildObjectTagDialog';
 import ScriptEditorDialog from './components/ScriptEditorDialog';
 import ModdingStudioDialog from './components/ModdingStudioDialog';
 import MapCompareDialog from './components/MapCompareDialog';
-import type { BatchExtractPreflightResult, HaloBitmapVersion, UpdateCheckResult } from '../electron/shared-types';
+import type {
+  BatchExtractPreflightResult,
+  HaloBitmapVersion,
+  UpdateCheckResult,
+  UpdateDownloadProgressEvent,
+} from '../electron/shared-types';
 
 /** Selections larger than this get a confirmation before walking dependencies (can be slow). */
 const LARGE_SELECTION_CONFIRM_THRESHOLD = 200;
@@ -72,6 +77,7 @@ export default function App() {
   } | null>(null);
   const [skippedPromptMapPaths, setSkippedPromptMapPaths] = useState<Set<string>>(new Set());
   const [updateBanner, setUpdateBanner] = useState<Extract<UpdateCheckResult, { ok: true }> | null>(null);
+  const [updateDownloadProgress, setUpdateDownloadProgress] = useState<UpdateDownloadProgressEvent | null>(null);
   const { logs, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
@@ -129,6 +135,32 @@ export default function App() {
     }
   };
 
+  const handleDownloadAndInstallUpdate = async (autoRestart: boolean) => {
+    if (typeof window.opence.downloadUpdate !== 'function') return;
+    const dlRes = await window.opence.downloadUpdate({
+      mode: 'auto',
+      version: updateBanner?.latestVersion,
+    });
+    if (dlRes.ok && autoRestart && typeof window.opence.applyUpdateAndRestart === 'function') {
+      await window.opence.applyUpdateAndRestart(dlRes.downloadedFilePath, dlRes.installMode);
+    }
+  };
+
+  const handleApplyReadyUpdate = async () => {
+    if (typeof window.opence.applyUpdateAndRestart !== 'function') return;
+    await window.opence.applyUpdateAndRestart(
+      updateDownloadProgress?.downloadedFilePath,
+      updateDownloadProgress?.installMode,
+    );
+  };
+
+  useEffect(() => {
+    if (typeof window.opence.onUpdateDownloadProgress !== 'function') return;
+    return window.opence.onUpdateDownloadProgress((evt) => {
+      setUpdateDownloadProgress(evt);
+    });
+  }, []);
+
   // Automatic startup update check (honors Settings > General > Check for updates on launch)
   useEffect(() => {
     if (typeof window.opence.checkForUpdates !== 'function') return;
@@ -144,6 +176,9 @@ export default function App() {
         if (cancelled || !res.ok) return;
         if (res.updateAvailable && res.latestVersion !== settings?.skippedUpdateVersion) {
           setUpdateBanner(res);
+          if (settings?.autoDownloadUpdates && typeof window.opence.downloadUpdate === 'function') {
+            void window.opence.downloadUpdate({ mode: 'auto', version: res.latestVersion });
+          }
         }
       } catch {
         // Silent failure on startup background check
@@ -373,69 +408,149 @@ export default function App() {
             justifyContent: 'space-between',
             gap: 12,
             padding: '7px 14px',
-            background: 'linear-gradient(90deg, rgba(0, 194, 255, 0.16), rgba(56, 189, 248, 0.08))',
-            borderBottom: '1px solid rgba(0, 194, 255, 0.35)',
+            background:
+              updateDownloadProgress?.stage === 'ready'
+                ? 'linear-gradient(90deg, rgba(74, 222, 128, 0.18), rgba(16, 185, 129, 0.08))'
+                : 'linear-gradient(90deg, rgba(0, 194, 255, 0.16), rgba(56, 189, 248, 0.08))',
+            borderBottom: `1px solid ${
+              updateDownloadProgress?.stage === 'ready' ? 'rgba(74, 222, 128, 0.4)' : 'rgba(0, 194, 255, 0.35)'
+            }`,
             fontSize: 12,
             color: 'var(--text-primary)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
             <span
               style={{
-                background: 'var(--accent-cyan)',
+                background: updateDownloadProgress?.stage === 'ready' ? '#4ade80' : 'var(--accent-cyan)',
                 color: '#06202c',
                 fontWeight: 700,
                 fontSize: 10.5,
                 padding: '2px 7px',
                 borderRadius: 3,
                 textTransform: 'uppercase',
+                whiteSpace: 'nowrap',
               }}
             >
-              Update Available
+              {updateDownloadProgress?.stage === 'ready'
+                ? 'Update Ready'
+                : updateDownloadProgress?.stage === 'downloading'
+                  ? `Downloading ${updateDownloadProgress.percent}%`
+                  : 'Update Available'}
             </span>
-            <span>
-              <strong>{updateBanner.releaseName}</strong> (v{updateBanner.latestVersion}) is now available on GitHub!{' '}
-              <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
-                (You are running v{updateBanner.currentVersion})
+
+            {updateDownloadProgress?.stage === 'downloading' ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, maxWidth: 520 }}>
+                <div
+                  style={{
+                    flex: 1,
+                    height: 7,
+                    background: 'rgba(0,0,0,0.45)',
+                    borderRadius: 4,
+                    overflow: 'hidden',
+                    border: '1px solid rgba(0, 194, 255, 0.3)',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${Math.max(3, updateDownloadProgress.percent)}%`,
+                      height: '100%',
+                      background: 'var(--accent-cyan)',
+                      transition: 'width 0.12s linear',
+                    }}
+                  />
+                </div>
+                <span style={{ fontSize: 11, fontFamily: 'var(--mono-font)', color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
+                  {(updateDownloadProgress.transferredBytes / (1024 * 1024)).toFixed(1)}
+                  {updateDownloadProgress.totalBytes > 0
+                    ? ` / ${(updateDownloadProgress.totalBytes / (1024 * 1024)).toFixed(1)} MB`
+                    : ' MB'}{' '}
+                  ({(updateDownloadProgress.bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s)
+                </span>
+              </div>
+            ) : updateDownloadProgress?.stage === 'ready' ? (
+              <span>
+                <strong>{updateBanner.releaseName}</strong> (v{updateBanner.latestVersion}) has been downloaded and verified. Click{' '}
+                <strong>Restart & Apply Update</strong> to install!
               </span>
-            </span>
+            ) : (
+              <span>
+                <strong>{updateBanner.releaseName}</strong> (v{updateBanner.latestVersion}) is now available!{' '}
+                <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
+                  (Current: v{updateBanner.currentVersion})
+                </span>
+                {updateDownloadProgress?.stage === 'error' && (
+                  <span style={{ color: '#f87171', marginLeft: 8, fontSize: 11 }}>
+                    (Download error: {updateDownloadProgress.error})
+                  </span>
+                )}
+              </span>
+            )}
           </div>
+
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {updateBanner.installerAsset && (
+            {updateDownloadProgress?.stage === 'ready' ? (
               <button
-                data-testid="update-banner-download-installer"
-                onClick={() => void window.opence.openExternalUrl?.(updateBanner.installerAsset!.browserDownloadUrl)}
+                data-testid="update-banner-restart-apply"
+                onClick={() => void handleApplyReadyUpdate()}
                 style={{
-                  background: 'var(--accent-cyan)',
-                  color: '#06202c',
+                  background: '#4ade80',
+                  color: '#052e16',
                   border: 'none',
                   borderRadius: 3,
-                  padding: '4px 10px',
-                  fontSize: 11,
+                  padding: '4px 12px',
+                  fontSize: 11.5,
                   fontWeight: 700,
                   cursor: 'pointer',
                 }}
               >
-                Download Installer (.exe)
+                🚀 Restart & Apply Update
               </button>
-            )}
-            {updateBanner.portableAsset && (
-              <button
-                data-testid="update-banner-download-portable"
-                onClick={() => void window.opence.openExternalUrl?.(updateBanner.portableAsset!.browserDownloadUrl)}
-                style={{
-                  background: 'rgba(255,255,255,0.08)',
-                  color: 'var(--text-primary)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 3,
-                  padding: '4px 10px',
-                  fontSize: 11,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
-              >
-                Download Portable (.exe)
-              </button>
+            ) : updateDownloadProgress?.stage === 'downloading' ? (
+              <span style={{ fontSize: 11, color: 'var(--accent-cyan)', fontWeight: 600 }}>
+                Staging {updateDownloadProgress.assetName}...
+              </span>
+            ) : (
+              <>
+                {(updateBanner.installerAsset || updateBanner.portableAsset) && (
+                  <>
+                    <button
+                      data-testid="update-banner-install-now"
+                      onClick={() => void handleDownloadAndInstallUpdate(true)}
+                      style={{
+                        background: 'var(--accent-cyan)',
+                        color: '#06202c',
+                        border: 'none',
+                        borderRadius: 3,
+                        padding: '4px 11px',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                      title="Download update in-app and automatically restart into the new version"
+                    >
+                      ⚡ Update & Restart Now
+                    </button>
+                    <button
+                      data-testid="update-banner-stage-bg"
+                      onClick={() => void handleDownloadAndInstallUpdate(false)}
+                      style={{
+                        background: 'rgba(255,255,255,0.08)',
+                        color: 'var(--text-primary)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 3,
+                        padding: '4px 10px',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                      title="Download in the background while you keep working, then restart whenever you're ready"
+                    >
+                      Download in Background
+                    </button>
+                  </>
+                )}
+              </>
             )}
             <button
               data-testid="update-banner-view-github"

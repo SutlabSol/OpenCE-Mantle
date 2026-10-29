@@ -5,6 +5,7 @@ import type {
   VersionResourceMaps,
   BitmapIdentificationResult,
   UpdateCheckResult,
+  UpdateDownloadProgressEvent,
 } from '../../electron/shared-types';
 
 interface Props {
@@ -73,9 +74,11 @@ export default function SettingsDialog({ onClose }: Props) {
   const [inspectResults, setInspectResults] = useState<Record<string, BitmapIdentificationResult | null>>({});
   const [inspectingKey, setInspectingKey] = useState<string | null>(null);
   const [checkUpdatesOnLaunch, setCheckUpdatesOnLaunch] = useState<boolean>(true);
+  const [autoDownloadUpdates, setAutoDownloadUpdates] = useState<boolean>(false);
   const [appVersion, setAppVersion] = useState<string>('0.6.8');
   const [checkingUpdates, setCheckingUpdates] = useState<boolean>(false);
   const [updateCheckResult, setUpdateCheckResult] = useState<UpdateCheckResult | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<UpdateDownloadProgressEvent | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -87,15 +90,40 @@ export default function SettingsDialog({ onClose }: Props) {
       if (s && typeof s.checkForUpdatesOnLaunch === 'boolean') {
         setCheckUpdatesOnLaunch(s.checkForUpdatesOnLaunch);
       }
+      if (s && typeof s.autoDownloadUpdates === 'boolean') {
+        setAutoDownloadUpdates(s.autoDownloadUpdates);
+      }
     }).catch(() => {});
     window.opence.getAppVersion?.().then((v) => {
       if (v) setAppVersion(v);
     }).catch(() => {});
+    const offProgress = window.opence.onUpdateDownloadProgress?.((evt) => {
+      setDownloadProgress(evt);
+    });
+    return () => {
+      offProgress?.();
+    };
   }, []);
 
   const handleToggleAutoUpdate = async (enabled: boolean) => {
     setCheckUpdatesOnLaunch(enabled);
     await window.opence.setCheckForUpdatesOnLaunch?.(enabled);
+  };
+
+  const handleToggleAutoDownload = async (enabled: boolean) => {
+    setAutoDownloadUpdates(enabled);
+    await window.opence.setAutoDownloadUpdates?.(enabled);
+  };
+
+  const handleDownloadAndRestartFromSettings = async () => {
+    if (!window.opence.downloadUpdate) return;
+    const dlRes = await window.opence.downloadUpdate({
+      mode: 'auto',
+      version: updateCheckResult && updateCheckResult.ok ? updateCheckResult.latestVersion : undefined,
+    });
+    if (dlRes.ok && window.opence.applyUpdateAndRestart) {
+      await window.opence.applyUpdateAndRestart(dlRes.downloadedFilePath, dlRes.installMode);
+    }
   };
 
   const handleCheckUpdatesNow = async () => {
@@ -401,45 +429,124 @@ export default function SettingsDialog({ onClose }: Props) {
                   </button>
                 </div>
 
-                <label
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '10px 12px',
-                    background: 'rgba(255,255,255,0.03)',
-                    borderRadius: 4,
-                    border: '1px solid var(--border)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <input
-                      type="checkbox"
-                      data-testid="settings-toggle-auto-update"
-                      checked={checkUpdatesOnLaunch}
-                      onChange={(e) => void handleToggleAutoUpdate(e.target.checked)}
-                      style={{ width: 15, height: 15, accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
-                    />
-                    <div>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                        Check for updates automatically when OpenCE Mantle launches
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-                        Disable this if you work offline or prefer to check for new releases manually.
-                      </div>
-                    </div>
-                  </div>
-                  <span
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <label
                     style={{
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: checkUpdatesOnLaunch ? '#4ade80' : 'var(--text-dim)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '10px 12px',
+                      background: 'rgba(255,255,255,0.03)',
+                      borderRadius: 4,
+                      border: '1px solid var(--border)',
+                      cursor: 'pointer',
                     }}
                   >
-                    {checkUpdatesOnLaunch ? '● Enabled' : '○ Disabled'}
-                  </span>
-                </label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <input
+                        type="checkbox"
+                        data-testid="settings-toggle-auto-update"
+                        checked={checkUpdatesOnLaunch}
+                        onChange={(e) => void handleToggleAutoUpdate(e.target.checked)}
+                        style={{ width: 15, height: 15, accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                      />
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                          Check for updates automatically when OpenCE Mantle launches
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                          Disable this if you work offline or prefer to check for new releases manually.
+                        </div>
+                      </div>
+                    </div>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: checkUpdatesOnLaunch ? '#4ade80' : 'var(--text-dim)',
+                      }}
+                    >
+                      {checkUpdatesOnLaunch ? '● Enabled' : '○ Disabled'}
+                    </span>
+                  </label>
+
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '10px 12px',
+                      background: 'rgba(255,255,255,0.03)',
+                      borderRadius: 4,
+                      border: '1px solid var(--border)',
+                      cursor: checkUpdatesOnLaunch ? 'pointer' : 'not-allowed',
+                      opacity: checkUpdatesOnLaunch ? 1 : 0.55,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <input
+                        type="checkbox"
+                        data-testid="settings-toggle-auto-download"
+                        disabled={!checkUpdatesOnLaunch}
+                        checked={autoDownloadUpdates}
+                        onChange={(e) => void handleToggleAutoDownload(e.target.checked)}
+                        style={{ width: 15, height: 15, accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                      />
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                          Automatically download updates in the background
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                          Pre-downloads the new release silently while you work so you can click "Restart & Apply" with zero wait.
+                        </div>
+                      </div>
+                    </div>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: autoDownloadUpdates && checkUpdatesOnLaunch ? '#4ade80' : 'var(--text-dim)',
+                      }}
+                    >
+                      {autoDownloadUpdates && checkUpdatesOnLaunch ? '● Enabled' : '○ Disabled'}
+                    </span>
+                  </label>
+                </div>
+
+                {downloadProgress?.stage === 'downloading' && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: '9px 12px',
+                      borderRadius: 4,
+                      background: 'rgba(0, 194, 255, 0.08)',
+                      border: '1px solid rgba(0, 194, 255, 0.3)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, marginBottom: 6 }}>
+                      <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>
+                        Downloading {downloadProgress.assetName}... ({downloadProgress.percent}%)
+                      </span>
+                      <span style={{ fontFamily: 'var(--mono-font)', color: 'var(--text-dim)' }}>
+                        {(downloadProgress.transferredBytes / (1024 * 1024)).toFixed(1)} MB
+                        {downloadProgress.totalBytes > 0
+                          ? ` / ${(downloadProgress.totalBytes / (1024 * 1024)).toFixed(1)} MB`
+                          : ''}{' '}
+                        • {(downloadProgress.bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s
+                      </span>
+                    </div>
+                    <div style={{ height: 6, background: 'rgba(0,0,0,0.45)', borderRadius: 3, overflow: 'hidden' }}>
+                      <div
+                        style={{
+                          width: `${Math.max(3, downloadProgress.percent)}%`,
+                          height: '100%',
+                          background: 'var(--accent-cyan)',
+                          transition: 'width 0.12s linear',
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {updateCheckResult && (
                   <div
@@ -472,22 +579,35 @@ export default function SettingsDialog({ onClose }: Props) {
                           <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--accent-cyan)' }}>
                             ★ New Release Available: {updateCheckResult.releaseName} (v{updateCheckResult.latestVersion})
                           </div>
-                          <div style={{ display: 'flex', gap: 6 }}>
-                            {updateCheckResult.installerAsset && (
+                          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            {downloadProgress?.stage === 'ready' ? (
                               <button
-                                onClick={() => void window.opence.openExternalUrl?.(updateCheckResult.installerAsset!.browserDownloadUrl)}
-                                style={actionBtnStyle(true)}
+                                data-testid="settings-restart-apply-update"
+                                onClick={() =>
+                                  void window.opence.applyUpdateAndRestart?.(
+                                    downloadProgress.downloadedFilePath,
+                                    downloadProgress.installMode,
+                                  )
+                                }
+                                style={{
+                                  ...actionBtnStyle(true),
+                                  background: '#4ade80',
+                                  color: '#052e16',
+                                }}
                               >
-                                Download Installer (.exe)
+                                🚀 Restart & Apply Update
                               </button>
-                            )}
-                            {updateCheckResult.portableAsset && (
-                              <button
-                                onClick={() => void window.opence.openExternalUrl?.(updateCheckResult.portableAsset!.browserDownloadUrl)}
-                                style={actionBtnStyle()}
-                              >
-                                Download Portable (.exe)
-                              </button>
+                            ) : (
+                              (updateCheckResult.installerAsset || updateCheckResult.portableAsset) && (
+                                <button
+                                  data-testid="settings-install-update-now"
+                                  disabled={downloadProgress?.stage === 'downloading'}
+                                  onClick={() => void handleDownloadAndRestartFromSettings()}
+                                  style={actionBtnStyle(true)}
+                                >
+                                  ⚡ Update & Restart Now
+                                </button>
+                              )
                             )}
                             <button
                               onClick={() => void window.opence.openExternalUrl?.(updateCheckResult.htmlUrl)}

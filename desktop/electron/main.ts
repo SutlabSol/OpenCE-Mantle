@@ -29,9 +29,14 @@ import {
   setVersionResourceMaps,
   setOpenCeDirectory,
   setCheckForUpdatesOnLaunch,
+  setAutoDownloadUpdates,
   setSkippedUpdateVersion,
 } from './settings';
-import { checkForGitHubUpdates } from './update-checker';
+import {
+  checkForGitHubUpdates,
+  downloadUpdateAsset,
+  spawnUpdateApplyScript,
+} from './update-checker';
 import { tagTestRunner } from './tag-test-runner';
 import { startWorker, sendWorkerRequest, cancelWorkerRequest } from './worker-manager';
 import { saveMapAsFlow, registerSaveMapAsIpc, type SaveMapAsDeps } from './save-map-as';
@@ -3958,11 +3963,63 @@ app.whenReady().then(() => {
     return { ok: true, checkForUpdatesOnLaunch: val };
   });
 
+  ipcMain.handle('app:setAutoDownloadUpdates', (_evt, enabled: boolean) => {
+    const val = Boolean(enabled);
+    setAutoDownloadUpdates(val);
+    return { ok: true, autoDownloadUpdates: val };
+  });
+
   ipcMain.handle('app:setSkippedUpdateVersion', (_evt, version: string | null) => {
     const val = version ? String(version).trim() : null;
     setSkippedUpdateVersion(val);
     return { ok: true, skippedUpdateVersion: val };
   });
+
+  ipcMain.handle(
+    'app:downloadUpdate',
+    async (
+      _evt,
+      options?: {
+        mode?: 'auto' | 'installer' | 'portable';
+        assetUrl?: string;
+        assetName?: string;
+        version?: string;
+      },
+    ) => {
+      const curVer = getAppDisplayVersion();
+      sendLog('info', `Downloading OpenCE Mantle update in background...`);
+      const res = await downloadUpdateAsset(curVer, options, (progress) => {
+        mainWindow?.webContents.send('app:updateDownloadProgress', progress);
+      });
+      if (res.ok) {
+        sendLog(
+          'info',
+          `Update downloaded and ready (${res.assetName}, ${(res.sizeBytes / (1024 * 1024)).toFixed(1)} MB). Click "Restart to Apply" to install.`,
+        );
+      } else {
+        sendLog('warn', `Update download failed: ${res.error}`);
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle(
+    'app:applyUpdateAndRestart',
+    async (_evt, downloadedFilePath?: string, installMode?: 'installer' | 'portable') => {
+      if (!(await confirmUnsavedChanges(unsavedChangesDeps))) {
+        return { ok: false, message: 'Cancelled by user.' };
+      }
+      const spawned = spawnUpdateApplyScript(downloadedFilePath, installMode);
+      if (!spawned.ok) {
+        return spawned;
+      }
+      currentMapModified = false; // prevent duplicate close prompt
+      setTimeout(() => {
+        app.quit();
+      }, 150);
+      return { ok: true };
+    },
+  );
 
   ipcMain.handle('app:openExternalUrl', async (_evt, url: string) => {
     if (typeof url !== 'string' || !url.startsWith('https://')) {
