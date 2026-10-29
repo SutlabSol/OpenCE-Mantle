@@ -105,6 +105,12 @@ export interface BspRenderMesh {
     radius: number;
     planes: Array<[number, number, number, number]>;
   }>;
+  /** Tag ID of the scenario's primary Sky 3D model (`gbxmodel`), if any. */
+  skyModelTagId?: number;
+  /** Outdoor ambient radiosity color `[r, g, b]` from the scenario's primary `sky` tag. */
+  skyOutdoorAmbientColor?: [number, number, number];
+  /** Outdoor fog color `[r, g, b]` from the scenario's primary `sky` tag. */
+  skyOutdoorFogColor?: [number, number, number];
 }
 
 /**
@@ -518,6 +524,52 @@ export function extractBspRenderMesh(
     }
   }
 
+  // Extract scenario Sky model & outdoor atmosphere colors (Sapien skybox + lighting)
+  let skyModelTagId: number | undefined;
+  let skyOutdoorAmbientColor: [number, number, number] | undefined;
+  let skyOutdoorFogColor: [number, number, number] | undefined;
+  try {
+    const skiesField = decodedScenario.get('skies');
+    if (skiesField && skiesField.kind === 'reflexive' && skiesField.value.count > 0 && skiesField.value.pointerLow > 0) {
+      const skiesOffset = header.tagDataOffset + (skiesField.value.pointerLow - tagIndex.baseMemoryAddress);
+      const skyDep = decodeStruct(buffer, skiesOffset, 'ScenarioSky').get('sky');
+      const skyTagId = skyDep && skyDep.kind === 'dependency' ? skyDep.value.tagId : 0xffffffff;
+      if (skyTagId !== 0xffffffff) {
+        const skyEntry = tagIndex.entries[skyTagId & 0xffff];
+        if (skyEntry && !skyEntry.isExternal) {
+          const skyFileOffset = resolveTagDataPointer(
+            skyEntry.tagDataPointerOrResourceIndex,
+            header,
+            tagIndex.baseMemoryAddress,
+          );
+          const decodedSky = decodeStruct(buffer, skyFileOffset, 'Sky');
+          const modelDep = decodedSky.get('model');
+          if (modelDep && modelDep.kind === 'dependency' && modelDep.value.tagId !== 0xffffffff) {
+            skyModelTagId = modelDep.value.tagId;
+          }
+          const ambField = decodedSky.get('outdoor ambient radiosity color');
+          if (ambField && ambField.kind === 'array' && Array.isArray(ambField.value) && ambField.value.length >= 3) {
+            skyOutdoorAmbientColor = [
+              Number(ambField.value[0]) || 0,
+              Number(ambField.value[1]) || 0,
+              Number(ambField.value[2]) || 0,
+            ];
+          }
+          const fogField = decodedSky.get('outdoor fog color');
+          if (fogField && fogField.kind === 'array' && Array.isArray(fogField.value) && fogField.value.length >= 3) {
+            skyOutdoorFogColor = [
+              Number(fogField.value[0]) || 0,
+              Number(fogField.value[1]) || 0,
+              Number(fogField.value[2]) || 0,
+            ];
+          }
+        }
+      }
+    }
+  } catch {
+    // Non-fatal if sky tag is custom/missing
+  }
+
   return {
     bspIndex,
     bspCount,
@@ -531,6 +583,9 @@ export function extractBspRenderMesh(
     clusterPortals,
     fogPlanes,
     weatherPolyhedra,
+    skyModelTagId,
+    skyOutdoorAmbientColor,
+    skyOutdoorFogColor,
   };
 }
 

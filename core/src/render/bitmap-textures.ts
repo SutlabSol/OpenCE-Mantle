@@ -3,6 +3,7 @@ import type { CacheFileHeader } from '../map/header';
 import type { TagIndex } from '../map/tag-index';
 import { resolveTagDataPointer } from '../map/tag-index';
 import { parseResourceMap } from '../map/resource-map';
+import { decodeStruct } from '../map/definitions/engine';
 
 export class BitmapTextureError extends Error {
   constructor(message: string) {
@@ -40,12 +41,33 @@ export const BitmapFormat = {
   P8: 17,
 } as const;
 
+export interface ShaderRenderMetadata {
+  shaderClass: string;
+  alphaTested?: boolean;
+  alphaBlended?: boolean;
+  twoSided?: boolean;
+  environmentType?: number; // 0 = normal, 1 = blended, 2 = blended base specular
+  detailFunction?: number; // 0 = double/biased multiply, 1 = multiply, 2 = double/biased add
+  primaryDetailTagId?: number;
+  primaryDetailScale?: number;
+  secondaryDetailTagId?: number;
+  secondaryDetailScale?: number;
+  microDetailTagId?: number;
+  microDetailScale?: number;
+  bumpMapTagId?: number;
+  bumpMapScale?: number;
+  uScale?: number;
+  vScale?: number;
+}
+
 export interface DecodedRgbaTexture {
   width: number;
   height: number;
   format: number;
   /** RGBA8888 pixel buffer (width * height * 4 bytes) ready for Three.js DataTexture */
   rgbaData: Uint8Array;
+  /** Optional Sapien shader metadata when resolved from a shader tag (`senv`, `soso`, `schi`, etc.) */
+  shaderMeta?: ShaderRenderMetadata;
 }
 
 export interface BitmapImageDescriptor {
@@ -128,6 +150,134 @@ export function unswizzleMorton2D(
     }
   }
   return out;
+}
+
+/**
+ * Extracts Sapien-grade shader properties (detail maps, detail scales, alpha-testing, two-sided foliage,
+ * transparent blending) for `shader_environment` (`senv`), `shader_model` (`soso`), and transparent shaders.
+ */
+export function resolveShaderRenderMetadata(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+  shaderTagId: number,
+): ShaderRenderMetadata | undefined {
+  const entry = tagIndex.entries.find((e) => e.tagId === shaderTagId);
+  if (!entry || entry.isExternal) return undefined;
+
+  const shaderClass = entry.primaryClassName || 'shader';
+  const shaderPath = (entry.path || '').toLowerCase();
+  const shaderOffset = resolveTagDataPointer(
+    entry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress,
+  );
+
+  try {
+    if (shaderClass === 'shader_environment') {
+      const decoded = decodeStruct(buffer, shaderOffset, 'ShaderEnvironment');
+      const envFlags = (decoded.get('shader environment flags')?.value as number) ?? 0;
+      const envType = (decoded.get('shader environment type')?.value as number) ?? 0;
+      const detailFunc = (decoded.get('detail map function')?.value as number) ?? 0;
+      const pScale = (decoded.get('primary detail map scale')?.value as number) || 1;
+      const pDep = decoded.get('primary detail map');
+      const pTagId = pDep && pDep.kind === 'dependency' && pDep.value.tagId !== 0xffffffff ? pDep.value.tagId : undefined;
+      const sScale = (decoded.get('secondary detail map scale')?.value as number) || 1;
+      const sDep = decoded.get('secondary detail map');
+      const sTagId = sDep && sDep.kind === 'dependency' && sDep.value.tagId !== 0xffffffff ? sDep.value.tagId : undefined;
+      const mScale = (decoded.get('micro detail map scale')?.value as number) || 1;
+      const mDep = decoded.get('micro detail map');
+      const mTagId = mDep && mDep.kind === 'dependency' && mDep.value.tagId !== 0xffffffff ? mDep.value.tagId : undefined;
+      const bScale = (decoded.get('bump map scale')?.value as number) || 1;
+      const bDep = decoded.get('bump map');
+      const bTagId = bDep && bDep.kind === 'dependency' && bDep.value.tagId !== 0xffffffff ? bDep.value.tagId : undefined;
+
+      const alphaTested =
+        (envFlags & 1) !== 0 ||
+        shaderPath.includes('grate') ||
+        shaderPath.includes('fence') ||
+        shaderPath.includes('ladder') ||
+        shaderPath.includes('chainlink') ||
+        shaderPath.includes('leaf') ||
+        shaderPath.includes('leaves') ||
+        shaderPath.includes('fern');
+
+      return {
+        shaderClass,
+        alphaTested,
+        twoSided: alphaTested,
+        environmentType: envType,
+        detailFunction: detailFunc,
+        primaryDetailTagId: pTagId,
+        primaryDetailScale: pScale > 0 ? pScale : 1,
+        secondaryDetailTagId: sTagId,
+        secondaryDetailScale: sScale > 0 ? sScale : 1,
+        microDetailTagId: mTagId,
+        microDetailScale: mScale > 0 ? mScale : 1,
+        bumpMapTagId: bTagId,
+        bumpMapScale: bScale > 0 ? bScale : 1,
+      };
+    }
+
+    if (shaderClass === 'shader_model') {
+      const decoded = decodeStruct(buffer, shaderOffset, 'ShaderModel');
+      const modelFlags = (decoded.get('shader model flags')?.value as number) ?? 0;
+      const twoSided = (modelFlags & 2) !== 0;
+      const notAlphaTested = (modelFlags & 4) !== 0;
+      const alphaBlendedDecal = (modelFlags & 8) !== 0;
+      const uScale = (decoded.get('map u scale')?.value as number) || 1;
+      const vScale = (decoded.get('map v scale')?.value as number) || 1;
+      const detailFunc = (decoded.get('detail function')?.value as number) ?? 0;
+      const dScale = (decoded.get('detail map scale')?.value as number) || 1;
+      const dDep = decoded.get('detail map');
+      const dTagId = dDep && dDep.kind === 'dependency' && dDep.value.tagId !== 0xffffffff ? dDep.value.tagId : undefined;
+
+      const isFoliagePath =
+        shaderPath.includes('leaf') ||
+        shaderPath.includes('leaves') ||
+        shaderPath.includes('foliage') ||
+        shaderPath.includes('branch') ||
+        shaderPath.includes('fern') ||
+        shaderPath.includes('vine') ||
+        shaderPath.includes('bush') ||
+        shaderPath.includes('shrub') ||
+        shaderPath.includes('pine') ||
+        shaderPath.includes('frond');
+
+      return {
+        shaderClass,
+        twoSided: twoSided || isFoliagePath,
+        alphaTested: (twoSided && !notAlphaTested) || isFoliagePath,
+        alphaBlended: alphaBlendedDecal,
+        detailFunction: detailFunc,
+        primaryDetailTagId: dTagId,
+        primaryDetailScale: dScale > 0 ? dScale : 1,
+        uScale: uScale > 0 ? uScale : 1,
+        vScale: vScale > 0 ? vScale : 1,
+      };
+    }
+
+    if (
+      shaderClass.startsWith('shader_transparent') ||
+      shaderClass === 'shader_transparent_chicago' ||
+      shaderClass === 'shader_transparent_chicago_extended' ||
+      shaderClass === 'shader_transparent_generic' ||
+      shaderClass === 'shader_transparent_glass' ||
+      shaderClass === 'shader_transparent_water' ||
+      shaderClass === 'shader_transparent_plasma' ||
+      shaderClass === 'shader_transparent_meter'
+    ) {
+      return {
+        shaderClass,
+        alphaBlended: true,
+        twoSided: true,
+      };
+    }
+  } catch {
+    // Non-fatal fallback
+  }
+
+  return { shaderClass };
 }
 
 /**

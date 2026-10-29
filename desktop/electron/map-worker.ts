@@ -49,6 +49,7 @@ import {
   updateBspVerticesInMap,
   decodeBitmapTagImage,
   resolveShaderBaseBitmapTagId,
+  resolveShaderRenderMetadata,
   BITM_FOURCC,
   extractScenarioPlacements,
   extractModelRenderGeometry,
@@ -1656,8 +1657,10 @@ export function runGetBitmapTexture(task: { requestId: string; bitmapTagId: numb
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
     let tagId = task.bitmapTagId;
+    let shaderMeta: ReturnType<typeof resolveShaderRenderMetadata>;
     const entry = currentMap.tagIndex.entries.find((e) => e.tagId === tagId);
     if (entry && entry.primaryClassFourCC !== BITM_FOURCC) {
+      shaderMeta = resolveShaderRenderMetadata(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId);
       const resolvedId = resolveShaderBaseBitmapTagId(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId);
       if (resolvedId !== null) {
         tagId = resolvedId;
@@ -1667,6 +1670,9 @@ export function runGetBitmapTexture(task: { requestId: string; bitmapTagId: numb
     }
     const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
     const texture = decodeBitmapTagImage(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId, task.imageIndex ?? 0, externalBitmaps);
+    if (shaderMeta) {
+      texture.shaderMeta = shaderMeta;
+    }
     sendResult(task.requestId, { ok: true, texture } satisfies GetBitmapTextureResult);
   } catch (err) {
     sendError(task.requestId, 'BITMAP_TEXTURE_ERROR', err instanceof Error ? err.message : String(err));

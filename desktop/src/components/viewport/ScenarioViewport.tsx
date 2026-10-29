@@ -284,10 +284,11 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     netgameFlags: THREE.Group;
     worldBounds: THREE.Group;
   } | null>(null);
-  const submeshMeshesRef = useRef<{ mesh: THREE.Mesh; lines: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial; bspIndex?: number }[]>([]);
+  const submeshMeshesRef = useRef<{ mesh: THREE.Mesh; lines: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial; bspIndex?: number; isSkyPortal?: boolean }[]>([]);
   const objectMeshesRef = useRef<{ mesh: THREE.Mesh; lines?: THREE.LineSegments; solidMat: THREE.MeshStandardMaterial; shaderTagId?: number }[]>([]);
-  const textureCacheRef = useRef<Map<number, Promise<THREE.Texture | null>>>(new Map());
+  const textureCacheRef = useRef<Map<string, Promise<THREE.Texture | null>>>(new Map());
   const modelCacheRef = useRef<Map<number, Promise<ModelRenderGeometry | null>>>(new Map());
+  const skyboxGroupRef = useRef<THREE.Group | null>(null);
 
   // Gizmo & selection refs
   const transformControlsRef = useRef<TransformControls | null>(null);
@@ -315,8 +316,12 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
   const [autoSnapToGround, setAutoSnapToGround] = useState<boolean>(true);
   const autoSnapToGroundRef = useRef<boolean>(true);
   autoSnapToGroundRef.current = autoSnapToGround;
+  const [gravityLockToGround, setGravityLockToGround] = useState<boolean>(true);
+  const gravityLockToGroundRef = useRef<boolean>(true);
+  gravityLockToGroundRef.current = gravityLockToGround;
   const prevSelectedIdsRef = useRef<string[]>([]);
   const prevAutoSnapRef = useRef<boolean>(true);
+  const prevGravityLockRef = useRef<boolean>(true);
   const sessionTouchedIdsRef = useRef<Set<string>>(new Set());
   const collisionWorldRef = useRef<SourceCollisionWorld | null>(null);
   const walkStateRef = useRef<SourceWalkState>({
@@ -548,7 +553,31 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       },
     ) => {
       try {
+        sessionTouchedIdsRef.current.add(placementId);
         const currentObj = scenarioData?.objects.find((o) => o.id === placementId);
+        const effectiveUpdates = { ...updates };
+        if (
+          gravityLockToGroundRef.current &&
+          effectiveUpdates.position &&
+          currentObj &&
+          (currentObj.kind === 'vehicle' ||
+            currentObj.kind === 'weapon' ||
+            currentObj.kind === 'equipment' ||
+            currentObj.kind === 'spawn')
+        ) {
+          const gZ = callbacksRef.current.sampleGroundHeightAt(
+            effectiveUpdates.position[0],
+            effectiveUpdates.position[1],
+            effectiveUpdates.position[2],
+          );
+          if (gZ !== null) {
+            effectiveUpdates.position = [effectiveUpdates.position[0], effectiveUpdates.position[1], gZ];
+            const targetGroup = sceneRef.current?.getObjectByName(placementId);
+            if (targetGroup) {
+              targetGroup.position.z = gZ;
+            }
+          }
+        }
         // If this is a teleporter with a co-located partner (Two-Way Teleporter Node), keep them stuck together
         let colocatedId: string | null = null;
         if (currentObj && currentObj.kind === 'netgame_flag' && (currentObj.paletteIndex === 6 || currentObj.paletteIndex === 7)) {
@@ -562,9 +591,9 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           if (colocated) colocatedId = colocated.id;
         }
 
-        let res = await window.opence.updateScenarioPlacement(placementId, updates);
-        if (colocatedId && updates.position) {
-          const partnerUpdates = { ...updates };
+        let res = await window.opence.updateScenarioPlacement(placementId, effectiveUpdates);
+        if (colocatedId && effectiveUpdates.position) {
+          const partnerUpdates = { ...effectiveUpdates };
           res = await window.opence.updateScenarioPlacement(colocatedId, partnerUpdates);
         }
 
@@ -843,6 +872,18 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           return prev;
         });
 
+        let spawnPos: [number, number, number] = [...position];
+        if (
+          gravityLockToGroundRef.current &&
+          (kind === 'vehicle' || kind === 'weapon' || kind === 'equipment' || kind === 'spawn' || kind === 'ctf_flag_item')
+        ) {
+          const gZ = callbacksRef.current.sampleGroundHeightAt(spawnPos[0], spawnPos[1], spawnPos[2]);
+          if (gZ !== null) {
+            spawnPos = [spawnPos[0], spawnPos[1], gZ];
+          }
+        }
+        position = spawnPos;
+
         if (kind === 'ctf_flag') {
           // CTF Flag Stand (type 0 = CTF Flag, usageId = teamIndex 0 Red or 1 Blue)
           const res = await window.opence.addScenarioPlacement('netgame_flag', 0, position, rotation, teamIndex ?? 0);
@@ -1036,11 +1077,11 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
   const GROUND_BOUND_KINDS = useMemo(() => new Set<string>(['vehicle', 'weapon', 'equipment', 'spawn']), []);
 
   // Samples the BSP ground surface height (Halo Z) at Halo horizontal coordinates (hx, hy) near reference height refZ.
-  // Filters for upward-facing BSP surfaces (normal Z >= 0.2) to ignore ceilings and steep vertical walls.
+  // Filters for upward-facing BSP surfaces (normal Z >= 0.2) and ignores +sky portal meshes, ceilings, and steep walls.
   const sampleGroundHeightAt = useCallback((hx: number, hy: number, refZ: number): number | null => {
     if (submeshMeshesRef.current.length === 0) return null;
     const bspMeshesList = submeshMeshesRef.current
-      .filter((s) => s.mesh.parent?.visible !== false)
+      .filter((s) => s.mesh.parent?.visible !== false && !s.isSkyPortal)
       .map((s) => s.mesh);
     if (bspMeshesList.length === 0) return null;
 
@@ -1104,26 +1145,46 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     selectionBoxHelperRef.current?.update();
   }, [selectedObjectId, scenarioData, handleUpdatePlacement, sampleGroundHeightAt]);
 
-  // Auto-Snap to Ground when ground-bound items (spawns, weapons, vehicles, equipment) become UNSELECTED
-  // Important: never auto-snap while an item is currently selected!
+  // Gravity Lock (locks even selected items to ground) & Auto-Snap to Ground (snaps unselected items to ground)
   useEffect(() => {
     for (const id of selectedObjectIds) {
       sessionTouchedIdsRef.current.add(id);
     }
 
     const newlyUnselectedIds = prevSelectedIdsRef.current.filter((id) => !selectedObjectIds.includes(id));
-    const toggledOn = autoSnapToGround && !prevAutoSnapRef.current;
+    const autoSnapToggledOn = autoSnapToGround && !prevAutoSnapRef.current;
+    const gravityToggledOn = gravityLockToGround && !prevGravityLockRef.current;
 
     prevSelectedIdsRef.current = [...selectedObjectIds];
     prevAutoSnapRef.current = autoSnapToGround;
+    prevGravityLockRef.current = gravityLockToGround;
 
-    if (!autoSnapToGround || !scenarioData) return;
+    if (!scenarioData) return;
 
-    const candidateIds = new Set<string>(newlyUnselectedIds);
-    if (toggledOn) {
-      for (const id of sessionTouchedIdsRef.current) {
-        if (!selectedObjectIds.includes(id)) {
+    const candidateIds = new Set<string>();
+    if (gravityLockToGround) {
+      // When Gravity Lock is ON, lock BOTH selected and newly-unselected ground-bound items to the ground
+      for (const id of selectedObjectIds) {
+        candidateIds.add(id);
+      }
+      for (const id of newlyUnselectedIds) {
+        candidateIds.add(id);
+      }
+      if (gravityToggledOn) {
+        for (const id of sessionTouchedIdsRef.current) {
           candidateIds.add(id);
+        }
+      }
+    } else if (autoSnapToGround) {
+      // When Gravity Lock is OFF and Auto-Snap is ON, only snap UNSELECTED ground-bound items
+      for (const id of newlyUnselectedIds) {
+        candidateIds.add(id);
+      }
+      if (autoSnapToggledOn) {
+        for (const id of sessionTouchedIdsRef.current) {
+          if (!selectedObjectIds.includes(id)) {
+            candidateIds.add(id);
+          }
         }
       }
     }
@@ -1132,8 +1193,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
 
     void (async () => {
       for (const id of candidateIds) {
-        // Double-check the item is still unselected
-        if (selectedObjectIdsRef.current.includes(id)) continue;
+        if (!gravityLockToGroundRef.current && selectedObjectIdsRef.current.includes(id)) continue;
 
         const placement = scenarioData.objects.find((o) => o.id === id);
         if (!placement || !GROUND_BOUND_KINDS.has(placement.kind)) continue;
@@ -1153,8 +1213,17 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           });
         }
       }
+      selectionBoxHelperRef.current?.update();
     })();
-  }, [selectedObjectIds, autoSnapToGround, scenarioData, GROUND_BOUND_KINDS, sampleGroundHeightAt, handleUpdatePlacement]);
+  }, [
+    selectedObjectIds,
+    autoSnapToGround,
+    gravityLockToGround,
+    scenarioData,
+    GROUND_BOUND_KINDS,
+    sampleGroundHeightAt,
+    handleUpdatePlacement,
+  ]);
 
   const callbacksRef = useRef({
     handleUpdatePlacement,
@@ -1232,18 +1301,19 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     textureCacheRef.current.clear();
   }, [header.scenarioName, header.crc32, bspMeshes]);
 
-  // Texture loader helper
-  const loadTexture = useCallback((shaderTagId: number): Promise<THREE.Texture | null> => {
-    if (shaderTagId === 0xffffffff || shaderTagId === 0) return Promise.resolve(null);
+  // Texture loader helper (supports shaderTagId or bitmapTagId + imageIndex, with Sapien trilinear mipmaps & 16x anisotropic filtering)
+  const loadTexture = useCallback((tagId: number, imageIndex = 0, options?: { clamp?: boolean; linearColorSpace?: boolean }): Promise<THREE.Texture | null> => {
+    if (tagId === 0xffffffff || tagId === 0) return Promise.resolve(null);
+    const cacheKey = `${tagId}:${imageIndex}:${options?.clamp ? 1 : 0}:${options?.linearColorSpace ? 1 : 0}`;
     const cache = textureCacheRef.current;
-    if (cache.has(shaderTagId)) {
-      return cache.get(shaderTagId)!;
+    if (cache.has(cacheKey)) {
+      return cache.get(cacheKey)!;
     }
     const promise = (async () => {
       try {
-        const res = await window.opence.getBitmapTexture(shaderTagId);
+        const res = await window.opence.getBitmapTexture(tagId, imageIndex);
         if (res.ok && res.texture) {
-          const { width, height, rgbaData } = res.texture;
+          const { width, height, rgbaData, shaderMeta } = res.texture;
           const tex = new THREE.DataTexture(
             rgbaData,
             width,
@@ -1251,11 +1321,14 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
             THREE.RGBAFormat,
             THREE.UnsignedByteType,
           );
-          tex.wrapS = THREE.RepeatWrapping;
-          tex.wrapT = THREE.RepeatWrapping;
-          tex.minFilter = THREE.LinearFilter;
+          tex.wrapS = options?.clamp ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+          tex.wrapT = options?.clamp ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+          tex.generateMipmaps = true;
+          tex.minFilter = THREE.LinearMipmapLinearFilter;
           tex.magFilter = THREE.LinearFilter;
-          tex.generateMipmaps = false;
+          tex.anisotropy = rendererRef.current ? Math.min(16, rendererRef.current.capabilities.getMaxAnisotropy()) : 16;
+          tex.colorSpace = options?.linearColorSpace ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+          tex.userData = { shaderMeta };
           tex.needsUpdate = true;
           return tex;
         }
@@ -1264,9 +1337,136 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       }
       return null;
     })();
-    cache.set(shaderTagId, promise);
+    cache.set(cacheKey, promise);
     return promise;
   }, []);
+
+  // Applies Sapien-grade shader features (diffuse map, tiled primary/secondary detail map blending,
+  // baked radiosity lightmap modulation, alpha-testing for grates/foliage, and transparency for glass/shields/water)
+  const applySapienShaderToMaterial = useCallback(
+    async (solidMat: THREE.MeshStandardMaterial, shaderTagId: number, isBsp = false) => {
+      const tex = await loadTexture(shaderTagId, 0);
+      if (!tex || !solidMat) return;
+
+      const shaderMeta = tex.userData?.shaderMeta as
+        | {
+            shaderClass: string;
+            alphaTested?: boolean;
+            alphaBlended?: boolean;
+            twoSided?: boolean;
+            environmentType?: number;
+            detailFunction?: number;
+            primaryDetailTagId?: number;
+            primaryDetailScale?: number;
+            secondaryDetailTagId?: number;
+            secondaryDetailScale?: number;
+            uScale?: number;
+            vScale?: number;
+          }
+        | undefined;
+
+      let baseTex = tex;
+      if (shaderMeta && ((shaderMeta.uScale && shaderMeta.uScale !== 1) || (shaderMeta.vScale && shaderMeta.vScale !== 1))) {
+        baseTex = tex.clone();
+        baseTex.repeat.set(shaderMeta.uScale || 1, shaderMeta.vScale || 1);
+        baseTex.needsUpdate = true;
+      }
+
+      solidMat.map = baseTex;
+      solidMat.color.setHex(0xffffff);
+
+      if (shaderMeta?.alphaTested) {
+        solidMat.alphaTest = 0.45;
+        solidMat.transparent = false;
+        solidMat.side = THREE.DoubleSide;
+      } else if (shaderMeta?.alphaBlended) {
+        solidMat.transparent = true;
+        solidMat.depthWrite = false;
+        solidMat.opacity = 0.82;
+        solidMat.side = THREE.DoubleSide;
+      }
+
+      const pDetailId = shaderMeta?.primaryDetailTagId;
+      const sDetailId =
+        shaderMeta?.environmentType === 1 || shaderMeta?.environmentType === 2
+          ? shaderMeta?.secondaryDetailTagId
+          : undefined;
+
+      const [pDetailTex, sDetailTex] = await Promise.all([
+        pDetailId ? loadTexture(pDetailId, 0, { linearColorSpace: true }) : Promise.resolve(null),
+        sDetailId ? loadTexture(sDetailId, 0, { linearColorSpace: true }) : Promise.resolve(null),
+      ]);
+
+      const hasDetail = !!pDetailTex;
+      const hasSecondary = !!(pDetailTex && sDetailTex);
+      const pScale = shaderMeta?.primaryDetailScale || 1.0;
+      const sScale = shaderMeta?.secondaryDetailScale || 1.0;
+      const detailFunc = shaderMeta?.detailFunction ?? 0;
+      const forceOpaqueAlpha = !shaderMeta?.alphaTested && !shaderMeta?.alphaBlended ? 1.0 : 0.0;
+
+      if (hasDetail || isBsp) {
+        solidMat.customProgramCacheKey = () =>
+          `sapien_${hasDetail ? 1 : 0}_${hasSecondary ? 1 : 0}_${detailFunc}_${forceOpaqueAlpha}_${isBsp ? 1 : 0}`;
+        solidMat.onBeforeCompile = (shader) => {
+          shader.uniforms.uPrimaryDetailMap = { value: pDetailTex };
+          shader.uniforms.uSecondaryDetailMap = { value: sDetailTex };
+          shader.uniforms.uHasPrimaryDetail = { value: hasDetail ? 1.0 : 0.0 };
+          shader.uniforms.uHasSecondaryDetail = { value: hasSecondary ? 1.0 : 0.0 };
+          shader.uniforms.uPrimaryDetailScale = { value: pScale };
+          shader.uniforms.uSecondaryDetailScale = { value: sScale };
+          shader.uniforms.uDetailFunction = { value: detailFunc };
+          shader.uniforms.uForceOpaqueAlpha = { value: forceOpaqueAlpha };
+
+          shader.fragmentShader =
+            `
+            uniform sampler2D uPrimaryDetailMap;
+            uniform sampler2D uSecondaryDetailMap;
+            uniform float uHasPrimaryDetail;
+            uniform float uHasSecondaryDetail;
+            uniform float uPrimaryDetailScale;
+            uniform float uSecondaryDetailScale;
+            uniform float uDetailFunction;
+            uniform float uForceOpaqueAlpha;
+            ` + shader.fragmentShader;
+
+          shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <map_fragment>',
+            `
+            #ifdef USE_MAP
+              vec4 sampledDiffuseColor = texture2D( map, vMapUv );
+              diffuseColor *= sampledDiffuseColor;
+              if ( uHasPrimaryDetail > 0.5 ) {
+                vec3 det1 = texture2D( uPrimaryDetailMap, vMapUv * uPrimaryDetailScale ).rgb;
+                vec3 detRgb = det1;
+                if ( uHasSecondaryDetail > 0.5 ) {
+                  vec3 det2 = texture2D( uSecondaryDetailMap, vMapUv * uSecondaryDetailScale ).rgb;
+                  detRgb = mix( det1, det2, sampledDiffuseColor.a );
+                }
+                if ( uDetailFunction < 0.5 ) {
+                  diffuseColor.rgb *= clamp( detRgb * 2.0, 0.25, 1.85 );
+                } else if ( uDetailFunction < 1.5 ) {
+                  diffuseColor.rgb *= detRgb;
+                } else {
+                  diffuseColor.rgb = clamp( diffuseColor.rgb + ( detRgb - 0.5 ) * 1.4, 0.0, 2.0 );
+                }
+              }
+              if ( uForceOpaqueAlpha > 0.5 ) {
+                diffuseColor.a = 1.0;
+              }
+            #endif
+            #ifdef USE_LIGHTMAP
+              vec3 bakedLm = clamp( texture2D( lightMap, vLightMapUv ).rgb * 1.75, 0.28, 1.55 );
+              diffuseColor.rgb *= bakedLm;
+            #endif
+            `,
+          );
+        };
+      }
+
+      solidMat.needsUpdate = true;
+    },
+    [loadTexture],
+  );
 
   // Refresh 3D viewport textures immediately when a bitmap tag is modified in the Bitmap Editor
   useEffect(() => {
@@ -1274,19 +1474,13 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       textureCacheRef.current.clear();
       for (const item of objectMeshesRef.current) {
         if (item.shaderTagId) {
-          loadTexture(item.shaderTagId).then((tex) => {
-            if (tex && item.solidMat) {
-              item.solidMat.map = tex;
-              item.solidMat.color.setHex(0xffffff);
-              item.solidMat.needsUpdate = true;
-            }
-          });
+          void applySapienShaderToMaterial(item.solidMat, item.shaderTagId, false);
         }
       }
     };
     window.addEventListener('opence:bitmap-updated', onBitmapUpdated);
     return () => window.removeEventListener('opence:bitmap-updated', onBitmapUpdated);
-  }, [loadTexture]);
+  }, [applySapienShaderToMaterial]);
 
   // Full 3D Viewport Refresh (reloads scenario placements, models, textures, and BSP meshes)
   const handleRefreshViewport = useCallback(() => {
@@ -1853,13 +2047,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
               objectMeshesRef.current.push({ mesh, lines, solidMat, shaderTagId: submesh.shaderTagId });
 
               if (submesh.shaderTagId) {
-                loadTexture(submesh.shaderTagId).then((tex) => {
-                  if (tex && solidMat) {
-                    solidMat.map = tex;
-                    solidMat.color.setHex(0xffffff);
-                    solidMat.needsUpdate = true;
-                  }
-                });
+                void applySapienShaderToMaterial(solidMat, submesh.shaderTagId, false);
               }
             }
             selectionBoxHelperRef.current?.update();
@@ -1950,8 +2138,38 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
 
   // Update render mode materials
   useEffect(() => {
-    const allMeshes = [...submeshMeshesRef.current, ...objectMeshesRef.current];
-    for (const item of allMeshes) {
+    for (const item of submeshMeshesRef.current) {
+      const { mesh, lines, solidMat, isSkyPortal } = item;
+      switch (renderMode) {
+        case 'textured':
+          mesh.visible = !isSkyPortal;
+          if (lines) lines.visible = false;
+          solidMat.wireframe = false;
+          break;
+        case 'textured-wireframe':
+          mesh.visible = !isSkyPortal;
+          if (lines) {
+            lines.visible = !isSkyPortal;
+            (lines.material as THREE.LineBasicMaterial).opacity = 0.35;
+          }
+          solidMat.wireframe = false;
+          break;
+        case 'wireframe':
+          mesh.visible = true;
+          solidMat.wireframe = true;
+          if (lines) {
+            lines.visible = true;
+            (lines.material as THREE.LineBasicMaterial).opacity = 0.9;
+          }
+          break;
+        case 'flat':
+          mesh.visible = !isSkyPortal;
+          if (lines) lines.visible = false;
+          solidMat.wireframe = false;
+          break;
+      }
+    }
+    for (const item of objectMeshesRef.current) {
       const { mesh, lines, solidMat } = item;
       switch (renderMode) {
         case 'textured':
@@ -2133,6 +2351,8 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
         for (const submesh of meshData.submeshes) {
           if (submesh.vertexCount === 0 || submesh.indices.length === 0) continue;
 
+          const isSkyPortal = submesh.shaderTagId === 0xffffffff || submesh.shaderTagId === 0;
+
           const geom = new THREE.BufferGeometry();
           const interleaved = new THREE.InterleavedBuffer(submesh.vertices, 8);
           geom.setAttribute('position', new THREE.InterleavedBufferAttribute(interleaved, 3, 0));
@@ -2140,14 +2360,16 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           geom.setAttribute('uv', new THREE.InterleavedBufferAttribute(interleaved, 2, 6));
 
           if (submesh.lightmapUvs && submesh.lightmapUvs.length > 0) {
-            geom.setAttribute('uv2', new THREE.BufferAttribute(submesh.lightmapUvs, 2));
+            const lmAttr = new THREE.BufferAttribute(submesh.lightmapUvs, 2);
+            geom.setAttribute('uv1', lmAttr);
+            geom.setAttribute('uv2', lmAttr);
           }
           geom.setIndex(new THREE.BufferAttribute(submesh.indices, 1));
 
           const solidMat = new THREE.MeshStandardMaterial({
             color: 0x90a4ae,
-            roughness: 0.8,
-            metalness: 0.1,
+            roughness: 0.82,
+            metalness: 0.06,
             side: THREE.DoubleSide,
           });
 
@@ -2161,18 +2383,27 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
             opacity: renderMode === 'wireframe' ? 0.9 : 0.35,
           });
           const lines = new THREE.LineSegments(wireframeGeom, wireframeMat);
-          lines.visible = renderMode === 'textured-wireframe' || renderMode === 'wireframe';
-          mesh.visible = true;
+          lines.visible = (renderMode === 'textured-wireframe' && !isSkyPortal) || renderMode === 'wireframe';
+          mesh.visible = renderMode === 'wireframe' ? true : !isSkyPortal;
           solidMat.wireframe = renderMode === 'wireframe';
           mesh.add(lines);
 
-          submeshMeshesRef.current.push({ mesh, lines, solidMat, bspIndex: idx });
+          submeshMeshesRef.current.push({ mesh, lines, solidMat, bspIndex: idx, isSkyPortal });
 
-          if (submesh.shaderTagId) {
-            loadTexture(submesh.shaderTagId).then((tex) => {
-              if (tex && solidMat) {
-                solidMat.map = tex;
-                solidMat.color.setHex(0xffffff);
+          if (!isSkyPortal && submesh.shaderTagId) {
+            void applySapienShaderToMaterial(solidMat, submesh.shaderTagId, true);
+          }
+
+          if (
+            !isSkyPortal &&
+            meshData.lightmapsBitmapTagId &&
+            meshData.lightmapsBitmapTagId !== 0xffffffff &&
+            submesh.lightmapBitmapIndex >= 0
+          ) {
+            loadTexture(meshData.lightmapsBitmapTagId, submesh.lightmapBitmapIndex, { clamp: true }).then((lmTex) => {
+              if (lmTex && solidMat) {
+                solidMat.lightMap = lmTex;
+                solidMat.lightMapIntensity = 0.45;
                 solidMat.needsUpdate = true;
               }
             });
@@ -2193,6 +2424,102 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
   useEffect(() => {
     syncBspMeshes();
   }, [syncBspMeshes]);
+
+  // Load and render the Scenario's 3D Skybox Dome (`skyModelTagId`) just like Sapien
+  useEffect(() => {
+    const haloRoot = haloRootRef.current;
+    if (!haloRoot) return;
+
+    if (skyboxGroupRef.current) {
+      haloRoot.remove(skyboxGroupRef.current);
+      skyboxGroupRef.current = null;
+    }
+
+    if (sceneRef.current) {
+      const fogRgb = primaryMesh?.skyOutdoorFogColor;
+      if (fogRgb && (fogRgb[0] > 0.02 || fogRgb[1] > 0.02 || fogRgb[2] > 0.02)) {
+        sceneRef.current.background = new THREE.Color(
+          Math.min(1, fogRgb[0] * 0.85 + 0.06),
+          Math.min(1, fogRgb[1] * 0.85 + 0.08),
+          Math.min(1, fogRgb[2] * 0.85 + 0.12),
+        );
+      } else if (primaryMesh?.skyModelTagId && primaryMesh.skyModelTagId !== 0xffffffff) {
+        sceneRef.current.background = new THREE.Color(0x1b2838);
+      } else {
+        sceneRef.current.background = new THREE.Color(0x13171f);
+      }
+    }
+
+    const skyModelId = primaryMesh?.skyModelTagId;
+    if (!skyModelId || skyModelId === 0xffffffff) return;
+
+    let active = true;
+    loadModelGeometry(skyModelId).then((modelGeom) => {
+      if (!active || !modelGeom || modelGeom.submeshes.length === 0 || !haloRootRef.current) return;
+
+      const skyGroup = new THREE.Group();
+      skyGroup.name = 'sapien_skybox_dome';
+      skyGroup.renderOrder = -1000;
+
+      // Normalize skybox radius to fit comfortably inside the camera far plane while surrounding the camera
+      let maxExtent = 1;
+      for (const sub of modelGeom.submeshes) {
+        const verts = sub.vertices;
+        for (let i = 0; i < verts.length; i += 8) {
+          const r = Math.hypot(verts[i], verts[i + 1], verts[i + 2]);
+          if (r > maxExtent) maxExtent = r;
+        }
+      }
+      const targetSkyRadius = 3500;
+      const skyScale = maxExtent > 0.01 ? targetSkyRadius / maxExtent : 1.0;
+
+      for (const submesh of modelGeom.submeshes) {
+        if (submesh.vertexCount === 0 || submesh.indices.length === 0) continue;
+        const geom = new THREE.BufferGeometry();
+        const interleaved = new THREE.InterleavedBuffer(submesh.vertices, 8);
+        geom.setAttribute('position', new THREE.InterleavedBufferAttribute(interleaved, 3, 0));
+        geom.setAttribute('normal', new THREE.InterleavedBufferAttribute(interleaved, 3, 3));
+        geom.setAttribute('uv', new THREE.InterleavedBufferAttribute(interleaved, 2, 6));
+        geom.setIndex(new THREE.BufferAttribute(submesh.indices, 1));
+
+        const skyMat = new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          depthTest: true,
+        });
+
+        const skyMesh = new THREE.Mesh(geom, skyMat);
+        skyMesh.scale.setScalar(skyScale);
+        skyMesh.renderOrder = -1000;
+        skyMesh.frustumCulled = false;
+        skyGroup.add(skyMesh);
+
+        if (submesh.shaderTagId && submesh.shaderTagId !== 0xffffffff) {
+          loadTexture(submesh.shaderTagId, 0).then((tex) => {
+            if (!tex) return;
+            skyMat.map = tex;
+            const meta = tex.userData?.shaderMeta as { alphaBlended?: boolean; alphaTested?: boolean } | undefined;
+            if (meta?.alphaBlended) {
+              skyMat.transparent = true;
+              skyMat.blending = THREE.AdditiveBlending;
+              skyMat.opacity = 0.85;
+            } else if (meta?.alphaTested) {
+              skyMat.alphaTest = 0.35;
+            }
+            skyMat.needsUpdate = true;
+          });
+        }
+      }
+
+      haloRootRef.current.add(skyGroup);
+      skyboxGroupRef.current = skyGroup;
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [primaryMesh?.skyModelTagId, primaryMesh?.skyOutdoorFogColor, loadModelGeometry, loadTexture]);
 
   // Build spatial hash collision world whenever visible BSP meshes change (Guilty Spark Item 2)
   useEffect(() => {
@@ -2548,12 +2875,15 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     const camera = new THREE.PerspectiveCamera(60, width / height, 0.5, 10000);
     cameraRef.current = camera;
 
-    // 3. Renderer
+    // 3. Renderer (Sapien-grade tone mapping & sRGB output)
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
       renderer.setSize(width, height);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.1;
       container.innerHTML = '';
       container.appendChild(renderer.domElement);
       rendererRef.current = renderer;
@@ -2562,19 +2892,22 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       return;
     }
 
-    // 4. Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    // 4. Lights (Sapien outdoor/indoor hemisphere + sun directional + camera fill light)
+    const hemiLight = new THREE.HemisphereLight(0xe2e8f0, 0x475569, 0.72);
+    scene.add(hemiLight);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.45);
     scene.add(ambientLight);
 
-    const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
-    dirLight1.position.set(100, 200, 100);
+    const dirLight1 = new THREE.DirectionalLight(0xfffbeb, 0.92);
+    dirLight1.position.set(120, 240, 110);
     scene.add(dirLight1);
 
-    const dirLight2 = new THREE.DirectionalLight(0x78909c, 0.4);
-    dirLight2.position.set(-100, -50, -100);
+    const dirLight2 = new THREE.DirectionalLight(0x94a3b8, 0.42);
+    dirLight2.position.set(-120, -60, -110);
     scene.add(dirLight2);
 
-    const headLight = new THREE.PointLight(0xffffff, 0.5, 300);
+    const headLight = new THREE.PointLight(0xffffff, 0.38, 280);
     scene.add(headLight);
 
     // 5. Halo coordinate root: Z-up to Y-up
@@ -2681,8 +3014,11 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
         );
         if (groundZ !== null) {
           const activeAxis = (transformControls as unknown as { axis?: string | null }).axis || '';
-          if (activeAxis.includes('Z')) {
-            // Vertical Z drag while selected: allow lifting into the air, but never allow pushing below the ground
+          if (gravityLockToGroundRef.current) {
+            // Gravity Lock ON: always keep weapons/vehicles/equipment/spawns glued to the ground, even when selected or dragging Z
+            attached.position.z = groundZ;
+          } else if (activeAxis.includes('Z')) {
+            // Vertical Z drag while selected (Gravity OFF): allow lifting into the air, but never allow pushing below the ground
             if (attached.position.z < groundZ) {
               attached.position.z = groundZ;
             }
@@ -2744,7 +3080,9 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
             ) {
               const gZ = callbacksRef.current.sampleGroundHeightAt(grp.position.x, grp.position.y, grp.position.z);
               if (gZ !== null) {
-                if (activeAxis.includes('Z')) {
+                if (gravityLockToGroundRef.current) {
+                  grp.position.z = gZ;
+                } else if (activeAxis.includes('Z')) {
                   if (grp.position.z < gZ) grp.position.z = gZ;
                 } else {
                   grp.position.z = gZ;
@@ -3293,6 +3631,10 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
       }
 
       camera.position.copy(pos);
+      if (skyboxGroupRef.current) {
+        // Keep Sapien 3D Skybox Dome centered on the camera in Halo Z-up coordinates (hx = pos.x, hy = -pos.z, hz = pos.y)
+        skyboxGroupRef.current.position.set(pos.x, -pos.z, pos.y);
+      }
       const lookTarget = new THREE.Vector3().copy(pos).add(
         new THREE.Vector3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch)),
       );
@@ -3815,6 +4157,28 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
             title="Auto-snap unselected spawns, weapons, vehicles, and equipment left in the air to the ground (selected items stay where placed until unselected)"
           >
             {autoSnapToGround ? '🧲 Auto-Snap: ON' : '🧲 Auto-Snap: OFF'}
+          </button>
+
+          {/* Gravity Lock Toggle: glues weapons/vehicles/equipment/spawns to the ground at all times, even when selected */}
+          <button
+            data-testid="viewport-gravity-lock-btn"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              setGravityLockToGround((prev) => !prev);
+            }}
+            style={{
+              background: gravityLockToGround ? 'rgba(74, 222, 128, 0.2)' : 'var(--bg-panel)',
+              color: gravityLockToGround ? '#4ade80' : 'var(--text-primary)',
+              border: `1px solid ${gravityLockToGround ? '#4ade80' : 'var(--border)'}`,
+              borderRadius: 4,
+              padding: '4px 10px',
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+            title="Gravity Lock: keeps weapons, vehicles, equipment, and spawns glued to the ground surface at all times (cannot go underground or float in the air, even while selected)"
+          >
+            {gravityLockToGround ? '🌍 Gravity: ON' : '🌍 Gravity: OFF'}
           </button>
 
           {/* Guilty Spark Item 2: Walk Mode (Master Chief Collision + Gravity + Jump) */}
