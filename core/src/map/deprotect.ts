@@ -234,7 +234,8 @@ function writeTagClassToEntry(
     (entry.secondaryClassFourCC ?? TAG_CLASS_NONE) !== secondaryFourCC ||
     (entry.tertiaryClassFourCC ?? TAG_CLASS_NONE) !== tertiaryFourCC;
 
-  const entryOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE + tagIdx * TAG_ENTRY_SIZE;
+  const tagHeaderSize = header.engine === 5 ? 0x24 : TAG_DATA_HEADER_PC_SIZE;
+  const entryOffset = header.tagDataOffset + tagHeaderSize + tagIdx * TAG_ENTRY_SIZE;
   if (isRangeInBuffer(entryOffset, TAG_ENTRY_SIZE, buffer.length)) {
     buffer.writeUInt32LE(primaryFourCC >>> 0, entryOffset + 0x00);
     buffer.writeUInt32LE(secondaryFourCC >>> 0, entryOffset + 0x04);

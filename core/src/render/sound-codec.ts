@@ -866,7 +866,7 @@ export function replaceSoundPermutationData(
     }
 
     // Update tag table entry
-    const tagArrayOffset = header.tagDataOffset + 0x28;
+    const tagArrayOffset = header.tagDataOffset + (header.engine === 5 ? 0x24 : 0x28);
     const entryOffset = tagArrayOffset + entryIdx * 32;
     outBuffer.writeUInt32LE(tagVirtualAddress, entryOffset + 0x14);
     outBuffer.writeUInt32LE(0, entryOffset + 0x18); // isExternal = false

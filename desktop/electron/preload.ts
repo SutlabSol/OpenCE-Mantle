@@ -264,11 +264,83 @@ const api: OpenceApi = {
   inspectLiveHudCatalog: () => ipcRenderer.invoke('hud:inspectCatalog'),
   applyLiveHudEdit: (request) => ipcRenderer.invoke('hud:applyEdit', request),
   applyLiveWeaponStatEdit: (request) => ipcRenderer.invoke('hud:applyWeaponStatEdit', request),
+  blinkLiveHudElement: (offsetVirtualAddress, originalX) =>
+    ipcRenderer.invoke('hud:blinkElement', offsetVirtualAddress, originalX),
+  equipLiveHudWeapon: (weaponTagId) => ipcRenderer.invoke('hud:equipWeapon', weaponTagId),
+  spawnLiveHudVehicle: (vehicleTagId) => ipcRenderer.invoke('hud:spawnVehicle', vehicleTagId),
+  spawnAllLiveHudArsenal: () => ipcRenderer.invoke('hud:spawnAllArsenal'),
   injectHudElementBitmap: (request) => ipcRenderer.invoke('hud:injectElementBitmap', request),
   inspectUiWidgetCanvas: (widgetTagIndex) => ipcRenderer.invoke('ui:inspectWidgetCanvas', widgetTagIndex),
   updateUiWidgetPlacement: (request) => ipcRenderer.invoke('ui:updateWidgetPlacement', request),
   saveUnicodeStringTable: (ustrTagIndex, strings) =>
     ipcRenderer.invoke('ui:saveUnicodeStringTable', ustrTagIndex, strings),
+  inspectContentExplorer: (tagIndex) => ipcRenderer.invoke('baboon:inspectContentExplorer', tagIndex),
+  autoFixTagDependencies: (tagIndices) => ipcRenderer.invoke('baboon:autoFixTagDependencies', tagIndices),
+  refactorMoveFolderInMap: (oldPrefix, newPrefix) =>
+    ipcRenderer.invoke('baboon:refactorMoveFolderInMap', oldPrefix, newPrefix),
+  reorganizeReflexiveBlock: (request) => ipcRenderer.invoke('baboon:reorganizeReflexiveBlock', request),
+  exportReflexiveTsv: (tagIndex, reflexivePath) =>
+    ipcRenderer.invoke('baboon:exportReflexiveTsv', tagIndex, reflexivePath),
+  importReflexiveTsv: (tagIndex, reflexivePath, tsvText) =>
+    ipcRenderer.invoke('baboon:importReflexiveTsv', tagIndex, reflexivePath, tsvText),
+  evaluateFunctionCurve: (params, sampleCount) =>
+    ipcRenderer.invoke('baboon:evaluateFunctionCurve', params, sampleCount),
+  analyzeHudMessageSafety: (tagIndex) => ipcRenderer.invoke('baboon:analyzeHudMessageSafety', tagIndex),
+  exportStringsCsv: (ustrTagIndex) => ipcRenderer.invoke('baboon:exportStringsCsv', ustrTagIndex),
+  previewStringsCsvImport: (ustrTagIndex, csvText, mode) =>
+    ipcRenderer.invoke('baboon:previewStringsCsvImport', ustrTagIndex, csvText, mode),
+  openLooseTagsWorkspace: (tagsRootDir) =>
+    ipcRenderer.invoke('baboon:openLooseTagsWorkspace', tagsRootDir),
+  readLooseTagFields: (absolutePath, relativePath) =>
+    ipcRenderer.invoke('baboon:readLooseTagFields', absolutePath, relativePath),
+  writeLooseTagField: (absolutePath, relativePath, fieldPath, newValue) =>
+    ipcRenderer.invoke('baboon:writeLooseTagField', absolutePath, relativePath, fieldPath, newValue),
+  fixLooseWorkspaceDependencies: (tagsRootDir) =>
+    ipcRenderer.invoke('baboon:fixLooseWorkspaceDependencies', tagsRootDir),
+  refactorMoveLooseTag: (tagsRootDir, oldRelativePath, newRelativePath, groupName) =>
+    ipcRenderer.invoke('baboon:refactorMoveLooseTag', tagsRootDir, oldRelativePath, newRelativePath, groupName),
+  inspectGitTagsWorkspace: (tagsRootDir) =>
+    ipcRenderer.invoke('baboon:inspectGitTagsWorkspace', tagsRootDir),
+  diffGitLooseTag: (tagsRootDir, absolutePath, gitRef) =>
+    ipcRenderer.invoke('baboon:diffGitLooseTag', tagsRootDir, absolutePath, gitRef),
+  queryHaloScriptCatalog: (query, engineFilter) =>
+    ipcRenderer.invoke('baboon:queryHaloScriptCatalog', query, engineFilter),
+  getToolCommands: (engineFilter) => ipcRenderer.invoke('baboon:getToolCommands', engineFilter),
+  runToolExeCommand: (options) => ipcRenderer.invoke('baboon:runToolExeCommand', options),
+  dropTagToExternalWindow: (absoluteTagPath) =>
+    ipcRenderer.invoke('baboon:dropTagToExternalWindow', absoluteTagPath),
+
+  // v0.6.9 Workspace Launcher, Frameless Window Controls, Themes, Multi-Map Tabs & Multi-Monitor Tear-Off
+  windowMinimize: () => ipcRenderer.invoke('window:minimize'),
+  windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+  windowClose: () => ipcRenderer.invoke('window:close'),
+  windowIsMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  onWindowMaximizedChange: (cb) => {
+    const listener = (_: unknown, isMaximized: boolean) => cb(isMaximized);
+    ipcRenderer.on('window:maximizedChanged', listener);
+    return () => ipcRenderer.removeListener('window:maximizedChanged', listener);
+  },
+  getTheme: () => ipcRenderer.invoke('settings:getTheme'),
+  setTheme: (theme) => ipcRenderer.invoke('settings:setTheme', theme),
+  onThemeChanged: (cb) => {
+    const listener = (_: unknown, theme: any) => cb(theme);
+    ipcRenderer.on('settings:themeChanged', listener);
+    return () => ipcRenderer.removeListener('settings:themeChanged', listener);
+  },
+  getRecentMapCards: () => ipcRenderer.invoke('recentMaps:getCards'),
+  togglePinRecentMap: (filePath) => ipcRenderer.invoke('recentMaps:togglePin', filePath),
+  removeRecentMap: (filePath) => ipcRenderer.invoke('recentMaps:remove', filePath),
+  revealInExplorer: (filePath) => ipcRenderer.invoke('recentMaps:revealInExplorer', filePath),
+  listOpenMapSessions: () => ipcRenderer.invoke('map:listOpenSessions'),
+  switchActiveMapSession: (sessionId) => ipcRenderer.invoke('map:switchActiveSession', sessionId),
+  closeMapSession: (sessionId) => ipcRenderer.invoke('map:closeSession', sessionId),
+  detachMapTabToWindow: (sessionId, coords) => ipcRenderer.invoke('window:detachMapTab', sessionId, coords),
+  redockMapTabToMainWindow: (sessionId) => ipcRenderer.invoke('window:redockMapTab', sessionId),
+  onOpenMapSessionsChanged: (cb) => {
+    const listener = (_: unknown, payload: any) => cb(payload);
+    ipcRenderer.on('map:sessionsChanged', listener);
+    return () => ipcRenderer.removeListener('map:sessionsChanged', listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('opence', api);

@@ -1153,6 +1153,13 @@ export function extractScenarioPlacements(
   }
 
   // 11. Decals
+  const decalPal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get('decal palette')?.value as { count: number; pointerLow: number } | undefined,
+    'ScenarioDecalPalette',
+  );
   const decRef = scnr.get('decals')?.value as { count: number; pointerLow: number } | undefined;
   if (decRef && decRef.count > 0) {
     const decSize = resolveStruct('ScenarioDecal').totalSize;
@@ -1163,18 +1170,20 @@ export function extractScenarioPlacements(
       const typeIdx = (item.get('decal type')?.value as number) ?? 0;
       const yaw = (item.get('yaw')?.value as number) ?? 0;
       const pitch = (item.get('pitch')?.value as number) ?? 0;
+      const pal = decalPal[typeIdx] || { tagId: 0xffffffff, path: `Decal ${typeIdx}`, modelTagId: 0xffffffff };
+      const leafName = pal.path ? pal.path.split('\\').pop() || pal.path : `Decal ${typeIdx}`;
 
       placements.push({
         id: `decal-${i}`,
         kind: 'decal',
         paletteIndex: typeIdx,
         nameIndex: -1,
-        objectTagId: 0xffffffff,
-        objectPath: `Decal ${typeIdx}`,
+        objectTagId: pal.tagId,
+        objectPath: pal.path || `Decal ${typeIdx}`,
         modelTagId: 0xffffffff,
         position: pos,
         rotation: [(yaw / 128) * Math.PI, (pitch / 128) * Math.PI, 0],
-        name: `Decal #${i}`,
+        name: `${leafName} #${i}`,
       });
       counts.decals = (counts.decals || 0) + 1;
     }
@@ -1368,9 +1377,10 @@ export function updateScenarioPlacement(
           });
           if (matchingItmc) resolvedItmcId = matchingItmc.tagId;
         }
+        const tagHeaderSize = header.engine === 5 ? 0x24 : 0x28;
         const pathPtr =
           resolvedItmcId !== 0xffffffff
-            ? buffer.readUInt32LE(header.tagDataOffset + 0x28 + (resolvedItmcId & 0xffff) * 32 + 0x10)
+            ? buffer.readUInt32LE(header.tagDataOffset + tagHeaderSize + (resolvedItmcId & 0xffff) * 32 + 0x10)
             : 0;
         buffer.writeUInt32LE(0x69746d63, itemOffset + 80); // 'itmc' fourCC in little-endian ('cmti')
         buffer.writeUInt32LE(pathPtr, itemOffset + 84);
@@ -1444,6 +1454,15 @@ export function updateScenarioPlacement(
       buffer.writeFloatLE(updates.position[0], itemOffset + 4);
       buffer.writeFloatLE(updates.position[1], itemOffset + 8);
       buffer.writeFloatLE(updates.position[2], itemOffset + 12);
+    }
+    if (updates.rotation) {
+      const yawByte = Math.max(-128, Math.min(127, Math.round((updates.rotation[0] / Math.PI) * 128)));
+      const pitchByte = Math.max(-128, Math.min(127, Math.round((updates.rotation[1] / Math.PI) * 128)));
+      buffer.writeInt8(yawByte, itemOffset + 2);
+      buffer.writeInt8(pitchByte, itemOffset + 3);
+    }
+    if (updates.paletteIndex !== undefined) {
+      buffer.writeInt16LE(updates.paletteIndex, itemOffset + 0);
     }
   } else if (kindStr === 'encounter') {
     const parts = placementId.split('-');
@@ -1588,6 +1607,13 @@ export function duplicateScenarioPlacement(
     newItemBytes.writeFloatLE(curX + offsetDelta[0], 0);
     newItemBytes.writeFloatLE(curY + offsetDelta[1], 4);
     newItemBytes.writeFloatLE(curZ + offsetDelta[2], 8);
+  } else if (kind === 'decal') {
+    const curX = newItemBytes.readFloatLE(4);
+    const curY = newItemBytes.readFloatLE(8);
+    const curZ = newItemBytes.readFloatLE(12);
+    newItemBytes.writeFloatLE(curX + offsetDelta[0], 4);
+    newItemBytes.writeFloatLE(curY + offsetDelta[1], 8);
+    newItemBytes.writeFloatLE(curZ + offsetDelta[2], 12);
   } else if (kind === 'equipment') {
     const curX = newItemBytes.readFloatLE(64);
     const curY = newItemBytes.readFloatLE(68);
@@ -1995,7 +2021,8 @@ export function addScenarioPlacement(
         itmcBytes.writeUInt32LE(0, 8);
         itmcBytes.writeInt16LE(30, 12);
         // ItemCollectionPermutation (84B at +92): weight=1.0 at +32, item TagDependency at +36
-        const entryPathPtr = curBuf.readUInt32LE(curHdr.tagDataOffset + 0x28 + (chosen.tagId & 0xffff) * 32 + 0x10);
+        const tagHeaderSize = curHdr.engine === 5 ? 0x24 : 0x28;
+        const entryPathPtr = curBuf.readUInt32LE(curHdr.tagDataOffset + tagHeaderSize + (chosen.tagId & 0xffff) * 32 + 0x10);
         itmcBytes.writeFloatLE(1.0, 92 + 32);
         itmcBytes.writeUInt32LE(entry.primaryClassName === 'weapon' ? 0x77656170 : 0x65716970, 92 + 36);
         itmcBytes.writeUInt32LE(entryPathPtr, 92 + 40);
@@ -2072,9 +2099,10 @@ export function addScenarioPlacement(
   newItemBytes.writeFloatLE(position[1], 68);
   newItemBytes.writeFloatLE(position[2], 72);
   newItemBytes.writeFloatLE(rotation[0], 76);
+  const tagHeaderSize = curHdr.engine === 5 ? 0x24 : 0x28;
   const itmcPathPtr =
     itmcTagId !== 0xffffffff
-      ? curBuf.readUInt32LE(curHdr.tagDataOffset + 0x28 + (itmcTagId & 0xffff) * 32 + 0x10)
+      ? curBuf.readUInt32LE(curHdr.tagDataOffset + tagHeaderSize + (itmcTagId & 0xffff) * 32 + 0x10)
       : 0;
   newItemBytes.writeUInt32LE(0x69746d63, 80); // 'itmc' fourCC in little-endian ('cmti')
   newItemBytes.writeUInt32LE(itmcPathPtr, 84);

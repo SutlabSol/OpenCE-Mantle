@@ -408,10 +408,26 @@ export function resolveDefaultHaloShadersForWorld(
   const shaderTags = normalizedTags.filter((t) =>
     ['senv', 'soso', 'schi', 'sgla', 'smet', 'spla', 'swat'].includes(t.classA),
   );
-  // Prefer `senv` (shader_environment) first for BSP surfaces, then `soso`/`schi`
-  const sortedShaders = [...shaderTags].sort((a, b) => {
-    const rank = (c: string) => (c === 'senv' ? 0 : c === 'soso' ? 1 : 2);
-    return rank(a.classA) - rank(b.classA);
+  // Prefer `senv` (shader_environment) and `levels\` BSP shaders first for BSP surfaces
+  const hasBspEnvShaders = shaderTags.some(
+    (t) => t.classA === 'senv' || t.path.toLowerCase().startsWith('levels\\'),
+  );
+  const candidateShaders = hasBspEnvShaders
+    ? shaderTags.filter((t) => {
+        const lower = t.path.toLowerCase();
+        if (/^(weapons|characters|ui|hud|effects|powerups|vehicles)\\/i.test(lower)) return false;
+        if (/decal|blood|teleporter|shield|flare|contrail|particle|reticle| hud|alpha_test|leaves|frond/i.test(lower)) return false;
+        return t.classA === 'senv' || lower.startsWith('levels\\') || lower.startsWith('scenery\\');
+      })
+    : shaderTags;
+
+  const sortedShaders = [...(candidateShaders.length > 0 ? candidateShaders : shaderTags)].sort((a, b) => {
+    const rank = (t: { classA: string; path: string }) => {
+      const isLevel = t.path.toLowerCase().startsWith('levels\\') ? 0 : 1;
+      const isSenv = t.classA === 'senv' ? 0 : t.classA === 'soso' ? 2 : 4;
+      return isLevel + isSenv;
+    };
+    return rank(a) - rank(b);
   });
 
   const fallbackShader = sortedShaders[0] ?? {
@@ -449,12 +465,12 @@ export function resolveDefaultHaloShadersForWorld(
     for (const st of sortedShaders) {
       const lower = st.path.toLowerCase();
       // Skip sky/portal/invisible shaders
-      if (/sky|portal|invisible|nodraw|blank|weather|fog/i.test(lower)) continue;
-      let score = st.classA === 'senv' ? 2 : 0;
+      if (/sky|portal|invisible|nodraw|blank|weather|fog|cloud/i.test(lower)) continue;
+      let score = (st.classA === 'senv' ? 12 : 0) + (lower.startsWith('levels\\') ? 10 : 0);
       for (let k = 0; k < spec.keywords.length; k++) {
         const kw = spec.keywords[k].toLowerCase();
         if (lower.includes(kw)) {
-          score += (spec.keywords.length - k) * 5;
+          score += (spec.keywords.length - k) * 6;
         }
       }
       if (score > bestScore) {
@@ -675,6 +691,147 @@ class MeshBuilder {
     }
   }
 
+  /**
+   * Adds a solid 3D inclined ramp prism along X from `(x0, z0)` to `(x1, z1)` spanning `y0 .. y1` with real slab `thickness`
+   * and optional side curbs (`curbHeight`), guaranteeing 100% solid 3D collision BSP planes with zero paper-thin faces.
+   */
+  addSolidRamp(
+    x0: number,
+    x1: number,
+    y0: number,
+    y1: number,
+    z0: number,
+    z1: number,
+    thickness: number,
+    topRole: WorldMaterialRole,
+    sideRole: WorldMaterialRole = topRole,
+    curbHeight = 0,
+  ): void {
+    const t = Math.max(0.25, thickness);
+    // Top walkable sloped surface (+Z normal)
+    this.addQuad([x0, y0, z0], [x1, y0, z1], [x1, y1, z1], [x0, y1, z0], topRole);
+    // Bottom sloped surface (-Z normal)
+    this.addQuad([x0, y1, z0 - t], [x1, y1, z1 - t], [x1, y0, z1 - t], [x0, y0, z0 - t], sideRole);
+    // Left side wall (y = y0, -Y normal)
+    this.addQuad([x0, y0, z0 - t], [x1, y0, z1 - t], [x1, y0, z1], [x0, y0, z0], sideRole);
+    // Right side wall (y = y1, +Y normal)
+    this.addQuad([x1, y1, z1 - t], [x0, y1, z0 - t], [x0, y1, z0], [x1, y1, z1], sideRole);
+    // Start end cap (x = x0, -X normal)
+    this.addQuad([x0, y1, z0 - t], [x0, y0, z0 - t], [x0, y0, z0], [x0, y1, z0], sideRole);
+    // End cap (x = x1, +X normal)
+    this.addQuad([x1, y0, z1 - t], [x1, y1, z1 - t], [x1, y1, z1], [x1, y0, z1], sideRole);
+
+    if (curbHeight > 0.05) {
+      const cw = 0.22;
+      for (const isRight of [false, true]) {
+        const cy0 = isRight ? y1 - cw : y0;
+        const cy1 = isRight ? y1 : y0 + cw;
+        this.addQuad([x0, cy0, z0 + curbHeight], [x1, cy0, z1 + curbHeight], [x1, cy1, z1 + curbHeight], [x0, cy1, z0 + curbHeight], sideRole);
+        this.addQuad([x0, cy0, z0], [x1, cy0, z1], [x1, cy0, z1 + curbHeight], [x0, cy0, z0 + curbHeight], sideRole);
+        this.addQuad([x1, cy1, z1], [x0, cy1, z0], [x0, cy1, z0 + curbHeight], [x1, cy1, z1 + curbHeight], sideRole);
+      }
+    }
+  }
+
+  /**
+   * Adds a solid 3D inclined ramp prism along Y from `(y0, z0)` to `(y1, z1)` spanning `x0 .. x1` with real slab `thickness`.
+   */
+  addSolidRampY(
+    x0: number,
+    x1: number,
+    y0: number,
+    y1: number,
+    z0: number,
+    z1: number,
+    thickness: number,
+    topRole: WorldMaterialRole,
+    sideRole: WorldMaterialRole = topRole,
+  ): void {
+    const t = Math.max(0.25, thickness);
+    this.addQuad([x0, y0, z0], [x1, y0, z0], [x1, y1, z1], [x0, y1, z1], topRole);
+    this.addQuad([x0, y1, z1 - t], [x1, y1, z1 - t], [x1, y0, z0 - t], [x0, y0, z0 - t], sideRole);
+    this.addQuad([x0, y1, z1 - t], [x0, y0, z0 - t], [x0, y0, z0], [x0, y1, z1], sideRole);
+    this.addQuad([x1, y0, z0 - t], [x1, y1, z1 - t], [x1, y1, z1], [x1, y0, z0], sideRole);
+    this.addQuad([x0, y0, z0 - t], [x1, y0, z0 - t], [x1, y0, z0], [x0, y0, z0], sideRole);
+    this.addQuad([x1, y1, z1 - t], [x0, y1, z1 - t], [x0, y1, z1], [x1, y1, z1], sideRole);
+  }
+
+  /**
+   * Adds an organic, multi-faceted 3D rock boulder / outcrop with natural craggy perturbation.
+   */
+  addOrganicBoulder(
+    cx: number,
+    cy: number,
+    cz: number,
+    rx: number,
+    ry: number,
+    rz: number,
+    role: WorldMaterialRole,
+    topRole: WorldMaterialRole = role,
+    seed = 1,
+  ): void {
+    const sides = 8;
+    const ring = (zNorm: number, radScale: number): [number, number, number][] => {
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i < sides; i++) {
+        const ang = (i / sides) * Math.PI * 2 + zNorm * 0.25;
+        const n = 1.0 + 0.16 * Math.sin(ang * 3 + seed * 1.7) + 0.1 * Math.cos(ang * 2 - seed * 2.3 + zNorm * 2.0);
+        pts.push([
+          cx + Math.cos(ang) * rx * radScale * n,
+          cy + Math.sin(ang) * ry * radScale * n,
+          cz + zNorm * rz,
+        ]);
+      }
+      return pts;
+    };
+    const rBot = ring(-0.5, 0.92);
+    const rMid = ring(0.05, 1.06);
+    const rTop = ring(0.5, 0.62);
+    const topCenter: [number, number, number] = [cx, cy, cz + rz * 0.56];
+    const botCenter: [number, number, number] = [cx, cy, cz - rz * 0.5];
+    for (let i = 0; i < sides; i++) {
+      const j = (i + 1) % sides;
+      this.addQuad(rBot[i], rBot[j], rMid[j], rMid[i], role);
+      this.addQuad(rMid[i], rMid[j], rTop[j], rTop[i], role);
+      this.addTriangle(rTop[i], rTop[j], topCenter, topRole);
+      this.addTriangle(rBot[j], rBot[i], botCenter, role);
+    }
+  }
+
+  /**
+   * Adds an organic tapered octagonal cave pillar / stalagmite-stalactite column between `z0` and `z1`.
+   */
+  addOctagonalPillar(
+    cx: number,
+    cy: number,
+    z0: number,
+    z1: number,
+    rBase: number,
+    rMid: number,
+    role: WorldMaterialRole,
+    seed = 0,
+  ): void {
+    const sides = 8;
+    const zMid = (z0 + z1) * 0.5;
+    const ring = (z: number, r: number): [number, number, number][] => {
+      const pts: [number, number, number][] = [];
+      for (let i = 0; i < sides; i++) {
+        const ang = (i / sides) * Math.PI * 2;
+        const perturb = seed ? 1.0 + 0.12 * Math.sin(ang * 3 + seed) : 1.0;
+        pts.push([cx + Math.cos(ang) * r * perturb, cy + Math.sin(ang) * r * perturb, z]);
+      }
+      return pts;
+    };
+    const r0 = ring(z0, rBase);
+    const r1 = ring(zMid, rMid);
+    const r2 = ring(z1, rBase);
+    for (let i = 0; i < sides; i++) {
+      const j = (i + 1) % sides;
+      this.addQuad(r0[i], r0[j], r1[j], r1[i], role);
+      this.addQuad(r1[i], r1[j], r2[j], r2[i], role);
+    }
+  }
+
   finalize(
     routeWaypoints: [number, number, number][],
     recommendedSpawnLocal: [number, number, number] = [2, 0, 0.2],
@@ -798,7 +955,12 @@ export function generateTunnelNetworkMesh(config: TunnelNetworkConfig): Generate
   const getPathBaseY = (pIdx: number): number => (pIdx - (pathCount - 1) * 0.5) * spacing;
   const getPathCurveOffsetY = (pIdx: number, t: number): number => {
     if (config.style === 'natural_cavern') {
-      return Math.sin(t * Math.PI * 2 + pIdx * 1.3) * Math.min(1.6, spacing * 0.14);
+      const env = Math.sin(t * Math.PI); // Smoothly pinned to 0 at entrance (t=0) and exit (t=1)
+      return (
+        env *
+        (Math.sin(t * Math.PI * 2 + pIdx * 1.3) * Math.min(2.2, spacing * 0.18) +
+          Math.sin(t * Math.PI * 4.5 + pIdx * 2.7) * Math.min(0.85, spacing * 0.07))
+      );
     }
     return 0;
   };
@@ -821,6 +983,7 @@ export function generateTunnelNetworkMesh(config: TunnelNetworkConfig): Generate
       // Check if `x` falls inside any cave on this path and blend width/height smoothly
       let curHalfW = tw * 0.5;
       let curH = th;
+      let inCaveFactor = 0;
       for (const cave of pathCaves) {
         const caveCenterX = Math.max(0.1, Math.min(0.9, cave.tPosition)) * dist;
         const halfLen = Math.max(3.0, cave.length * 0.5);
@@ -829,37 +992,42 @@ export function generateTunnelNetworkMesh(config: TunnelNetworkConfig): Generate
           const smooth = 0.5 * (1 + Math.cos(rel * Math.PI)); // 1 at cave center, 0 at cave ends
           curHalfW = Math.max(curHalfW, (cave.width * 0.5 - tw * 0.5) * smooth + tw * 0.5);
           curH = Math.max(curH, (cave.height - th) * smooth + th);
+          inCaveFactor = Math.max(inCaveFactor, smooth);
         }
       }
 
-      // Organic cavern wall undulation
-      const wave =
-        config.style === 'natural_cavern'
-          ? Math.sin(s * 1.7 + pIdx * 2.1) * 0.22
-          : 0;
-      const hw = curHalfW + wave;
-      const bevelW = config.style === 'forerunner_conduit' ? hw * 1.18 : hw * 1.08;
-      const midH = curH * 0.55;
+      // Multi-octave organic cavern wall & ceiling undulation
+      const isCavern = config.style === 'natural_cavern';
+      const waveY = isCavern
+        ? Math.sin(s * 1.45 + pIdx * 2.1) * 0.34 + Math.cos(s * 2.9 - pIdx * 1.3) * 0.18
+        : 0;
+      const waveZ = isCavern
+        ? Math.abs(Math.sin(s * 1.8 + pIdx * 1.7)) * 0.42 + inCaveFactor * Math.sin(s * 3.1) * 0.35
+        : 0;
+      const hw = curHalfW + waveY;
+      const bevelW = config.style === 'forerunner_conduit' ? hw * 1.2 : hw * (isCavern ? 1.15 : 1.08);
+      const midH = (curH + waveZ) * 0.52;
+      const crownH = curH + waveZ + (isCavern ? 0.35 + inCaveFactor * 0.65 : 0);
 
-      // 6-point octagonal/arched cross-section:
+      // 6-point arched/vaulted cross-section:
       // 0: Floor Left (-hw, z0)
       // 1: Floor Right (+hw, z0)
       // 2: Mid-Wall Right (+bevelW, z0 + midH)
-      // 3: Ceiling Right (+hw * 0.72, z0 + curH)
-      // 4: Ceiling Left (-hw * 0.72, z0 + curH)
+      // 3: Ceiling Right (+hw * 0.68, z0 + crownH)
+      // 4: Ceiling Left (-hw * 0.68, z0 + crownH)
       // 5: Mid-Wall Left (-bevelW, z0 + midH)
       return {
         x,
         cy,
         z0,
         hw,
-        curH,
+        curH: crownH,
         pts: [
           [x, cy - hw, z0] as [number, number, number],
           [x, cy + hw, z0] as [number, number, number],
           [x, cy + bevelW, z0 + midH] as [number, number, number],
-          [x, cy + hw * 0.72, z0 + curH] as [number, number, number],
-          [x, cy - hw * 0.72, z0 + curH] as [number, number, number],
+          [x, cy + hw * 0.68, z0 + crownH] as [number, number, number],
+          [x, cy - hw * 0.68, z0 + crownH] as [number, number, number],
           [x, cy - bevelW, z0 + midH] as [number, number, number],
         ],
       };
@@ -916,16 +1084,29 @@ export function generateTunnelNetworkMesh(config: TunnelNetworkConfig): Generate
         builder.addQuad(secA.pts[5], secB.pts[5], secB.pts[0], secA.pts[0], wallRole, 0.25, true);
       }
 
-      // Add Forerunner / UNSC structural rib frames every 4 slices
+      // Add Forerunner / UNSC structural rib frames every 4 slices, or organic cavern wall rock ledges in natural_cavern
       if (config.style !== 'natural_cavern' && s > 0 && s < numSlices && s % 4 === 0 && !hasLeftCross && !hasRightCross) {
         builder.addStrutBetweenPoints(secA.pts[0], secA.pts[5], 0.22, trimRole);
         builder.addStrutBetweenPoints(secA.pts[5], secA.pts[4], 0.22, trimRole);
         builder.addStrutBetweenPoints(secA.pts[1], secA.pts[2], 0.22, trimRole);
         builder.addStrutBetweenPoints(secA.pts[2], secA.pts[3], 0.22, trimRole);
+      } else if (config.style === 'natural_cavern' && s > 1 && s < numSlices - 1 && s % 5 === 0 && !hasLeftCross && !hasRightCross) {
+        const side = s % 10 === 0 ? 1 : -1;
+        builder.addOrganicBoulder(
+          secA.x,
+          secA.cy + side * (secA.hw + 0.35),
+          secA.z0 + 0.55,
+          0.95,
+          0.65,
+          1.1,
+          'rock_wall',
+          'dirt_ground',
+          s + pIdx * 17,
+        );
       }
     }
 
-    // Add interior cave pillars / stalagmites for each cave on this path
+    // Add interior cave pillars / stalagmites & organic alcove boulders for each cave on this path
     for (const cave of pathCaves) {
       const pillarCount = Math.max(0, Math.min(8, Math.round(cave.pillars || 0)));
       const caveCenterX = Math.max(0.1, Math.min(0.9, cave.tPosition)) * dist;
@@ -936,20 +1117,16 @@ export function generateTunnelNetworkMesh(config: TunnelNetworkConfig): Generate
         const angle = (k / Math.max(1, pillarCount)) * Math.PI * 2 + 0.4;
         const rX = Math.max(1.2, cave.length * 0.24) * Math.cos(angle);
         const rY = Math.max(1.2, cave.width * 0.26) * Math.sin(angle);
-        // Keep the central pathway (`|rY| < tw * 0.45`) clear so Spartan/Warthog clearance is never blocked!
-        const safeY = Math.abs(rY) < tw * 0.5 ? Math.sign(rY || 1) * (tw * 0.55) : rY;
+        // Keep the central pathway (`|rY| < tw * 0.5`) clear so Spartan/Warthog clearance is never blocked!
+        const safeY = Math.abs(rY) < tw * 0.52 ? Math.sign(rY || 1) * (tw * 0.58) : rY;
         const px = caveCenterX + rX;
         const py = caveY + safeY;
-        const pRadius = config.style === 'natural_cavern' ? 0.65 : 0.45;
-        builder.addSolidBox(
-          px,
-          py,
-          caveZ + cave.height * 0.48,
-          pRadius * 2,
-          pRadius * 2,
-          cave.height * 0.96,
-          config.style === 'natural_cavern' ? 'rock_wall' : 'forerunner_trim',
-        );
+        if (config.style === 'natural_cavern') {
+          builder.addOctagonalPillar(px, py, caveZ, caveZ + cave.height * 0.98, 0.85, 0.48, 'rock_wall', k + 1);
+          builder.addOrganicBoulder(px + 0.5, py + Math.sign(safeY) * 0.6, caveZ + 0.4, 0.8, 0.7, 0.8, 'rock_wall', 'dirt_ground', k + 9);
+        } else {
+          builder.addOctagonalPillar(px, py, caveZ, caveZ + cave.height * 0.98, 0.55, 0.42, 'forerunner_trim', 0);
+        }
       }
     }
 
@@ -1144,15 +1321,29 @@ export function generateBridgeNetworkMesh(config: BridgeNetworkConfig): Generate
         for (const side of [-1, 1]) {
           const ry = cy + side * (hw - rThick * 0.5);
           const localH = isNatural ? railH * (0.75 + 0.35 * Math.sin(s * 2.3 + side)) : railH;
-          builder.addSolidBox(
-            (x0 + x1) * 0.5,
-            ry,
-            (z0 + z1) * 0.5 + localH * 0.5,
-            (x1 - x0) * 1.02,
-            rThick,
-            localH,
-            railRole,
-          );
+          if (isNatural && s % 3 === 1) {
+            builder.addOrganicBoulder(
+              (x0 + x1) * 0.5,
+              ry + side * 0.18,
+              (z0 + z1) * 0.5 + localH * 0.45,
+              (x1 - x0) * 0.68,
+              rThick * 1.45,
+              localH * 1.25,
+              'rock_wall',
+              config.style === 'natural_dirt' ? 'grass_ground' : 'rock_wall',
+              s * 7 + (side > 0 ? 3 : 11),
+            );
+          } else {
+            builder.addSolidBox(
+              (x0 + x1) * 0.5,
+              ry,
+              (z0 + z1) * 0.5 + localH * 0.5,
+              (x1 - x0) * 1.02,
+              rThick,
+              localH,
+              railRole,
+            );
+          }
         }
       }
 
@@ -1316,38 +1507,52 @@ export function createPresetTerrainGrid(
   let groundRole: WorldMaterialRole = 'dirt_ground';
   let cliffRole: WorldMaterialRole = 'rock_wall';
 
+  // Multi-octave organic fBm displacement so generated terrain has natural ridges, gullies, and eroded hills
+  const fbm = (x: number, y: number): number => {
+    const o1 = Math.sin(x * 3.1 + Math.cos(y * 2.7)) * Math.cos(y * 3.3 - Math.sin(x * 2.4));
+    const o2 = 0.5 * Math.sin(x * 6.7 - y * 5.3 + 1.2) * Math.cos(x * 4.9 + y * 6.1);
+    const o3 = 0.25 * Math.cos(x * 13.1 + y * 11.7 - 0.7);
+    const o4 = 0.125 * Math.sin(x * 23.0 - y * 19.0);
+    return o1 + o2 + o3 + o4;
+  };
+
   for (let iy = 0; iy <= safeSteps; iy++) {
     const ny = (iy / safeSteps) * 2 - 1; // -1 .. +1
     for (let ix = 0; ix <= safeSteps; ix++) {
       const nx = (ix / safeSteps) * 2 - 1; // -1 .. +1
       const r = Math.hypot(nx, ny);
+      const detail = fbm(nx, ny);
       let z = 0;
 
       if (preset === 'bloodgulch_canyon') {
         groundRole = 'sand_ground';
         cliffRole = 'rock_wall';
-        // Box canyon walls along Y edges + rolling dunes in the valley floor
-        const canyonWall = Math.pow(Math.max(0, Math.abs(ny) - 0.55) / 0.45, 1.8) * 14.0;
-        const rollingHills = Math.sin(nx * Math.PI * 2) * Math.cos(ny * Math.PI * 1.5) * 1.2;
-        z = canyonWall + rollingHills;
+        // Organic warped canyon rim + multi-tier rock ledges + rolling valley dunes
+        const canyonWarp = Math.abs(ny + 0.12 * Math.sin(nx * Math.PI * 1.8));
+        const canyonWall = Math.pow(Math.max(0, canyonWarp - 0.5) / 0.5, 1.65) * 15.5;
+        const terrace = canyonWall > 3.5 ? Math.round(canyonWall / 3.2) * 0.55 : 0;
+        const rollingDunes = detail * 1.45 + Math.sin(nx * Math.PI * 2.2) * 0.85;
+        z = canyonWall + terrace + rollingDunes;
       } else if (preset === 'timberland_ridge') {
         groundRole = 'grass_ground';
         cliffRole = 'rock_wall';
-        const rim = Math.pow(Math.max(0, r - 0.5) / 0.5, 1.6) * 12.0;
-        const centralHill = Math.max(0, 1 - (r / 0.35) ** 2) * 3.8;
-        const undulation = Math.sin(nx * 4.0) * Math.sin(ny * 4.0) * 0.9;
-        z = rim + centralHill + undulation;
+        const rimWarp = r + 0.1 * Math.sin(Math.atan2(ny, nx) * 5 + r * 3);
+        const rim = Math.pow(Math.max(0, rimWarp - 0.48) / 0.52, 1.55) * 13.5;
+        const centralHill = Math.max(0, 1 - (r / 0.38) ** 2) * 4.2;
+        z = rim + centralHill + detail * 1.35;
       } else if (preset === 'icefields_glacier') {
         groundRole = 'snow_ground';
         cliffRole = 'rock_wall';
-        const gorge = Math.abs(ny) < 0.25 ? -2.8 * (1 - Math.abs(ny) / 0.25) : 0;
-        const ridge = Math.pow(Math.abs(ny), 1.5) * 9.0 + Math.cos(nx * Math.PI * 2) * 1.1;
+        const gorgeDist = Math.abs(ny - 0.14 * Math.sin(nx * Math.PI * 1.5));
+        const gorge = gorgeDist < 0.26 ? -3.2 * (1 - gorgeDist / 0.26) : 0;
+        const ridge = Math.pow(gorgeDist, 1.45) * 9.5 + detail * 1.25;
         z = gorge + ridge;
       } else if (preset === 'deathisland_mesa') {
         groundRole = 'grass_ground';
         cliffRole = 'rock_wall';
-        const plateau = r < 0.45 ? 6.5 : r < 0.7 ? 6.5 * (1 - (r - 0.45) / 0.25) : 0;
-        z = plateau + Math.sin(nx * 3.2) * Math.cos(ny * 3.2) * 0.6;
+        const mesaR = r + 0.08 * detail;
+        const plateau = mesaR < 0.44 ? 7.2 : mesaR < 0.72 ? 7.2 * (1 - (mesaR - 0.44) / 0.28) : 0;
+        z = plateau + detail * 0.95;
       }
 
       heights[iy * stride + ix] = Number(z.toFixed(3));
@@ -1554,96 +1759,147 @@ export function generateQuickForgeWorldMesh(config: QuickForgeWorldConfig): Gene
         const wallThick = 0.55;
 
         if (city.includeAccessibleInteriors) {
-          // Hollow building shell with ground-floor doorway openings, roof slab, and interior ramp to roof!
+          // Detailed multi-story hollow building shell with ground-floor doorway openings, roof slab, parapet walls, and solid 3D interior ramp to roof!
           const halfF = bFootprint * 0.5;
           const doorW = Math.min(2.6, bFootprint * 0.35);
           const doorH = 2.4;
           const sidePanelW = (bFootprint - doorW) * 0.5;
 
-          // Front & Back walls with center doorway opening
+          // Front & Back walls with center doorway opening + window lintel belt courses
           for (const sideY of [-1, 1]) {
             const wy = blockCenterY + sideY * (halfF - wallThick * 0.5);
             builder.addSolidBox(blockCenterX - halfF + sidePanelW * 0.5, wy, oz + 0.24 + bHeight * 0.5, sidePanelW, wallThick, bHeight, 'building_facade');
             builder.addSolidBox(blockCenterX + halfF - sidePanelW * 0.5, wy, oz + 0.24 + bHeight * 0.5, sidePanelW, wallThick, bHeight, 'building_facade');
             if (bHeight > doorH) {
               builder.addSolidBox(blockCenterX, wy, oz + 0.24 + doorH + (bHeight - doorH) * 0.5, doorW, wallThick, bHeight - doorH, 'building_facade');
+              // Entrance canopy overhang
+              builder.addSolidBox(blockCenterX, wy + sideY * 0.65, oz + 0.24 + doorH + 0.15, doorW + 0.8, 1.1, 0.28, 'forerunner_trim');
             }
           }
-          // Left & Right solid walls
+          // Left & Right solid walls with architectural vertical pilasters
           for (const sideX of [-1, 1]) {
             const wx = blockCenterX + sideX * (halfF - wallThick * 0.5);
             builder.addSolidBox(wx, blockCenterY, oz + 0.24 + bHeight * 0.5, wallThick, bFootprint, bHeight, 'building_facade');
+            builder.addSolidBox(wx + sideX * 0.16, blockCenterY - halfF * 0.45, oz + 0.24 + bHeight * 0.5, 0.28, 0.55, bHeight, 'sidewalk_concrete');
+            builder.addSolidBox(wx + sideX * 0.16, blockCenterY + halfF * 0.45, oz + 0.24 + bHeight * 0.5, 0.28, 0.55, bHeight, 'sidewalk_concrete');
           }
-          // Rooftop deck with sniper opening + interior ramp
+          // Rooftop deck with sniper opening + solid 3D interior ramp + rooftop sniper cover parapets
           const roofZ = oz + 0.24 + bHeight;
-          builder.addSolidBox(blockCenterX - bFootprint * 0.18, blockCenterY, roofZ, bFootprint * 0.64, bFootprint, 0.4, 'sidewalk_concrete');
-          // Ramp from ground floor up to roof along +X inside wall
-          const rX0 = blockCenterX + bFootprint * 0.16;
-          const rX1 = blockCenterX + halfF - wallThick;
+          const rampBayW = Math.min(2.6, bFootprint * 0.34);
+          const mainDeckW = bFootprint - rampBayW;
+          builder.addSolidBox(blockCenterX - rampBayW * 0.5, blockCenterY, roofZ - 0.2, mainDeckW, bFootprint, 0.4, 'sidewalk_concrete');
+          // Rooftop parapet cover walls
+          builder.addSolidBox(blockCenterX, blockCenterY - halfF + 0.2, roofZ + 0.45, bFootprint, 0.35, 0.9, 'forerunner_trim');
+          builder.addSolidBox(blockCenterX, blockCenterY + halfF - 0.2, roofZ + 0.45, bFootprint, 0.35, 0.9, 'forerunner_trim');
+          builder.addSolidBox(blockCenterX - halfF + 0.2, blockCenterY, roofZ + 0.45, 0.35, bFootprint, 0.9, 'forerunner_trim');
+          // Solid 3D wedge ramp from ground floor up to roof along +X inside wall
+          const rW = Math.max(1.4, rampBayW - wallThick);
+          const rXCenter = blockCenterX + halfF - wallThick - rampBayW * 0.5 + 0.05;
           const rY0 = blockCenterY - halfF + wallThick;
           const rY1 = blockCenterY + halfF - wallThick;
-          builder.addQuad([rX0, rY0, oz + 0.24], [rX1, rY0, oz + 0.24], [rX1, rY1, roofZ], [rX0, rY1, roofZ], 'forerunner_floor', 0.25, true);
+          builder.addSolidRampY(rXCenter - rW * 0.5, rXCenter + rW * 0.5, rY0, rY1, oz + 0.24, roofZ, 0.45, 'forerunner_floor', 'sidewalk_concrete');
         } else {
-          // Solid skyscraper block with rooftop parapet
+          // Detailed multi-tier New Mombasa / Halo 2 Metropolis skyscraper with setback upper tower, cornice ledges, and rooftop penthouse
+          const tier1H = bHeight * 0.62;
+          const tier2H = bHeight * 0.38;
           builder.addSolidBox(
             blockCenterX,
             blockCenterY,
-            oz + 0.24 + bHeight * 0.5,
+            oz + 0.24 + tier1H * 0.5,
             bFootprint,
             bFootprint,
-            bHeight,
+            tier1H,
             'building_facade',
             'sidewalk_concrete',
           );
+          // Mid-building cornice belt ledge
+          builder.addSolidBox(
+            blockCenterX,
+            blockCenterY,
+            oz + 0.24 + tier1H,
+            bFootprint + 0.45,
+            bFootprint + 0.45,
+            0.35,
+            'forerunner_trim',
+            'sidewalk_concrete',
+          );
+          // Upper setback tower tier
+          const upperFoot = bFootprint * 0.78;
+          builder.addSolidBox(
+            blockCenterX,
+            blockCenterY,
+            oz + 0.24 + tier1H + tier2H * 0.5,
+            upperFoot,
+            upperFoot,
+            tier2H,
+            'building_facade',
+            'sidewalk_concrete',
+          );
+          // Rooftop mechanical penthouse + antenna spire
+          const roofTopZ = oz + 0.24 + bHeight;
+          builder.addSolidBox(
+            blockCenterX,
+            blockCenterY,
+            roofTopZ + 0.7,
+            upperFoot * 0.42,
+            upperFoot * 0.42,
+            1.4,
+            'forerunner_trim',
+            'forerunner_floor',
+          );
+        }
+
+        // Streetlight / utility pylons at block corners
+        for (const cxSign of [-1, 1]) {
+          for (const cySign of [-1, 1]) {
+            const lampX = blockCenterX + cxSign * (bSize * 0.5 - 0.35);
+            const lampY = blockCenterY + cySign * (bSize * 0.5 - 0.35);
+            builder.addSolidBox(lampX, lampY, oz + 1.8, 0.22, 0.22, 3.2, 'forerunner_trim');
+            builder.addSolidBox(lampX - cxSign * 0.45, lampY, oz + 3.35, 1.1, 0.26, 0.18, 'forerunner_light');
+          }
         }
 
         // Optional street barricades in intersections
         if (city.includeStreetBarricades && bx < bxCount - 1) {
           const streetX = blockCenterX + bSize * 0.5 + sWidth * 0.5;
-          builder.addSolidBox(streetX, blockCenterY, oz + 0.45, 0.6, 2.4, 0.9, 'forerunner_trim');
+          builder.addSolidBox(streetX, blockCenterY - 1.2, oz + 0.5, 0.7, 2.2, 1.0, 'forerunner_trim');
+          builder.addSolidBox(streetX, blockCenterY + 1.2, oz + 0.5, 0.7, 2.2, 1.0, 'forerunner_trim');
         }
       }
     }
 
-    // Optional Elevated Highway Overpass with On/Off Ramps
+    // Optional Elevated Highway Overpass with Solid 3D On/Off Ramps (Full 3D Collision!)
     if (city.includeHighwayOverpass) {
       const hwyY = oy + totalY * 0.5;
-      const hwyZ = oz + 4.8;
-      const hwyW = Math.max(4.0, sWidth * 0.85);
-      builder.addSolidBox(ox + totalX * 0.5, hwyY, hwyZ, totalX, hwyW, 0.45, 'concrete_road');
-      // Guardrails
-      builder.addSolidBox(ox + totalX * 0.5, hwyY - hwyW * 0.5 + 0.15, hwyZ + 0.5, totalX, 0.25, 0.65, 'sidewalk_concrete');
-      builder.addSolidBox(ox + totalX * 0.5, hwyY + hwyW * 0.5 - 0.15, hwyZ + 0.5, totalX, 0.25, 0.65, 'sidewalk_concrete');
-      // Support columns
+      const hwyDeckThick = 0.6;
+      const hwyTopZ = oz + 4.8;
+      const hwyCenterZ = hwyTopZ - hwyDeckThick * 0.5;
+      const hwyW = Math.max(4.5, sWidth * 0.85);
+      // Solid highway deck whose top surface is at hwyTopZ
+      builder.addSolidBox(ox + totalX * 0.5, hwyY, hwyCenterZ, totalX, hwyW, hwyDeckThick, 'concrete_road');
+      // Guardrails sitting flush on hwyTopZ
+      builder.addSolidBox(ox + totalX * 0.5, hwyY - hwyW * 0.5 + 0.2, hwyTopZ + 0.45, totalX, 0.35, 0.9, 'sidewalk_concrete');
+      builder.addSolidBox(ox + totalX * 0.5, hwyY + hwyW * 0.5 - 0.2, hwyTopZ + 0.45, totalX, 0.35, 0.9, 'sidewalk_concrete');
+      // Center median divider
+      builder.addSolidBox(ox + totalX * 0.5, hwyY, hwyTopZ + 0.22, totalX * 0.96, 0.3, 0.44, 'forerunner_trim');
+      // Support columns + cross-beams
       for (let bx = 0; bx <= bxCount; bx++) {
         const colX = ox + sWidth * 0.5 + bx * pitch;
-        builder.addSolidBox(colX, hwyY, oz + 2.4, 0.9, 0.9, 4.8, 'sidewalk_concrete');
+        builder.addOctagonalPillar(colX, hwyY - hwyW * 0.32, oz, hwyTopZ - hwyDeckThick, 0.55, 0.45, 'sidewalk_concrete');
+        builder.addOctagonalPillar(colX, hwyY + hwyW * 0.32, oz, hwyTopZ - hwyDeckThick, 0.55, 0.45, 'sidewalk_concrete');
+        builder.addSolidBox(colX, hwyY, hwyTopZ - hwyDeckThick - 0.3, 1.1, hwyW * 0.92, 0.6, 'sidewalk_concrete');
       }
-      // West & East On-Ramps
-      const rampLen = 10.0;
-      builder.addQuad(
-        [ox - rampLen, hwyY - hwyW * 0.5, oz],
-        [ox, hwyY - hwyW * 0.5, hwyZ],
-        [ox, hwyY + hwyW * 0.5, hwyZ],
-        [ox - rampLen, hwyY + hwyW * 0.5, oz],
-        'concrete_road',
-        0.25,
-        true,
-      );
-      builder.addQuad(
-        [ox + totalX, hwyY - hwyW * 0.5, hwyZ],
-        [ox + totalX + rampLen, hwyY - hwyW * 0.5, oz],
-        [ox + totalX + rampLen, hwyY + hwyW * 0.5, oz],
-        [ox + totalX, hwyY + hwyW * 0.5, hwyZ],
-        'concrete_road',
-        0.25,
-        true,
-      );
+      // Solid 3D West & East On-Ramps (watertight 3D wedges with side walls & bottom faces for 100% solid vehicle/biped collision!)
+      const rampLen = 11.0;
+      builder.addSolidRamp(ox - rampLen, ox, hwyY - hwyW * 0.5, hwyY + hwyW * 0.5, oz, hwyTopZ, hwyDeckThick, 'concrete_road', 'sidewalk_concrete', 0.45);
+      builder.addSolidRamp(ox + totalX, ox + totalX + rampLen, hwyY - hwyW * 0.5, hwyY + hwyW * 0.5, hwyTopZ, oz, hwyDeckThick, 'concrete_road', 'sidewalk_concrete', 0.45);
     }
   }
 
   // 3. Modular Nature-Inspired, Forerunner & Human Pieces
+  let pieceIdx = 0;
   for (const piece of config.pieces ?? []) {
+    const pIdx = pieceIdx++;
     const pBuilder = new MeshBuilder(piece.position, piece.yawDeg || 0);
     const [sx, sy, sz] = [
       Math.max(1, piece.size[0] || 6),
@@ -1653,44 +1909,63 @@ export function generateQuickForgeWorldMesh(config: QuickForgeWorldConfig): Gene
 
     switch (piece.kind) {
       case 'natural_arch': {
-        // Walkable rocky arch spanning along X
-        const steps = 10;
+        // Organic sculpted rocky arch spanning along X with solid stone abutments and uneven natural bridge deck
+        const steps = 12;
         const hw = sy * 0.5;
+        pBuilder.addOrganicBoulder(-sx * 0.46, 0, sz * 0.35, sx * 0.22, hw * 1.15, sz * 0.45, 'rock_wall', 'dirt_ground', pIdx * 17 + 1);
+        pBuilder.addOrganicBoulder(sx * 0.46, 0, sz * 0.35, sx * 0.22, hw * 1.15, sz * 0.45, 'rock_wall', 'dirt_ground', pIdx * 17 + 2);
         for (let i = 0; i < steps; i++) {
           const t0 = i / steps, t1 = (i + 1) / steps;
           const x0 = (t0 - 0.5) * sx, x1 = (t1 - 0.5) * sx;
-          const zTop0 = sz * (0.75 + 0.25 * Math.sin(t0 * Math.PI));
-          const zTop1 = sz * (0.75 + 0.25 * Math.sin(t1 * Math.PI));
-          const zBot0 = Math.sin(t0 * Math.PI) * sz * 0.65;
-          const zBot1 = Math.sin(t1 * Math.PI) * sz * 0.65;
-          pBuilder.addQuad([x0, -hw, zTop0], [x1, -hw, zTop1], [x1, hw, zTop1], [x0, hw, zTop0], 'dirt_ground');
-          pBuilder.addQuad([x0, hw, zBot0], [x1, hw, zBot1], [x1, -hw, zBot1], [x0, -hw, zBot0], 'rock_wall');
-          pBuilder.addQuad([x0, -hw, zBot0], [x1, -hw, zBot1], [x1, -hw, zTop1], [x0, -hw, zTop0], 'rock_wall');
-          pBuilder.addQuad([x1, hw, zBot1], [x0, hw, zBot0], [x0, hw, zTop0], [x1, hw, zTop1], 'rock_wall');
+          const archRipple0 = Math.sin(t0 * Math.PI * 3) * 0.12;
+          const archRipple1 = Math.sin(t1 * Math.PI * 3) * 0.12;
+          const zTop0 = sz * (0.76 + 0.24 * Math.sin(t0 * Math.PI) + archRipple0 * 0.25);
+          const zTop1 = sz * (0.76 + 0.24 * Math.sin(t1 * Math.PI) + archRipple1 * 0.25);
+          const zBot0 = Math.sin(t0 * Math.PI) * sz * 0.64;
+          const zBot1 = Math.sin(t1 * Math.PI) * sz * 0.64;
+          const w0 = hw * (0.85 + 0.2 * Math.cos((t0 - 0.5) * Math.PI));
+          const w1 = hw * (0.85 + 0.2 * Math.cos((t1 - 0.5) * Math.PI));
+          pBuilder.addQuad([x0, -w0, zTop0], [x1, -w1, zTop1], [x1, w1, zTop1], [x0, w0, zTop0], 'dirt_ground');
+          pBuilder.addQuad([x0, w0, zBot0], [x1, w1, zBot1], [x1, -w1, zBot1], [x0, -w0, zBot0], 'rock_wall');
+          pBuilder.addQuad([x0, -w0, zBot0], [x1, -w1, zBot1], [x1, -w1, zTop1], [x0, -w0, zTop0], 'rock_wall');
+          pBuilder.addQuad([x1, w1, zBot1], [x0, w0, zBot0], [x0, w0, zTop0], [x1, w1, zTop1], 'rock_wall');
         }
         break;
       }
       case 'boulder_cluster': {
-        pBuilder.addSolidBox(0, 0, sz * 0.45, sx * 0.65, sy * 0.65, sz * 0.9, 'rock_wall');
-        pBuilder.addSolidBox(sx * 0.32, sy * 0.25, sz * 0.3, sx * 0.45, sy * 0.45, sz * 0.6, 'rock_wall');
-        pBuilder.addSolidBox(-sx * 0.28, -sy * 0.22, sz * 0.25, sx * 0.4, sy * 0.4, sz * 0.5, 'rock_wall');
+        pBuilder.addOrganicBoulder(0, 0, sz * 0.45, sx * 0.38, sy * 0.38, sz * 0.52, 'rock_wall', 'rock_wall', pIdx * 31 + 1);
+        pBuilder.addOrganicBoulder(sx * 0.34, sy * 0.24, sz * 0.28, sx * 0.26, sy * 0.26, sz * 0.36, 'rock_wall', 'rock_wall', pIdx * 31 + 2);
+        pBuilder.addOrganicBoulder(-sx * 0.3, -sy * 0.22, sz * 0.24, sx * 0.24, sy * 0.22, sz * 0.3, 'rock_wall', 'rock_wall', pIdx * 31 + 3);
+        pBuilder.addOrganicBoulder(sx * 0.15, -sy * 0.32, sz * 0.18, sx * 0.18, sy * 0.2, sz * 0.22, 'rock_wall', 'rock_wall', pIdx * 31 + 4);
         break;
       }
       case 'cliff_spire': {
-        pBuilder.addSolidBox(0, 0, sz * 0.3, sx, sy, sz * 0.6, 'rock_wall', 'grass_ground');
-        pBuilder.addSolidBox(0, 0, sz * 0.75, sx * 0.6, sy * 0.6, sz * 0.5, 'rock_wall', 'grass_ground');
+        // Multi-tiered organic rocky mesa / cliff spire with walkable grassy ledges
+        pBuilder.addOctagonalPillar(0, 0, 0, sz * 0.45, sx * 0.52, sx * 0.42, 'rock_wall', pIdx * 43 + 1);
+        pBuilder.addOctagonalPillar(sx * 0.06, -sy * 0.04, sz * 0.42, sz * 0.82, sx * 0.36, sx * 0.26, 'rock_wall', pIdx * 43 + 2);
+        pBuilder.addOrganicBoulder(-sx * 0.04, sy * 0.05, sz * 0.88, sx * 0.2, sy * 0.2, sz * 0.22, 'rock_wall', 'grass_ground', pIdx * 43 + 7);
         break;
       }
       case 'canyon_wall': {
-        pBuilder.addSolidBox(0, 0, sz * 0.5, sx, sy, sz, 'rock_wall', 'dirt_ground');
+        // Stratified stepped canyon cliff wall with natural ledges and rock outcrops
+        pBuilder.addSolidBox(0, 0, sz * 0.28, sx, sy, sz * 0.56, 'rock_wall', 'dirt_ground');
+        pBuilder.addSolidBox(0, -sy * 0.08, sz * 0.72, sx * 0.88, sy * 0.76, sz * 0.48, 'rock_wall', 'grass_ground');
+        pBuilder.addOrganicBoulder(-sx * 0.32, sy * 0.28, sz * 0.35, sx * 0.22, sy * 0.24, sz * 0.4, 'rock_wall', 'dirt_ground', pIdx * 53 + 3);
+        pBuilder.addOrganicBoulder(sx * 0.32, -sy * 0.25, sz * 0.38, sx * 0.2, sy * 0.22, sz * 0.42, 'rock_wall', 'dirt_ground', pIdx * 53 + 9);
         break;
       }
       case 'crater_basin': {
-        const rimT = Math.min(sx, sy) * 0.2;
-        pBuilder.addSolidBox(0, -sy * 0.5 + rimT * 0.5, sz * 0.5, sx, rimT, sz, 'rock_wall');
-        pBuilder.addSolidBox(0, sy * 0.5 - rimT * 0.5, sz * 0.5, sx, rimT, sz, 'rock_wall');
-        pBuilder.addSolidBox(-sx * 0.5 + rimT * 0.5, 0, sz * 0.5, rimT, sy, sz, 'rock_wall');
-        pBuilder.addSolidBox(sx * 0.5 - rimT * 0.5, 0, sz * 0.5, rimT, sy, sz, 'rock_wall');
+        // Octagonal natural impact crater with sloped inner bowl and jagged boulder rim
+        const segs = 8;
+        const rx = sx * 0.5;
+        const ry = sy * 0.5;
+        for (let s = 0; s < segs; s++) {
+          const a = (s / segs) * Math.PI * 2;
+          const bx = Math.cos(a) * rx * 0.82;
+          const by = Math.sin(a) * ry * 0.82;
+          pBuilder.addOrganicBoulder(bx, by, sz * 0.38, rx * 0.34, ry * 0.34, sz * 0.45, 'rock_wall', 'dirt_ground', pIdx * 61 + s);
+        }
+        pBuilder.addSolidBox(0, 0, 0.1, sx * 0.55, sy * 0.55, 0.2, 'dirt_ground');
         break;
       }
       case 'natural_ramp':
@@ -1698,19 +1973,21 @@ export function generateQuickForgeWorldMesh(config: QuickForgeWorldConfig): Gene
         const isFore = piece.kind === 'forerunner_ramp';
         const topRole: WorldMaterialRole = isFore ? 'forerunner_floor' : 'dirt_ground';
         const sideRole: WorldMaterialRole = isFore ? 'forerunner_wall' : 'rock_wall';
-        const hx = sx * 0.5, hy = sy * 0.5;
-        pBuilder.addQuad([-hx, -hy, 0], [hx, -hy, sz], [hx, hy, sz], [-hx, hy, 0], topRole, 0.25, true);
-        pBuilder.addQuad([-hx, hy, 0], [hx, hy, 0], [hx, -hy, 0], [-hx, -hy, 0], sideRole);
-        pBuilder.addQuad([hx, -hy, 0], [hx, hy, 0], [hx, hy, sz], [hx, -hy, sz], sideRole);
-        pBuilder.addTriangle([-hx, -hy, 0], [hx, -hy, 0], [hx, -hy, sz], sideRole);
-        pBuilder.addTriangle([hx, hy, 0], [-hx, hy, 0], [hx, hy, sz], sideRole);
+        const hx = sx * 0.5;
+        const hy = sy * 0.5;
+        pBuilder.addSolidRamp(-hx, hx, -hy, hy, 0, sz, 0.45, topRole, sideRole, isFore ? 0.35 : 0);
         break;
       }
       case 'forerunner_tower': {
-        // Multi-tier angled Forerunner monolith with glowing energy core strips
-        pBuilder.addSolidBox(0, 0, sz * 0.25, sx, sy, sz * 0.5, 'forerunner_wall', 'forerunner_floor');
-        pBuilder.addSolidBox(0, 0, sz * 0.65, sx * 0.72, sy * 0.72, sz * 0.45, 'forerunner_trim', 'forerunner_floor');
-        pBuilder.addSolidBox(0, 0, sz * 0.92, sx * 0.45, sy * 0.45, sz * 0.16, 'forerunner_light', 'forerunner_light');
+        // Multi-tier octagonal & angled Forerunner spire with buttress fins and glowing energy core
+        pBuilder.addOctagonalPillar(0, 0, 0, sz * 0.48, sx * 0.5, sx * 0.4, 'forerunner_wall', pIdx * 71 + 1);
+        pBuilder.addOctagonalPillar(0, 0, sz * 0.46, sz * 0.86, sx * 0.36, sx * 0.26, 'forerunner_trim', pIdx * 71 + 2);
+        pBuilder.addSolidBox(0, 0, sz * 0.92, sx * 0.34, sy * 0.34, sz * 0.16, 'forerunner_light', 'forerunner_light');
+        // 4 diagonal structural buttress fins
+        pBuilder.addSolidBox(-sx * 0.38, 0, sz * 0.35, sx * 0.22, sy * 0.18, sz * 0.7, 'forerunner_trim');
+        pBuilder.addSolidBox(sx * 0.38, 0, sz * 0.35, sx * 0.22, sy * 0.18, sz * 0.7, 'forerunner_trim');
+        pBuilder.addSolidBox(0, -sy * 0.38, sz * 0.35, sx * 0.18, sy * 0.22, sz * 0.7, 'forerunner_trim');
+        pBuilder.addSolidBox(0, sy * 0.38, sz * 0.35, sx * 0.18, sy * 0.22, sz * 0.7, 'forerunner_trim');
         break;
       }
       case 'forerunner_bunker':

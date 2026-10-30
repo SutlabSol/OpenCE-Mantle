@@ -4,7 +4,6 @@ import { isBackupFilePath } from '../electron/map-file-rules';
 import { useOpenceEvents } from './hooks/useOpenceEvents';
 import MenuBar from './components/MenuBar';
 import Toolbar from './components/Toolbar';
-import WelcomeDropZone from './components/WelcomeDropZone';
 import CompressedBanner from './components/CompressedBanner';
 import UnsupportedBanner from './components/UnsupportedBanner';
 import TagBrowser from './components/TagBrowser';
@@ -34,9 +33,21 @@ import MapCompareDialog from './components/MapCompareDialog';
 import { LiveHudEditorDialog } from './components/LiveHudEditorDialog';
 import { HudBitmapInjectorDialog } from './components/HudBitmapInjectorDialog';
 import { UiMapStudioDialog } from './components/UiMapStudioDialog';
+import BaboonStudioDialog, { type BaboonStudioTab } from './components/BaboonStudioDialog';
+import WorkspaceHome from './components/WorkspaceHome';
+import BottomMapTabBar from './components/BottomMapTabBar';
+import SplitComparePane from './components/SplitComparePane';
+import ThemeSelectorModal from './components/ThemeSelectorModal';
+import WhatsNewModal from './components/WhatsNewModal';
+import HelpAboutModal from './components/HelpAboutModal';
+import TutorialsHubModal from './components/TutorialsHubModal';
+import GlossaryModal from './components/GlossaryModal';
+import CommunityModal from './components/CommunityModal';
 import type {
+  AppThemeId,
   BatchExtractPreflightResult,
   HaloBitmapVersion,
+  OpenMapTabSession,
   UpdateCheckResult,
   UpdateDownloadProgressEvent,
 } from '../electron/shared-types';
@@ -69,6 +80,8 @@ export default function App() {
     elementId?: string;
   } | null>(null);
   const [uiMapStudioOpen, setUiMapStudioOpen] = useState(false);
+  const [baboonStudioOpen, setBaboonStudioOpen] = useState(false);
+  const [baboonStudioTab, setBaboonStudioTab] = useState<BaboonStudioTab>('content-explorer');
   /** Convert to Custom Edition: 'open' = the map in the unsupported banner, 'pick' = choose a file. */
   const [convertSource, setConvertSource] = useState<'open' | 'pick' | null>(null);
   /** Tag opened in the right-click "Tag Editor..." modal (or null = closed). */
@@ -90,6 +103,25 @@ export default function App() {
   const [skippedPromptMapPaths, setSkippedPromptMapPaths] = useState<Set<string>>(new Set());
   const [updateBanner, setUpdateBanner] = useState<Extract<UpdateCheckResult, { ok: true }> | null>(null);
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<UpdateDownloadProgressEvent | null>(null);
+  const [appVersion, setAppVersion] = useState<string>('0.7.0');
+  const [currentTheme, setCurrentTheme] = useState<AppThemeId>('dark');
+  const [showLauncherHome, setShowLauncherHome] = useState<boolean>(true);
+  const [themeModalOpen, setThemeModalOpen] = useState(false);
+  const [whatsNewModalOpen, setWhatsNewModalOpen] = useState(false);
+  const [helpModalOpen, setHelpModalOpen] = useState(false);
+  const [tutorialsModalOpen, setTutorialsModalOpen] = useState(false);
+  const [glossaryModalOpen, setGlossaryModalOpen] = useState(false);
+  const [communityModalOpen, setCommunityModalOpen] = useState(false);
+  const [openSessions, setOpenSessions] = useState<OpenMapTabSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [secondarySessionId, setSecondarySessionId] = useState<string | null>(null);
+  const [splitViewEnabled, setSplitViewEnabled] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(0.58);
+  const [isCheckingUpdatesManual, setIsCheckingUpdatesManual] = useState(false);
+  const detachedSessionIdParam =
+    typeof window !== 'undefined'
+      ? new URLSearchParams(window.location.search).get('detachedSessionId')
+      : null;
   const { logs, log } = useOpenceEvents();
   const isMockActive = typeof window !== 'undefined' && Boolean((window as unknown as { __OPENCE_MOCK__?: boolean }).__OPENCE_MOCK__);
 
@@ -131,21 +163,130 @@ export default function App() {
 
   const handleManualCheckForUpdates = async () => {
     if (typeof window.opence.checkForUpdates !== 'function') return;
+    setIsCheckingUpdatesManual(true);
     log('info', 'Checking GitHub Releases for updates...');
-    const res = await window.opence.checkForUpdates();
-    if (!res.ok) {
-      log('warn', `Update check failed: ${res.error}`);
-      setSettingsDialogOpen(true);
-      return;
-    }
-    if (res.updateAvailable) {
-      setUpdateBanner(res);
-      log('info', `New release available: ${res.releaseName} (v${res.latestVersion})!`);
-    } else {
-      log('info', `OpenCE Mantle is up to date (v${res.currentVersion}).`);
-      setSettingsDialogOpen(true);
+    try {
+      const res = await window.opence.checkForUpdates();
+      if (!res.ok) {
+        log('warn', `Update check failed: ${res.error}`);
+        setSettingsDialogOpen(true);
+        return;
+      }
+      if (res.updateAvailable) {
+        setUpdateBanner(res);
+        log('info', `New release available: ${res.releaseName} (v${res.latestVersion})!`);
+      } else {
+        log('info', `OpenCE Mantle is up to date (v${res.currentVersion}).`);
+        setSettingsDialogOpen(true);
+      }
+    } finally {
+      setIsCheckingUpdatesManual(false);
     }
   };
+
+  const handleSelectTheme = (theme: AppThemeId) => {
+    setCurrentTheme(theme);
+    document.documentElement.setAttribute('data-theme', theme);
+    window.opence.setTheme?.(theme).catch(() => {});
+  };
+
+  const handleOpenMapPath = async (filePath: string) => {
+    const result = await window.opence.loadMap(filePath);
+    if (!result) return;
+    setMapState(result);
+    if (result.status === 'ok') {
+      setShowLauncherHome(false);
+    }
+    resetSelectionState();
+  };
+
+  const handleSwitchSession = async (sessionId: string, focusTagPath?: string) => {
+    const res = await window.opence.switchActiveMapSession?.(sessionId);
+    if (res?.ok && res.session) {
+      setActiveSessionId(sessionId);
+      setMapState(res.session.map);
+      setShowLauncherHome(false);
+      resetSelectionState();
+      if (focusTagPath) {
+        const found = res.session.map.tags.find(
+          (t) => t.path.toLowerCase() === focusTagPath.toLowerCase(),
+        );
+        if (found) {
+          setFocusedTag(found);
+          setSelectedTagIndices(new Set([found.index]));
+        }
+      }
+    }
+  };
+
+  const handleCloseSession = async (sessionId: string) => {
+    const res = await window.opence.closeMapSession?.(sessionId);
+    if (!res?.ok) return;
+    setOpenSessions(res.sessions);
+    setActiveSessionId(res.activeSessionId);
+    if (res.activeSessionId) {
+      const next = res.sessions.find((s) => s.sessionId === res.activeSessionId);
+      if (next) {
+        setMapState(next.map);
+        resetSelectionState();
+      }
+    } else {
+      setMapState(null);
+      setShowLauncherHome(true);
+      resetSelectionState();
+    }
+  };
+
+  useEffect(() => {
+    window.opence.getAppVersion?.().then((v) => v && setAppVersion(v)).catch(() => {});
+    window.opence
+      .getTheme?.()
+      .then((t) => {
+        if (t) {
+          setCurrentTheme(t);
+          document.documentElement.setAttribute('data-theme', t);
+        }
+      })
+      .catch(() => {});
+    const offTheme = window.opence.onThemeChanged?.((t) => {
+      setCurrentTheme(t);
+      document.documentElement.setAttribute('data-theme', t);
+    });
+    window.opence
+      .listOpenMapSessions?.()
+      .then((res) => {
+        if (!res) return;
+        setOpenSessions(res.sessions);
+        setActiveSessionId(res.activeSessionId);
+        if (detachedSessionIdParam) {
+          const detSession = res.sessions.find((s) => s.sessionId === detachedSessionIdParam);
+          if (detSession) {
+            setMapState(detSession.map);
+            setShowLauncherHome(false);
+            void window.opence.switchActiveMapSession?.(detachedSessionIdParam);
+          }
+        }
+      })
+      .catch(() => {});
+    const offSessions = window.opence.onOpenMapSessionsChanged?.((payload) => {
+      setOpenSessions(payload.sessions);
+      setActiveSessionId(payload.activeSessionId);
+      if (payload.sessions.length >= 2) {
+        setSecondarySessionId((prev) => {
+          if (prev && payload.sessions.some((s) => s.sessionId === prev && s.sessionId !== payload.activeSessionId)) {
+            return prev;
+          }
+          const other = payload.sessions.find((s) => s.sessionId !== payload.activeSessionId);
+          return other?.sessionId ?? null;
+        });
+      }
+    });
+    return () => {
+      offTheme?.();
+      offSessions?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleDownloadAndInstallUpdate = async (autoRestart: boolean) => {
     if (typeof window.opence.downloadUpdate !== 'function') return;
@@ -165,6 +306,12 @@ export default function App() {
       updateDownloadProgress?.installMode,
     );
   };
+
+  useEffect(() => {
+    const onOpenWorldMerger = () => setBspSwapperOpen(true);
+    window.addEventListener('opence:open-world-merger', onOpenWorldMerger);
+    return () => window.removeEventListener('opence:open-world-merger', onOpenWorldMerger);
+  }, []);
 
   useEffect(() => {
     if (typeof window.opence.onUpdateDownloadProgress !== 'function') return;
@@ -218,7 +365,19 @@ export default function App() {
         setHudBitmapInjectorOpen(true);
       }
       else if (action === 'ui-map-studio') setUiMapStudioOpen(true);
-      else if (action === 'settings') setSettingsDialogOpen(true);
+      else if (action === 'open-loose-tags-workspace') {
+        setBaboonStudioTab('loose-workspace');
+        setBaboonStudioOpen(true);
+      } else if (action === 'content-explorer') {
+        setBaboonStudioTab('content-explorer');
+        setBaboonStudioOpen(true);
+      } else if (action === 'tool-command-runner') {
+        setBaboonStudioTab('tool-runner');
+        setBaboonStudioOpen(true);
+      } else if (action === 'asset-library-browser') {
+        setBaboonStudioTab('asset-libraries');
+        setBaboonStudioOpen(true);
+      } else if (action === 'settings') setSettingsDialogOpen(true);
       else if (action === 'check-for-updates') void handleManualCheckForUpdates();
       else if (action === 'convert-map') setConvertSource('pick');
       else if (action.startsWith('identify-bitmaps:')) {
@@ -227,6 +386,9 @@ export default function App() {
     });
     const offLoaded = window.opence.onMapLoaded((result) => {
       setMapState(result);
+      if (result.status === 'ok') {
+        setShowLauncherHome(false);
+      }
       resetSelectionState();
     });
     // Same map, changed in place (Inject applied, saved): refresh the tag list and info panel, keep the selection.
@@ -267,6 +429,9 @@ export default function App() {
       const result = await window.opence.loadMap(path);
       if (!result) return; // cancelled in the unsaved-changes prompt
       setMapState(result);
+      if (result.status === 'ok') {
+        setShowLauncherHome(false);
+      }
       resetSelectionState();
     };
     window.addEventListener('dragover', onDragOver);
@@ -328,6 +493,9 @@ export default function App() {
     const result = await window.opence.openMapDialog();
     if (result) {
       setMapState(result);
+      if (result.status === 'ok') {
+        setShowLauncherHome(false);
+      }
       resetSelectionState();
     }
   };
@@ -371,68 +539,110 @@ export default function App() {
         </div>
       )}
       <MenuBar
+        activeMapTitle={
+          mapState?.status === 'ok'
+            ? `${mapState.filePath.split(/[\\/]/).pop() ?? mapState.header.scenarioName}${mapState.modified ? ' *' : ''}`
+            : null
+        }
+        isDetachedWindow={Boolean(detachedSessionIdParam)}
+        onRedockDetachedWindow={
+          detachedSessionIdParam
+            ? () => {
+                void window.opence.redockMapTabToMainWindow?.(detachedSessionIdParam);
+              }
+            : undefined
+        }
         menus={[
           {
             label: 'File',
             items: [
+              { label: 'Workspace Launcher Home', onClick: () => setShowLauncherHome(true) },
               { label: 'Open Map...', onClick: handleOpen },
+              {
+                label: 'Open Standard Blam tags/ Workspace...',
+                onClick: () => {
+                  setBaboonStudioTab('loose-workspace');
+                  setBaboonStudioOpen(true);
+                },
+              },
               { label: 'Save', onClick: handleSave, disabled: !canSave },
               { label: 'Save As...', onClick: handleSaveAs, disabled: !canSaveAs },
               { label: 'Discard Changes...', onClick: handleDiscard, disabled: !isModified },
               { label: 'Convert to Custom Edition...', onClick: () => setConvertSource('pick') },
+              { label: '', separator: true },
+              { label: 'Change Theme...', onClick: () => setThemeModalOpen(true) },
+              { label: 'Settings...', onClick: () => setSettingsDialogOpen(true) },
+              { label: '', separator: true },
               { label: 'Exit', onClick: () => window.close() },
             ],
           },
           {
             label: 'Tools',
             items: [
-              { label: '🎯 Live HUD & Weapon Tag Editor...', onClick: () => setLiveHudEditorOpen(true), disabled: !canExtract },
-              {
-                label: '🖼️ Guided HUD Bitmap Injector (Weapons / Vehicles / HUD)...',
-                onClick: () => {
-                  setHudBitmapInjectorInitial(null);
-                  setHudBitmapInjectorOpen(true);
-                },
-                disabled: !canInject,
-              },
-              { label: '🖥️ UI.map & Menu Widget Studio (DeLa / ustr)...', onClick: () => setUiMapStudioOpen(true), disabled: !canExtract },
-              { label: '', separator: true },
               { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
               { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
               { label: 'HaloScript (.hsc) IDE & Sample Scripts...', onClick: () => setScriptEditorOpen(true), disabled: !canExtract },
               { label: 'Universal Converter, Scanner & Mod Studio...', onClick: () => setModdingStudioOpen(true), disabled: !canExtract },
               { label: 'Compare With Another .map File...', onClick: () => setMapCompareOpen(true), disabled: !canExtract },
+              {
+                label: '🧭 Content Explorer, Dependency Auto-Fix & Refactoring...',
+                onClick: () => {
+                  setBaboonStudioTab('content-explorer');
+                  setBaboonStudioOpen(true);
+                },
+                disabled: !canExtract,
+              },
+              {
+                label: '🛠️ Visual tool.exe Command Runner & HaloScript Reference...',
+                onClick: () => {
+                  setBaboonStudioTab('tool-runner');
+                  setBaboonStudioOpen(true);
+                },
+              },
+              {
+                label: '🖼️ Bitmap & 3D Model Library Browser...',
+                onClick: () => {
+                  setBaboonStudioTab('asset-libraries');
+                  setBaboonStudioOpen(true);
+                },
+                disabled: !canExtract,
+              },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
-              { label: 'Swap BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
-              { label: '', separator: true },
-              { label: 'Settings...', onClick: () => setSettingsDialogOpen(true) },
+              { label: '🌍 Swap BSP & Multi-Map World Merger...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
             ],
           },
           {
             label: 'Help',
             items: [
+              { label: "What's New in Mantle...", onClick: () => setWhatsNewModalOpen(true) },
+              { label: 'Tutorials Hub...', onClick: () => setTutorialsModalOpen(true) },
+              { label: 'Visual UI Atlas & Tag Glossary...', onClick: () => setGlossaryModalOpen(true) },
+              { label: 'Community Hub (Discord, GitHub, HaloStats)...', onClick: () => setCommunityModalOpen(true) },
+              { label: '', separator: true },
               { label: 'Check for Updates...', onClick: () => void handleManualCheckForUpdates() },
               { label: '', separator: true },
-              { label: 'About', onClick: () => window.opence.showAbout() },
+              { label: 'Help & About OpenCE Mantle...', onClick: () => setHelpModalOpen(true) },
             ],
           },
         ]}
       />
-      <Toolbar
-        onOpen={handleOpen}
-        canExtract={canExtract}
-        canExtractWholeMap={canExtract}
-        canInject={canInject}
-        onExtract={() => requestExtract(Array.from(selectedTagIndices))}
-        onExtractWholeMap={() => void handleBatchExtract()}
-        onInject={() => setInjectDialogOpen(true)}
-        onOpenLiveHudEditor={() => setLiveHudEditorOpen(true)}
-        onOpenHudBitmapInjector={() => {
-          setHudBitmapInjectorInitial(null);
-          setHudBitmapInjectorOpen(true);
-        }}
-        onOpenUiMapStudio={() => setUiMapStudioOpen(true)}
-      />
+      {(!showLauncherHome || mapState?.status === 'ok') && !showLauncherHome && (
+        <Toolbar
+          onOpen={handleOpen}
+          canExtract={canExtract}
+          canExtractWholeMap={canExtract}
+          canInject={canInject}
+          onExtract={() => requestExtract(Array.from(selectedTagIndices))}
+          onExtractWholeMap={() => void handleBatchExtract()}
+          onInject={() => setInjectDialogOpen(true)}
+          onOpenLiveHudEditor={() => setLiveHudEditorOpen(true)}
+          onOpenHudBitmapInjector={() => {
+            setHudBitmapInjectorInitial(null);
+            setHudBitmapInjectorOpen(true);
+          }}
+          onOpenUiMapStudio={() => setUiMapStudioOpen(true)}
+        />
+      )}
 
       {updateBanner && (
         <div
@@ -645,92 +855,241 @@ export default function App() {
       {mapState?.status === 'error' && <UnsupportedBanner message={mapState.message} />}
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        {mapState?.status === 'ok' ? (
+        {!showLauncherHome && mapState?.status === 'ok' ? (
           <>
-            <TagBrowser
-              tags={mapState.tags}
-              focusedTag={focusedTag}
-              onFocusTag={setFocusedTag}
-              selected={selectedTagIndices}
-              onSelectedChange={setSelectedTagIndices}
-              onExtractRequested={requestExtract}
-              extractDisabledReason={extractDisabledReason}
-              onExtractWholeMap={handleBatchExtract}
-              canExtractWholeMap={canExtract}
-              onEditTag={setEditingTag}
-              onFindReferences={(tag) => {
-                setFocusedTag(tag);
-                setSelectedTagIndices(new Set([tag.index]));
-                setPropertiesPaletteTab('references');
+            <div
+              style={{
+                flex: splitViewEnabled ? `0 0 ${Math.round(splitRatio * 100)}%` : 1,
+                display: 'flex',
+                minWidth: 0,
+                minHeight: 0,
               }}
-              onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
-              onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
-              onDeleteTag={(tag) => setTagAction({ action: 'delete', tag })}
-              onOpenBitmapEditor={setBitmapEditorTag}
-              onOpenSoundAuditor={setSoundAuditorTag}
-              onOpenHudPreviewer={setHudPreviewerTag}
-            />
-            <CenterWorkspace
-              header={mapState.header}
-              allTags={mapState.tags}
-              onActiveTabChange={setCenterTab}
-              onSelectObjectTag={(tagId, objectPath) => {
-                if (mapState?.status !== 'ok') return;
-                const target =
-                  mapState.tags.find((t) => t.tagId === tagId) ??
-                  mapState.tags.find((t) => (t.tagId & 0xffff) === (tagId & 0xffff)) ??
-                  (objectPath
-                    ? mapState.tags.find((t) => t.path.toLowerCase() === objectPath.toLowerCase())
-                    : undefined);
-                if (target) {
-                  setFocusedTag(target);
-                  setSelectedTagIndices(new Set([target.index]));
-                }
-              }}
-              onOpenTagEditor={(tagIndexOrPath) => {
-                if (mapState?.status !== 'ok') return;
-                const target =
-                  typeof tagIndexOrPath === 'number'
-                    ? (mapState.tags.find((t) => t.index === tagIndexOrPath) ?? mapState.tags[tagIndexOrPath])
-                    : mapState.tags.find(
-                        (t) =>
-                          t.path.toLowerCase() === tagIndexOrPath.toLowerCase() ||
-                          t.path.toLowerCase().endsWith(tagIndexOrPath.toLowerCase()),
-                      );
-                if (target) {
-                  setFocusedTag(target);
-                  setSelectedTagIndices(new Set([target.index]));
-                  setEditingTag(target);
-                }
-              }}
-            />
-            {centerTab !== 'bitmap-3d' && centerTab !== 'bsp-model-studio' && (
-              <PropertiesPalette
+            >
+              <TagBrowser
+                tags={mapState.tags}
                 focusedTag={focusedTag}
+                onFocusTag={setFocusedTag}
+                selected={selectedTagIndices}
+                onSelectedChange={setSelectedTagIndices}
+                onExtractRequested={requestExtract}
+                extractDisabledReason={extractDisabledReason}
+                onExtractWholeMap={handleBatchExtract}
+                canExtractWholeMap={canExtract}
+                onEditTag={setEditingTag}
+                onFindReferences={(tag) => {
+                  setFocusedTag(tag);
+                  setSelectedTagIndices(new Set([tag.index]));
+                  setPropertiesPaletteTab('references');
+                }}
+                onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
+                onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
+                onDeleteTag={(tag) => setTagAction({ action: 'delete', tag })}
+                onOpenBitmapEditor={setBitmapEditorTag}
+                onOpenSoundAuditor={setSoundAuditorTag}
+                onOpenHudPreviewer={setHudPreviewerTag}
+              />
+              <CenterWorkspace
+                header={mapState.header}
                 allTags={mapState.tags}
-                activeTab={propertiesPaletteTab}
-                onTabChange={setPropertiesPaletteTab}
-                onSelectTag={(idx) => {
-                  const t = mapState.tags.find((tag) => tag.index === idx) ?? mapState.tags[idx];
-                  if (t) {
-                    setFocusedTag(t);
-                    setSelectedTagIndices(new Set([t.index]));
+                onActiveTabChange={setCenterTab}
+                onSelectObjectTag={(tagId, objectPath) => {
+                  if (mapState?.status !== 'ok') return;
+                  const target =
+                    mapState.tags.find((t) => t.tagId === tagId) ??
+                    mapState.tags.find((t) => (t.tagId & 0xffff) === (tagId & 0xffff)) ??
+                    (objectPath
+                      ? mapState.tags.find((t) => t.path.toLowerCase() === objectPath.toLowerCase())
+                      : undefined);
+                  if (target) {
+                    setFocusedTag(target);
+                    setSelectedTagIndices(new Set([target.index]));
+                  }
+                }}
+                onOpenTagEditor={(tagIndexOrPath) => {
+                  if (mapState?.status !== 'ok') return;
+                  const target =
+                    typeof tagIndexOrPath === 'number'
+                      ? (mapState.tags.find((t) => t.index === tagIndexOrPath) ?? mapState.tags[tagIndexOrPath])
+                      : mapState.tags.find(
+                          (t) =>
+                            t.path.toLowerCase() === tagIndexOrPath.toLowerCase() ||
+                            t.path.toLowerCase().endsWith(tagIndexOrPath.toLowerCase()),
+                        );
+                  if (target) {
+                    setFocusedTag(target);
+                    setSelectedTagIndices(new Set([target.index]));
+                    setEditingTag(target);
                   }
                 }}
               />
+              {centerTab !== 'bitmap-3d' && centerTab !== 'bsp-model-studio' && (
+                <PropertiesPalette
+                  focusedTag={focusedTag}
+                  allTags={mapState.tags}
+                  activeTab={propertiesPaletteTab}
+                  onTabChange={setPropertiesPaletteTab}
+                  onSelectTag={(idx) => {
+                    const t = mapState.tags.find((tag) => tag.index === idx) ?? mapState.tags[idx];
+                    if (t) {
+                      setFocusedTag(t);
+                      setSelectedTagIndices(new Set([t.index]));
+                    }
+                  }}
+                />
+              )}
+            </div>
+
+            {splitViewEnabled && (
+              <>
+                {/* Draggable Vertical Center Divider */}
+                <div
+                  data-testid="split-view-divider"
+                  title="Drag horizontally to resize side-by-side map comparison panes"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    const onMove = (moveEvt: MouseEvent) => {
+                      const next = Math.max(0.3, Math.min(0.75, moveEvt.clientX / window.innerWidth));
+                      setSplitRatio(next);
+                    };
+                    const onUp = () => {
+                      window.removeEventListener('mousemove', onMove);
+                      window.removeEventListener('mouseup', onUp);
+                    };
+                    window.addEventListener('mousemove', onMove);
+                    window.addEventListener('mouseup', onUp);
+                  }}
+                  style={{
+                    width: 6,
+                    cursor: 'col-resize',
+                    background: 'var(--bg-panel-header)',
+                    borderLeft: '1px solid var(--border)',
+                    borderRight: '1px solid var(--border)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--accent-cyan)',
+                    fontSize: 9,
+                    userSelect: 'none',
+                    flexShrink: 0,
+                  }}
+                >
+                  ⋮
+                </div>
+
+                <SplitComparePane
+                  sessions={openSessions}
+                  primarySession={openSessions.find((s) => s.sessionId === activeSessionId) ?? null}
+                  secondarySession={
+                    openSessions.find((s) => s.sessionId === secondarySessionId) ??
+                    openSessions.find((s) => s.sessionId !== activeSessionId) ??
+                    null
+                  }
+                  onSelectSecondarySession={(sid) => setSecondarySessionId(sid)}
+                  onActivateSessionAsPrimary={(sid, focusPath) => {
+                    void handleSwitchSession(sid, focusPath);
+                  }}
+                  onFocusMatchingTagInPrimary={(tagPath, groupName) => {
+                    if (mapState?.status !== 'ok') return;
+                    const match = mapState.tags.find(
+                      (t) =>
+                        t.primaryClassName === groupName &&
+                        t.path.toLowerCase() === tagPath.toLowerCase(),
+                    );
+                    if (match) {
+                      setFocusedTag(match);
+                      setSelectedTagIndices(new Set([match.index]));
+                    }
+                  }}
+                  onOpenAnotherMap={() => void handleOpen()}
+                  onDetachSessionToWindow={(sid) => {
+                    void window.opence.detachMapTabToWindow?.(sid);
+                  }}
+                  onCloseSplitView={() => setSplitViewEnabled(false)}
+                />
+              </>
             )}
           </>
         ) : (
-          <WelcomeDropZone onOpen={handleOpen} />
+          <WorkspaceHome
+            appVersion={appVersion}
+            currentTheme={currentTheme}
+            updateAvailableVersion={updateBanner?.latestVersion ?? null}
+            isCheckingUpdates={isCheckingUpdatesManual}
+            onCheckUpdates={() => void handleManualCheckForUpdates()}
+            onOpenThemeModal={() => setThemeModalOpen(true)}
+            onOpenMapDialog={() => void handleOpen()}
+            onOpenMapPath={(p) => void handleOpenMapPath(p)}
+            onOpenLooseWorkspace={() => {
+              setBaboonStudioTab('loose-workspace');
+              setBaboonStudioOpen(true);
+            }}
+            onOpenWhatsNew={() => setWhatsNewModalOpen(true)}
+            onOpenHelp={() => setHelpModalOpen(true)}
+            onOpenTutorials={() => setTutorialsModalOpen(true)}
+            onOpenGlossary={() => setGlossaryModalOpen(true)}
+            onOpenCommunity={() => setCommunityModalOpen(true)}
+          />
         )}
       </div>
 
-      <LogPanel logs={logs} />
+      {!showLauncherHome && mapState?.status === 'ok' && <LogPanel logs={logs} />}
+
+      {(openSessions.length > 0 || mapState?.status === 'ok') && (
+        <BottomMapTabBar
+          sessions={openSessions}
+          activeSessionId={activeSessionId}
+          secondarySessionId={secondarySessionId}
+          showLauncherHome={showLauncherHome}
+          splitViewEnabled={splitViewEnabled}
+          onToggleLauncherHome={(show) => setShowLauncherHome(show)}
+          onSelectSession={(sid) => void handleSwitchSession(sid)}
+          onSelectSecondarySession={(sid) => setSecondarySessionId(sid)}
+          onCloseSession={(sid) => void handleCloseSession(sid)}
+          onOpenNewMapTab={() => void handleOpen()}
+          onToggleSplitView={() => setSplitViewEnabled((prev) => !prev)}
+          onDetachSessionToWindow={(sid, coords) => {
+            void window.opence.detachMapTabToWindow?.(sid, coords);
+          }}
+        />
+      )}
+
       <StatusBar mapState={mapState} />
 
       {extractSelection && <DependencyDialog selectedIndices={extractSelection} onClose={() => setExtractSelection(null)} log={log} />}
       {injectDialogOpen && <InjectDialog onClose={() => setInjectDialogOpen(false)} log={log} />}
-      {settingsDialogOpen && <SettingsDialog onClose={() => setSettingsDialogOpen(false)} />}
+      {settingsDialogOpen && (
+        <SettingsDialog
+          onClose={() => setSettingsDialogOpen(false)}
+          currentTheme={currentTheme}
+          onOpenThemeModal={() => setThemeModalOpen(true)}
+        />
+      )}
+      {themeModalOpen && (
+        <ThemeSelectorModal
+          currentTheme={currentTheme}
+          onSelectTheme={handleSelectTheme}
+          onClose={() => setThemeModalOpen(false)}
+        />
+      )}
+      {whatsNewModalOpen && (
+        <WhatsNewModal
+          appVersion={appVersion}
+          onCheckUpdates={() => void handleManualCheckForUpdates()}
+          onClose={() => setWhatsNewModalOpen(false)}
+        />
+      )}
+      {helpModalOpen && (
+        <HelpAboutModal
+          appVersion={appVersion}
+          onOpenTutorials={() => setTutorialsModalOpen(true)}
+          onOpenGlossary={() => setGlossaryModalOpen(true)}
+          onOpenCommunity={() => setCommunityModalOpen(true)}
+          onClose={() => setHelpModalOpen(false)}
+        />
+      )}
+      {tutorialsModalOpen && <TutorialsHubModal onClose={() => setTutorialsModalOpen(false)} />}
+      {glossaryModalOpen && <GlossaryModal onClose={() => setGlossaryModalOpen(false)} />}
+      {communityModalOpen && <CommunityModal onClose={() => setCommunityModalOpen(false)} />}
       {verifyDialogOpen && <VerifyEmbeddedDataDialog onClose={() => setVerifyDialogOpen(false)} log={log} />}
       {convertSource && <ConvertDialog source={convertSource} onClose={() => setConvertSource(null)} log={log} />}
             {resourcePrompt && (
@@ -921,6 +1280,33 @@ export default function App() {
           initialUstrTagIndex={focusedTag?.primaryClassName === 'ustr' ? focusedTag.index : null}
           onTagsChanged={async () => {
             setMapState((prev) => (prev && prev.status === 'ok' ? { ...prev, modified: true } : prev));
+          }}
+        />
+      )}
+
+      {baboonStudioOpen && (
+        <BaboonStudioDialog
+          open={baboonStudioOpen}
+          initialTab={baboonStudioTab}
+          focusedTag={focusedTag}
+          allTags={mapState?.status === 'ok' ? mapState.tags : []}
+          onClose={() => setBaboonStudioOpen(false)}
+          onSelectMapTag={(tagIndex) => {
+            if (mapState?.status !== 'ok') return;
+            const found = mapState.tags.find((t) => t.index === tagIndex) ?? mapState.tags[tagIndex];
+            if (found) {
+              setFocusedTag(found);
+              setSelectedTagIndices(new Set([found.index]));
+            }
+          }}
+          onOpenTagEditor={(tagIndex) => {
+            if (mapState?.status !== 'ok') return;
+            const found = mapState.tags.find((t) => t.index === tagIndex) ?? mapState.tags[tagIndex];
+            if (found) {
+              setFocusedTag(found);
+              setSelectedTagIndices(new Set([found.index]));
+              setEditingTag(found);
+            }
           }}
         />
       )}

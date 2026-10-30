@@ -1179,8 +1179,10 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
     }
   }
 
+  const isXboxTarget = targetHeader.engine === 5;
+  const tagHeaderSize = isXboxTarget ? 0x24 : TAG_DATA_HEADER_PC_SIZE;
   const subHeaderOffset = targetHeader.tagDataOffset; // OLD position - read-anchor for everything below
-  const arrayOffset = subHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
+  const arrayOffset = subHeaderOffset + tagHeaderSize;
   const oldTagCount = targetTagIndex.entries.length;
   const oldStructDataOffset = arrayOffset + oldTagCount * TAG_ENTRY_SIZE;
   const oldFileLength = targetBuffer.length;
@@ -1225,7 +1227,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
 
   // Embedded relocation: every unique asset across toAdd/toSwap, inserted once right before
   // modelDataFileOffset, zero-padded to a 4-byte boundary
-  const insertPos = targetTagIndex.modelDataFileOffset;
+  const insertPos = isXboxTarget ? subHeaderOffset : targetTagIndex.modelDataFileOffset;
   const embeddedAssetBuffers: Buffer[] = options.allowEmbeddedRelocation
     ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).filter((a) => a.kind === 'bitmap' || a.kind === 'sound').map((a) => Buffer.from(a.data, 'base64')))
     : [];
@@ -1235,7 +1237,7 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
   const shiftBeforeTagData = insertSize + insertVertexSize + insertTriangleSize;
 
   // Key boundaries in targetBuffer
-  const posVertex = targetTagIndex.modelDataFileOffset + targetTagIndex.vertexSize;
+  const posVertex = isXboxTarget ? subHeaderOffset : targetTagIndex.modelDataFileOffset + targetTagIndex.vertexSize;
   const posTriangle = subHeaderOffset;
 
   // The base and the array pointer never change (module doc). Existing pointers at or past the old
@@ -1302,11 +1304,11 @@ export function applyInjectionWithReport(targetBuffer: Buffer, targetHeader: Cac
     return at + shiftBeforeTagData + delta;
   };
   const oldArrayEndAddress = (baseMemoryAddress + (oldStructDataOffset - subHeaderOffset)) >>> 0;
-  const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: (baseMemoryAddress + targetHeader.tagDataSize) >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
+  const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: (baseMemoryAddress + Math.max(targetHeader.tagDataSize, oldFileLength - subHeaderOffset)) >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
 
   out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 0x0c);
-  if (insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 0x14); // modelDataFileOffset
-  if (totalModelPartCount > 0) {
+  if (!isXboxTarget && insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 0x14); // modelDataFileOffset
+  if (!isXboxTarget && totalModelPartCount > 0) {
     const newModelPartCount = targetTagIndex.modelPartCount + totalModelPartCount;
     out.writeUInt32LE(newModelPartCount, newTagDataOffset + 0x10); // modelPartCount
     out.writeUInt32LE(newModelPartCount, newTagDataOffset + 0x18); // modelPartCountAgain

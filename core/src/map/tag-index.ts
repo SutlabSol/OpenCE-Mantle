@@ -94,8 +94,8 @@ export function parseTagIndex(buffer: Buffer, header: CacheFileHeader): TagIndex
   const tagFileChecksums = buffer.readUInt32LE(tagDataHeaderOffset + 0x08);
   const tagCount = buffer.readUInt32LE(tagDataHeaderOffset + 0x0c);
   const modelPartCount = buffer.readUInt32LE(tagDataHeaderOffset + 0x10);
-  const modelDataFileOffset = buffer.readUInt32LE(tagDataHeaderOffset + 0x14);
-  const vertexSize = buffer.readUInt32LE(tagDataHeaderOffset + 0x1c);
+  const modelDataFileOffset = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 0x14);
+  const vertexSize = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 0x1c);
   const modelDataSize = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 0x20);
 
   const isMcc = !isXbox && (header.engine === CacheFileEngine.MCC_CEA || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS);

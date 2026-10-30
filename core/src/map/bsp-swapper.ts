@@ -397,7 +397,8 @@ function rewriteBspDependencies(
           if (mapped !== undefined) {
             buffer.writeUInt32LE(mapped >>> 0, fieldOffset + 12);
             if (tagDataOffset !== undefined) {
-              const entryOff = tagDataOffset + 0x28 + (mapped & 0xffff) * 32;
+              const tagHeaderSize = buffer.readUInt32LE(0x04) === 5 ? 0x24 : 0x28;
+              const entryOff = tagDataOffset + tagHeaderSize + (mapped & 0xffff) * 32;
               if (entryOff + 0x14 <= buffer.length) {
                 const pathPtr = buffer.readUInt32LE(entryOff + 0x10);
                 buffer.writeUInt32LE(pathPtr >>> 0, fieldOffset + 4);
@@ -2090,7 +2091,8 @@ export function performBspSwap(
           reinspected.tagIndex.baseMemoryAddress,
         );
         const curTagOff = out.readUInt32LE(0x10);
-        const sbspEntryOff = curTagOff + 0x28 + (newSbspTagId & 0xffff) * 32;
+        const tagHeaderSize = reinspected.header.engine === 5 ? 0x24 : 0x28;
+        const sbspEntryOff = curTagOff + tagHeaderSize + (newSbspTagId & 0xffff) * 32;
         const sbspPathPtr = sbspEntryOff + 0x14 <= out.length ? out.readUInt32LE(sbspEntryOff + 0x10) : 0;
 
         const elemBuf = Buffer.alloc(32, 0);

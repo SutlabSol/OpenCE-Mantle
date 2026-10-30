@@ -1,4 +1,16 @@
-import { CACHE_FILE_HEADER_SIZE, CacheFileEngine, CacheFileLiteral, CE_BASE_MEMORY_ADDRESS, CE_TAG_ARRAY_ADDRESS, CE_TAG_SPACE_SIZE, TAG_DATA_HEADER_PC_SIZE, TAG_ENTRY_SIZE, TAG_STRING_SIZE } from '../../constants/cache-file';
+import {
+  CACHE_FILE_HEADER_SIZE,
+  CacheFileEngine,
+  CacheFileLiteral,
+  CE_BASE_MEMORY_ADDRESS,
+  CE_TAG_ARRAY_ADDRESS,
+  CE_TAG_SPACE_SIZE,
+  MCC_BASE_MEMORY_ADDRESS,
+  MCC_TAG_ARRAY_ADDRESS,
+  TAG_DATA_HEADER_PC_SIZE,
+  TAG_ENTRY_SIZE,
+  TAG_STRING_SIZE,
+} from '../../constants/cache-file';
 import { fourCCToString, lookupTagClass } from '../../constants/tag-classes';
 import { readFixedString, writeFixedString } from '../../binary/strings';
 import { BSP_SPACE_POINTER_KINDS, collectBspSpacePointers, collectTagDataPointers, TAG_DATA_POINTER_KINDS, UnwalkableTagError } from '../pointer-rebase';
@@ -9,25 +21,15 @@ import type { ConversionCheck, ConversionResourceFiles, RetailConversionOptions,
 
 /**
  * Converter Phase 2: true demo layout maps (Mac demo: 'Ehed' at 0x2C0, cache version 6 at 0x588, tag
- * data at 0x4BF10000) -> Custom Edition (609). Research: memory/demo-converter.md "Phase 2 research"
- * and PRD 2026-10-12 "Converter Phase 2".
- *
- * The demo map is first turned into a retail-layout copy in memory (`normalizeDemoMap`): a standard
- * header built from the demo header's fields, and every pointer of the tag space moved from 0x4BF10000
- * to 0x40440000 by schema (tag data: `collectTagDataPointers`, the same walk ADD and Phase 1c use;
- * BSPs: `collectBspSpacePointers`). File offsets don't change (same 2048-byte header, same layout).
- * That copy then goes through Phase 1 unchanged (the external data copy-in, the alignment, the
- * repairs, every check, the CRC on save); only the layout rows differ. The CE reader is not loosened.
- *
- * Measured on MacDemo bloodgulch (the prototype numbers are a cross-check only): 20,865 tag-data
- * pointers + 1 BSP address + 1 BSP header + 386 BSP reflexives + 81 BSP data blocks; afterwards every
- * BSP-space word equals PC bloodgulch's, and the model data is unchanged.
+ * data at 0x4BF10000) and MCC CEA maps (cache version 13 at 0x04, tag data at 0x50000000) -> Custom Edition (609).
  */
 
 /** Where the true demo layout loads its tag data (Invader `gbx-demo`; every MacDemo map's tag array is at this + 0x28). */
 export const DEMO_BASE_MEMORY_ADDRESS = 0x4bf10000;
 /** Every pointer of the tag space moves by this (-0x0BAD0000). */
 export const DEMO_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - DEMO_BASE_MEMORY_ADDRESS;
+/** Every pointer of an MCC map's tag space moves by this (0x40440000 - 0x50000000 = -0x0FBC0000). */
+export const MCC_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - MCC_BASE_MEMORY_ADDRESS;
 
 /** Demo header fields (memory/demo-converter.md; tag data offset measured at 0x5EC, not the PDF's 0x10). */
 const DEMO = {
@@ -90,10 +92,194 @@ export type DemoNormalizationResult = { ok: true; value: DemoNormalization; rows
 
 const hex = (n: number) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
 const LAYOUT_LABEL = 'Original Halo demo map (cache version 6)';
+const MCC_LAYOUT_LABEL = 'MCC Halo 1 map (cache version 13)';
 const REBASE_LABEL = 'Tag data moves to the Custom Edition address';
 
 function row(id: ConversionCheck['id'], label: string, status: ConversionCheck['status'], message: string, details: string[] = []): ConversionCheck {
   return { id, label, status, message, details: details.slice(0, 50), requiresAcknowledgement: false };
+}
+
+/**
+ * Normalizes an MCC Halo 1 (`engine === 13`, `0x50000000`) map into a retail-layout copy in memory:
+ * 1. Swaps each Structure BSP's preceding vertex pool with the BSP body so the vertex pool sits inside
+ *    the BSP region after the BSP structs, and populates `uncompressed vertices` (`+0xD8`, `+0xE4`)
+ *    on every `ScenarioStructureBSPMaterial`.
+ * 2. Rebases all tag-data and BSP-space pointers from `0x50000000` to `0x40440000`.
+ */
+export function normalizeMccMap(source: Buffer): DemoNormalizationResult {
+  const refuse = (id: 'demoLayout' | 'demoRebase', message: string, details: string[] = [], earlier: ConversionCheck[] = []): DemoNormalizationResult => ({
+    ok: false,
+    rows: [...earlier, row(id, id === 'demoLayout' ? MCC_LAYOUT_LABEL : REBASE_LABEL, 'refuse', message, details)],
+  });
+  const layout = classifyMapLayout(source);
+  if (layout.kind !== 'mcc') {
+    return refuse('demoLayout', 'This is not an MCC Halo 1 map (cache version 13).');
+  }
+  const header: DemoHeader = {
+    version: source.readUInt32LE(STD.version),
+    scenarioType: source.readUInt16LE(STD.scenarioType),
+    scenarioName: readFixedString(source, STD.scenarioName, TAG_STRING_SIZE),
+    buildString: readFixedString(source, STD.buildString, TAG_STRING_SIZE),
+    crc32: source.readUInt32LE(STD.crc32),
+    fileSize: source.readUInt32LE(STD.fileSize),
+    tagDataOffset: source.readUInt32LE(STD.tagDataOffset),
+    tagDataSize: source.readUInt32LE(STD.tagDataSize),
+  };
+  if (header.fileSize !== source.length) {
+    return refuse('demoLayout', `The header says ${header.fileSize} bytes but the file has ${source.length}.`);
+  }
+  const { tagDataOffset: tdo, tagDataSize: tds } = header;
+  if (tdo < CACHE_FILE_HEADER_SIZE || tds < TAG_DATA_HEADER_PC_SIZE || tdo + tds > source.length) {
+    return refuse('demoLayout', `The tag data (file offset ${tdo}, ${tds} bytes) is not inside the file.`);
+  }
+  const arrayPointer = source.readUInt32LE(tdo);
+  if (arrayPointer !== MCC_TAG_ARRAY_ADDRESS) {
+    return refuse('demoLayout', `The tag array pointer is ${hex(arrayPointer)}, not ${hex(MCC_TAG_ARRAY_ADDRESS)}.`);
+  }
+  const tagCount = source.readUInt32LE(tdo + 0xc);
+  if (TAG_DATA_HEADER_PC_SIZE + tagCount * TAG_ENTRY_SIZE > tds) {
+    return refuse('demoLayout', `The tag array (${tagCount} tags) doesn't fit in the tag data.`);
+  }
+  const layoutRow = row(
+    'demoLayout',
+    MCC_LAYOUT_LABEL,
+    'pass',
+    `Standard header, cache version 13 (MCC CEA), build ${header.buildString}, ${tagCount} tags at ${hex(MCC_BASE_MEMORY_ADDRESS)}. BSP vertex pools are folded into each BSP block and the tag data is rebased to the Custom Edition address.`,
+  );
+
+  const copy = Buffer.from(source);
+  const arrayAt = tdo + TAG_DATA_HEADER_PC_SIZE;
+  const scenarioTagId = copy.readUInt32LE(tdo + 0x4);
+  const scnrIdx = scenarioTagId & 0xffff;
+  const scnrEntryAt = arrayAt + scnrIdx * TAG_ENTRY_SIZE;
+  const scnrPtr = copy.readUInt32LE(scnrEntryAt + 0x14);
+  const scnrOff = tdo + (scnrPtr - MCC_BASE_MEMORY_ADDRESS);
+  if (scnrOff >= tdo && scnrOff + 0x5b0 <= copy.length) {
+    const bspCount = copy.readInt32LE(scnrOff + 0x5a4);
+    const bspPtr = copy.readUInt32LE(scnrOff + 0x5a8);
+    const bspBase = tdo + (bspPtr - MCC_BASE_MEMORY_ADDRESS);
+    let prevOriginalBspEnd = CACHE_FILE_HEADER_SIZE;
+    for (let i = 0; i < bspCount; i++) {
+      const bEntryOff = bspBase + i * 32;
+      if (bEntryOff + 32 > copy.length) break;
+      const oldBspStart = copy.readUInt32LE(bEntryOff + 0x00);
+      const oldBspSize = copy.readUInt32LE(bEntryOff + 0x04);
+      const oldBspAddr = copy.readUInt32LE(bEntryOff + 0x08);
+      const vertPoolOff = prevOriginalBspEnd;
+      const vertPoolSize = oldBspStart - vertPoolOff;
+      prevOriginalBspEnd = oldBspStart + oldBspSize;
+
+      if (vertPoolSize >= 0 && oldBspStart + oldBspSize <= copy.length) {
+        const vertPoolBuf = Buffer.from(copy.subarray(vertPoolOff, oldBspStart));
+        const bspBodyBuf = Buffer.from(copy.subarray(oldBspStart, oldBspStart + oldBspSize));
+        bspBodyBuf.copy(copy, vertPoolOff);
+        vertPoolBuf.copy(copy, vertPoolOff + oldBspSize);
+
+        const newBspStart = vertPoolOff;
+        const newBspSize = oldBspSize + vertPoolSize;
+        copy.writeUInt32LE(newBspStart >>> 0, bEntryOff + 0x00);
+        copy.writeUInt32LE(newBspSize >>> 0, bEntryOff + 0x04);
+
+        copy.writeUInt32LE(0, newBspStart + 0x04);
+        copy.writeUInt32LE(0, newBspStart + 0x08);
+
+        const sbspHeaderPtr = copy.readUInt32LE(newBspStart + 0x00);
+        const sbspOff = newBspStart + (sbspHeaderPtr - oldBspAddr);
+        if (sbspOff >= newBspStart && sbspOff + 0x124 <= newBspStart + newBspSize) {
+          const lmCount = copy.readInt32LE(sbspOff + 0x118);
+          const lmPtr = copy.readUInt32LE(sbspOff + 0x11c);
+          const lmBase = newBspStart + (lmPtr - oldBspAddr);
+          for (let l = 0; l < lmCount; l++) {
+            const lmEntry = lmBase + l * 32;
+            if (lmEntry + 32 > newBspStart + newBspSize) break;
+            const matCount = copy.readInt32LE(lmEntry + 0x14);
+            const matPtr = copy.readUInt32LE(lmEntry + 0x18);
+            const matBase = newBspStart + (matPtr - oldBspAddr);
+            for (let m = 0; m < matCount; m++) {
+              const matOff = matBase + m * 256;
+              if (matOff + 256 > newBspStart + newBspSize) break;
+              const vCount = copy.readUInt32LE(matOff + 0xb8);
+              const rvOff = copy.readUInt32LE(matOff + 0xbc);
+              const lmvCount = copy.readUInt32LE(matOff + 0xc4);
+              const totalVertBytes = vCount * 56 + lmvCount * 20;
+              const vertAddr = (oldBspAddr + oldBspSize + rvOff) >>> 0;
+              copy.writeUInt32LE(totalVertBytes >>> 0, matOff + 0xd8);
+              copy.writeUInt32LE(0, matOff + 0xdc);
+              copy.writeUInt32LE(0, matOff + 0xe0);
+              copy.writeUInt32LE(vertAddr, matOff + 0xe4);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const entries: TagDataLayout['entries'][number][] = [];
+  for (let i = 0; i < tagCount; i++) {
+    const at = arrayAt + i * TAG_ENTRY_SIZE;
+    const fourcc = copy.readUInt32LE(at);
+    const isExt = copy.readUInt32LE(at + 0x18) === 1;
+    // Clear MCC bit 9 (0x200) on embedded BitmapData flags (+0x0e) so OpenCE's bitmap_verify accepts them
+    if (fourcc === 0x6269746d && !isExt) {
+      const bitmStructAt = tdo + ((copy.readUInt32LE(at + 0x14) - MCC_BASE_MEMORY_ADDRESS) | 0);
+      if (bitmStructAt >= tdo && bitmStructAt + 0x68 <= copy.length) {
+        const bCount = copy.readUInt32LE(bitmStructAt + 0x60);
+        const bPtr = copy.readUInt32LE(bitmStructAt + 0x64);
+        const bArrAt = tdo + ((bPtr - MCC_BASE_MEMORY_ADDRESS) | 0);
+        if (bCount > 0 && bCount < 4096 && bArrAt >= tdo && bArrAt + bCount * 48 <= copy.length) {
+          for (let b = 0; b < bCount; b++) {
+            const bOff = bArrAt + b * 48;
+            const rawFlags = copy.readUInt16LE(bOff + 0x0e);
+            if ((rawFlags & ~0x1ff) !== 0) {
+              copy.writeUInt16LE(rawFlags & 0x1ff, bOff + 0x0e);
+            }
+          }
+        }
+      }
+    }
+    const pathAt = tdo + ((copy.readUInt32LE(at + 0x10) - MCC_BASE_MEMORY_ADDRESS) | 0);
+    entries.push({
+      index: i,
+      path: pathAt >= tdo && pathAt < tdo + tds ? readCStringWithin(copy, pathAt, tdo + tds) : `(tag #${i})`,
+      primaryClassName: i === (scenarioTagId & 0xffff) && copy.readUInt32LE(at + 0xc) === scenarioTagId ? 'scenario' : (lookupTagClass(fourcc)?.name ?? fourCCToString(fourcc)),
+      isExternal: isExt,
+    });
+  }
+
+  const tagLayout: TagDataLayout = { tagDataOffset: tdo, tagDataSize: tds, baseMemoryAddress: MCC_BASE_MEMORY_ADDRESS, tagArrayFileOffset: arrayAt, entries };
+  const tolerated: ToleratedPointer[] = [];
+  const tolerate = { staleReferencePaths: true, rootsOutsideTagData: true };
+  let sites: { kind: DemoPointerKind; at: number; value: number; tagIndex: number }[];
+  try {
+    sites = [...collectTagDataPointers(copy, tagLayout, { tolerate, tolerated }), ...collectBspSpacePointers(copy, tagLayout, { tolerate })];
+  } catch (err) {
+    if (!(err instanceof UnwalkableTagError)) throw err;
+    return refuse('demoRebase', `The tag data can't be moved: ${err.message}`, [], [layoutRow]);
+  }
+
+  const moved = Object.fromEntries([...TAG_DATA_POINTER_KINDS, ...BSP_SPACE_POINTER_KINDS].map((k) => [k, 0])) as Record<DemoPointerKind, number>;
+  for (const s of sites) {
+    copy.writeUInt32LE((s.value + MCC_TO_CE_DELTA) >>> 0, s.at);
+    moved[s.kind]++;
+  }
+  copy.writeUInt32LE(CE_TAG_ARRAY_ADDRESS, tdo);
+  copy.writeUInt32LE(CacheFileEngine.RETAIL, STD.version);
+  copy.writeUInt32LE(0, STD.padding);
+
+  const total = sites.length;
+  const rebaseRow = row(
+    'demoRebase',
+    REBASE_LABEL,
+    'pass',
+    `${total.toLocaleString('en-US')} pointers move from ${hex(MCC_BASE_MEMORY_ADDRESS)} to ${hex(CE_BASE_MEMORY_ADDRESS)}, found by walking every tag and structure BSP with the tag definitions.`,
+    [
+      ...Object.entries(moved)
+        .filter(([, n]) => n > 0)
+        .map(([k, n]) => `${k}: ${n.toLocaleString('en-US')}`),
+      ...(tolerated.length > 0 ? [`${tolerated.length} stale pointer(s) outside the tag data are left as they are.`] : []),
+    ],
+  );
+  return { ok: true, value: { buffer: copy, header, moved, tolerated }, rows: [layoutRow, rebaseRow] };
 }
 
 /**
@@ -103,6 +289,9 @@ function row(id: ConversionCheck['id'], label: string, status: ConversionCheck['
  * names it); a pointer outside the demo tag space.
  */
 export function normalizeDemoMap(source: Buffer): DemoNormalizationResult {
+  if (classifyMapLayout(source).kind === 'mcc') {
+    return normalizeMccMap(source);
+  }
   const refuse = (id: 'demoLayout' | 'demoRebase', message: string, details: string[] = [], earlier: ConversionCheck[] = []): DemoNormalizationResult => ({
     ok: false,
     rows: [...earlier, row(id, id === 'demoLayout' ? LAYOUT_LABEL : REBASE_LABEL, 'refuse', message, details)],
@@ -228,7 +417,7 @@ function refusedReport(rows: ConversionCheck[], header: DemoHeader | null): Reta
   };
 }
 
-/** The full pre-flight report of a demo map: the layout and rebase rows, then every Phase 1 check on the retail-layout copy. */
+/** The full pre-flight report of a demo or MCC map: the layout and rebase rows, then every Phase 1 check on the retail-layout copy. */
 export function preflightDemoConversion(source: Buffer, resources: ConversionResourceFiles = {}): RetailConversionReport {
   const normalized = normalizeDemoMap(source);
   if (!normalized.ok) return refusedReport(normalized.rows, readDemoHeader(source));
@@ -241,7 +430,7 @@ export interface DemoConversionResult extends RetailConversionResult {
 }
 
 /**
- * Converts a demo map: the retail-layout copy, then Phase 1's conversion of it (same options, same
+ * Converts a demo or MCC map: the retail-layout copy, then Phase 1's conversion of it (same options, same
  * refusals). Never mutates `source`. The result is not finalized: the scenario name and crc32 are set
  * when it is written (`writeFinalizedMap`), as for every other conversion.
  */

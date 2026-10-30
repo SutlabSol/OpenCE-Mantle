@@ -225,10 +225,12 @@ function captureEmbeddedFields(
       capturedAssetKeys?.add(`${match.resourceMap}:${match.fileOffset}:${match.size}`);
 
       // Clear the external flag in myBytes so the struct becomes an internal/embedded asset
+      const isMccSource = buffer.length >= 8 && buffer.readUInt32LE(4) === 13;
       const flag = flagLocation(resolved, match.fieldName);
       if (flag) {
         if (flag.width === 2) {
-          myBytes.writeUInt16LE(myBytes.readUInt16LE(flag.offset) & ~flag.mask, flag.offset);
+          const mccMask = isMccSource && match.kind === 'bitmap' ? 0xff : 0xffff;
+          myBytes.writeUInt16LE(myBytes.readUInt16LE(flag.offset) & ~flag.mask & mccMask, flag.offset);
         } else if (flag.width === 4) {
           myBytes.writeUInt32LE(myBytes.readUInt32LE(flag.offset) & ~flag.mask, flag.offset);
         }
@@ -245,6 +247,9 @@ function captureEmbeddedFields(
       if (!validation.ok) {
         capture.blockedReasons.push(`${context}: ${validation.reason}.`);
         continue;
+      }
+      if (buffer.length >= 8 && buffer.readUInt32LE(4) === 13 && myBytes.length >= 0x10 && myBytes.readUInt32LE(0) === 0x6269746d) {
+        myBytes.writeUInt16LE(myBytes.readUInt16LE(0x0e) & 0xff, 0x0e);
       }
     }
     const dedupeKey = `${match.fileOffset}:${match.size}`;

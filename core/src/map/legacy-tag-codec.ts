@@ -42,57 +42,154 @@ import {
 import { generateOpenCeModToml, type OpenCeModTomlConfig } from './mod-packager';
 import type { RandomAccessFile } from './convert/resource-files';
 
-const HEK_GROUP_VERSIONS: Record<string, number> = {
-  bitm: 7,
-  mod2: 5,
-  mode: 4,
-  coll: 10,
-  scen: 1,
+export const HEK_GROUP_VERSIONS: Record<string, number> = {
+  actr: 2,
+  actv: 2,
+  'ant!': 1,
   bipd: 3,
-  vehi: 1,
-  weap: 2,
-  eqip: 2,
-  garb: 1,
-  proj: 5,
-  mach: 1,
+  bitm: 7,
+  trak: 2,
+  colo: 1,
+  cdmg: 1,
+  cont: 3,
+  'jpt!': 6,
+  deca: 1,
+  dobc: 1,
+  devi: 1,
   ctrl: 1,
   lifi: 1,
-  ssce: 1,
-  soso: 2,
-  senv: 2,
-  sgla: 1,
-  schi: 1,
-  scex: 1,
-  swat: 2,
-  smet: 1,
-  spla: 1,
-  'str#': 1,
-  ustr: 1,
-  'snd!': 4,
-  antr: 4,
-  phys: 4,
-  foot: 1,
+  mach: 1,
+  udlg: 1,
   effe: 4,
+  eqip: 2,
+  flag: 1,
+  'fog ': 1,
+  font: 1,
+  garb: 1,
+  mod2: 5,
+  matg: 3,
+  'glw!': 1,
+  grhi: 1,
+  hudg: 1,
+  'hmt ': 1,
+  'hud#': 1,
+  devc: 1,
+  item: 2,
+  itmc: 0,
+  lens: 2,
+  ligh: 3,
+  elec: 1,
+  mgs2: 1,
+  foot: 1,
+  metr: 1,
+  mode: 4,
+  antr: 4,
+  coll: 10,
+  mply: 1,
+  obje: 1,
   part: 2,
   pctl: 4,
-  cont: 3,
-  ligh: 3,
-  lens: 2,
-  mgs2: 1,
-  deca: 1,
-  itmc: 0,
-  actv: 2,
-  actr: 2,
-  'jpt!': 6,
-  unhi: 1,
-  wphi: 2,
-  grhi: 1,
-  udlg: 1,
-  lsnd: 3,
-  trak: 2,
+  phys: 4,
+  plac: 2,
+  pphy: 1,
+  ngpr: 1,
+  proj: 5,
   scnr: 2,
   sbsp: 5,
+  scen: 1,
+  shdr: 1,
+  senv: 2,
+  soso: 2,
+  schi: 1,
+  scex: 1,
+  sotr: 1,
+  sgla: 1,
+  smet: 1,
+  spla: 1,
+  swat: 2,
+  'sky ': 1,
+  'snd!': 4,
+  snde: 1,
+  lsnd: 3,
+  ssce: 1,
+  'str#': 1,
+  tagc: 1,
+  Soul: 1,
+  DeLa: 1,
+  ustr: 1,
+  unit: 2,
+  unhi: 1,
+  vehi: 1,
+  vcky: 2,
+  weap: 2,
+  wphi: 2,
+  rain: 1,
+  wind: 1,
 };
+
+export interface BlamLooseTagHeaderInfo {
+  format: 'classic_blam_be' | 'gen3_malb_le' | 'gen3_blam_be';
+  groupFourCC: string;
+  groupName: string;
+  version: number;
+  headerSize: number;
+  crc32: number;
+}
+
+/**
+ * Inspects a loose tag file's header (supporting Halo 1/2 Classic 64-byte `'blam'` Big-Endian
+ * as well as Halo 3 / ODST / Reach `'MALB'` / `'BLAM'` Gen3 headers).
+ */
+export function inspectBlamLooseTagHeader(buf: Buffer): BlamLooseTagHeaderInfo | null {
+  if (buf.length >= 64 && buf.toString('latin1', 60, 64) === 'blam') {
+    const groupFourCC = buf.toString('latin1', 36, 40);
+    const cls = lookupTagClass(fourCCFromString(groupFourCC));
+    return {
+      format: 'classic_blam_be',
+      groupFourCC,
+      groupName: cls?.name ?? groupFourCC.trim(),
+      version: buf.readUInt16BE(56),
+      headerSize: buf.readUInt32BE(44) || 64,
+      crc32: buf.readUInt32BE(40),
+    };
+  }
+  if (buf.length >= 64) {
+    const magic0 = buf.readUInt32LE(0);
+    if (magic0 === 0x4d414c42) {
+      // 'MALB' Little-Endian Gen3 loose tag
+      const fourCCNum = buf.readUInt32LE(36);
+      const cls = lookupTagClass(fourCCNum);
+      const groupFourCC = Buffer.from([
+        (fourCCNum >>> 24) & 0xff,
+        (fourCCNum >>> 16) & 0xff,
+        (fourCCNum >>> 8) & 0xff,
+        fourCCNum & 0xff,
+      ]).toString('latin1');
+      return {
+        format: 'gen3_malb_le',
+        groupFourCC,
+        groupName: cls?.name ?? groupFourCC.trim(),
+        version: buf.readUInt16LE(56),
+        headerSize: buf.readUInt32LE(44) || 64,
+        crc32: buf.readUInt32LE(40),
+      };
+    }
+    if (magic0 === 0x424c414d) {
+      // 'BLAM' Big-Endian Gen3 loose tag
+      const groupFourCC = buf.toString('latin1', 36, 40);
+      const cls = lookupTagClass(fourCCFromString(groupFourCC));
+      return {
+        format: 'gen3_blam_be',
+        groupFourCC,
+        groupName: cls?.name ?? groupFourCC.trim(),
+        version: buf.readUInt16BE(56),
+        headerSize: buf.readUInt32BE(44) || 64,
+        crc32: buf.readUInt32BE(40),
+      };
+    }
+  }
+  return null;
+}
 
 function isTwoByteScalarType(field: ResolvedField): boolean {
   const t = field.def.type;
@@ -444,6 +541,174 @@ export function serializeContainerTagToHekLooseBuffer(tag: OceContainerTag): Buf
 
   writeStructArray(tag.structName, 0, 1, tag.path, () => tag.path);
   return Buffer.concat(outChunks);
+}
+
+export interface BlamExportedTagFile {
+  relativePath: string;
+  group: string;
+  tagPath: string;
+  bytes: Buffer;
+}
+
+/**
+ * Serializes every tag in an `OceContainer` into standard 64-byte `'blam'` Big-Endian loose tag files
+ * (`<tag.path>.<tag.group>` or `tags/<tag.path>.<tag.group>`), compatible with Sapien, Guerilla,
+ * `tool.exe`, Invader, MEK/Mozzarilla, and Baboon.
+ */
+export function serializeOceContainerToBlamTagFiles(
+  container: OceContainer,
+  options?: {
+    prefixTagsDir?: boolean;
+    rootIndicesOnly?: boolean;
+  },
+): BlamExportedTagFile[] {
+  const prefixTagsDir = options?.prefixTagsDir ?? false;
+  const rootSet = options?.rootIndicesOnly ? new Set(container.rootOriginalIndices) : null;
+  const files: BlamExportedTagFile[] = [];
+
+  for (const tag of container.tags) {
+    if (rootSet && !rootSet.has(tag.originalIndex)) continue;
+    const looseBytes = serializeContainerTagToHekLooseBuffer(tag);
+    const normTagPath = tag.path.replace(/[\\/]+/g, path.sep);
+    const relPath = prefixTagsDir
+      ? path.join('tags', `${normTagPath}.${tag.group}`)
+      : `${normTagPath}.${tag.group}`;
+    files.push({
+      relativePath: relPath,
+      group: tag.group,
+      tagPath: tag.path,
+      bytes: looseBytes,
+    });
+  }
+  return files;
+}
+
+/**
+ * Extracts one or more tags (and optionally their complete recursive dependency tree across all
+ * Halo CE tag classes, including hydrating external `bitmaps.map` and `sounds.map` tags) from a
+ * `.map` buffer into standard 64-byte `'blam'` Big-Endian loose tag files.
+ */
+export function extractTagsToBlamFilesFromMap(
+  mapBuffer: Buffer,
+  rootTagIndices: number[],
+  options?: {
+    includeDependencies?: boolean;
+    prefixTagsDir?: boolean;
+    captureGbxmodelRawData?: boolean;
+    resourceFiles?: { bitmaps?: RandomAccessFile; sounds?: RandomAccessFile };
+  },
+): {
+  tagFiles: BlamExportedTagFile[];
+  container: OceContainer;
+} {
+  const header = parseCacheFileHeader(mapBuffer);
+  const tagIndex = parseTagIndex(mapBuffer, header);
+  const includeDependencies = options?.includeDependencies ?? true;
+  const prefixTagsDir = options?.prefixTagsDir ?? false;
+
+  const nonExternalRoots = rootTagIndices.filter((idx) => {
+    const ent = tagIndex.entries[idx];
+    return ent && !ent.isExternal;
+  });
+
+  let container: OceContainer;
+  if (nonExternalRoots.length > 0) {
+    const extracted = extractTagSet(mapBuffer, header, tagIndex, nonExternalRoots, {
+      resourceFiles: options?.resourceFiles,
+      captureGbxmodelRawData: options?.captureGbxmodelRawData ?? true,
+    });
+    container = deserializeContainer(serializeContainer(extracted, header.scenarioName));
+    hydrateExternalRawDataInContainer(container, options?.resourceFiles);
+  } else {
+    container = {
+      magic: OCETAGS_MAGIC,
+      formatVersion: OCETAGS_FORMAT_VERSION,
+      sourceMapName: header.scenarioName,
+      createdAt: new Date().toISOString(),
+      hasUnresolvedBspReferences: false,
+      rootOriginalIndices: [...rootTagIndices],
+      tags: [],
+      notExtracted: [],
+      warnings: [],
+      resourceMapIdentities: {},
+      externalResourceRefs: [],
+      externalData: 'embedded',
+    };
+  }
+
+  // Also hydrate any directly-selected external bitmap tags if bitmaps.map is provided
+  const bitmapsFile = options?.resourceFiles?.bitmaps;
+  if (bitmapsFile) {
+    for (const rootIdx of rootTagIndices) {
+      const ent = tagIndex.entries[rootIdx];
+      if (!ent || !ent.isExternal || ent.primaryClassName !== 'bitmap') continue;
+      if (container.tags.some((t) => t.group === 'bitmap' && t.path.toLowerCase() === ent.path.toLowerCase())) {
+        continue;
+      }
+      const resIdx = ent.tagDataPointerOrResourceIndex >>> 0;
+      const hdr = bitmapsFile.read(0, 16);
+      const tableOffset = hdr.readUInt32LE(8);
+      const entryCount = hdr.readUInt32LE(12);
+      if (resIdx >= entryCount) continue;
+      const eBuf = bitmapsFile.read(tableOffset + resIdx * 12, 12);
+      const dataSize = eBuf.readUInt32LE(4);
+      const dataOffset = eBuf.readUInt32LE(8);
+      if (dataSize < 108 || dataOffset + dataSize > bitmapsFile.size) continue;
+      const fullTagBuf = bitmapsFile.read(dataOffset, dataSize);
+      const bCount = fullTagBuf.readUInt32LE(96);
+      if (bCount <= 0 || bCount > 256 || 108 + bCount * 48 > fullTagBuf.length) continue;
+
+      const structBytes = Buffer.alloc(108 + bCount * 48, 0);
+      fullTagBuf.copy(structBytes, 0, 0, 108);
+      structBytes.writeUInt32LE(108, 100);
+      structBytes.writeUInt32LE(0, 104);
+
+      const assets: OceContainerEmbeddedRawDataAsset[] = [];
+      const patches: OceContainerEmbeddedRawDataPatch[] = [];
+      for (let i = 0; i < bCount; i++) {
+        const srcElemOff = 108 + i * 48;
+        const dstElemOff = 108 + i * 48;
+        fullTagBuf.copy(structBytes, dstElemOff, srcElemOff, srcElemOff + 48);
+        const flags = structBytes.readUInt16LE(dstElemOff + 14);
+        structBytes.writeUInt16LE(flags & ~0x0100, dstElemOff + 14);
+        const pixOff = fullTagBuf.readUInt32LE(srcElemOff + 24);
+        const pixLen = fullTagBuf.readUInt32LE(srcElemOff + 28);
+        if (pixLen > 0 && pixOff + pixLen <= bitmapsFile.size) {
+          const pixBytes = bitmapsFile.read(pixOff, pixLen);
+          const assetIndex = assets.length;
+          assets.push({
+            kind: 'bitmap',
+            data: pixBytes.toString('base64'),
+          });
+          patches.push({
+            assetIndex,
+            patchOffset: dstElemOff + 24,
+            patchWidth: 4,
+          });
+        }
+      }
+      container.tags.push({
+        originalIndex: rootIdx,
+        group: 'bitmap',
+        path: ent.path,
+        structName: 'Bitmap',
+        data: structBytes.toString('base64'),
+        dependencies: [],
+        embeddedRawDataAssets: assets,
+        embeddedRawDataPatches: patches,
+      });
+    }
+  }
+
+  const tagFiles = serializeOceContainerToBlamTagFiles(container, {
+    prefixTagsDir,
+    rootIndicesOnly: !includeDependencies,
+  });
+
+  return {
+    tagFiles,
+    container,
+  };
 }
 
 /**

@@ -27,6 +27,7 @@ var CHIMERA_COMPRESSED_ENGINE_MASK = 2249850880;
 var TAG_STRING_SIZE = 32;
 var CACHE_FILE_HEADER_SIZE = 2048;
 var TAG_DATA_HEADER_PC_SIZE = 40;
+var TAG_ENTRY_SIZE = 32;
 var CE_BASE_MEMORY_ADDRESS = 1078198272;
 var CE_TAG_ARRAY_ADDRESS = CE_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_PC_SIZE;
 var MCC_BASE_MEMORY_ADDRESS = 1342177280;
@@ -37,11 +38,58 @@ var XBOX_TAG_ARRAY_ADDRESS = XBOX_BASE_MEMORY_ADDRESS + TAG_DATA_HEADER_XBOX_SIZ
 var CE_STOCK_TAG_SPACE_SIZE = 23 * 1024 * 1024;
 var CE_TAG_SPACE_SIZE = 128 * 1024 * 1024;
 
+// ../core/src/binary/strings.ts
+function readFixedString(buffer, offset, length) {
+  const slice = buffer.subarray(offset, offset + length);
+  const nullIndex = slice.indexOf(0);
+  const trimmed = nullIndex === -1 ? slice : slice.subarray(0, nullIndex);
+  return trimmed.toString("ascii");
+}
+function writeFixedString(buffer, offset, length, value) {
+  buffer.fill(0, offset, offset + length);
+  const bytes = Buffer.from(value, "ascii").subarray(0, length - 1);
+  bytes.copy(buffer, offset);
+}
+function readCString(buffer, offset) {
+  let end = offset;
+  while (end < buffer.length && buffer[end] !== 0) {
+    end++;
+  }
+  return buffer.toString("ascii", offset, end);
+}
+
 // ../core/src/map/errors.ts
 var CorruptMapError = class extends Error {
   constructor(message) {
     super(message);
     this.name = "CorruptMapError";
+  }
+};
+var UnexpectedTagArrayAddressError = class extends CorruptMapError {
+  constructor(found, expected) {
+    super(
+      `This map's tag array pointer is 0x${found.toString(16).toUpperCase()}, but every Custom Edition map has 0x${expected.toString(16).toUpperCase()}. It was most likely written by Inject Tags (ADD) in an earlier, broken build of OpenCE Mantle, and the game cannot load it. Re-create it from the original map with this build.`
+    );
+    this.found = found;
+    this.expected = expected;
+    this.name = "UnexpectedTagArrayAddressError";
+  }
+};
+var KNOWN_ENGINE_NAMES = {
+  5: "Halo: Combat Evolved (Xbox)",
+  6: "Halo PC Demo",
+  7: "Halo PC Retail (version 7)",
+  13: "Halo: Combat Evolved Anniversary (MCC)",
+  6790: "Native/MCC internal format"
+};
+var UnsupportedMapVersionError = class extends Error {
+  constructor(engineValue) {
+    const known = KNOWN_ENGINE_NAMES[engineValue];
+    super(
+      known ? `This is a ${known} map. OpenCE Mantle only supports Halo: Custom Edition PC maps (version 609).` : `Unrecognized map version/engine (0x${engineValue.toString(16)}). Only Halo: Custom Edition PC maps (version 609) are supported.`
+    );
+    this.engineValue = engineValue;
+    this.name = "UnsupportedMapVersionError";
   }
 };
 
@@ -59,6 +107,54 @@ function isChimeraCompressedCustomEdition(buffer) {
   const engine = buffer.readUInt32LE(4);
   return (engine & 4294901760) >>> 0 === CHIMERA_COMPRESSED_ENGINE_MASK && (engine & 65535) === 609 /* CUSTOM_EDITION */;
 }
+function parseCacheFileHeader(buffer) {
+  if (buffer.length < CACHE_FILE_HEADER_SIZE) {
+    throw new CorruptMapError(
+      `File is only ${buffer.length} bytes; a Halo CE map header is at least ${CACHE_FILE_HEADER_SIZE} bytes.`
+    );
+  }
+  if (!hasValidMagic(buffer)) {
+    throw new CorruptMapError('Missing "head"/"foot" magic values. This does not look like a Halo map file.');
+  }
+  const engine = buffer.readUInt32LE(4);
+  if (engine !== 609 /* CUSTOM_EDITION */ && engine !== 7 /* RETAIL */ && engine !== 13 /* MCC_CEA */ && engine !== 5 /* XBOX */) {
+    throw new UnsupportedMapVersionError(engine);
+  }
+  const decompressedFileSize = buffer.readUInt32LE(8);
+  const tagDataOffset = buffer.readUInt32LE(16);
+  let tagDataSize = buffer.readUInt32LE(20);
+  const legacyTagSizeRepair = engine === 7 /* RETAIL */ && decompressedFileSize === buffer.length && tagDataSize === decompressedFileSize && tagDataOffset >= CACHE_FILE_HEADER_SIZE && tagDataOffset < decompressedFileSize;
+  if (legacyTagSizeRepair) {
+    tagDataSize = decompressedFileSize - tagDataOffset;
+  }
+  return {
+    engine,
+    decompressedFileSize,
+    compressedPadding: buffer.readUInt32LE(12),
+    tagDataOffset,
+    tagDataSize,
+    scenarioName: readFixedString(buffer, 32, TAG_STRING_SIZE),
+    buildString: readFixedString(buffer, 64, TAG_STRING_SIZE),
+    mapType: buffer.readUInt16LE(96),
+    crc32: buffer.readUInt32LE(100),
+    ...legacyTagSizeRepair ? { legacyTagSizeRepair: true } : {}
+  };
+}
+function serializeCacheFileHeader(header, out) {
+  const buffer = out ?? Buffer.alloc(CACHE_FILE_HEADER_SIZE);
+  buffer.writeUInt32LE(1751474532 /* HEAD */, 0);
+  buffer.writeUInt32LE(header.engine, 4);
+  buffer.writeUInt32LE(header.decompressedFileSize, 8);
+  buffer.writeUInt32LE(header.compressedPadding, 12);
+  buffer.writeUInt32LE(header.tagDataOffset, 16);
+  buffer.writeUInt32LE(header.tagDataSize, 20);
+  writeFixedString(buffer, 32, TAG_STRING_SIZE, header.scenarioName);
+  writeFixedString(buffer, 64, TAG_STRING_SIZE, header.buildString);
+  buffer.writeUInt16LE(header.mapType, 96);
+  buffer.writeUInt32LE(header.crc32, 100);
+  buffer.writeUInt32LE(1718579060 /* FOOT */, 2044);
+  return buffer;
+}
 
 // ../core/src/constants/tag-classes.ts
 function fourCCFromString(code) {
@@ -67,6 +163,15 @@ function fourCCFromString(code) {
   }
   return (code.charCodeAt(0) << 24 | code.charCodeAt(1) << 16 | code.charCodeAt(2) << 8 | code.charCodeAt(3)) >>> 0;
 }
+function fourCCToString(value) {
+  return String.fromCharCode(
+    value >>> 24 & 255,
+    value >>> 16 & 255,
+    value >>> 8 & 255,
+    value & 255
+  );
+}
+var NULL_TAG_ID = 4294967295;
 var TAG_CLASSES = [
   { name: "actor", groupId: "actr", parent: null, purpose: "Defines core AI behaviours shared by actor variants." },
   { name: "actor_variant", groupId: "actv", parent: null, purpose: "Specializes an actor: appearance, weapon use, grenades, health, dropped equipment." },
@@ -152,14 +257,88 @@ var TAG_CLASSES = [
   { name: "wind", groupId: "wind", parent: null, purpose: "Speed and variation of wind in a BSP cluster." }
 ];
 var CLASS_BY_FOURCC = new Map(TAG_CLASSES.map((c) => [fourCCFromString(c.groupId), c]));
+var TAG_CLASS_NONE = 4294967295;
+function lookupTagClass(fourcc) {
+  return CLASS_BY_FOURCC.get(fourcc) ?? null;
+}
 var CLASS_BY_NAME = new Map(TAG_CLASSES.map((c) => [c.name, c]));
+function lookupTagClassByName(name) {
+  return CLASS_BY_NAME.get(name) ?? null;
+}
 
 // ../core/src/map/tag-index.ts
+function resolveTagDataPointer(pointer, header, baseMemoryAddress) {
+  return header.tagDataOffset + (pointer - baseMemoryAddress);
+}
 function inferBaseMemoryAddressForClassifier(tagArrayAddress) {
   if (tagArrayAddress === XBOX_TAG_ARRAY_ADDRESS) {
     return XBOX_BASE_MEMORY_ADDRESS;
   }
   return tagArrayAddress - TAG_DATA_HEADER_PC_SIZE >>> 0;
+}
+function parseTagIndex(buffer, header) {
+  const tagDataHeaderOffset = header.tagDataOffset;
+  const isXbox = header.engine === 5 /* XBOX */;
+  const tagHeaderSize = isXbox ? TAG_DATA_HEADER_XBOX_SIZE : TAG_DATA_HEADER_PC_SIZE;
+  if (tagDataHeaderOffset + tagHeaderSize > buffer.length) {
+    throw new CorruptMapError("Tag data offset from the header is out of bounds of the file.");
+  }
+  const tagArrayAddress = buffer.readUInt32LE(tagDataHeaderOffset + 0);
+  const scenarioTagId = buffer.readUInt32LE(tagDataHeaderOffset + 4);
+  const tagFileChecksums = buffer.readUInt32LE(tagDataHeaderOffset + 8);
+  const tagCount = buffer.readUInt32LE(tagDataHeaderOffset + 12);
+  const modelPartCount = buffer.readUInt32LE(tagDataHeaderOffset + 16);
+  const modelDataFileOffset = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 20);
+  const vertexSize = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 28);
+  const modelDataSize = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 32);
+  const isMcc = !isXbox && (header.engine === 13 /* MCC_CEA */ || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS);
+  const expectedTagArrayAddress = isXbox ? XBOX_TAG_ARRAY_ADDRESS : isMcc ? MCC_TAG_ARRAY_ADDRESS : CE_TAG_ARRAY_ADDRESS;
+  if (tagArrayAddress !== expectedTagArrayAddress) {
+    throw new UnexpectedTagArrayAddressError(tagArrayAddress, expectedTagArrayAddress);
+  }
+  const tagArrayFileOffset = tagDataHeaderOffset + tagHeaderSize;
+  const baseMemoryAddress = isXbox ? XBOX_BASE_MEMORY_ADDRESS : isMcc ? MCC_BASE_MEMORY_ADDRESS : CE_BASE_MEMORY_ADDRESS;
+  if (tagArrayFileOffset + tagCount * TAG_ENTRY_SIZE > buffer.length) {
+    throw new CorruptMapError("Tag count from the tag index is out of bounds of the file (map may be corrupt).");
+  }
+  const entries = [];
+  for (let i = 0; i < tagCount; i++) {
+    const entryOffset = tagArrayFileOffset + i * TAG_ENTRY_SIZE;
+    const primaryClassFourCC = buffer.readUInt32LE(entryOffset + 0);
+    const secondaryClassFourCC = buffer.readUInt32LE(entryOffset + 4);
+    const tertiaryClassFourCC = buffer.readUInt32LE(entryOffset + 8);
+    const tagId = buffer.readUInt32LE(entryOffset + 12);
+    const tagPathPointer = buffer.readUInt32LE(entryOffset + 16);
+    const tagDataPointerOrResourceIndex = buffer.readUInt32LE(entryOffset + 20);
+    const isExternal = !isXbox && buffer.readUInt32LE(entryOffset + 24) === 1;
+    const pathFileOffset = resolveTagDataPointer(tagPathPointer, header, baseMemoryAddress);
+    if (pathFileOffset < 0 || pathFileOffset >= buffer.length) {
+      throw new CorruptMapError(`Tag #${i}: path pointer resolves outside of the file; map may be corrupt or protected.`);
+    }
+    const path16 = readCString(buffer, pathFileOffset);
+    entries.push({
+      index: i,
+      tagId,
+      primaryClassFourCC,
+      secondaryClassFourCC: secondaryClassFourCC === TAG_CLASS_NONE ? null : secondaryClassFourCC,
+      tertiaryClassFourCC: tertiaryClassFourCC === TAG_CLASS_NONE ? null : tertiaryClassFourCC,
+      primaryClassName: lookupTagClass(primaryClassFourCC)?.name ?? fourCCToString(primaryClassFourCC),
+      path: path16,
+      isExternal,
+      tagDataPointerOrResourceIndex
+    });
+  }
+  return {
+    scenarioTagId,
+    tagChecksum: tagFileChecksums,
+    tagCount,
+    modelPartCount,
+    modelDataFileOffset,
+    vertexSize,
+    modelDataSize,
+    baseMemoryAddress,
+    entries
+  };
 }
 
 // ../core/src/map/convert/classify.ts
@@ -189,15 +368,58 @@ function classifyMapLayout(buffer) {
 
 // electron/main.ts
 var import_electron4 = require("electron");
-var path12 = __toESM(require("path"));
-var fs10 = __toESM(require("fs"));
+var path15 = __toESM(require("path"));
+var fs13 = __toESM(require("fs"));
+var import_child_process3 = require("child_process");
 
 // ../core/src/map/tag-footprints.ts
 var SCENARIO_STRUCTURE_BSP_FOURCC = fourCCFromString("sbsp");
 
 // ../core/src/map/compression.ts
+var zlib = __toESM(require("zlib"));
 var import_zstd = require("@mongodb-js/zstd");
 var CUSTOM_EDITION_COMPRESSED_ENGINE = (609 /* CUSTOM_EDITION */ | CHIMERA_COMPRESSED_ENGINE_MASK) >>> 0;
+function ensureXboxMapDecompressed(buffer) {
+  if (!hasValidMagic(buffer)) return buffer;
+  const engine = buffer.readUInt32LE(4);
+  if (engine !== 5 /* XBOX */) return buffer;
+  const decompressedFileSize = buffer.readUInt32LE(8);
+  const tagDataOffset = buffer.readUInt32LE(16);
+  if (buffer.length >= decompressedFileSize && tagDataOffset + 36 <= buffer.length && buffer.readUInt32LE(tagDataOffset) === 2151309348) {
+    return buffer;
+  }
+  if (buffer.length <= CACHE_FILE_HEADER_SIZE || buffer[CACHE_FILE_HEADER_SIZE] !== 120) {
+    return buffer;
+  }
+  try {
+    const inflated = zlib.inflateSync(buffer.subarray(CACHE_FILE_HEADER_SIZE));
+    const totalSize = Math.max(decompressedFileSize, CACHE_FILE_HEADER_SIZE + inflated.length);
+    const out = Buffer.alloc(totalSize, 202);
+    buffer.copy(out, 0, 0, CACHE_FILE_HEADER_SIZE);
+    inflated.copy(out, CACHE_FILE_HEADER_SIZE);
+    return out;
+  } catch {
+    return buffer;
+  }
+}
+
+// ../core/src/map/open-map.ts
+function inspectCustomEditionMap(buffer) {
+  if (isChimeraCompressedCustomEdition(buffer)) {
+    return { status: "compressed" };
+  }
+  try {
+    const decompressedBuffer = ensureXboxMapDecompressed(buffer);
+    const header = parseCacheFileHeader(decompressedBuffer);
+    const tagIndex = parseTagIndex(decompressedBuffer, header);
+    return { status: "ok", header, tagIndex };
+  } catch (error) {
+    if (error instanceof UnsupportedMapVersionError) {
+      return { status: "unsupported", message: error.message };
+    }
+    throw error;
+  }
+}
 
 // ../core/src/map/resource-map.ts
 var import_crypto = require("crypto");
@@ -233,6 +455,9 @@ function computeResourceMapIdentity(buffer) {
   const hash = (0, import_crypto.createHash)("sha256");
   hash.update(buffer.subarray(0, Math.min(tableEnd, buffer.length)));
   return { fileSize: buffer.length, entryCount: map.resourceCount, fingerprint: hash.digest("hex") };
+}
+function resourceMapIdentitiesMatch(a, b) {
+  return a.fileSize === b.fileSize && a.entryCount === b.entryCount && a.fingerprint === b.fingerprint;
 }
 var RESOURCE_MAP_TYPE_BY_KIND = { bitmaps: 1, sounds: 2, loc: 3 };
 function validateResourceMapFile(buffer, kind) {
@@ -33739,6 +33964,171 @@ var ALL_DEFINITION_FILES = [
   wind_default
 ];
 
+// ../core/src/map/definitions/codec.ts
+var FLOAT_COMPOSITE_COMPONENT_COUNT = {
+  Point2D: 2,
+  Point3D: 3,
+  Vector2D: 2,
+  Vector3D: 3,
+  Plane2D: 3,
+  Plane3D: 4,
+  Euler2D: 2,
+  Euler3D: 3,
+  Quaternion: 4,
+  Matrix: 9,
+  ColorRGB: 3,
+  ColorARGB: 4
+};
+var INT16_COMPOSITE_COMPONENT_COUNT = {
+  Point2DInt: 2,
+  Rectangle2D: 4
+};
+function decodeDependency(buffer, offset) {
+  return {
+    fourcc: buffer.readUInt32LE(offset + 0),
+    pathPointer: buffer.readUInt32LE(offset + 4),
+    pathSize: buffer.readUInt32LE(offset + 8),
+    tagId: buffer.readUInt32LE(offset + 12)
+  };
+}
+function encodeDependency(buffer, offset, value) {
+  buffer.writeUInt32LE(value.fourcc, offset + 0);
+  buffer.writeUInt32LE(value.pathPointer, offset + 4);
+  buffer.writeUInt32LE(value.pathSize, offset + 8);
+  buffer.writeUInt32LE(value.tagId, offset + 12);
+}
+function decodeReflexive(buffer, offset) {
+  return {
+    count: buffer.readUInt32LE(offset + 0),
+    pointerLow: buffer.readUInt32LE(offset + 4),
+    pointerHigh: buffer.readUInt32LE(offset + 8)
+  };
+}
+function encodeReflexive(buffer, offset, value) {
+  buffer.writeUInt32LE(value.count, offset + 0);
+  buffer.writeUInt32LE(value.pointerLow, offset + 4);
+  buffer.writeUInt32LE(value.pointerHigh, offset + 8);
+}
+function decodeTagDataOffset(buffer, offset) {
+  return {
+    size: buffer.readUInt32LE(offset + 0),
+    external: buffer.readUInt32LE(offset + 4),
+    fileOffset: buffer.readUInt32LE(offset + 8),
+    pointerLow: buffer.readUInt32LE(offset + 12),
+    pointerHigh: buffer.readUInt32LE(offset + 16)
+  };
+}
+function encodeTagDataOffset(buffer, offset, value) {
+  buffer.writeUInt32LE(value.size, offset + 0);
+  buffer.writeUInt32LE(value.external, offset + 4);
+  buffer.writeUInt32LE(value.fileOffset, offset + 8);
+  buffer.writeUInt32LE(value.pointerLow, offset + 12);
+  buffer.writeUInt32LE(value.pointerHigh, offset + 16);
+}
+function decodeBasicUnit(buffer, offset, type) {
+  switch (type) {
+    case "int8":
+      return buffer.readInt8(offset);
+    case "uint8":
+      return buffer.readUInt8(offset);
+    case "int16":
+      return buffer.readInt16LE(offset);
+    case "uint16":
+    case "Index":
+      return buffer.readUInt16LE(offset);
+    case "int32":
+      return buffer.readInt32LE(offset);
+    case "uint32":
+    case "Pointer":
+    case "TagFourCC":
+    case "TagID":
+    case "ColorARGBInt":
+      return buffer.readUInt32LE(offset);
+    case "float":
+    case "Angle":
+    case "Fraction":
+      return buffer.readFloatLE(offset);
+    case "ScenarioScriptNodeValue":
+      return buffer.readUInt32LE(offset);
+    case "TagString": {
+      const raw = Buffer.from(buffer.subarray(offset, offset + 32));
+      const nullIndex = raw.indexOf(0);
+      const text = (nullIndex === -1 ? raw : raw.subarray(0, nullIndex)).toString("ascii");
+      return { text, raw };
+    }
+  }
+  if (type in FLOAT_COMPOSITE_COMPONENT_COUNT) {
+    const n = FLOAT_COMPOSITE_COMPONENT_COUNT[type];
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(buffer.readFloatLE(offset + i * 4));
+    return out;
+  }
+  if (type in INT16_COMPOSITE_COMPONENT_COUNT) {
+    const n = INT16_COMPOSITE_COMPONENT_COUNT[type];
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(buffer.readInt16LE(offset + i * 2));
+    return out;
+  }
+  throw new Error(`decodeBasicUnit: unknown basic type "${type}"`);
+}
+function encodeBasicUnit(buffer, offset, type, value) {
+  switch (type) {
+    case "int8":
+      buffer.writeInt8(value, offset);
+      return;
+    case "uint8":
+      buffer.writeUInt8(value, offset);
+      return;
+    case "int16":
+      buffer.writeInt16LE(value, offset);
+      return;
+    case "uint16":
+    case "Index":
+      buffer.writeUInt16LE((value < 0 ? 65535 : value) & 65535, offset);
+      return;
+    case "int32":
+      buffer.writeInt32LE(value, offset);
+      return;
+    case "uint32":
+    case "Pointer":
+    case "TagFourCC":
+    case "TagID":
+    case "ColorARGBInt":
+      buffer.writeUInt32LE(value, offset);
+      return;
+    case "float":
+    case "Angle":
+    case "Fraction":
+      buffer.writeFloatLE(value, offset);
+      return;
+    case "ScenarioScriptNodeValue":
+      buffer.writeUInt32LE(value, offset);
+      return;
+    case "TagString": {
+      const v = value;
+      if (v.raw) {
+        v.raw.copy(buffer, offset);
+        return;
+      }
+      buffer.fill(0, offset, offset + 32);
+      const bytes = Buffer.from(v.text, "ascii").subarray(0, 31);
+      bytes.copy(buffer, offset);
+      return;
+    }
+  }
+  if (type in FLOAT_COMPOSITE_COMPONENT_COUNT) {
+    const arr = value;
+    for (let i = 0; i < arr.length; i++) buffer.writeFloatLE(arr[i], offset + i * 4);
+    return;
+  }
+  if (type in INT16_COMPOSITE_COMPONENT_COUNT) {
+    const arr = value;
+    for (let i = 0; i < arr.length; i++) buffer.writeInt16LE(arr[i], offset + i * 2);
+    return;
+  }
+  throw new Error(`encodeBasicUnit: unknown basic type "${type}"`);
+}
+
 // ../core/src/map/definitions/engine.ts
 var DefinitionLoadError = class extends Error {
   constructor(message) {
@@ -33853,8 +34243,23 @@ function resolveStruct(name, _visiting = /* @__PURE__ */ new Set()) {
   _visiting.delete(name);
   return resolved;
 }
+function resolvePointer(pointer, fileOffsetAnchor, baseMemoryAddress) {
+  return fileOffsetAnchor + (pointer - baseMemoryAddress);
+}
+function isRangeInBuffer(start, size, bufferLength) {
+  return Number.isSafeInteger(start) && Number.isSafeInteger(size) && start >= 0 && size >= 0 && start + size <= bufferLength;
+}
 function getAllTagGroupNames() {
   return Array.from(tagGroupNameToStructName.keys());
+}
+function getBitfieldDefinition(name) {
+  return bitfields.get(name);
+}
+function getEnumDefinition(name) {
+  return enums.get(name);
+}
+function getGroupStructName(tagGroupName) {
+  return tagGroupNameToStructName.get(tagGroupName) ?? null;
 }
 function getGroupDefinition(tagGroupName) {
   const structName = tagGroupNameToStructName.get(tagGroupName);
@@ -33863,10 +34268,507 @@ function getGroupDefinition(tagGroupName) {
   }
   return resolveStruct(structName);
 }
+function decodeValueField(buffer, absOffset, field) {
+  if (field.type === "TagDependency") return { kind: "dependency", value: decodeDependency(buffer, absOffset) };
+  if (field.type === "TagReflexive") return { kind: "reflexive", value: decodeReflexive(buffer, absOffset) };
+  if (field.type === "TagDataOffset") return { kind: "tagDataOffset", value: decodeTagDataOffset(buffer, absOffset) };
+  if (enums.has(field.type)) return { kind: "enum", value: buffer.readUInt16LE(absOffset) };
+  const bitfieldDef = bitfields.get(field.type);
+  if (bitfieldDef) {
+    const value = bitfieldDef.width === 8 ? buffer.readUInt8(absOffset) : bitfieldDef.width === 16 ? buffer.readUInt16LE(absOffset) : buffer.readUInt32LE(absOffset);
+    return { kind: "bitfield", value, width: bitfieldDef.width };
+  }
+  if (field.bounds) {
+    const unitSize = basicUnitSize(field.type);
+    return {
+      kind: "bounds",
+      type: field.type,
+      value: [decodeBasicUnit(buffer, absOffset, field.type), decodeBasicUnit(buffer, absOffset + unitSize, field.type)]
+    };
+  }
+  if (field.count && field.count > 1) {
+    const unitSize = basicUnitSize(field.type);
+    const out = [];
+    for (let i = 0; i < field.count; i++) out.push(decodeBasicUnit(buffer, absOffset + i * unitSize, field.type));
+    return { kind: "array", type: field.type, value: out };
+  }
+  return { kind: "basic", type: field.type, value: decodeBasicUnit(buffer, absOffset, field.type) };
+}
+function encodeValueField(buffer, absOffset, decoded) {
+  switch (decoded.kind) {
+    case "dependency":
+      encodeDependency(buffer, absOffset, decoded.value);
+      return;
+    case "reflexive":
+      encodeReflexive(buffer, absOffset, decoded.value);
+      return;
+    case "tagDataOffset":
+      encodeTagDataOffset(buffer, absOffset, decoded.value);
+      return;
+    case "enum":
+      buffer.writeUInt16LE(decoded.value, absOffset);
+      return;
+    case "bitfield":
+      if (decoded.width === 8) buffer.writeUInt8(decoded.value, absOffset);
+      else if (decoded.width === 16) buffer.writeUInt16LE(decoded.value, absOffset);
+      else buffer.writeUInt32LE(decoded.value, absOffset);
+      return;
+    case "bounds": {
+      const unitSize = basicUnitSize(decoded.type);
+      encodeBasicUnit(buffer, absOffset, decoded.type, decoded.value[0]);
+      encodeBasicUnit(buffer, absOffset + unitSize, decoded.type, decoded.value[1]);
+      return;
+    }
+    case "array": {
+      const unitSize = basicUnitSize(decoded.type);
+      decoded.value.forEach((v, i) => encodeBasicUnit(buffer, absOffset + i * unitSize, decoded.type, v));
+      return;
+    }
+    case "basic":
+      encodeBasicUnit(buffer, absOffset, decoded.type, decoded.value);
+      return;
+  }
+}
+function decodeStruct(buffer, baseOffset, structName) {
+  const resolved = resolveStruct(structName);
+  const out = /* @__PURE__ */ new Map();
+  for (const field of resolved.fields) {
+    out.set(field.name, decodeValueField(buffer, baseOffset + field.offset, field.def));
+  }
+  return out;
+}
+
+// ../core/src/map/definitions/validate-tag.ts
+function locateStructureBsp(buffer, _tagIndex, scenarioFileOffset, scenarioFileOffsetAnchor, scenarioBaseMemoryAddress, targetTagId, bspIndex) {
+  const decodedScenario = decodeStruct(buffer, scenarioFileOffset, "Scenario");
+  const bspsField = decodedScenario.get("structure bsps");
+  if (!bspsField || bspsField.kind !== "reflexive") return null;
+  const { count, pointerLow } = bspsField.value;
+  if (count === 0) return null;
+  const childSize = resolveStruct("ScenarioBSP").totalSize;
+  const arrayOffset = scenarioFileOffsetAnchor + (pointerLow - scenarioBaseMemoryAddress);
+  if (bspIndex !== void 0 && bspIndex >= 0 && bspIndex < count) {
+    const entryOffset = arrayOffset + bspIndex * childSize;
+    const decoded = decodeStruct(buffer, entryOffset, "ScenarioBSP");
+    const bspStart = decoded.get("bsp start").value;
+    const bspAddress = decoded.get("bsp address").value;
+    if (bspStart + 24 > buffer.length) return null;
+    const metaPointer = buffer.readUInt32LE(bspStart + 0);
+    return { fileOffset: bspStart + (metaPointer - bspAddress), fileOffsetAnchor: bspStart, baseMemoryAddress: bspAddress };
+  }
+  for (let i = 0; i < count; i++) {
+    const entryOffset = arrayOffset + i * childSize;
+    const decoded = decodeStruct(buffer, entryOffset, "ScenarioBSP");
+    const dep = decoded.get("structure bsp");
+    if (!dep || dep.kind !== "dependency") continue;
+    if (dep.value.tagId !== targetTagId) continue;
+    const bspStart = decoded.get("bsp start").value;
+    const bspAddress = decoded.get("bsp address").value;
+    if (bspStart + 24 > buffer.length) return null;
+    const metaPointer = buffer.readUInt32LE(bspStart + 0);
+    return { fileOffset: bspStart + (metaPointer - bspAddress), fileOffsetAnchor: bspStart, baseMemoryAddress: bspAddress };
+  }
+  return null;
+}
+
+// ../core/src/map/dependency-walker.ts
+var UNCERTAIN_GROUPS = ["spheroid"];
+
+// ../core/src/map/tag-extractor.ts
+function childFieldPath(parentPath, fieldName) {
+  return `${parentPath}.${fieldName}`;
+}
+function reflexiveElementPath(parentPath, fieldName, index) {
+  return `${parentPath}.${fieldName}[${index}]`;
+}
+function isRelocatedTagDataField(field, value) {
+  return value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset && value.value.size > 0;
+}
 
 // ../core/src/map/container.ts
+var OCETAGS_MAGIC = "OCETAGS";
 var OCETAGS_FORMAT_VERSION = 5;
+var OCETAGS_MIN_SUPPORTED_VERSION = 1;
 var OCETAGS_EXTENSION = ".ocetags";
+var ContainerFormatError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ContainerFormatError";
+  }
+};
+var ContainerHasBspError = class extends ContainerFormatError {
+  constructor(paths) {
+    super(`This .ocetags container includes scenario_structure_bsp tag(s), which must never be imported: ${paths.join(", ")}.`);
+    this.name = "ContainerHasBspError";
+  }
+};
+var RESOURCE_MAP_BY_NAME = {
+  "bitmaps.map": "bitmaps",
+  "sounds.map": "sounds",
+  "loc.map": "loc"
+};
+function serializeContainer(set, sourceMapName, resourceMapIdentities = {}, options) {
+  const localIndexByOriginal = /* @__PURE__ */ new Map();
+  set.tags.forEach((t, i) => localIndexByOriginal.set(t.originalIndex, i));
+  const externalResourceRefs = [];
+  for (const w of set.warnings) {
+    if (w.kind !== "externalData" || !w.resourceMap) continue;
+    const tagIndex = localIndexByOriginal.get(w.originalIndex);
+    if (tagIndex === void 0) continue;
+    const resourceKey = RESOURCE_MAP_BY_NAME[w.resourceMap];
+    const identity = resourceKey ? resourceMapIdentities[resourceKey] : void 0;
+    externalResourceRefs.push({
+      tagIndex,
+      coverage: w.resourceMap === "sounds.map" ? "sound-samples" : "bitmap-mipmap",
+      resourceMap: w.resourceMap,
+      fileOffset: w.fileOffset ?? 0,
+      size: w.size ?? 0,
+      status: identity ? "verified" : "unverified"
+    });
+  }
+  const container = {
+    magic: OCETAGS_MAGIC,
+    formatVersion: OCETAGS_FORMAT_VERSION,
+    sourceMapName,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    itemName: options?.itemName,
+    displayName: options?.displayName ?? options?.itemName,
+    hasUnresolvedBspReferences: set.notExtracted.length > 0,
+    rootOriginalIndices: set.rootOriginalIndices,
+    tags: set.tags.map((t) => {
+      const tagItemName = options?.itemNames?.[t.originalIndex] ?? (set.rootOriginalIndices.includes(t.originalIndex) ? options?.itemName : void 0);
+      return {
+        originalIndex: t.originalIndex,
+        group: t.group,
+        path: t.path,
+        structName: t.structName,
+        itemName: tagItemName,
+        displayName: tagItemName,
+        data: t.data.toString("base64"),
+        dependencies: t.dependencies,
+        secondaryClassFourCC: t.secondaryClassFourCC,
+        tertiaryClassFourCC: t.tertiaryClassFourCC,
+        embeddedRawDataAssets: t.embeddedRawDataAssets.map((a) => ({ kind: a.kind, data: a.data.toString("base64") })),
+        embeddedRawDataPatches: t.embeddedRawDataPatches.map((p) => ({ ...p })),
+        injectionBlockers: t.injectionBlockers.map((b) => ({ ...b })),
+        gbxmodelGeometryParts: t.gbxmodelGeometryParts?.map((p) => ({
+          geometryIndex: p.geometryIndex,
+          partIndex: p.partIndex,
+          vertexType: p.vertexType,
+          vertexCount: p.vertexCount,
+          vertexData: p.vertexBytes.toString("base64"),
+          triangleBufferType: p.triangleBufferType,
+          triangleCount: p.triangleCount,
+          triangleData: p.triangleBytes.toString("base64")
+        }))
+      };
+    }),
+    notExtracted: set.notExtracted,
+    warnings: set.warnings,
+    resourceMapIdentities,
+    externalResourceRefs,
+    externalData: set.tags.some((t) => (t.embeddedRawDataAssets?.length ?? 0) > 0) ? "embedded" : "referenced"
+  };
+  return Buffer.from(JSON.stringify(container, null, 2), "utf-8");
+}
+function deserializeContainer(buffer) {
+  let parsed;
+  try {
+    parsed = JSON.parse(buffer.toString("utf-8"));
+  } catch {
+    throw new ContainerFormatError("File is not a valid .ocetags container (not valid JSON).");
+  }
+  if (!parsed || parsed.magic !== OCETAGS_MAGIC) {
+    throw new ContainerFormatError("File is not a valid .ocetags container (missing or wrong magic value).");
+  }
+  if (typeof parsed.formatVersion !== "number" || parsed.formatVersion < OCETAGS_MIN_SUPPORTED_VERSION || parsed.formatVersion > OCETAGS_FORMAT_VERSION) {
+    throw new ContainerFormatError(
+      `Unsupported .ocetags format version ${parsed.formatVersion} (this build reads versions ${OCETAGS_MIN_SUPPORTED_VERSION}-${OCETAGS_FORMAT_VERSION}). ` + (typeof parsed.formatVersion === "number" && parsed.formatVersion > OCETAGS_FORMAT_VERSION ? "This container was created by a newer version of OpenCE - update the app." : "")
+    );
+  }
+  const bspTags = (parsed.tags ?? []).filter((t) => t.group === "scenario_structure_bsp");
+  if (bspTags.length > 0) {
+    throw new ContainerHasBspError(bspTags.map((t) => t.path));
+  }
+  parsed.resourceMapIdentities = parsed.resourceMapIdentities ?? {};
+  parsed.externalResourceRefs = parsed.externalResourceRefs ?? [];
+  parsed.externalData = parsed.externalData === "embedded" ? "embedded" : "referenced";
+  return parsed;
+}
+
+// ../core/src/map/pointer-rebase.ts
+function tagDataLayoutOf(header, tagIndex) {
+  return {
+    tagDataOffset: header.tagDataOffset,
+    tagDataSize: header.tagDataSize,
+    baseMemoryAddress: tagIndex.baseMemoryAddress,
+    tagArrayFileOffset: header.tagDataOffset + (header.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE),
+    entries: tagIndex.entries
+  };
+}
+var EXTERNAL_GROUPS_WITH_BASE_STRUCT = ["sound"];
+var EXTERNAL_GROUPS_WITH_RESOURCE_INDEX = ["bitmap", "font", "unicode_string_list", "hud_message_text"];
+var UnwalkableTagError = class extends Error {
+  constructor(tagIndex, tagPath, group, reason) {
+    super(`Tag "${tagPath}" (${group}) in the target map can't be read completely with this build's tag definitions (${reason}), so its pointers can't be moved safely.`);
+    this.tagIndex = tagIndex;
+    this.tagPath = tagPath;
+    this.group = group;
+    this.name = "UnwalkableTagError";
+  }
+};
+function collectTagDataPointers(buffer, layout, options = {}) {
+  const { tagDataOffset, tagDataSize, baseMemoryAddress } = layout;
+  const tagDataEnd = tagDataOffset + tagDataSize;
+  const fileOf = (pointer) => tagDataOffset + (pointer - baseMemoryAddress | 0);
+  const inTagData = (pointer, length) => {
+    const at = fileOf(pointer);
+    return at >= tagDataOffset && at + length <= tagDataEnd && at + length <= buffer.length;
+  };
+  const sites = [];
+  const seenSites = /* @__PURE__ */ new Set();
+  const visitedStructs = /* @__PURE__ */ new Set();
+  const addSite = (kind, at, tagIndex) => {
+    if (seenSites.has(at)) return;
+    seenSites.add(at);
+    sites.push({ kind, at, value: buffer.readUInt32LE(at), tagIndex });
+  };
+  const tolerate = (pointer) => {
+    if (seenSites.has(pointer.at)) return;
+    seenSites.add(pointer.at);
+    options.tolerated?.push(pointer);
+  };
+  const stalePath = (pathPointer) => options.tolerate?.staleReferencePaths === true && !inTagData(pathPointer, 1);
+  const isXboxLayout = layout.tagArrayFileOffset === tagDataOffset + 36;
+  if (isXboxLayout && tagDataOffset + 36 <= buffer.length) {
+    const vPartsPtr = buffer.readUInt32LE(tagDataOffset + 20);
+    if (vPartsPtr !== 0 && inTagData(vPartsPtr, 4)) addSite("dataBlock", tagDataOffset + 20, -1);
+    const iPartsPtr = buffer.readUInt32LE(tagDataOffset + 28);
+    if (iPartsPtr !== 0 && inTagData(iPartsPtr, 4)) addSite("dataBlock", tagDataOffset + 28, -1);
+  }
+  for (const e of layout.entries) {
+    const group = e.primaryClassName ?? "(unknown)";
+    const fail = (reason) => {
+      throw new UnwalkableTagError(e.index, e.path, group, reason);
+    };
+    const entryAt = layout.tagArrayFileOffset + e.index * TAG_ENTRY_SIZE;
+    if (!inTagData(buffer.readUInt32LE(entryAt + 16), 1)) fail("its path pointer is outside the tag data");
+    addSite("tagPath", entryAt + 16, e.index);
+    const dataPointer = buffer.readUInt32LE(entryAt + 20);
+    const resourceBacked = e.isExternal && EXTERNAL_GROUPS_WITH_BASE_STRUCT.includes(group);
+    if (e.isExternal && !resourceBacked) {
+      if (EXTERNAL_GROUPS_WITH_RESOURCE_INDEX.includes(group)) continue;
+      fail("it is an external (resource map) entry of a group this build has not measured, so its data field could be an address or an index");
+    }
+    if (group === "scenario_structure_bsp") {
+      if (dataPointer !== 0 && inTagData(dataPointer, 1)) fail("its BSP data pointer points into the tag data");
+      continue;
+    }
+    if (UNCERTAIN_GROUPS.includes(group)) fail("this group has no reliable field layout");
+    const rootStruct = e.primaryClassName ? getGroupStructName(e.primaryClassName) : null;
+    if (!rootStruct) fail("there is no definition for this group");
+    if (options.tolerate?.rootsOutsideTagData && !inTagData(dataPointer, resolveStruct(rootStruct).totalSize)) {
+      options.tolerated?.push({ kind: "rootOutsideTagData", tagIndex: e.index, at: entryAt + 20, value: dataPointer, where: `${e.path} root` });
+      addSite("tagData", entryAt + 20, e.index);
+      continue;
+    }
+    const walk = (structName, pointer, where) => {
+      const size = resolveStruct(structName).totalSize;
+      if (!inTagData(pointer, size)) fail(`${where} is outside the tag data`);
+      const at = fileOf(pointer);
+      const key = `${structName}@${at}`;
+      if (visitedStructs.has(key)) return;
+      visitedStructs.add(key);
+      const decoded = decodeStruct(buffer, at, structName);
+      for (const field of resolveStruct(structName).fields) {
+        const value = decoded.get(field.name);
+        if (!value || field.def.nonCached) continue;
+        const fieldAt = at + field.offset;
+        const fieldWhere = `${where}.${field.name}`;
+        if (value.kind === "dependency") {
+          const pathPointer = value.value.pathPointer >>> 0;
+          if (pathPointer === 0 || pathPointer === 4294967295) continue;
+          if (stalePath(pathPointer)) {
+            tolerate({ kind: "staleReferencePath", tagIndex: e.index, at: fieldAt + 4, value: pathPointer, where: fieldWhere });
+            continue;
+          }
+          if (!inTagData(pathPointer, 1)) fail(`${fieldWhere} has a path pointer outside the tag data`);
+          addSite("referencePath", fieldAt + 4, e.index);
+        } else if (value.kind === "reflexive" && field.def.type === "TagReflexive") {
+          const pointer2 = value.value.pointerLow >>> 0;
+          if (value.value.count === 0) {
+            if (pointer2 !== 0) addSite("reflexive", fieldAt + 4, e.index);
+            continue;
+          }
+          if (resourceBacked && pointer2 === 0) continue;
+          const childStruct = field.def.struct;
+          if (!childStruct) return fail(`${fieldWhere} has no block definition`);
+          const childSize = resolveStruct(childStruct).totalSize;
+          if (!inTagData(pointer2, value.value.count * childSize)) fail(`${fieldWhere} (${value.value.count} blocks) is outside the tag data`);
+          addSite("reflexive", fieldAt + 4, e.index);
+          for (let i = 0; i < value.value.count; i++) walk(childStruct, pointer2 + i * childSize >>> 0, `${fieldWhere}[${i}]`);
+        } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset") {
+          if (field.def.externalFileOffset) continue;
+          const pointer2 = value.value.pointerLow >>> 0;
+          if (value.value.size > 0) {
+            if (!inTagData(pointer2, value.value.size)) fail(`${fieldWhere} (${value.value.size} bytes) is outside the tag data`);
+            addSite("dataBlock", fieldAt + 12, e.index);
+          } else if (pointer2 !== 0) {
+            addSite("dataBlock", fieldAt + 12, e.index);
+          }
+        } else if (field.def.type === "Pointer") {
+          const raw = buffer.readUInt32LE(fieldAt);
+          if (raw !== 0 && raw !== 4294967295 && inTagData(raw, 1)) fail(`${fieldWhere} is a runtime pointer into the tag data, which this build doesn't know how to move`);
+        }
+      }
+      if (isXboxLayout && structName === "ModelGeometryPart") {
+        const triOff1 = buffer.readUInt32LE(at + 76);
+        if (triOff1 !== 0 && inTagData(triOff1, 2)) addSite("dataBlock", at + 76, e.index);
+        const triOff2 = buffer.readUInt32LE(at + 80);
+        if (triOff2 !== 0 && inTagData(triOff2, 2)) addSite("dataBlock", at + 80, e.index);
+        const vertIndPtr = buffer.readUInt32LE(at + 100);
+        if (vertIndPtr !== 0 && inTagData(vertIndPtr, 12)) {
+          addSite("dataBlock", at + 100, e.index);
+          const indAt = fileOf(vertIndPtr);
+          const vertBufPtr = buffer.readUInt32LE(indAt + 4);
+          if (vertBufPtr !== 0 && inTagData(vertBufPtr, 32)) {
+            addSite("dataBlock", indAt + 4, e.index);
+          }
+        }
+      }
+    };
+    addSite("tagData", entryAt + 20, e.index);
+    walk(rootStruct, dataPointer, e.path);
+  }
+  collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, (pathPointer) => stalePath(pathPointer), tolerate);
+  return sites;
+}
+var BSP_HEADER_SIZE = 24;
+var BSP_HEADER_SIGNATURE_OFFSET = 20;
+function basicNumber(decoded, name) {
+  const v = decoded.get(name);
+  return v?.kind === "basic" && typeof v.value === "number" ? v.value : void 0;
+}
+function collectBspReferencePaths(buffer, layout, inTagData, fileOf, addSite, stalePath = () => false, tolerate = () => void 0, bspSpace) {
+  const scenarioStruct = getGroupStructName("scenario");
+  const bspStruct = getGroupStructName("scenario_structure_bsp");
+  if (!scenarioStruct || !bspStruct) return;
+  const bspsField = resolveStruct(scenarioStruct).fields.find((f) => f.name === "structure bsps");
+  const scenarioBspStruct = bspsField?.def.type === "TagReflexive" ? bspsField.def.struct : void 0;
+  for (const scenario of layout.entries) {
+    if (scenario.isExternal || scenario.primaryClassName !== "scenario") continue;
+    const scenarioPointer = buffer.readUInt32LE(layout.tagArrayFileOffset + scenario.index * TAG_ENTRY_SIZE + 20);
+    const bsps = decodeStruct(buffer, fileOf(scenarioPointer), scenarioStruct).get("structure bsps");
+    if (bsps?.kind !== "reflexive" || bsps.value.count === 0) continue;
+    if (!scenarioBspStruct) throw new UnwalkableTagError(scenario.index, scenario.path, "scenario", `"structure bsps" is not a block list in this build's definitions`);
+    const elementSize = resolveStruct(scenarioBspStruct).totalSize;
+    const addressField = resolveStruct(scenarioBspStruct).fields.find((f) => f.name === "bsp address");
+    for (let b = 0; b < bsps.value.count; b++) {
+      const elementAt = fileOf(bsps.value.pointerLow + b * elementSize);
+      const element = decodeStruct(buffer, elementAt, scenarioBspStruct);
+      const ref = element.get("structure bsp");
+      const bspEntry = ref?.kind === "dependency" ? layout.entries[ref.value.tagId & 65535] : void 0;
+      const name = bspEntry ?? { index: scenario.index, path: `${scenario.path} structure bsps[${b}]` };
+      const fail = (reason) => {
+        throw new UnwalkableTagError(name.index, name.path, "scenario_structure_bsp", reason);
+      };
+      const bspStart = basicNumber(element, "bsp start");
+      const bspSize = basicNumber(element, "bsp size");
+      const bspAddress = basicNumber(element, "bsp address");
+      if (bspStart === void 0 || bspSize === void 0 || bspAddress === void 0) fail("its location in the scenario could not be read");
+      if (bspSize < 4 || bspStart + 4 > buffer.length) fail("its BSP header is outside the file");
+      const inBsp = (pointer, length) => {
+        const at = bspStart + (pointer - bspAddress | 0);
+        return at >= bspStart && at + length <= bspStart + bspSize && at + length <= buffer.length;
+      };
+      if (bspSpace) {
+        if (!addressField) fail(`"bsp address" is not in this build's definitions`);
+        bspSpace("bspAddress", elementAt + addressField.offset, name.index);
+        if (bspStart + BSP_HEADER_SIZE > buffer.length) fail("its BSP header is outside the file");
+        for (let w = 4; w < BSP_HEADER_SIGNATURE_OFFSET; w += 4) {
+          if (buffer.readUInt32LE(bspStart + w) !== 0) fail(`its BSP header word at +0x${w.toString(16)} is not 0, and how to move it is not known`);
+        }
+        bspSpace("bspHeader", bspStart, name.index);
+      }
+      const visited = /* @__PURE__ */ new Set();
+      const walk = (structName, pointer, where) => {
+        const size = resolveStruct(structName).totalSize;
+        if (!inBsp(pointer, size)) fail(`${where} is outside the BSP data`);
+        const at = bspStart + (pointer - bspAddress | 0);
+        const key = `${structName}@${at}`;
+        if (visited.has(key)) return;
+        visited.add(key);
+        const decoded = decodeStruct(buffer, at, structName);
+        for (const field of resolveStruct(structName).fields) {
+          const value = decoded.get(field.name);
+          if (!value || field.def.nonCached) continue;
+          if (bspSpace) {
+            if (value.kind === "reflexive" && field.def.type === "TagReflexive") {
+              const pointer2 = value.value.pointerLow >>> 0;
+              if (pointer2 !== 0 && (value.value.count > 0 || inBsp(pointer2, 1))) bspSpace("bspReflexive", at + field.offset + 4, name.index);
+            } else if (value.kind === "tagDataOffset" && field.def.type === "TagDataOffset" && !field.def.externalFileOffset) {
+              const pointer2 = value.value.pointerLow >>> 0;
+              if (value.value.size > 0) {
+                if (!inBsp(pointer2, value.value.size)) fail(`${where}.${field.name} (${value.value.size} bytes) is outside the BSP data`);
+                bspSpace("bspDataBlock", at + field.offset + 12, name.index);
+              } else if (pointer2 !== 0 && inBsp(pointer2, 1)) {
+                bspSpace("bspDataBlock", at + field.offset + 12, name.index);
+              }
+            } else if (field.def.type === "Pointer") {
+              const raw = buffer.readUInt32LE(at + field.offset);
+              if (raw !== 0 && raw !== 4294967295 && inBsp(raw, 1)) fail(`${where}.${field.name} is a runtime pointer into the BSP data, which this build doesn't know how to move`);
+            }
+          }
+          if (value.kind === "dependency") {
+            const pathPointer = value.value.pathPointer >>> 0;
+            if (pathPointer === 0 || pathPointer === 4294967295) continue;
+            if (stalePath(pathPointer)) {
+              tolerate({ kind: "staleReferencePath", tagIndex: name.index, at: at + field.offset + 4, value: pathPointer, where: `${where}.${field.name}` });
+              continue;
+            }
+            if (!inTagData(pathPointer, 1)) fail(`${where}.${field.name} has a path pointer outside the tag data`);
+            addSite("bspReferencePath", at + field.offset + 4, name.index);
+          } else if (value.kind === "reflexive" && field.def.type === "TagReflexive" && value.value.count > 0) {
+            const childStruct = field.def.struct;
+            if (!childStruct) return fail(`${where}.${field.name} has no block definition`);
+            const childSize = resolveStruct(childStruct).totalSize;
+            const childPointer = value.value.pointerLow >>> 0;
+            let count = value.value.count;
+            if (count === 4294967295 && childSize > 0) {
+              const fields = resolveStruct(structName).fields;
+              const fIdx = fields.indexOf(field);
+              const nextField = fIdx >= 0 ? fields[fIdx + 1] : void 0;
+              const nextVal = nextField ? decoded.get(nextField.name) : void 0;
+              const nextPtr = nextVal?.kind === "reflexive" ? nextVal.value.pointerLow >>> 0 : 0;
+              if (nextPtr > childPointer && (nextPtr - childPointer) % childSize === 0 && inBsp(childPointer, nextPtr - childPointer)) {
+                count = (nextPtr - childPointer) / childSize;
+                buffer.writeUInt32LE(count, at + field.offset);
+              }
+            }
+            if (!inBsp(childPointer, count * childSize)) fail(`${where}.${field.name} (${count} blocks) is outside the BSP data`);
+            for (let i = 0; i < count; i++) walk(childStruct, childPointer + i * childSize >>> 0, `${where}.${field.name}[${i}]`);
+          }
+        }
+      };
+      walk(bspStruct, buffer.readUInt32LE(bspStart), name.path);
+    }
+  }
+}
+function zeroCounts() {
+  return { tagPath: 0, tagData: 0, reflexive: 0, dataBlock: 0, referencePath: 0, bspReferencePath: 0 };
+}
+function applyPointerShift(sites, shift, write) {
+  const counts = { visited: zeroCounts(), rebased: zeroCounts(), totalVisited: 0, totalRebased: 0 };
+  for (const s of sites) {
+    counts.visited[s.kind]++;
+    counts.totalVisited++;
+    if (s.value < shift.from || s.value >= shift.to) continue;
+    write(s.at, s.value + shift.delta >>> 0);
+    counts.rebased[s.kind]++;
+    counts.totalRebased++;
+  }
+  return counts;
+}
 
 // ../core/src/map/cache-crc.ts
 var CRC_TABLE = (() => {
@@ -33878,6 +34780,69 @@ var CRC_TABLE = (() => {
   }
   return table;
 })();
+function computeCacheCrc32(buffer, regions) {
+  let crc = 4294967295;
+  for (const r of regions) {
+    if (!isRangeInBuffer(r.offset, r.size, buffer.length)) {
+      throw new CorruptMapError(`Cannot compute the map checksum: ${r.label} (file offset ${r.offset}, ${r.size} bytes) is outside the file.`);
+    }
+    for (let i = r.offset, end = r.offset + r.size; i < end; i++) crc = CRC_TABLE[(crc ^ buffer[i]) & 255] ^ crc >>> 8;
+  }
+  return crc >>> 0;
+}
+function ceStructureBspRegions(buffer, header, tagIndex, purpose = "Cannot compute the map checksum") {
+  const regions = [];
+  const scenario = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenario || scenario.tagId !== tagIndex.scenarioTagId >>> 0 || scenario.isExternal) {
+    throw new CorruptMapError(`${purpose}: the scenario tag ID in the tag data header does not name a scenario tag in this map.`);
+  }
+  const scenarioStruct = getGroupStructName("scenario");
+  const scenarioAt = resolveTagDataPointer(scenario.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (!isRangeInBuffer(scenarioAt, resolveStruct(scenarioStruct).totalSize, buffer.length)) {
+    throw new CorruptMapError(`${purpose}: the scenario tag data is outside the file.`);
+  }
+  const bsps = decodeStruct(buffer, scenarioAt, scenarioStruct).get("structure bsps");
+  if (bsps?.kind === "reflexive" && bsps.value.count > 0) {
+    const field = resolveStruct(scenarioStruct).fields.find((f) => f.name === "structure bsps");
+    const bspStruct = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+    if (!bspStruct) throw new CorruptMapError(`${purpose}: "structure bsps" is not a block list in this build's definitions.`);
+    const size = resolveStruct(bspStruct).totalSize;
+    const base = resolvePointer(bsps.value.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(base, bsps.value.count * size, buffer.length)) {
+      throw new CorruptMapError(`${purpose}: the scenario's structure BSP list is outside the file.`);
+    }
+    for (let i = 0; i < bsps.value.count; i++) {
+      const d = decodeStruct(buffer, base + i * size, bspStruct);
+      const start = d.get("bsp start");
+      const length = d.get("bsp size");
+      if (start?.kind !== "basic" || length?.kind !== "basic") throw new CorruptMapError(`${purpose}: unexpected structure BSP layout.`);
+      regions.push({ offset: Number(start.value), size: Number(length.value), label: `structure bsp ${i}` });
+    }
+  }
+  return regions;
+}
+function ceCrcRegions(buffer, header, tagIndex) {
+  const bspRegions = ceStructureBspRegions(buffer, header, tagIndex);
+  const regions = [];
+  if (header.engine === 13) {
+    for (let i = 0; i < bspRegions.length; i++) {
+      const prevEnd = i === 0 ? 2048 : bspRegions[i - 1].offset + bspRegions[i - 1].size;
+      const end = bspRegions[i].offset + bspRegions[i].size;
+      regions.push({
+        offset: prevEnd,
+        size: Math.max(0, end - prevEnd),
+        label: bspRegions[i].label
+      });
+    }
+  } else {
+    regions.push(...bspRegions);
+  }
+  if (header.engine !== 5 && tagIndex.modelDataSize > 0) {
+    regions.push({ offset: tagIndex.modelDataFileOffset, size: tagIndex.modelDataSize, label: "model data" });
+  }
+  regions.push({ offset: header.tagDataOffset, size: header.tagDataSize, label: "tag data" });
+  return regions;
+}
 
 // ../core/src/map/convert/resource-files.ts
 var HEADER_SIZE = 16;
@@ -33921,6 +34886,873 @@ function readResourceTable(file, kind) {
   return { ok: true, table: { kind, label: file.label, fileSize: file.size, entries, byRange } };
 }
 
+// ../core/src/map/tag-injector.ts
+function hydrateExternalRawDataInContainer(container, resourceFiles) {
+  if (!resourceFiles?.bitmaps && !resourceFiles?.sounds) return;
+  for (const t of container.tags) {
+    if (t.group !== "bitmap" && t.group !== "sound") continue;
+    if (t.ceExternalResourceIndex !== void 0 || t.ceExternalSound) continue;
+    const dataBuf = Buffer.from(t.data, "base64");
+    let mutated = false;
+    if (t.group === "bitmap" && resourceFiles.bitmaps && dataBuf.length >= 108) {
+      const bCount = dataBuf.readInt32LE(96);
+      const arrOff = dataBuf.readUInt32LE(100);
+      if (bCount <= 0 || bCount > 256) continue;
+      if (arrOff <= 0 || arrOff + bCount * 48 > dataBuf.length) continue;
+      if (!t.embeddedRawDataAssets) t.embeddedRawDataAssets = [];
+      if (!t.embeddedRawDataPatches) t.embeddedRawDataPatches = [];
+      const existingPatchOffsets = new Set(t.embeddedRawDataPatches.map((p) => p.patchOffset));
+      for (let i = 0; i < bCount; i++) {
+        const elemOff = arrOff + i * 48;
+        const patchOff = elemOff + 24;
+        if (existingPatchOffsets.has(patchOff)) continue;
+        const flags = dataBuf.readUInt16LE(elemOff + 14);
+        if ((flags & 256) === 0) continue;
+        const pixOff = dataBuf.readUInt32LE(patchOff);
+        const pixSize = dataBuf.readUInt32LE(elemOff + 28);
+        if (pixSize <= 0 || pixOff + pixSize > resourceFiles.bitmaps.size) continue;
+        const rawData = Buffer.from(resourceFiles.bitmaps.read(pixOff, pixSize));
+        const assetIndex = t.embeddedRawDataAssets.length;
+        t.embeddedRawDataAssets.push({ kind: "bitmap", data: rawData.toString("base64") });
+        t.embeddedRawDataPatches.push({ assetIndex, patchOffset: patchOff, patchWidth: 4 });
+        dataBuf.writeUInt16LE(flags & ~256, elemOff + 14);
+        existingPatchOffsets.add(patchOff);
+        mutated = true;
+      }
+    } else if (t.group === "sound" && resourceFiles.sounds && dataBuf.length >= 164) {
+      const prCount = dataBuf.readInt32LE(152);
+      const prArrOff = dataBuf.readUInt32LE(156);
+      if (prCount <= 0 || prCount > 64) continue;
+      if (prArrOff <= 0 || prArrOff + prCount * 72 > dataBuf.length) continue;
+      if (!t.embeddedRawDataAssets) t.embeddedRawDataAssets = [];
+      if (!t.embeddedRawDataPatches) t.embeddedRawDataPatches = [];
+      const existingPatchOffsets = new Set(t.embeddedRawDataPatches.map((p) => p.patchOffset));
+      for (let p = 0; p < prCount; p++) {
+        const prOff = prArrOff + p * 72;
+        const permCount = dataBuf.readInt32LE(prOff + 56);
+        const permArrOff = dataBuf.readUInt32LE(prOff + 60);
+        if (permCount <= 0 || permCount > 256) continue;
+        if (permArrOff <= 0 || permArrOff + permCount * 124 > dataBuf.length) continue;
+        for (let m = 0; m < permCount; m++) {
+          const permOff = permArrOff + m * 124;
+          const patchOff = permOff + 72;
+          if (existingPatchOffsets.has(patchOff)) continue;
+          const extFlag = dataBuf.readUInt32LE(permOff + 68);
+          if ((extFlag & 1) === 0) continue;
+          const sampleSize = dataBuf.readUInt32LE(permOff + 64);
+          const sampleOff = dataBuf.readUInt32LE(patchOff);
+          if (sampleSize <= 0 || sampleOff + sampleSize > resourceFiles.sounds.size) continue;
+          const rawData = Buffer.from(resourceFiles.sounds.read(sampleOff, sampleSize));
+          const assetIndex = t.embeddedRawDataAssets.length;
+          t.embeddedRawDataAssets.push({ kind: "sound", data: rawData.toString("base64") });
+          t.embeddedRawDataPatches.push({ assetIndex, patchOffset: patchOff, patchWidth: 4 });
+          dataBuf.writeUInt32LE((extFlag & ~1) >>> 0, permOff + 68);
+          existingPatchOffsets.add(patchOff);
+          mutated = true;
+        }
+      }
+    }
+    if (mutated) {
+      t.data = dataBuf.toString("base64");
+    }
+  }
+}
+var NULL_TAG_ID2 = 4294967295;
+function normalizeTagPath(path16) {
+  return path16.toLowerCase().replace(/\//g, "\\");
+}
+function tagKey(path16, group) {
+  return `${normalizeTagPath(path16)}|${group}`;
+}
+function computeNewTagId(index) {
+  const salt = (index + 24948 | 32768) & 65535;
+  return (salt << 16 | index & 65535) >>> 0;
+}
+var RESOURCE_MAP_KEY = {
+  "bitmaps.map": "bitmaps",
+  "sounds.map": "sounds",
+  "loc.map": "loc"
+};
+var OCETAGS_SUPPORTED_MAX_VERSION = OCETAGS_FORMAT_VERSION;
+function warningMessagesOfKind(container, kind) {
+  const byOriginal = /* @__PURE__ */ new Map();
+  for (const w of container.warnings) {
+    if (w.kind !== kind) continue;
+    if (!byOriginal.has(w.originalIndex)) byOriginal.set(w.originalIndex, []);
+    byOriginal.get(w.originalIndex).push(w.message);
+  }
+  return byOriginal;
+}
+function embeddedWarningMessages(container) {
+  return warningMessagesOfKind(container, "embeddedRawData");
+}
+function embeddedCapturedCounts(container) {
+  const byOriginal = /* @__PURE__ */ new Map();
+  for (const t of container.tags) {
+    const count = (t.embeddedRawDataPatches ?? []).filter((p) => {
+      const kind = t.embeddedRawDataAssets?.[p.assetIndex]?.kind;
+      return kind === "bitmap" || kind === "sound";
+    }).length;
+    byOriginal.set(t.originalIndex, count);
+  }
+  return byOriginal;
+}
+function planInjection(mode, target, container, resourceMapConfig = {}, options = {}) {
+  const targetTagIndex = target.tagIndex;
+  if (container.formatVersion > OCETAGS_SUPPORTED_MAX_VERSION) {
+    return { kind: "refused", reason: `This .ocetags container is format version ${container.formatVersion}, newer than this build supports (${OCETAGS_SUPPORTED_MAX_VERSION}). Update OpenCE.` };
+  }
+  if (container.hasUnresolvedBspReferences) {
+    return { kind: "refused", reason: "This container has unresolved BSP references (it was extracted with a BSP in the selection). Re-extract without the scenario/BSP before injecting." };
+  }
+  const targetByKey = /* @__PURE__ */ new Map();
+  const targetGroupsByPath = /* @__PURE__ */ new Map();
+  for (const e of targetTagIndex.entries) {
+    targetByKey.set(tagKey(e.path, e.primaryClassName ?? ""), e);
+    const normP = normalizeTagPath(e.path);
+    let gSet = targetGroupsByPath.get(normP);
+    if (!gSet) {
+      gSet = /* @__PURE__ */ new Set();
+      targetGroupsByPath.set(normP, gSet);
+    }
+    if (e.primaryClassName) gSet.add(e.primaryClassName);
+  }
+  const matchedByLocalIndex = /* @__PURE__ */ new Map();
+  const candidateAdd = /* @__PURE__ */ new Set();
+  const classConflicts = [];
+  for (let li = 0; li < container.tags.length; li++) {
+    const t = container.tags[li];
+    const existing = targetByKey.get(tagKey(t.path, t.group));
+    if (existing) {
+      matchedByLocalIndex.set(li, existing);
+    } else {
+      candidateAdd.add(li);
+      const otherGroups = targetGroupsByPath.get(normalizeTagPath(t.path));
+      if (otherGroups && otherGroups.size > 0) {
+        classConflicts.push({
+          localIndex: li,
+          path: t.path,
+          group: t.group,
+          existingGroups: [...otherGroups]
+        });
+      }
+    }
+  }
+  const embeddedWarningsByOriginal = embeddedWarningMessages(container);
+  const embeddedCapturedByOriginal = embeddedCapturedCounts(container);
+  const uncapturedDataByOriginal = warningMessagesOfKind(container, "uncapturedData");
+  const invalidReflexiveByOriginal = warningMessagesOfKind(container, "invalidReflexive");
+  const extractionFailedByOriginal = warningMessagesOfKind(container, "extractionFailed");
+  const uncertainGroupByOriginal = warningMessagesOfKind(container, "uncertainGroup");
+  const ignoredDependencyPaths = /* @__PURE__ */ new Map();
+  function effectiveDependencies(t) {
+    const ignored = ignoredDependencyPaths.get(t);
+    const deps = t.dependencies;
+    return ignored && ignored.size > 0 ? deps.filter((d) => !ignored.has(d.fieldPath)) : deps;
+  }
+  function structuralBlockReason(t) {
+    const reasons = [];
+    const uncaptured = uncapturedDataByOriginal.get(t.originalIndex) ?? [];
+    if (uncaptured.length > 0) reasons.push(`This tag has data that cannot be captured or relocated: ${uncaptured.join("; ")}`);
+    const blockers = t.injectionBlockers ?? [];
+    const invalid = [...blockers.filter((b) => b.kind === "invalidReflexive").map((b) => b.message), ...blockers.length > 0 ? [] : invalidReflexiveByOriginal.get(t.originalIndex) ?? []];
+    if (invalid.length > 0) reasons.push(`This tag has an invalid/corrupt layout (a reflexive outside the source map) and cannot be relocated: ${invalid.join("; ")}`);
+    const failed = [...blockers.filter((b) => b.kind === "extractionFailed").map((b) => b.message), ...blockers.length > 0 ? [] : extractionFailedByOriginal.get(t.originalIndex) ?? []];
+    if (failed.length > 0) reasons.push(`This tag failed to extract and cannot be injected: ${failed.join("; ")}`);
+    const uncertain = uncertainGroupByOriginal.get(t.originalIndex) ?? [];
+    if (uncertain.length > 0) reasons.push(`This tag's group has no reliable field layout, so it cannot be safely relocated: ${uncertain.join("; ")}`);
+    if (t.group === "gbxmodel") {
+      if (!t.gbxmodelGeometryParts || t.gbxmodelGeometryParts.length === 0) {
+        reasons.push("This gbxmodel tag has no captured model geometry parts (re-extract to capture geometry for injection).");
+      } else if (options.allowGbxmodelGeometryRelocation === false) {
+        reasons.push("Relocation of gbxmodel geometry is disabled by options.");
+      }
+    }
+    if (reasons.length === 0) {
+      const depMap = checkDependencyMap(t);
+      ignoredDependencyPaths.set(t, depMap.ignoredPaths);
+      if (depMap.reason) reasons.push(depMap.reason);
+    }
+    return reasons.length > 0 ? reasons.join(" ") : null;
+  }
+  function embeddedBlockReason(t) {
+    const msgs = embeddedWarningsByOriginal.get(t.originalIndex);
+    if (!msgs || msgs.length === 0) return null;
+    if (!options.allowEmbeddedRelocation) {
+      return `Relocation of embedded (non-shared) bitmap/sound data is disabled this milestone: ${msgs.join("; ")}`;
+    }
+    const captured = embeddedCapturedByOriginal.get(t.originalIndex) ?? 0;
+    if (captured < msgs.length) {
+      return `This container doesn't have the embedded bitmap/sound bytes captured for relocation (extracted by a build without this feature, or a capture mismatch at extraction time) - re-extract to enable relocation: ${msgs.join("; ")}`;
+    }
+    return null;
+  }
+  const blockedReasons = /* @__PURE__ */ new Map();
+  const blockedEmbeddedSet = /* @__PURE__ */ new Set();
+  const blockedUncapturedSet = /* @__PURE__ */ new Set();
+  for (const li of candidateAdd) {
+    const t = container.tags[li];
+    const reasons = [];
+    const structural = structuralBlockReason(t);
+    if (structural) {
+      blockedUncapturedSet.add(li);
+      reasons.push(structural);
+    }
+    const embedded = embeddedBlockReason(t);
+    if (embedded) {
+      blockedEmbeddedSet.add(li);
+      reasons.push(embedded);
+    }
+    if (reasons.length > 0) blockedReasons.set(li, reasons);
+  }
+  const blocked = /* @__PURE__ */ new Set([...blockedEmbeddedSet, ...blockedUncapturedSet]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const li of candidateAdd) {
+      if (blocked.has(li)) continue;
+      const t = container.tags[li];
+      for (const dep of effectiveDependencies(t)) {
+        if (dep.kind === "null") continue;
+        if (dep.kind === "internal" && dep.localTagIndex !== void 0) {
+          if (matchedByLocalIndex.has(dep.localTagIndex)) continue;
+          if (candidateAdd.has(dep.localTagIndex) && !blocked.has(dep.localTagIndex)) continue;
+          if (!blockedReasons.has(li)) blockedReasons.set(li, []);
+          blockedReasons.get(li).push(`Depends on "${dep.path}" which could not be added (${(blockedReasons.get(dep.localTagIndex) ?? ["unresolvable"]).join("; ")}).`);
+          blocked.add(li);
+          changed = true;
+        } else if (dep.kind === "external" || dep.kind === "internal" && dep.localTagIndex === void 0) {
+          if (targetByKey.has(tagKey(dep.path, dep.group))) continue;
+          if (!blockedReasons.has(li)) blockedReasons.set(li, []);
+          blockedReasons.get(li).push(`Depends on "${dep.path}" (${dep.group}), a resource-map tag not present in the target map. Adding new resource-map references isn't supported this milestone.`);
+          blocked.add(li);
+          changed = true;
+        } else if (dep.kind === "unresolved" || dep.kind === "notExtracted") {
+          if (!blockedReasons.has(li)) blockedReasons.set(li, []);
+          blockedReasons.get(li).push(`Has a ${dep.kind} dependency on "${dep.path}" from extraction time - cannot be safely injected.`);
+          blocked.add(li);
+          changed = true;
+        }
+      }
+    }
+  }
+  const toAddLocalIndices = Array.from(candidateAdd).filter((li) => !blocked.has(li)).sort((a, b) => a - b);
+  if (toAddLocalIndices.length > 0) {
+    try {
+      collectTagDataPointers(target.buffer, tagDataLayoutOf(target.header, targetTagIndex), { tolerate: { staleReferencePaths: true } });
+    } catch (err) {
+      if (!(err instanceof UnwalkableTagError)) throw err;
+      return { kind: "refused", reason: `Adding tags moves every pointer in the target map, and one tag can't be handled. ${err.message} Only a SWAP that adds no new tags (every tag already in the map) can be done on this map.` };
+    }
+  }
+  const reusedByLocalIndex = /* @__PURE__ */ new Map();
+  const toSwap = [];
+  for (const [li, existing] of matchedByLocalIndex) {
+    if (mode === "add") {
+      reusedByLocalIndex.set(li, existing.tagId);
+      continue;
+    }
+    const t = container.tags[li];
+    const reasons = [];
+    if (existing.isExternal && !options.allowEmbeddedRelocation) {
+      reasons.push(`The existing "${t.path}" (${t.group}) in the target is an external (resource map) entry; swapping into those isn't supported. Left unchanged.`);
+    }
+    const structuralBlockMsg = structuralBlockReason(t);
+    if (structuralBlockMsg) {
+      reasons.push(structuralBlockMsg);
+    }
+    const embeddedBlockMsg = embeddedBlockReason(t);
+    if (embeddedBlockMsg) {
+      reasons.push(embeddedBlockMsg);
+    }
+    for (const dep of effectiveDependencies(t)) {
+      if (dep.kind === "null") continue;
+      if (dep.kind === "internal" && dep.localTagIndex !== void 0) {
+        if (matchedByLocalIndex.has(dep.localTagIndex)) continue;
+        if (candidateAdd.has(dep.localTagIndex) && !blocked.has(dep.localTagIndex)) continue;
+        reasons.push(`Depends on "${dep.path}" which could not be added (${(blockedReasons.get(dep.localTagIndex) ?? ["unresolvable"]).join("; ")}).`);
+      } else if (dep.kind === "external") {
+        if (targetByKey.has(tagKey(dep.path, dep.group))) continue;
+        reasons.push(`Depends on "${dep.path}" (${dep.group}), a resource-map tag not present in the target map. Adding new resource-map references isn't supported this milestone.`);
+      } else if (dep.kind === "unresolved" || dep.kind === "notExtracted") {
+        reasons.push(`Has a ${dep.kind} dependency on "${dep.path}" from extraction time - cannot be safely injected.`);
+      }
+    }
+    if (reasons.length > 0) {
+      blockedReasons.set(li, reasons);
+      blocked.add(li);
+      if (embeddedBlockMsg) blockedEmbeddedSet.add(li);
+      reusedByLocalIndex.set(li, existing.tagId);
+    } else {
+      toSwap.push({ localIndex: li, path: t.path, group: t.group, targetTagId: existing.tagId, targetOriginalIndex: existing.index });
+    }
+  }
+  const blockedEmbedded = Array.from(blockedEmbeddedSet).map((li) => ({
+    localIndex: li,
+    path: container.tags[li].path,
+    group: container.tags[li].group,
+    reasons: blockedReasons.get(li) ?? []
+  }));
+  const blockedOther = Array.from(blocked).filter((li) => !blockedEmbeddedSet.has(li)).map((li) => ({ localIndex: li, path: container.tags[li].path, group: container.tags[li].group, reasons: blockedReasons.get(li) ?? [] }));
+  const resolvedTagIdByLocalIndex = new Map(reusedByLocalIndex);
+  for (const s of toSwap) resolvedTagIdByLocalIndex.set(s.localIndex, s.targetTagId);
+  const oldTagCount = targetTagIndex.entries.length;
+  toAddLocalIndices.forEach((li, i) => resolvedTagIdByLocalIndex.set(li, computeNewTagId(oldTagCount + i)));
+  const externalRefStatuses = (container.externalResourceRefs ?? []).map((ref) => {
+    const t = container.tags[ref.tagIndex];
+    const configKey = RESOURCE_MAP_KEY[ref.resourceMap];
+    const targetIdentity = configKey ? resourceMapConfig[configKey]?.identity : void 0;
+    const sourceIdentity = configKey ? container.resourceMapIdentities?.[configKey] : void 0;
+    let status;
+    if (!targetIdentity) status = "unconfigured-on-target";
+    else if (!sourceIdentity) status = "unverified-at-extraction";
+    else status = resourceMapIdentitiesMatch(sourceIdentity, targetIdentity) ? "match" : "mismatch";
+    return { localIndex: ref.tagIndex, path: t.path, resourceMap: ref.resourceMap, status };
+  });
+  const refusedRoots = [];
+  for (const rootOriginal of container.rootOriginalIndices) {
+    const li = container.tags.findIndex((t) => t.originalIndex === rootOriginal);
+    if (li === -1) continue;
+    if (blocked.has(li) && !matchedByLocalIndex.has(li)) {
+      refusedRoots.push({ originalIndex: rootOriginal, path: container.tags[li].path, reasons: blockedReasons.get(li) ?? [] });
+    }
+  }
+  const writeTags = [...toAddLocalIndices.map((li) => container.tags[li]), ...toSwap.map((s) => container.tags[s.localIndex])];
+  if (writeTags.length > 0) {
+    const layout = layoutAppend(target.buffer.length, target.header.tagDataOffset, toAddLocalIndices.length * TAG_ENTRY_SIZE, 0, writeTags.map((t) => alignTagData(Buffer.from(t.data, "base64"), t.structName).data), toAddLocalIndices.map((li) => container.tags[li].path));
+    const newTagDataSize = layout.newFileLength - target.header.tagDataOffset;
+    const bsps = ceStructureBspRegions(target.buffer, target.header, targetTagIndex, "Cannot check the tag space");
+    const largestBsp = bsps.reduce((n, r) => Math.max(n, r.size), 0);
+    if (newTagDataSize + largestBsp > CE_TAG_SPACE_SIZE) {
+      const mib = (n) => `${(n / (1024 * 1024)).toFixed(2)} MiB`;
+      return {
+        kind: "refused",
+        reason: `The result would not fit in the game's tag space: tag data would be ${mib(newTagDataSize)} (now ${mib(target.header.tagDataSize)}) and the largest BSP is ${mib(largestBsp)}, ${mib(newTagDataSize + largestBsp)} in total; the limit is ${mib(CE_TAG_SPACE_SIZE)}. Inject fewer tags.`
+      };
+    }
+  }
+  return {
+    kind: "ok",
+    mode,
+    toAdd: toAddLocalIndices.map((li) => container.tags[li]),
+    toAddLocalIndices,
+    toSwap,
+    reusedByLocalIndex,
+    resolvedTagIdByLocalIndex,
+    blockedEmbedded,
+    blockedOther,
+    externalRefStatuses,
+    refusedRoots,
+    classConflicts,
+    counts: {
+      totalInClosure: container.tags.length,
+      reused: reusedByLocalIndex.size,
+      swapped: toSwap.length,
+      added: toAddLocalIndices.length,
+      blockedEmbedded: blockedEmbedded.length,
+      blockedOther: blockedOther.length,
+      externalReferenced: externalRefStatuses.length
+    }
+  };
+}
+function planAddInjection(target, container, resourceMapConfig = {}, options = {}) {
+  return planInjection("add", target, container, resourceMapConfig, options);
+}
+function planSwapInjection(target, container, resourceMapConfig = {}, options = {}) {
+  return planInjection("swap", target, container, resourceMapConfig, options);
+}
+function collectDependencyFields(data, structName, localOffset, fieldPath, sites, nonCachedPaths) {
+  const resolved = resolveStruct(structName);
+  const decoded = decodeStruct(data, localOffset, structName);
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value) continue;
+    const path16 = childFieldPath(fieldPath, field.name);
+    if (field.def.nonCached) {
+      if (value.kind === "dependency") nonCachedPaths.add(path16);
+      continue;
+    }
+    if (value.kind === "dependency") {
+      sites.push({ fieldPath: path16, tagId: value.value.tagId >>> 0 });
+    } else if (value.kind === "reflexive" && value.value.count > 0 && value.value.pointerLow > 0) {
+      const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+      if (!childStructName || childStructName === "PredictedResource") continue;
+      const childSize = resolveStruct(childStructName).totalSize;
+      const base = value.value.pointerLow;
+      if (!isRangeInBuffer(base, value.value.count * childSize, data.length)) {
+        throw new Error(`"${path16}" (${value.value.count} x "${childStructName}") points outside the tag's own data`);
+      }
+      for (let i = 0; i < value.value.count; i++) {
+        collectDependencyFields(data, childStructName, base + i * childSize, reflexiveElementPath(fieldPath, field.name, i), sites, nonCachedPaths);
+      }
+    } else if (isRelocatedTagDataField(field, value)) {
+      if (!isRangeInBuffer(value.value.pointerLow, value.value.size, data.length)) {
+        throw new Error(`"${path16}" (${value.value.size} data bytes) points outside the tag's own data`);
+      }
+    }
+  }
+}
+function checkDependencyMap(t) {
+  if (t.ceExternalResourceIndex !== void 0) {
+    return { reason: null, ignoredPaths: /* @__PURE__ */ new Set() };
+  }
+  const sites = [];
+  const nonCachedPaths = /* @__PURE__ */ new Set();
+  try {
+    collectDependencyFields(Buffer.from(t.data, "base64"), t.structName, 0, t.path, sites, nonCachedPaths);
+  } catch (err) {
+    return { reason: `This tag's saved data does not match this build's field layout (${err instanceof Error ? err.message : String(err)}), so its tag references cannot be matched safely. Re-extract it.`, ignoredPaths: nonCachedPaths };
+  }
+  const problems = [];
+  const entryByPath = /* @__PURE__ */ new Map();
+  for (const dep of t.dependencies) {
+    if (entryByPath.has(dep.fieldPath)) problems.push(`"${dep.fieldPath}" is listed more than once`);
+    entryByPath.set(dep.fieldPath, dep);
+  }
+  const sitePaths = new Set(sites.map((s) => s.fieldPath));
+  for (const dep of entryByPath.values()) {
+    if (!sitePaths.has(dep.fieldPath) && !nonCachedPaths.has(dep.fieldPath)) {
+      problems.push(`reference "${dep.fieldPath}" is not a tag reference field in this build (unknown, or renamed since the container was saved)`);
+    }
+  }
+  for (const site of sites) {
+    const dep = entryByPath.get(site.fieldPath);
+    const fieldIsNull = site.tagId === NULL_TAG_ID2;
+    if (!fieldIsNull && !dep) problems.push(`"${site.fieldPath}" holds a tag reference but the container has no entry for it`);
+    else if (dep && dep.kind === "null" !== fieldIsNull) problems.push(`"${site.fieldPath}" ${fieldIsNull ? "is empty but its entry names a tag" : "holds a tag reference but its entry is empty"}`);
+  }
+  if (problems.length === 0) return { reason: null, ignoredPaths: nonCachedPaths };
+  const shown = problems.slice(0, 3).join("; ") + (problems.length > 3 ? `; and ${problems.length - 3} more` : "");
+  return { reason: `This tag's saved tag references don't match its fields, so they cannot be assigned safely: ${shown}. Re-extract it with this version of OpenCE.`, ignoredPaths: nonCachedPaths };
+}
+function rewriteAddedTagData(data, structName, localOffset, fieldPath, depsByPath, translation, tagBaseAbsolute, resolveDepTagId, pathPointerOfTagId) {
+  const resolved = resolveStruct(structName);
+  const decoded = decodeStruct(data, localOffset, structName);
+  for (const field of resolved.fields) {
+    const value = decoded.get(field.name);
+    if (!value) continue;
+    if (field.def.nonCached) continue;
+    const absFieldOffset = localOffset + field.offset;
+    const path16 = childFieldPath(fieldPath, field.name);
+    if (value.kind === "dependency") {
+      if (value.value.tagId !== NULL_TAG_ID2) {
+        const dep = depsByPath.get(path16);
+        if (!dep) throw new Error(`Internal error: no dependency entry for "${path16}" - planInjection should have blocked this tag.`);
+        const newTagId = resolveDepTagId(dep);
+        const decodedDep = decodeDependency(data, absFieldOffset);
+        encodeDependency(data, absFieldOffset, { ...decodedDep, pathPointer: pathPointerOfTagId(newTagId), pathSize: 0, tagId: newTagId });
+      }
+    } else if (value.kind === "reflexive" && value.value.count > 0 && value.value.pointerLow > 0) {
+      const childStructName = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+      if (!childStructName) continue;
+      if (childStructName === "PredictedResource") {
+        data.writeUInt32LE(0, absFieldOffset + 0);
+        data.writeUInt32LE(0, absFieldOffset + 4);
+        data.writeUInt32LE(0, absFieldOffset + 8);
+        continue;
+      }
+      const childSize = resolveStruct(childStructName).totalSize;
+      const oldLocalChildBase = value.value.pointerLow;
+      const newPointer = oldLocalChildBase + translation >>> 0;
+      data.writeUInt32LE(newPointer, absFieldOffset + 4);
+      data.writeUInt32LE(0, absFieldOffset + 8);
+      const childAbsoluteBase = tagBaseAbsolute + oldLocalChildBase;
+      for (let i = 0; i < value.value.count; i++) {
+        rewriteAddedTagData(data, childStructName, childAbsoluteBase + i * childSize, reflexiveElementPath(fieldPath, field.name, i), depsByPath, translation, tagBaseAbsolute, resolveDepTagId, pathPointerOfTagId);
+      }
+    } else if (isRelocatedTagDataField(field, value)) {
+      data.writeUInt32LE(value.value.pointerLow + translation >>> 0, absFieldOffset + 12);
+      data.writeUInt32LE(0, absFieldOffset + 16);
+    }
+  }
+}
+var TAG_DATA_BLOCK_ALIGNMENT = 4;
+function padToAlignment(length) {
+  return (TAG_DATA_BLOCK_ALIGNMENT - length % TAG_DATA_BLOCK_ALIGNMENT) % TAG_DATA_BLOCK_ALIGNMENT;
+}
+function alignTagData(data, structName) {
+  if (data.length === 0) {
+    return { data: Buffer.alloc(0), mapOffset: (oldOffset) => oldOffset };
+  }
+  const copies = [];
+  const pointerWrites = [];
+  let length = 0;
+  const place = (from, size) => {
+    length += padToAlignment(length);
+    const to = length;
+    copies.push({ from, to, length: size });
+    length += size;
+    return to;
+  };
+  const visit = (name, oldAt, newAt) => {
+    const decoded = decodeStruct(data, oldAt, name);
+    const children = [];
+    for (const field of resolveStruct(name).fields) {
+      const value = decoded.get(field.name);
+      if (!value || field.def.nonCached) continue;
+      const childStruct = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+      if (value.kind === "reflexive" && value.value.count > 0 && value.value.pointerLow > 0 && childStruct) {
+        const size = resolveStruct(childStruct).totalSize;
+        const newBase = place(value.value.pointerLow, value.value.count * size);
+        pointerWrites.push({ at: newAt + field.offset + 4, value: newBase });
+        children.push({ struct: childStruct, size, count: value.value.count, oldBase: value.value.pointerLow, newBase });
+      } else if (isRelocatedTagDataField(field, value)) {
+        pointerWrites.push({ at: newAt + field.offset + 12, value: place(value.value.pointerLow, value.value.size) });
+      }
+    }
+    for (const c of children) {
+      for (let i = 0; i < c.count; i++) visit(c.struct, c.oldBase + i * c.size, c.newBase + i * c.size);
+    }
+  };
+  place(0, resolveStruct(structName).totalSize);
+  visit(structName, 0, 0);
+  const out = Buffer.alloc(length);
+  for (const c of copies) data.copy(out, c.to, c.from, c.from + c.length);
+  for (const w of pointerWrites) out.writeUInt32LE(w.value, w.at);
+  const mapOffset = (oldOffset) => {
+    const c = copies.find((x) => oldOffset >= x.from && oldOffset < x.from + x.length);
+    if (!c) throw new Error(`Internal error: offset ${oldOffset} is not inside any block of the tag's data.`);
+    return c.to + (oldOffset - c.from);
+  };
+  return { data: out, mapOffset };
+}
+function layoutAppend(oldFileLength, oldTagDataOffset, delta, insertSize, dataBuffers, newPaths) {
+  const newTagDataOffset = oldTagDataOffset + insertSize;
+  const structOffsets = [];
+  let running = oldFileLength + insertSize + delta;
+  for (const b of dataBuffers) {
+    running += padToAlignment(running - newTagDataOffset);
+    structOffsets.push(running);
+    running += b.length;
+  }
+  const pathOffsets = [];
+  const pathBuffers = newPaths.map((p) => Buffer.from(`${p}\0`, "ascii"));
+  for (const b of pathBuffers) {
+    pathOffsets.push(running);
+    running += b.length;
+  }
+  return { structOffsets, pathOffsets, pathBuffers, newFileLength: running };
+}
+function dependenciesByPath(t) {
+  return new Map(t.dependencies.map((d) => [d.fieldPath, d]));
+}
+function makeResolveDepTagId(t, plan, targetTagIndex) {
+  return (dep) => {
+    if (dep.kind === "internal" && dep.localTagIndex !== void 0) {
+      const resolved = plan.resolvedTagIdByLocalIndex.get(dep.localTagIndex);
+      if (resolved === void 0) throw new Error(`Internal error: dependency to local tag ${dep.localTagIndex} was not resolved before applying injection.`);
+      return resolved;
+    }
+    if (dep.kind === "external" || dep.kind === "internal" && dep.localTagIndex === void 0) {
+      const match = targetTagIndex.entries.find((e) => normalizeTagPath(e.path) === normalizeTagPath(dep.path) && e.primaryClassName === dep.group);
+      if (!match) throw new Error(`Internal error: external dependency to "${dep.path}" was not validated as present in the target before applying injection.`);
+      return match.tagId;
+    }
+    throw new Error(`Internal error: tag "${t.path}" reached applyInjection with an unresolved/notExtracted dependency - planInjection should have blocked it.`);
+  };
+}
+function patchGbxmodelParts(out, structOffset, baseMemoryAddress, newTagDataOffset, parts) {
+  const partsMap = /* @__PURE__ */ new Map();
+  for (const p of parts) partsMap.set(`${p.geometryIndex}:${p.partIndex}`, p);
+  const gbxResolved = resolveStruct("GBXModel");
+  const geomField = gbxResolved.fields.find((f) => f.name === "geometries");
+  if (!geomField) return;
+  const geomSize = resolveStruct("GBXModelGeometry").totalSize;
+  const partsField = resolveStruct("GBXModelGeometry").fields.find((f) => f.name === "parts");
+  if (!partsField) return;
+  const partSize = resolveStruct("GBXModelGeometryPart").totalSize;
+  const partFields = resolveStruct("GBXModelGeometryPart").fields;
+  const vOffField = partFields.find((f) => f.name === "vertex offset");
+  const triOffField = partFields.find((f) => f.name === "triangle offset");
+  const triOff2Field = partFields.find((f) => f.name === "triangle offset 2");
+  if (!vOffField || !triOffField || !triOff2Field) return;
+  const geomCount = out.readUInt32LE(structOffset + geomField.offset + 0);
+  const geomPointer = out.readUInt32LE(structOffset + geomField.offset + 4);
+  const geomBase = geomPointer - baseMemoryAddress + newTagDataOffset;
+  for (let g = 0; g < geomCount; g++) {
+    const geomOffset = geomBase + g * geomSize;
+    if (geomOffset + geomSize > out.length) break;
+    const partsCount = out.readUInt32LE(geomOffset + partsField.offset + 0);
+    const partsPointer = out.readUInt32LE(geomOffset + partsField.offset + 4);
+    const partsBase = partsPointer - baseMemoryAddress + newTagDataOffset;
+    for (let p = 0; p < partsCount; p++) {
+      const partOffset = partsBase + p * partSize;
+      if (partOffset + partSize > out.length) break;
+      const info = partsMap.get(`${g}:${p}`);
+      if (info) {
+        out.writeUInt32LE(info.vertexOffset, partOffset + vOffField.offset);
+        out.writeUInt32LE(info.triangleOffset, partOffset + triOffField.offset);
+        out.writeUInt32LE(info.triangleOffset, partOffset + triOff2Field.offset);
+      }
+    }
+  }
+}
+function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, container, plan, options = {}) {
+  const addedCount = plan.toAdd.length;
+  const swappedCount = plan.toSwap.length;
+  if (addedCount === 0 && swappedCount === 0) return { buffer: Buffer.from(targetBuffer), rebase: null };
+  const writeTags = [...plan.toAdd, ...plan.toSwap.map((s) => container.tags[s.localIndex])];
+  for (const t of writeTags) {
+    if (t.injectionBlockers && t.injectionBlockers.length > 0) {
+      throw new Error(`Internal error: "${t.path}" reached applyInjection() with injection blockers (${t.injectionBlockers.map((b) => b.kind).join(", ")}) - planInjection() should have blocked it.`);
+    }
+  }
+  if (!options.allowEmbeddedRelocation) {
+    for (const t of writeTags) {
+      const hasBitmapOrSoundPatch = (t.embeddedRawDataPatches ?? []).some((p) => {
+        const kind = t.embeddedRawDataAssets?.[p.assetIndex]?.kind;
+        return kind === "bitmap" || kind === "sound";
+      });
+      if (hasBitmapOrSoundPatch) {
+        throw new Error(`Internal error: "${t.path}" reached applyInjection() with embedded raw data to relocate, but allowEmbeddedRelocation is false - planInjection() should have blocked it.`);
+      }
+    }
+  }
+  const isXboxTarget = targetHeader.engine === 5;
+  const tagHeaderSize = isXboxTarget ? 36 : TAG_DATA_HEADER_PC_SIZE;
+  const subHeaderOffset = targetHeader.tagDataOffset;
+  const arrayOffset = subHeaderOffset + tagHeaderSize;
+  const oldTagCount = targetTagIndex.entries.length;
+  const oldStructDataOffset = arrayOffset + oldTagCount * TAG_ENTRY_SIZE;
+  const oldFileLength = targetBuffer.length;
+  const delta = addedCount * TAG_ENTRY_SIZE;
+  const injectedParts = [];
+  const vertexBuffers = [];
+  const triangleBuffers = [];
+  let runningV = 0;
+  let runningT = 0;
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
+    if (t.group !== "gbxmodel" || !t.gbxmodelGeometryParts) continue;
+    for (const p of t.gbxmodelGeometryParts) {
+      const vBytes = Buffer.from(p.vertexData, "base64");
+      const tBytes = Buffer.from(p.triangleData, "base64");
+      injectedParts.push({
+        tagIndex: i,
+        geometryIndex: p.geometryIndex,
+        partIndex: p.partIndex,
+        vertexOffset: targetTagIndex.vertexSize + runningV,
+        triangleOffset: targetTagIndex.modelDataSize - targetTagIndex.vertexSize + runningT
+      });
+      vertexBuffers.push(vBytes);
+      triangleBuffers.push(tBytes);
+      runningV += vBytes.length;
+      runningT += tBytes.length;
+    }
+  }
+  const newVertexBytes = Buffer.concat(vertexBuffers);
+  const insertVertexSize = newVertexBytes.length;
+  const unpaddedTriangles = Buffer.concat(triangleBuffers);
+  const padT = (4 - unpaddedTriangles.length % 4) % 4;
+  const newTriangleBytes = padT > 0 ? Buffer.concat([unpaddedTriangles, Buffer.alloc(padT, 0)]) : unpaddedTriangles;
+  const insertTriangleSize = newTriangleBytes.length;
+  const totalModelPartCount = injectedParts.length;
+  const insertPos = isXboxTarget ? subHeaderOffset : targetTagIndex.modelDataFileOffset;
+  const embeddedAssetBuffers = options.allowEmbeddedRelocation ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).filter((a) => a.kind === "bitmap" || a.kind === "sound").map((a) => Buffer.from(a.data, "base64"))) : [];
+  const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
+  const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + (4 - embeddedBlobSize % 4) % 4;
+  const shiftBeforeTagData = insertSize + insertVertexSize + insertTriangleSize;
+  const posVertex = isXboxTarget ? subHeaderOffset : targetTagIndex.modelDataFileOffset + targetTagIndex.vertexSize;
+  const posTriangle = subHeaderOffset;
+  const baseMemoryAddress = targetTagIndex.baseMemoryAddress;
+  const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex), { tolerate: { staleReferencePaths: true } }) : [];
+  const newTagDataOffset = subHeaderOffset + shiftBeforeTagData;
+  const newArrayOffset = arrayOffset + shiftBeforeTagData;
+  const laidOut = writeTags.map((t) => alignTagData(Buffer.from(t.data, "base64"), t.structName));
+  const dataBuffers = laidOut.map((l) => l.data);
+  const { structOffsets, pathOffsets, pathBuffers, newFileLength } = layoutAppend(oldFileLength, subHeaderOffset, delta, shiftBeforeTagData, dataBuffers, plan.toAdd.map((t) => t.path));
+  const out = Buffer.alloc(newFileLength);
+  targetBuffer.copy(out, 0, 0, insertPos);
+  const assetAbsoluteOffsets = writeTags.map(() => /* @__PURE__ */ new Map());
+  if (insertSize > 0) {
+    let cursor = insertPos;
+    for (let i = 0; i < writeTags.length; i++) {
+      const assets = writeTags[i].embeddedRawDataAssets ?? [];
+      for (let assetIdx = 0; assetIdx < assets.length; assetIdx++) {
+        const asset = assets[assetIdx];
+        if (asset.kind !== "bitmap" && asset.kind !== "sound") continue;
+        const bytes = Buffer.from(asset.data, "base64");
+        bytes.copy(out, cursor);
+        assetAbsoluteOffsets[i].set(assetIdx, cursor);
+        cursor += bytes.length;
+      }
+    }
+  }
+  targetBuffer.copy(out, insertPos + insertSize, insertPos, posVertex);
+  if (insertVertexSize > 0) {
+    newVertexBytes.copy(out, insertPos + insertSize + targetTagIndex.vertexSize);
+  }
+  targetBuffer.copy(out, insertPos + insertSize + targetTagIndex.vertexSize + insertVertexSize, posVertex, posTriangle);
+  if (insertTriangleSize > 0) {
+    newTriangleBytes.copy(out, posTriangle + insertSize + insertVertexSize);
+  }
+  targetBuffer.copy(out, posTriangle + shiftBeforeTagData, posTriangle, oldStructDataOffset);
+  targetBuffer.copy(out, oldStructDataOffset + shiftBeforeTagData + delta, oldStructDataOffset, oldFileLength);
+  const outOffsetOf = (at) => {
+    if (at < insertPos) return at;
+    if (at < posVertex) return at + insertSize;
+    if (at < posTriangle) return at + insertSize + insertVertexSize;
+    if (at < oldStructDataOffset) return at + shiftBeforeTagData;
+    return at + shiftBeforeTagData + delta;
+  };
+  const oldArrayEndAddress = baseMemoryAddress + (oldStructDataOffset - subHeaderOffset) >>> 0;
+  const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: baseMemoryAddress + Math.max(targetHeader.tagDataSize, oldFileLength - subHeaderOffset) >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
+  out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 12);
+  if (!isXboxTarget && insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 20);
+  if (!isXboxTarget && totalModelPartCount > 0) {
+    const newModelPartCount = targetTagIndex.modelPartCount + totalModelPartCount;
+    out.writeUInt32LE(newModelPartCount, newTagDataOffset + 16);
+    out.writeUInt32LE(newModelPartCount, newTagDataOffset + 24);
+    out.writeUInt32LE(targetTagIndex.vertexSize + insertVertexSize, newTagDataOffset + 28);
+    out.writeUInt32LE(targetTagIndex.modelDataSize + insertVertexSize + insertTriangleSize, newTagDataOffset + 32);
+  }
+  for (let i = 0; i < addedCount; i++) {
+    const t = plan.toAdd[i];
+    const entryOffset = oldStructDataOffset + shiftBeforeTagData + i * TAG_ENTRY_SIZE;
+    const classInfo = lookupTagClassByName(t.group);
+    if (!classInfo) throw new Error(`Unknown tag group "${t.group}" - cannot write a tag index entry for it.`);
+    const primaryFourCC = fourCCFromString(classInfo.groupId);
+    const secondary = t.secondaryClassFourCC ?? 4294967295;
+    const tertiary = t.tertiaryClassFourCC ?? 4294967295;
+    out.writeUInt32LE(primaryFourCC, entryOffset + 0);
+    out.writeUInt32LE(secondary === null ? 4294967295 : secondary, entryOffset + 4);
+    out.writeUInt32LE(tertiary === null ? 4294967295 : tertiary, entryOffset + 8);
+    const tagId = plan.resolvedTagIdByLocalIndex.get(plan.toAddLocalIndices[i]);
+    out.writeUInt32LE(tagId, entryOffset + 12);
+    const pathPointer = baseMemoryAddress + (pathOffsets[i] - newTagDataOffset);
+    out.writeUInt32LE(pathPointer >>> 0, entryOffset + 16);
+    if (t.ceExternalResourceIndex !== void 0) {
+      out.writeUInt32LE(t.ceExternalResourceIndex >>> 0, entryOffset + 20);
+      out.writeUInt32LE(1, entryOffset + 24);
+    } else {
+      const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
+      out.writeUInt32LE(dataPointer >>> 0, entryOffset + 20);
+      out.writeUInt32LE(t.ceExternalSound ? 1 : 0, entryOffset + 24);
+    }
+    pathBuffers[i].copy(out, pathOffsets[i]);
+  }
+  for (let j = 0; j < swappedCount; j++) {
+    const s = plan.toSwap[j];
+    const t = container.tags[s.localIndex];
+    const i = addedCount + j;
+    const entryOffset = newArrayOffset + s.targetOriginalIndex * TAG_ENTRY_SIZE;
+    const secondary = t.secondaryClassFourCC ?? 4294967295;
+    const tertiary = t.tertiaryClassFourCC ?? 4294967295;
+    out.writeUInt32LE(secondary === null ? 4294967295 : secondary, entryOffset + 4);
+    out.writeUInt32LE(tertiary === null ? 4294967295 : tertiary, entryOffset + 8);
+    if (t.ceExternalResourceIndex !== void 0) {
+      out.writeUInt32LE(t.ceExternalResourceIndex >>> 0, entryOffset + 20);
+      out.writeUInt32LE(1, entryOffset + 24);
+    } else {
+      const dataPointer = baseMemoryAddress + (structOffsets[i] - newTagDataOffset);
+      out.writeUInt32LE(dataPointer >>> 0, entryOffset + 20);
+      out.writeUInt32LE(t.ceExternalSound ? 1 : 0, entryOffset + 24);
+    }
+  }
+  const pathPointerOfTagId = (tagId) => out.readUInt32LE(newArrayOffset + (tagId & 65535) * TAG_ENTRY_SIZE + 16);
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
+    if (t.ceExternalResourceIndex !== void 0 || dataBuffers[i].length === 0) continue;
+    dataBuffers[i].copy(out, structOffsets[i]);
+    const translation = baseMemoryAddress - newTagDataOffset + structOffsets[i] >>> 0;
+    rewriteAddedTagData(out, t.structName, structOffsets[i], t.path, dependenciesByPath(t), translation, structOffsets[i], makeResolveDepTagId(t, plan, targetTagIndex), pathPointerOfTagId);
+  }
+  for (let i = 0; i < writeTags.length; i++) {
+    for (const patch of writeTags[i].embeddedRawDataPatches ?? []) {
+      const newAbsOffset = assetAbsoluteOffsets[i].get(patch.assetIndex);
+      if (newAbsOffset !== void 0) {
+        out.writeUInt32LE(newAbsOffset, structOffsets[i] + laidOut[i].mapOffset(patch.patchOffset));
+      }
+    }
+  }
+  for (let i = 0; i < writeTags.length; i++) {
+    const t = writeTags[i];
+    if (t.group === "gbxmodel") {
+      const myParts = injectedParts.filter((p) => p.tagIndex === i);
+      if (myParts.length > 0) {
+        patchGbxmodelParts(out, structOffsets[i], baseMemoryAddress, newTagDataOffset, myParts);
+      }
+    }
+  }
+  if (shiftBeforeTagData > 0 || delta > 0) {
+    const swappedSet = new Set(plan.toSwap.map((sw) => sw.targetOriginalIndex));
+    for (let entryIdx = 0; entryIdx < oldTagCount; entryIdx++) {
+      if (swappedSet.has(entryIdx)) continue;
+      const entryOffset = newArrayOffset + entryIdx * TAG_ENTRY_SIZE;
+      const groupFourCC = out.readUInt32LE(entryOffset + 0);
+      const isExternal = out.readUInt32LE(entryOffset + 24);
+      if (groupFourCC === 1651078253 && !isExternal) {
+        const tagDataPtr = out.readUInt32LE(entryOffset + 20);
+        if (tagDataPtr >= baseMemoryAddress) {
+          const tagStructOffset = newTagDataOffset + (tagDataPtr - baseMemoryAddress);
+          if (tagStructOffset + 104 <= out.length) {
+            const imgCount = out.readUInt32LE(tagStructOffset + 96);
+            const imgPtr = out.readUInt32LE(tagStructOffset + 100);
+            if (imgCount > 0 && imgPtr >= baseMemoryAddress) {
+              const imgArrayOffset = newTagDataOffset + (imgPtr - baseMemoryAddress);
+              for (let imgIdx = 0; imgIdx < imgCount; imgIdx++) {
+                const rowOffset = imgArrayOffset + imgIdx * 48;
+                if (rowOffset + 48 <= out.length) {
+                  const flags = out.readUInt16LE(rowOffset + 14);
+                  const isImgExternal = (flags & 256) !== 0;
+                  if (!isImgExternal) {
+                    const pixelOff = out.readUInt32LE(rowOffset + 24);
+                    if (pixelOff >= insertPos && pixelOff < oldFileLength) {
+                      const newPixelOff = outOffsetOf(pixelOff);
+                      out.writeUInt32LE(newPixelOff, rowOffset + 24);
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } else if (groupFourCC === 1936614433 && !isExternal) {
+        const tagDataPtr = out.readUInt32LE(entryOffset + 20);
+        if (tagDataPtr >= baseMemoryAddress) {
+          const tagStructOffset = newTagDataOffset + (tagDataPtr - baseMemoryAddress);
+          if (tagStructOffset + 160 <= out.length) {
+            const pitchCount = out.readUInt32LE(tagStructOffset + 152);
+            const pitchPtr = out.readUInt32LE(tagStructOffset + 156);
+            if (pitchCount > 0 && pitchCount < 32 && pitchPtr >= baseMemoryAddress) {
+              const pitchArrayOffset = newTagDataOffset + (pitchPtr - baseMemoryAddress);
+              const pitchStructSize = 72;
+              for (let p = 0; p < pitchCount; p++) {
+                const pOffset = pitchArrayOffset + p * pitchStructSize;
+                if (pOffset + pitchStructSize <= out.length) {
+                  const permCount = out.readUInt32LE(pOffset + 60);
+                  const permPtr = out.readUInt32LE(pOffset + 64);
+                  if (permCount > 0 && permCount < 256 && permPtr >= baseMemoryAddress) {
+                    const permArrayOffset = newTagDataOffset + (permPtr - baseMemoryAddress);
+                    const permStructSize = 124;
+                    for (let m = 0; m < permCount; m++) {
+                      const mOffset = permArrayOffset + m * permStructSize;
+                      if (mOffset + permStructSize <= out.length) {
+                        const sampleExt = out.readUInt32LE(mOffset + 68);
+                        if ((sampleExt & 1) === 0) {
+                          const sampleOffset = out.readUInt32LE(mOffset + 72);
+                          if (sampleOffset >= insertPos && sampleOffset < oldFileLength) {
+                            out.writeUInt32LE(outOffsetOf(sampleOffset), mOffset + 72);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  out.writeUInt32LE(newFileLength, 8);
+  if (shiftBeforeTagData > 0) out.writeUInt32LE(newTagDataOffset, 16);
+  out.writeUInt32LE(newFileLength - newTagDataOffset, 20);
+  out.writeUInt32LE(newFileLength - newTagDataOffset, 20);
+  return { buffer: out, rebase };
+}
+
 // ../core/src/map/finalize-map.ts
 var MAX_SCENARIO_NAME_LENGTH = TAG_STRING_SIZE - 1;
 function scenarioNameFromFileName(fileName) {
@@ -33962,6 +35794,1050 @@ var TAG_DATA_REPAIR_IDS = ["alignTagData", "scriptSyntaxData", "tagRootOutside",
 // ../core/src/map/convert/demo-to-ce.ts
 var DEMO_BASE_MEMORY_ADDRESS = 1274085376;
 var DEMO_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - DEMO_BASE_MEMORY_ADDRESS;
+var MCC_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - MCC_BASE_MEMORY_ADDRESS;
+
+// ../core/src/map/tag-postprocess.ts
+var OBJECT_SUBCLASS_FOURCCS = /* @__PURE__ */ new Set([
+  "bipd",
+  "vehi",
+  "weap",
+  "eqip",
+  "garb",
+  "proj",
+  "scen",
+  "mach",
+  "ctrl",
+  "lifi",
+  "ssce",
+  "obje"
+]);
+function invertMatrix3x3(m) {
+  const a00 = m[0], a01 = m[1], a02 = m[2];
+  const a10 = m[3], a11 = m[4], a12 = m[5];
+  const a20 = m[6], a21 = m[7], a22 = m[8];
+  const b01 = a22 * a11 - a12 * a21;
+  const b11 = -a22 * a10 + a12 * a20;
+  const b21 = a21 * a10 - a11 * a20;
+  const det = a00 * b01 + a01 * b11 + a02 * b21;
+  if (Math.abs(det) < 1e-12) return null;
+  const invDet = 1 / det;
+  const out = new Float32Array(9);
+  out[0] = b01 * invDet;
+  out[1] = (-a22 * a01 + a02 * a21) * invDet;
+  out[2] = (a12 * a01 - a02 * a11) * invDet;
+  out[3] = b11 * invDet;
+  out[4] = (a22 * a00 - a02 * a20) * invDet;
+  out[5] = (-a12 * a00 + a02 * a10) * invDet;
+  out[6] = b21 * invDet;
+  out[7] = (-a21 * a00 + a01 * a20) * invDet;
+  out[8] = (a11 * a00 - a01 * a10) * invDet;
+  return out;
+}
+function postprocessTagFields(buffer, header, tagIndex, editedTagIndex, _fieldName) {
+  return postprocessEditedTagInPlace(buffer, header, tagIndex, editedTagIndex);
+}
+function postprocessEditedTagInPlace(buffer, header, tagIndex, editedTagIndex) {
+  const entry = tagIndex.entries[editedTagIndex];
+  if (!entry || entry.isExternal) return;
+  let rootOff;
+  try {
+    rootOff = resolveTagDataPointer(
+      entry.tagDataPointerOrResourceIndex,
+      header,
+      tagIndex.baseMemoryAddress
+    );
+  } catch {
+    return;
+  }
+  if (rootOff <= 0 || rootOff >= buffer.length) return;
+  const group = entry.primaryClassName;
+  try {
+    if (OBJECT_SUBCLASS_FOURCCS.has(group ?? "") || group === "biped" || group === "vehicle" || group === "weapon" || group === "equipment" || group === "garbage" || group === "projectile" || group === "scenery" || group === "sound_scenery" || group === "device_machine" || group === "device_control" || group === "device_light_fixture") {
+      postprocessObjectBaseFields(buffer, rootOff);
+    }
+    if (group === "physics" || group === "phys") {
+      postprocessPhysicsTag(buffer, header, tagIndex, rootOff);
+    } else if (group === "point_physics" || group === "pphy") {
+      postprocessPointPhysicsTag(buffer, rootOff);
+    } else if (group === "device_machine" || group === "device_control" || group === "device_light_fixture" || group === "device" || group === "mach" || group === "ctrl" || group === "lifi" || group === "devi") {
+      postprocessDeviceTag(buffer, rootOff, group === "device_machine" || group === "mach");
+    } else if (group === "light" || group === "ligh") {
+      postprocessLightTag(buffer, rootOff);
+    } else if (group === "particle" || group === "part") {
+      postprocessParticleTag(buffer, rootOff);
+    } else if (group === "effect" || group === "effe") {
+      postprocessEffectTag(buffer, header, tagIndex, rootOff);
+    }
+  } catch {
+  }
+}
+function postprocessPhysicsTag(buffer, header, tagIndex, rootOff) {
+  if (rootOff + 128 > buffer.length) return;
+  const momentScale = buffer.readFloatLE(rootOff + 4) || 0.3;
+  const totalMass = buffer.readFloatLE(rootOff + 8);
+  const totalDensity = buffer.readFloatLE(rootOff + 24);
+  if (totalMass <= 0) return;
+  const mpCount = buffer.readInt32LE(rootOff + 116);
+  const mpPtr = buffer.readUInt32LE(rootOff + 120);
+  if (mpCount <= 0 || mpCount > 64 || mpPtr === 0) return;
+  const mpOff = resolveTagDataPointer(mpPtr, header, tagIndex.baseMemoryAddress);
+  if (mpOff <= 0 || mpOff + mpCount * 128 > buffer.length) return;
+  let sumRelMass = 0;
+  let sumRelMassOverRelDen = 0;
+  for (let i = 0; i < mpCount; i++) {
+    const off = mpOff + i * 128;
+    const relMass = Math.max(1e-4, buffer.readFloatLE(off + 40) || 1);
+    const relDen = Math.max(1e-4, buffer.readFloatLE(off + 48) || 1);
+    sumRelMass += relMass;
+    sumRelMassOverRelDen += relMass / relDen;
+  }
+  if (sumRelMass <= 0) return;
+  const denScale = totalDensity > 0 ? totalDensity / mpCount * sumRelMassOverRelDen : 0;
+  const massScale = mpCount / sumRelMass;
+  let comX = 0, comY = 0, comZ = 0;
+  for (let i = 0; i < mpCount; i++) {
+    const off = mpOff + i * 128;
+    const relMass = Math.max(1e-4, buffer.readFloatLE(off + 40) || 1);
+    const relDen = Math.max(1e-4, buffer.readFloatLE(off + 48) || 1);
+    const ptMass = totalMass * (relMass / sumRelMass);
+    const ptDen = denScale * massScale * relDen;
+    buffer.writeFloatLE(ptMass, off + 44);
+    if (ptDen > 0) buffer.writeFloatLE(ptDen, off + 52);
+    const px = buffer.readFloatLE(off + 56);
+    const py = buffer.readFloatLE(off + 60);
+    const pz = buffer.readFloatLE(off + 64);
+    comX += ptMass * px;
+    comY += ptMass * py;
+    comZ += ptMass * pz;
+  }
+  comX /= totalMass;
+  comY /= totalMass;
+  comZ /= totalMass;
+  buffer.writeFloatLE(comX, rootOff + 12);
+  buffer.writeFloatLE(comY, rootOff + 16);
+  buffer.writeFloatLE(comZ, rootOff + 20);
+  let xx = 0, yy = 0, zz = 0, xy = 0, zx = 0, yz = 0;
+  for (let i = 0; i < mpCount; i++) {
+    const off = mpOff + i * 128;
+    const ptMass = buffer.readFloatLE(off + 44);
+    const px = buffer.readFloatLE(off + 56) - comX;
+    const py = buffer.readFloatLE(off + 60) - comY;
+    const pz = buffer.readFloatLE(off + 64) - comZ;
+    const radius = Math.max(0.01, buffer.readFloatLE(off + 104));
+    const rTerm = 0.4 * radius * radius;
+    xx += ptMass * (py * py + pz * pz + rTerm);
+    yy += ptMass * (px * px + pz * pz + rTerm);
+    zz += ptMass * (px * px + py * py + rTerm);
+    xy += ptMass * (px * py);
+    zx += ptMass * (px * pz);
+    yz += ptMass * (py * pz);
+  }
+  const m = new Float32Array([
+    momentScale * xx,
+    -momentScale * xy,
+    -momentScale * zx,
+    -momentScale * xy,
+    momentScale * yy,
+    -momentScale * yz,
+    -momentScale * zx,
+    -momentScale * yz,
+    momentScale * zz
+  ]);
+  buffer.writeFloatLE(m[0], rootOff + 80);
+  buffer.writeFloatLE(m[4], rootOff + 84);
+  buffer.writeFloatLE(m[8], rootOff + 88);
+  const imCount = buffer.readInt32LE(rootOff + 92);
+  const imPtr = buffer.readUInt32LE(rootOff + 96);
+  if (imCount >= 2 && imPtr !== 0) {
+    const imOff = resolveTagDataPointer(imPtr, header, tagIndex.baseMemoryAddress);
+    if (imOff > 0 && imOff + 72 <= buffer.length) {
+      const mInv = invertMatrix3x3(m);
+      if (mInv) {
+        for (let k = 0; k < 9; k++) {
+          buffer.writeFloatLE(m[k], imOff + k * 4);
+          buffer.writeFloatLE(mInv[k], imOff + 36 + k * 4);
+        }
+      }
+    }
+  }
+}
+function postprocessPointPhysicsTag(buffer, rootOff) {
+  if (rootOff + 64 > buffer.length) return;
+  const density = buffer.readFloatLE(rootOff + 24);
+  if (density <= 0) return;
+  buffer.writeFloatLE(density * 355840 / 3, rootOff + 4);
+  buffer.writeFloatLE(-((density - 1) / (density + 1)), rootOff + 8);
+  buffer.writeFloatLE(-((density / 11e-4 - 1) / (density / 11e-4 + 1)), rootOff + 12);
+}
+function postprocessDeviceTag(buffer, rootOff, isMachine) {
+  if (rootOff + 656 > buffer.length) return;
+  const powerTrans = buffer.readFloatLE(rootOff + 384);
+  const powerAccel = buffer.readFloatLE(rootOff + 388);
+  const posTrans = buffer.readFloatLE(rootOff + 392);
+  const posAccel = buffer.readFloatLE(rootOff + 396);
+  const delayTime = buffer.readFloatLE(rootOff + 400);
+  buffer.writeFloatLE(powerTrans > 0 ? 1 / (30 * powerTrans) : 0, rootOff + 620);
+  buffer.writeFloatLE(powerAccel > 0 ? 1 / (30 * powerAccel) : 0, rootOff + 624);
+  buffer.writeFloatLE(posTrans > 0 ? 1 / (30 * posTrans) : 0, rootOff + 628);
+  buffer.writeFloatLE(posAccel > 0 ? 1 / (30 * posAccel) : 0, rootOff + 632);
+  buffer.writeInt16LE(Math.max(0, Math.floor(30 * delayTime)), rootOff + 644);
+  if (isMachine && rootOff + 804 <= buffer.length) {
+    const doorOpenSec = buffer.readFloatLE(rootOff + 728);
+    buffer.writeInt16LE(Math.max(0, Math.floor(30 * doorOpenSec)), rootOff + 800);
+  }
+}
+function postprocessLightTag(buffer, rootOff) {
+  if (rootOff + 64 > buffer.length) return;
+  const specMult = buffer.readFloatLE(rootOff + 28);
+  if (specMult === 0) {
+    buffer.writeFloatLE(2, rootOff + 28);
+  }
+  const falloffRad = buffer.readFloatLE(rootOff + 16);
+  const cutoffRad = buffer.readFloatLE(rootOff + 20);
+  if (falloffRad !== 0 || cutoffRad !== 0) {
+    buffer.writeFloatLE(Math.cos(falloffRad), rootOff + 32);
+    buffer.writeFloatLE(Math.cos(cutoffRad), rootOff + 36);
+    buffer.writeFloatLE(Math.sin(cutoffRad), rootOff + 44);
+  }
+}
+function postprocessParticleTag(buffer, rootOff) {
+  if (rootOff + 216 > buffer.length) return;
+  buffer.writeFloatLE(0, rootOff + 136);
+  buffer.writeInt16LE(1, rootOff + 206);
+}
+function postprocessEffectTag(buffer, header, tagIndex, rootOff) {
+  if (rootOff + 64 > buffer.length) return;
+  const evCount = buffer.readInt32LE(rootOff + 44);
+  const evPtr = buffer.readUInt32LE(rootOff + 48);
+  if (evCount <= 0 || evCount > 64 || evPtr === 0) return;
+  const evBase = resolveTagDataPointer(evPtr, header, tagIndex.baseMemoryAddress);
+  if (evBase <= 0 || evBase + evCount * 68 > buffer.length) return;
+  for (let e = 0; e < evCount; e++) {
+    const evOff = evBase + e * 68;
+    const partCount = buffer.readInt32LE(evOff + 40);
+    const partPtr = buffer.readUInt32LE(evOff + 44);
+    if (partCount > 0 && partCount <= 64 && partPtr !== 0) {
+      const partBase = resolveTagDataPointer(partPtr, header, tagIndex.baseMemoryAddress);
+      if (partBase > 0 && partBase + partCount * 104 <= buffer.length) {
+        for (let p = 0; p < partCount; p++) {
+          const pOff = partBase + p * 104;
+          const refGroupRev = buffer.toString("latin1", pOff + 24, pOff + 28);
+          const refGroup = refGroupRev.split("").reverse().join("");
+          if (refGroup.trim().length === 4) {
+            const typeClass = OBJECT_SUBCLASS_FOURCCS.has(refGroup) ? "obje" : refGroup;
+            buffer.write(typeClass.split("").reverse().join(""), pOff + 20, 4, "latin1");
+          }
+        }
+      }
+    }
+    const ptclCount = buffer.readInt32LE(evOff + 52);
+    const ptclPtr = buffer.readUInt32LE(evOff + 56);
+    if (ptclCount > 0 && ptclCount <= 64 && ptclPtr !== 0) {
+      const ptclBase = resolveTagDataPointer(ptclPtr, header, tagIndex.baseMemoryAddress);
+      if (ptclBase > 0 && ptclBase + ptclCount * 232 <= buffer.length) {
+        for (let p = 0; p < ptclCount; p++) {
+          const pOff = ptclBase + p * 232;
+          const yaw = buffer.readFloatLE(pOff + 24);
+          const pitch = buffer.readFloatLE(pOff + 28);
+          const cosP = Math.cos(pitch);
+          buffer.writeFloatLE(Math.cos(yaw) * cosP, pOff + 32);
+          buffer.writeFloatLE(Math.sin(yaw) * cosP, pOff + 36);
+          buffer.writeFloatLE(Math.sin(pitch), pOff + 40);
+        }
+      }
+    }
+  }
+}
+function postprocessObjectBaseFields(buffer, rootOff) {
+  if (rootOff + 180 > buffer.length) return;
+  const boundingRadius = buffer.readFloatLE(rootOff + 4);
+  const renderBoundingRadius = buffer.readFloatLE(rootOff + 172);
+  if (Number.isFinite(boundingRadius) && boundingRadius > 0) {
+    if (!Number.isFinite(renderBoundingRadius) || renderBoundingRadius < boundingRadius) {
+      buffer.writeFloatLE(boundingRadius, rootOff + 172);
+    }
+  }
+}
+
+// ../core/src/map/tag-field-editor.ts
+var MAX_REFLEXIVE_DEPTH = 8;
+var MAX_REFLEXIVE_CHILDREN = 4096;
+var TagFieldEditorError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "TagFieldEditorError";
+  }
+};
+function resolveTagRootOffset(buffer, header, tagIndex, tagEntryIndex) {
+  const entry = tagIndex.entries[tagEntryIndex];
+  if (!entry) {
+    throw new TagFieldEditorError(`Tag entry #${tagEntryIndex} not found in tag index.`);
+  }
+  const group = entry.primaryClassName;
+  if (!group) {
+    throw new TagFieldEditorError(`Tag #${tagEntryIndex} has unknown primary class FourCC.`);
+  }
+  if (entry.isExternal && group !== "sound") {
+    throw new TagFieldEditorError(`Tag "${entry.path}" is an external resource tag with no in-map base struct.`);
+  }
+  const structDef = getGroupDefinition(group);
+  const rootFileOffset = resolveTagDataPointer(entry.tagDataPointerOrResourceIndex, header, tagIndex.baseMemoryAddress);
+  if (rootFileOffset < 0 || rootFileOffset + structDef.totalSize > buffer.length) {
+    throw new TagFieldEditorError(`Tag "${entry.path}" struct offset (0x${rootFileOffset.toString(16)}) is out of bounds of the map.`);
+  }
+  return { structDef, rootFileOffset, group };
+}
+function buildStructFields(buffer, tagIndex, structDef, baseAbs, fileOffsetAnchor, baseMemoryAddress, tagByTagId, depth) {
+  const fields = [];
+  for (const f of structDef.fields) {
+    const absOffset = baseAbs + f.offset;
+    const decoded = decodeValueField(buffer, absOffset, f.def);
+    if (f.def.type === "TagReflexive") {
+      const ref = decoded.value;
+      const childStructName = f.def.struct;
+      const children = [];
+      let blockReason;
+      if (!childStructName) {
+        blockReason = "TagReflexive has no known child struct name.";
+      } else if (depth >= MAX_REFLEXIVE_DEPTH) {
+        blockReason = `Recursion capped at depth ${MAX_REFLEXIVE_DEPTH}.`;
+      } else {
+        let childResolved = null;
+        try {
+          childResolved = resolveStruct(childStructName);
+        } catch {
+          childResolved = null;
+        }
+        if (!childResolved) {
+          blockReason = `Unknown TagReflexive target struct "${childStructName}".`;
+        } else if (ref.count === 0) {
+          blockReason = "Reflexive has 0 elements.";
+        } else {
+          const childBase = resolvePointer(ref.pointerLow, fileOffsetAnchor, baseMemoryAddress);
+          const totalBytes = ref.count * childResolved.totalSize;
+          if (!isRangeInBuffer(childBase, totalBytes, buffer.length)) {
+            blockReason = `Reflexive block (${ref.count} \xD7 ${childResolved.totalSize} B at 0x${childBase.toString(16)}) is out of bounds (map is ${buffer.length} B).`;
+          } else {
+            const n = Math.min(ref.count, MAX_REFLEXIVE_CHILDREN);
+            if (n < ref.count) blockReason = `Reflexive truncated from ${ref.count} to ${n} elements (MAX_REFLEXIVE_CHILDREN).`;
+            const r = childResolved;
+            for (let i = 0; i < n; i++) {
+              const structBase = childBase + i * r.totalSize;
+              const structFields = buildStructFields(buffer, tagIndex, r, structBase, fileOffsetAnchor, baseMemoryAddress, tagByTagId, depth + 1);
+              children.push({ structName: r.name, structBase, fields: structFields });
+            }
+          }
+        }
+      }
+      fields.push({
+        name: f.name,
+        kind: "reflexive",
+        type: "TagReflexive",
+        offset: absOffset,
+        size: f.size,
+        value: ref,
+        readOnly: true,
+        readOnlyReason: blockReason ?? "TagReflexive has no in-place write support (read-only decode).",
+        reflexiveStruct: childStructName,
+        reflexiveCount: ref.count,
+        children
+      });
+      continue;
+    }
+    if (f.def.type === "TagDataOffset") {
+      fields.push({
+        name: f.name,
+        kind: "unsupported",
+        type: "TagDataOffset",
+        offset: absOffset,
+        size: f.size,
+        value: decoded.value,
+        readOnly: true,
+        readOnlyReason: "Raw data offset (relocation required)"
+      });
+      continue;
+    }
+    if (f.def.type === "TagDependency") {
+      const depVal = decoded.value;
+      const isNull = depVal.tagId === NULL_TAG_ID || depVal.tagId === 0;
+      let targetInfo = null;
+      if (!isNull) {
+        const targetEntry = tagByTagId.get(depVal.tagId);
+        if (targetEntry) {
+          targetInfo = { tagId: targetEntry.tagId, path: targetEntry.path, group: targetEntry.primaryClassName ?? "" };
+        } else {
+          targetInfo = { tagId: depVal.tagId, path: `Unknown (0x${depVal.tagId.toString(16)})`, group: "" };
+        }
+      }
+      fields.push({
+        name: f.name,
+        kind: "dependency",
+        type: "TagDependency",
+        offset: absOffset,
+        size: f.size,
+        value: depVal.tagId,
+        dependencyClasses: f.def.classes,
+        dependencyTarget: targetInfo
+      });
+      continue;
+    }
+    const enumDef = getEnumDefinition(f.def.type);
+    if (enumDef) {
+      fields.push({ name: f.name, kind: "enum", type: f.def.type, offset: absOffset, size: f.size, value: decoded.value, enumOptions: enumDef.options });
+      continue;
+    }
+    const bitfieldDef = getBitfieldDefinition(f.def.type);
+    if (bitfieldDef) {
+      fields.push({ name: f.name, kind: "bitfield", type: f.def.type, offset: absOffset, size: f.size, value: decoded.value, bitfieldFlags: bitfieldDef.fields, bitfieldWidth: bitfieldDef.width });
+      continue;
+    }
+    if (f.def.bounds) {
+      fields.push({ name: f.name, kind: "bounds", type: f.def.type, offset: absOffset, size: f.size, value: decoded.value, boundsType: f.def.type });
+      continue;
+    }
+    if (f.def.type === "TagString") {
+      const strVal = decoded.value;
+      fields.push({ name: f.name, kind: "string", type: "TagString", offset: absOffset, size: f.size, value: strVal.text });
+      continue;
+    }
+    if (Array.isArray(decoded.value)) {
+      fields.push({ name: f.name, kind: "composite", type: f.def.type, offset: absOffset, size: f.size, value: decoded.value });
+      continue;
+    }
+    fields.push({ name: f.name, kind: "number", type: f.def.type, offset: absOffset, size: f.size, value: decoded.value });
+  }
+  return fields;
+}
+function readTagFieldValues(buffer, header, tagIndex, tagEntryIndex) {
+  const entry = tagIndex.entries[tagEntryIndex];
+  if (entry && entry.isExternal && entry.primaryClassName && entry.primaryClassName !== "sound") {
+    const group2 = entry.primaryClassName;
+    const structDef2 = getGroupDefinition(group2);
+    const synthBuf = Buffer.alloc(structDef2.totalSize, 0);
+    for (const f of structDef2.fields) {
+      if (f.def.type === "TagDependency") {
+        synthBuf.writeUInt32LE(NULL_TAG_ID, f.offset + 12);
+      }
+    }
+    if (group2 === "font" && structDef2.totalSize >= 16) {
+      synthBuf.writeInt16LE(14, 4);
+      synthBuf.writeInt16LE(4, 6);
+      synthBuf.writeInt16LE(2, 8);
+      synthBuf.writeInt16LE(1, 10);
+    }
+    const tagByTagId2 = /* @__PURE__ */ new Map();
+    for (const e of tagIndex.entries) {
+      tagByTagId2.set(e.tagId, e);
+    }
+    const fields2 = buildStructFields(
+      synthBuf,
+      tagIndex,
+      structDef2,
+      0,
+      0,
+      tagIndex.baseMemoryAddress,
+      tagByTagId2,
+      0
+    );
+    return { tagIndex: tagEntryIndex, tagId: entry.tagId, tagPath: entry.path, group: group2, structName: structDef2.name, fields: fields2 };
+  }
+  const { structDef, rootFileOffset, group } = resolveTagRootOffset(buffer, header, tagIndex, tagEntryIndex);
+  const tagByTagId = /* @__PURE__ */ new Map();
+  for (const e of tagIndex.entries) {
+    tagByTagId.set(e.tagId, e);
+  }
+  const fields = buildStructFields(
+    buffer,
+    tagIndex,
+    structDef,
+    rootFileOffset,
+    header.tagDataOffset,
+    tagIndex.baseMemoryAddress,
+    tagByTagId,
+    0
+  );
+  return { tagIndex: tagEntryIndex, tagId: entry.tagId, tagPath: entry.path, group, structName: structDef.name, fields };
+}
+function resolveTargetField(buffer, header, tagIndex, structDef, rootFileOffset, fieldPath) {
+  const direct = structDef.fields.find((f) => f.name === fieldPath);
+  if (direct) {
+    return { field: direct, absOffset: rootFileOffset + direct.offset };
+  }
+  const segments = fieldPath.split(".");
+  let currentStruct = structDef;
+  let currentBase = rootFileOffset;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (i === segments.length - 1) {
+      const leaf = currentStruct.fields.find((f) => f.name === seg);
+      if (!leaf) {
+        throw new TagFieldEditorError(`Struct "${currentStruct.name}" has no field named "${seg}" (path "${fieldPath}").`);
+      }
+      return { field: leaf, absOffset: currentBase + leaf.offset };
+    }
+    const refDepth = i + 1;
+    if (refDepth >= MAX_REFLEXIVE_DEPTH) {
+      throw new TagFieldEditorError(`Reflexive path "${fieldPath}" exceeds the maximum nesting depth of ${MAX_REFLEXIVE_DEPTH - 1}.`);
+    }
+    const m = seg.match(/^(.+)\[(\d+)\]$/);
+    if (!m) {
+      throw new TagFieldEditorError(`Segment "${seg}" in path "${fieldPath}" is not a valid reflexive step (expected form name[<index>]).`);
+    }
+    const refName = m[1];
+    const index = Number(m[2]);
+    const field = currentStruct.fields.find((f) => f.name === refName);
+    if (!field) {
+      throw new TagFieldEditorError(`Struct "${currentStruct.name}" has no field named "${refName}" (path "${fieldPath}").`);
+    }
+    if (field.def.type !== "TagReflexive" || !field.def.struct) {
+      throw new TagFieldEditorError(`Field "${refName}" in struct "${currentStruct.name}" is not a TagReflexive with a known child struct.`);
+    }
+    const ref = decodeValueField(buffer, currentBase + field.offset, field.def).value;
+    if (index < 0 || index >= ref.count || index >= MAX_REFLEXIVE_CHILDREN) {
+      throw new TagFieldEditorError(`Reflexive index ${index} is out of range for "${refName}" (it has ${ref.count} element(s)).`);
+    }
+    let childStruct;
+    try {
+      childStruct = resolveStruct(field.def.struct);
+    } catch {
+      throw new TagFieldEditorError(`TagReflexive "${refName}" targets an unknown child struct "${field.def.struct}".`);
+    }
+    const childBase = resolvePointer(ref.pointerLow, header.tagDataOffset, tagIndex.baseMemoryAddress);
+    if (!isRangeInBuffer(childBase, ref.count * childStruct.totalSize, buffer.length)) {
+      throw new TagFieldEditorError(`Reflexive block "${refName}" (child struct "${childStruct.name}") is out of bounds of the map.`);
+    }
+    currentStruct = childStruct;
+    currentBase = childBase + index * childStruct.totalSize;
+  }
+  throw new TagFieldEditorError(`Empty or invalid field path "${fieldPath}".`);
+}
+function writeTagFieldValue(buffer, header, tagIndex, tagEntryIndex, fieldName, newValue) {
+  const { structDef, rootFileOffset } = resolveTagRootOffset(buffer, header, tagIndex, tagEntryIndex);
+  const { field, absOffset } = resolveTargetField(buffer, header, tagIndex, structDef, rootFileOffset, fieldName);
+  if (field.def.type === "TagReflexive" || field.def.type === "TagDataOffset") {
+    throw new TagFieldEditorError(`In-place editing of ${field.def.type} is not supported.`);
+  }
+  if (field.def.type === "TagDependency") {
+    let targetTagId = NULL_TAG_ID;
+    if (typeof newValue === "number") {
+      targetTagId = newValue;
+    } else if (typeof newValue === "object" && newValue !== null && "tagId" in newValue) {
+      targetTagId = newValue.tagId;
+    } else if (newValue === null || newValue === void 0 || newValue === "") {
+      targetTagId = NULL_TAG_ID;
+    } else {
+      throw new TagFieldEditorError(`Invalid TagDependency value: ${JSON.stringify(newValue)}`);
+    }
+    if (targetTagId === NULL_TAG_ID || targetTagId === -1 || targetTagId >>> 0 === NULL_TAG_ID) {
+      encodeValueField(buffer, absOffset, {
+        kind: "dependency",
+        value: { fourcc: NULL_TAG_ID, pathPointer: 0, pathSize: 0, tagId: NULL_TAG_ID }
+      });
+      return { fieldName, newValue: NULL_TAG_ID, fieldOffset: absOffset };
+    }
+    const targetEntry = tagIndex.entries.find((e) => e.tagId === targetTagId);
+    if (!targetEntry) {
+      throw new TagFieldEditorError(`Target tag ID 0x${targetTagId.toString(16)} not found in this map.`);
+    }
+    const tagHeaderSize = header.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE;
+    const tagArrayFileOffset = header.tagDataOffset + tagHeaderSize;
+    const pathPointer = buffer.readUInt32LE(tagArrayFileOffset + targetEntry.index * TAG_ENTRY_SIZE + 16);
+    encodeValueField(buffer, absOffset, {
+      kind: "dependency",
+      value: {
+        fourcc: targetEntry.primaryClassFourCC,
+        pathPointer,
+        pathSize: 0,
+        tagId: targetEntry.tagId
+      }
+    });
+    postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, fieldName);
+    return { fieldName, newValue: targetEntry.tagId, fieldOffset: absOffset };
+  }
+  const enumDef = getEnumDefinition(field.def.type);
+  if (enumDef) {
+    let intVal;
+    if (typeof newValue === "string") {
+      const idx = enumDef.options.indexOf(newValue);
+      if (idx === -1) {
+        throw new TagFieldEditorError(`"${newValue}" is not a valid option for enum "${enumDef.name}".`);
+      }
+      intVal = idx;
+    } else {
+      intVal = Number(newValue);
+      if (intVal < 0 || intVal >= enumDef.options.length) {
+        throw new TagFieldEditorError(`Value ${intVal} is out of range for enum "${enumDef.name}".`);
+      }
+    }
+    encodeValueField(buffer, absOffset, { kind: "enum", value: intVal });
+    return { fieldName, newValue: intVal, fieldOffset: absOffset };
+  }
+  const bitfieldDef = getBitfieldDefinition(field.def.type);
+  if (bitfieldDef) {
+    const bitVal = Number(newValue) >>> 0;
+    encodeValueField(buffer, absOffset, { kind: "bitfield", value: bitVal, width: bitfieldDef.width });
+    return { fieldName, newValue: bitVal, fieldOffset: absOffset };
+  }
+  if (field.def.bounds) {
+    if (!Array.isArray(newValue) || newValue.length !== 2) {
+      throw new TagFieldEditorError(`Field "${fieldName}" expects a [from, to] bounds array.`);
+    }
+    const boundsVal = [Number(newValue[0]), Number(newValue[1])];
+    encodeValueField(buffer, absOffset, { kind: "bounds", type: field.def.type, value: boundsVal });
+    postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, fieldName);
+    return { fieldName, newValue: boundsVal, fieldOffset: absOffset };
+  }
+  if (field.def.type === "TagString") {
+    const text = typeof newValue === "string" ? newValue : String(newValue ?? "");
+    encodeValueField(buffer, absOffset, { kind: "basic", type: "TagString", value: { text } });
+    return { fieldName, newValue: text, fieldOffset: absOffset };
+  }
+  if (Array.isArray(newValue)) {
+    encodeValueField(buffer, absOffset, {
+      kind: field.def.count && field.def.count > 1 ? "array" : "basic",
+      type: field.def.type,
+      value: newValue.map(Number)
+    });
+    postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, fieldName);
+    return { fieldName, newValue, fieldOffset: absOffset };
+  }
+  const numVal = Number(newValue);
+  if (Number.isNaN(numVal)) {
+    throw new TagFieldEditorError(`Field "${fieldName}" expects a numeric value, got ${JSON.stringify(newValue)}`);
+  }
+  encodeValueField(buffer, absOffset, { kind: "basic", type: field.def.type, value: numVal });
+  postprocessTagFields(buffer, header, tagIndex, tagEntryIndex, fieldName);
+  return { fieldName, newValue: numVal, fieldOffset: absOffset };
+}
+
+// ../core/src/render/bsp-geometry.ts
+function unpackCompressedUnitVector32(packed) {
+  let ix = packed & 2047;
+  if (ix & 1024) ix -= 2048;
+  let iy = packed >>> 11 & 2047;
+  if (iy & 1024) iy -= 2048;
+  let iz = packed >>> 22 & 1023;
+  if (iz & 512) iz -= 1024;
+  let nx = ix / 1023;
+  let ny = iy / 1023;
+  let nz = iz / 511;
+  const len = Math.hypot(nx, ny, nz);
+  if (len > 1e-6) {
+    nx /= len;
+    ny /= len;
+    nz /= len;
+  }
+  return [nx, ny, nz];
+}
+function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  if (!scenarioEntry) {
+    throw new Error(`Scenario tag (ID: 0x${tagIndex.scenarioTagId.toString(16)}) not found in tag index.`);
+  }
+  const scenarioFileOffset = resolveTagDataPointer(
+    scenarioEntry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const decodedScenario = decodeStruct(buffer, scenarioFileOffset, "Scenario");
+  const bspsField = decodedScenario.get("structure bsps");
+  if (!bspsField || bspsField.kind !== "reflexive" || bspsField.value.count === 0) {
+    throw new Error("Scenario has no structure bsps.");
+  }
+  const bspCount = bspsField.value.count;
+  if (bspIndex < 0 || bspIndex >= bspCount) {
+    throw new Error(`BSP index ${bspIndex} is out of bounds (scenario has ${bspCount} BSPs).`);
+  }
+  const scenarioBspSize = resolveStruct("ScenarioBSP").totalSize;
+  const bspsArrayOffset = header.tagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+  const bspNames = [];
+  for (let i = 0; i < bspCount; i++) {
+    const entryOffset = bspsArrayOffset + i * scenarioBspSize;
+    const entry = decodeStruct(buffer, entryOffset, "ScenarioBSP");
+    const dep = entry.get("structure bsp");
+    const depTagId = dep && dep.kind === "dependency" ? dep.value.tagId : 4294967295;
+    const tagEntry = tagIndex.entries[depTagId & 65535];
+    bspNames.push(tagEntry?.path || `BSP ${i}`);
+  }
+  const bspEntryOffset = bspsArrayOffset + bspIndex * scenarioBspSize;
+  const decodedBspEntry = decodeStruct(buffer, bspEntryOffset, "ScenarioBSP");
+  const bspDep = decodedBspEntry.get("structure bsp");
+  const bspTagId = bspDep && bspDep.kind === "dependency" ? bspDep.value.tagId : 4294967295;
+  const bspLocation = locateStructureBsp(
+    buffer,
+    tagIndex,
+    scenarioFileOffset,
+    header.tagDataOffset,
+    tagIndex.baseMemoryAddress,
+    bspTagId,
+    bspIndex
+  );
+  if (!bspLocation) {
+    throw new Error(`Failed to locate structure BSP (tagId: 0x${bspTagId.toString(16)}).`);
+  }
+  const decodedBsp = decodeStruct(buffer, bspLocation.fileOffset, "ScenarioStructureBSP");
+  const lightmapsBitmapDep = decodedBsp.get("lightmaps bitmap");
+  const lightmapsBitmapTagId = lightmapsBitmapDep && lightmapsBitmapDep.kind === "dependency" ? lightmapsBitmapDep.value.tagId : 4294967295;
+  const boundsX = decodedBsp.get("world bounds x");
+  const boundsY = decodedBsp.get("world bounds y");
+  const boundsZ = decodedBsp.get("world bounds z");
+  const worldBounds = [
+    boundsX?.value[0] ?? 0,
+    boundsY?.value[0] ?? 0,
+    boundsZ?.value[0] ?? 0,
+    boundsX?.value[1] ?? 0,
+    boundsY?.value[1] ?? 0,
+    boundsZ?.value[1] ?? 0
+  ];
+  const surfacesField = decodedBsp.get("surfaces");
+  if (!surfacesField || surfacesField.kind !== "reflexive") {
+    throw new Error("ScenarioStructureBSP has invalid surfaces reflexive.");
+  }
+  const surfacesOffset = bspLocation.fileOffsetAnchor + (surfacesField.value.pointerLow - bspLocation.baseMemoryAddress);
+  const lightmapsField = decodedBsp.get("lightmaps");
+  if (!lightmapsField || lightmapsField.kind !== "reflexive") {
+    throw new Error("ScenarioStructureBSP has invalid lightmaps reflexive.");
+  }
+  const lightmapsOffset = bspLocation.fileOffsetAnchor + (lightmapsField.value.pointerLow - bspLocation.baseMemoryAddress);
+  const lmStructSize = resolveStruct("ScenarioStructureBSPLightmap").totalSize;
+  const matStructSize = resolveStruct("ScenarioStructureBSPMaterial").totalSize;
+  const submeshes = [];
+  let totalVertices = 0;
+  let totalTriangles = 0;
+  let submeshCounter = 0;
+  for (let lmIdx = 0; lmIdx < lightmapsField.value.count; lmIdx++) {
+    const lmOffset = lightmapsOffset + lmIdx * lmStructSize;
+    const decodedLm = decodeStruct(buffer, lmOffset, "ScenarioStructureBSPLightmap");
+    const bitmapField = decodedLm.get("bitmap");
+    const rawBitmapIdx = bitmapField?.value ?? -1;
+    const lightmapBitmapIndex = rawBitmapIdx === 65535 || rawBitmapIdx < 0 ? -1 : rawBitmapIdx;
+    const materialsReflexive = decodedLm.get("materials");
+    if (!materialsReflexive || materialsReflexive.kind !== "reflexive" || materialsReflexive.value.count === 0) {
+      continue;
+    }
+    const materialsOffset = bspLocation.fileOffsetAnchor + (materialsReflexive.value.pointerLow - bspLocation.baseMemoryAddress);
+    for (let matIdx = 0; matIdx < materialsReflexive.value.count; matIdx++) {
+      const matOffset = materialsOffset + matIdx * matStructSize;
+      const decodedMat = decodeStruct(buffer, matOffset, "ScenarioStructureBSPMaterial");
+      const shaderDep = decodedMat.get("shader");
+      const shaderTagId = shaderDep && shaderDep.kind === "dependency" ? shaderDep.value.tagId : 4294967295;
+      const shaderPermField = decodedMat.get("shader permutation");
+      const shaderPermutation = shaderPermField?.value ?? 0;
+      const surfStartField = decodedMat.get("surfaces");
+      const surfCountField = decodedMat.get("surface count");
+      const vertCountField = decodedMat.get("rendered vertices count");
+      const lmVertCountField = decodedMat.get("lightmap vertices count");
+      const surfaceIndexStart = surfStartField?.value ?? 0;
+      const surfaceCount = surfCountField?.value ?? 0;
+      const vertexCount = vertCountField?.value ?? 0;
+      const lmVertexCount = lmVertCountField?.value ?? 0;
+      if (vertexCount === 0 || surfaceCount === 0) {
+        continue;
+      }
+      const uncompressedData = decodedMat.get("uncompressed vertices");
+      const vertPtr = uncompressedData && uncompressedData.kind === "tagDataOffset" ? uncompressedData.value.pointerLow : 0;
+      const rvIdxPtrField = decodedMat.get("rendered vertices index pointer");
+      const lmvIdxPtrField = decodedMat.get("lightmap vertices index pointer");
+      const rvIdxPtr = rvIdxPtrField?.value ?? 0;
+      const lmvIdxPtr = lmvIdxPtrField?.value ?? 0;
+      const isXboxCompressedBsp = vertPtr === 0 && rvIdxPtr !== 0 && header.engine === 5;
+      let vertOffset;
+      let lmVertOffset = 0;
+      if (isXboxCompressedBsp) {
+        const rvRefOff = bspLocation.fileOffsetAnchor + (rvIdxPtr - bspLocation.baseMemoryAddress);
+        const actualVertPtr = buffer.readUInt32LE(rvRefOff + 4);
+        vertOffset = bspLocation.fileOffsetAnchor + (actualVertPtr - bspLocation.baseMemoryAddress);
+        if (lmVertexCount > 0 && lmvIdxPtr !== 0) {
+          const lmvRefOff = bspLocation.fileOffsetAnchor + (lmvIdxPtr - bspLocation.baseMemoryAddress);
+          const actualLmVertPtr = buffer.readUInt32LE(lmvRefOff + 4);
+          lmVertOffset = bspLocation.fileOffsetAnchor + (actualLmVertPtr - bspLocation.baseMemoryAddress);
+        }
+      } else if (vertPtr !== 0) {
+        vertOffset = bspLocation.fileOffsetAnchor + (vertPtr - bspLocation.baseMemoryAddress);
+        lmVertOffset = vertOffset + vertexCount * 56;
+      } else {
+        const renderedVertOffsetField = decodedMat.get("rendered vertices offset");
+        const lmVertOffsetField = decodedMat.get("lightmap vertices offset");
+        vertOffset = 2048 + (renderedVertOffsetField?.value ?? 0);
+        lmVertOffset = 2048 + (lmVertOffsetField?.value ?? (renderedVertOffsetField?.value ?? 0) + vertexCount * 56);
+      }
+      const vertices = new Float32Array(vertexCount * 8);
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      if (isXboxCompressedBsp) {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = vertOffset + v * 32;
+          const x = buffer.readFloatLE(vOff + 0);
+          const y = buffer.readFloatLE(vOff + 4);
+          const z = buffer.readFloatLE(vOff + 8);
+          const [nx, ny, nz] = unpackCompressedUnitVector32(buffer.readUInt32LE(vOff + 12));
+          const u = buffer.readFloatLE(vOff + 24);
+          const vCoord = buffer.readFloatLE(vOff + 28);
+          const outIdx = v * 8;
+          vertices[outIdx + 0] = x;
+          vertices[outIdx + 1] = y;
+          vertices[outIdx + 2] = z;
+          vertices[outIdx + 3] = nx;
+          vertices[outIdx + 4] = ny;
+          vertices[outIdx + 5] = nz;
+          vertices[outIdx + 6] = u;
+          vertices[outIdx + 7] = vCoord;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
+      } else {
+        for (let v = 0; v < vertexCount; v++) {
+          const vOff = vertOffset + v * 56;
+          const x = buffer.readFloatLE(vOff + 0);
+          const y = buffer.readFloatLE(vOff + 4);
+          const z = buffer.readFloatLE(vOff + 8);
+          const nx = buffer.readFloatLE(vOff + 12);
+          const ny = buffer.readFloatLE(vOff + 16);
+          const nz = buffer.readFloatLE(vOff + 20);
+          const u = buffer.readFloatLE(vOff + 48);
+          const vCoord = buffer.readFloatLE(vOff + 52);
+          const outIdx = v * 8;
+          vertices[outIdx + 0] = x;
+          vertices[outIdx + 1] = y;
+          vertices[outIdx + 2] = z;
+          vertices[outIdx + 3] = nx;
+          vertices[outIdx + 4] = ny;
+          vertices[outIdx + 5] = nz;
+          vertices[outIdx + 6] = u;
+          vertices[outIdx + 7] = vCoord;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          if (z < minZ) minZ = z;
+          if (z > maxZ) maxZ = z;
+        }
+      }
+      const lightmapUvs = new Float32Array(vertexCount * 2);
+      if (isXboxCompressedBsp) {
+        if (lightmapBitmapIndex >= 0 && lmVertOffset > 0 && lmVertexCount >= vertexCount) {
+          for (let v = 0; v < vertexCount; v++) {
+            const lmvOff = lmVertOffset + v * 8;
+            const lu = buffer.readInt16LE(lmvOff + 4) / 32767;
+            const lv = buffer.readInt16LE(lmvOff + 6) / 32767;
+            lightmapUvs[v * 2 + 0] = lu;
+            lightmapUvs[v * 2 + 1] = lv;
+          }
+        }
+      } else if (lightmapBitmapIndex >= 0 && lmVertexCount >= vertexCount && lmVertOffset > 0 && lmVertOffset + vertexCount * 20 <= buffer.length) {
+        for (let v = 0; v < vertexCount; v++) {
+          const lmvOff = lmVertOffset + v * 20;
+          const lu = buffer.readFloatLE(lmvOff + 12);
+          const lv = buffer.readFloatLE(lmvOff + 16);
+          lightmapUvs[v * 2 + 0] = lu;
+          lightmapUvs[v * 2 + 1] = lv;
+        }
+      }
+      const indices = new Uint16Array(surfaceCount * 3);
+      for (let s = 0; s < surfaceCount; s++) {
+        const sOff = surfacesOffset + (surfaceIndexStart + s) * 6;
+        indices[s * 3 + 0] = buffer.readUInt16LE(sOff + 0);
+        indices[s * 3 + 1] = buffer.readUInt16LE(sOff + 2);
+        indices[s * 3 + 2] = buffer.readUInt16LE(sOff + 4);
+      }
+      const boundingBox = [
+        minX === Infinity ? 0 : minX,
+        minY === Infinity ? 0 : minY,
+        minZ === Infinity ? 0 : minZ,
+        maxX === -Infinity ? 0 : maxX,
+        maxY === -Infinity ? 0 : maxY,
+        maxZ === -Infinity ? 0 : maxZ
+      ];
+      submeshes.push({
+        submeshIndex: submeshCounter++,
+        lightmapIndex: lmIdx,
+        lightmapBitmapIndex,
+        shaderTagId,
+        shaderPermutation,
+        vertexCount,
+        vertices,
+        lightmapUvs,
+        indices,
+        boundingBox
+      });
+      totalVertices += vertexCount;
+      totalTriangles += surfaceCount;
+    }
+  }
+  const clusterPortals = [];
+  const portalsField = decodedBsp.get("cluster portals");
+  if (portalsField && portalsField.kind === "reflexive" && portalsField.value.count > 0 && portalsField.value.pointerLow > 0) {
+    const portalStructSize = resolveStruct("ScenarioStructureBSPClusterPortal").totalSize;
+    const portalsOffset = bspLocation.fileOffsetAnchor + (portalsField.value.pointerLow - bspLocation.baseMemoryAddress);
+    for (let i = 0; i < portalsField.value.count; i++) {
+      const pOff = portalsOffset + i * portalStructSize;
+      if (pOff < 0 || pOff + portalStructSize > buffer.length) break;
+      const frontCluster = buffer.readInt16LE(pOff + 0);
+      const backCluster = buffer.readInt16LE(pOff + 2);
+      const cx = buffer.readFloatLE(pOff + 8);
+      const cy = buffer.readFloatLE(pOff + 12);
+      const cz = buffer.readFloatLE(pOff + 16);
+      const boundingRadius = buffer.readFloatLE(pOff + 20);
+      const vCount = buffer.readInt32LE(pOff + 52);
+      const vPtr = buffer.readUInt32LE(pOff + 56);
+      const verts = [];
+      if (vCount > 0 && vCount <= 128 && vPtr > 0) {
+        const vBase = bspLocation.fileOffsetAnchor + (vPtr - bspLocation.baseMemoryAddress);
+        for (let v = 0; v < vCount; v++) {
+          const vo = vBase + v * 12;
+          if (vo < 0 || vo + 12 > buffer.length) break;
+          verts.push([buffer.readFloatLE(vo), buffer.readFloatLE(vo + 4), buffer.readFloatLE(vo + 8)]);
+        }
+      }
+      if (verts.length >= 3) {
+        clusterPortals.push({
+          frontCluster,
+          backCluster,
+          centroid: [cx, cy, cz],
+          boundingRadius,
+          vertices: verts
+        });
+      }
+    }
+  }
+  const fogPlanes = [];
+  const fogField = decodedBsp.get("fog planes");
+  if (fogField && fogField.kind === "reflexive" && fogField.value.count > 0 && fogField.value.pointerLow > 0) {
+    const fogStructSize = resolveStruct("ScenarioStructureBSPFogPlane").totalSize;
+    const fogOffset = bspLocation.fileOffsetAnchor + (fogField.value.pointerLow - bspLocation.baseMemoryAddress);
+    for (let i = 0; i < fogField.value.count; i++) {
+      const fOff = fogOffset + i * fogStructSize;
+      if (fOff < 0 || fOff + fogStructSize > buffer.length) break;
+      const frontRegion = buffer.readInt16LE(fOff + 0);
+      const vCount = buffer.readInt32LE(fOff + 20);
+      const vPtr = buffer.readUInt32LE(fOff + 24);
+      const verts = [];
+      let sx = 0, sy = 0, sz = 0;
+      if (vCount > 0 && vCount <= 128 && vPtr > 0) {
+        const vBase = bspLocation.fileOffsetAnchor + (vPtr - bspLocation.baseMemoryAddress);
+        for (let v = 0; v < vCount; v++) {
+          const vo = vBase + v * 12;
+          if (vo < 0 || vo + 12 > buffer.length) break;
+          const vx = buffer.readFloatLE(vo);
+          const vy = buffer.readFloatLE(vo + 4);
+          const vz = buffer.readFloatLE(vo + 8);
+          verts.push([vx, vy, vz]);
+          sx += vx;
+          sy += vy;
+          sz += vz;
+        }
+      }
+      if (verts.length >= 3) {
+        fogPlanes.push({
+          frontRegion,
+          centroid: [sx / verts.length, sy / verts.length, sz / verts.length],
+          vertices: verts
+        });
+      }
+    }
+  }
+  const weatherPolyhedra = [];
+  const weatherField = decodedBsp.get("weather polyhedra");
+  if (weatherField && weatherField.kind === "reflexive" && weatherField.value.count > 0 && weatherField.value.pointerLow > 0) {
+    const weatherStructSize = resolveStruct("ScenarioStructureBSPWeatherPolyhedron").totalSize;
+    const weatherOffset = bspLocation.fileOffsetAnchor + (weatherField.value.pointerLow - bspLocation.baseMemoryAddress);
+    for (let i = 0; i < weatherField.value.count; i++) {
+      const wOff = weatherOffset + i * weatherStructSize;
+      if (wOff < 0 || wOff + weatherStructSize > buffer.length) break;
+      const cx = buffer.readFloatLE(wOff + 0);
+      const cy = buffer.readFloatLE(wOff + 4);
+      const cz = buffer.readFloatLE(wOff + 8);
+      const radius = buffer.readFloatLE(wOff + 12);
+      const pCount = buffer.readInt32LE(wOff + 20);
+      const pPtr = buffer.readUInt32LE(wOff + 24);
+      const planes = [];
+      if (pCount > 0 && pCount <= 64 && pPtr > 0) {
+        const pBase = bspLocation.fileOffsetAnchor + (pPtr - bspLocation.baseMemoryAddress);
+        for (let p = 0; p < pCount; p++) {
+          const po = pBase + p * 16;
+          if (po < 0 || po + 16 > buffer.length) break;
+          planes.push([
+            buffer.readFloatLE(po + 0),
+            buffer.readFloatLE(po + 4),
+            buffer.readFloatLE(po + 8),
+            buffer.readFloatLE(po + 12)
+          ]);
+        }
+      }
+      if (radius > 0) {
+        weatherPolyhedra.push({
+          center: [cx, cy, cz],
+          radius,
+          planes
+        });
+      }
+    }
+  }
+  let skyModelTagId;
+  let skyOutdoorAmbientColor;
+  let skyOutdoorFogColor;
+  try {
+    const skiesField = decodedScenario.get("skies");
+    if (skiesField && skiesField.kind === "reflexive" && skiesField.value.count > 0 && skiesField.value.pointerLow > 0) {
+      const skiesOffset = header.tagDataOffset + (skiesField.value.pointerLow - tagIndex.baseMemoryAddress);
+      const skyDep = decodeStruct(buffer, skiesOffset, "ScenarioSky").get("sky");
+      const skyTagId = skyDep && skyDep.kind === "dependency" ? skyDep.value.tagId : 4294967295;
+      if (skyTagId !== 4294967295) {
+        const skyEntry = tagIndex.entries[skyTagId & 65535];
+        if (skyEntry && !skyEntry.isExternal) {
+          const skyFileOffset = resolveTagDataPointer(
+            skyEntry.tagDataPointerOrResourceIndex,
+            header,
+            tagIndex.baseMemoryAddress
+          );
+          const decodedSky = decodeStruct(buffer, skyFileOffset, "Sky");
+          const modelDep = decodedSky.get("model");
+          if (modelDep && modelDep.kind === "dependency" && modelDep.value.tagId !== 4294967295) {
+            skyModelTagId = modelDep.value.tagId;
+          }
+          const ambField = decodedSky.get("outdoor ambient radiosity color");
+          if (ambField && ambField.kind === "array" && Array.isArray(ambField.value) && ambField.value.length >= 3) {
+            skyOutdoorAmbientColor = [
+              Number(ambField.value[0]) || 0,
+              Number(ambField.value[1]) || 0,
+              Number(ambField.value[2]) || 0
+            ];
+          }
+          const fogField2 = decodedSky.get("outdoor fog color");
+          if (fogField2 && fogField2.kind === "array" && Array.isArray(fogField2.value) && fogField2.value.length >= 3) {
+            skyOutdoorFogColor = [
+              Number(fogField2.value[0]) || 0,
+              Number(fogField2.value[1]) || 0,
+              Number(fogField2.value[2]) || 0
+            ];
+          }
+        }
+      }
+    }
+  } catch {
+  }
+  return {
+    bspIndex,
+    bspCount,
+    bspNames,
+    bspTagId,
+    lightmapsBitmapTagId,
+    worldBounds,
+    totalVertices,
+    totalTriangles,
+    submeshes,
+    clusterPortals,
+    fogPlanes,
+    weatherPolyhedra,
+    skyModelTagId,
+    skyOutdoorAmbientColor,
+    skyOutdoorFogColor
+  };
+}
 
 // ../core/src/render/bitmap-textures.ts
 var BitmapFormat = {
@@ -33981,7 +36857,7 @@ var BitmapFormat = {
 };
 
 // ../core/src/render/bitmap-codec.ts
-var zlib = __toESM(require("zlib"));
+var zlib2 = __toESM(require("zlib"));
 var BITMAP_FORMAT_NAMES = {
   [BitmapFormat.A8]: "A8 (8-bit Alpha)",
   [BitmapFormat.Y8]: "Y8 (8-bit Greyscale)",
@@ -34034,7 +36910,7 @@ function encodeRgbaToPng(rgba, width, height) {
       rawScanlines[rowOffset + 1 + x] = rgba[srcRow + x];
     }
   }
-  const deflated = zlib.deflateSync(rawScanlines, { level: 6 });
+  const deflated = zlib2.deflateSync(rawScanlines, { level: 6 });
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
@@ -34048,11 +36924,476 @@ function encodeRgbaToPng(rgba, width, height) {
   const iendChunk = makePngChunk("IEND", Buffer.alloc(0));
   return Buffer.concat([PNG_SIGNATURE, ihdrChunk, idatChunk, iendChunk]);
 }
+function decodePngToRgba(pngBuffer) {
+  if (pngBuffer.length < 8 || !pngBuffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    throw new Error("Invalid PNG signature.");
+  }
+  let width = 0;
+  let height = 0;
+  let colorType = 6;
+  const idatChunks = [];
+  let offset = 8;
+  while (offset + 8 <= pngBuffer.length) {
+    const chunkLen = pngBuffer.readUInt32BE(offset);
+    const chunkType = pngBuffer.toString("ascii", offset + 4, offset + 8);
+    const chunkData = pngBuffer.subarray(offset + 8, offset + 8 + chunkLen);
+    if (chunkType === "IHDR") {
+      width = chunkData.readUInt32BE(0);
+      height = chunkData.readUInt32BE(4);
+      colorType = chunkData[9];
+    } else if (chunkType === "IDAT") {
+      idatChunks.push(chunkData);
+    } else if (chunkType === "IEND") {
+      break;
+    }
+    offset += 12 + chunkLen;
+  }
+  if (width <= 0 || height <= 0) {
+    throw new Error("PNG has invalid dimensions.");
+  }
+  const inflated = zlib2.inflateSync(Buffer.concat(idatChunks));
+  const bpp = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 0 ? 1 : 4;
+  const scanlineLen = 1 + width * bpp;
+  const rgba = new Uint8Array(width * height * 4);
+  let prevRow = null;
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * scanlineLen;
+    const filter = inflated[rowStart];
+    const currentRow = new Uint8Array(width * bpp);
+    for (let i = 0; i < width * bpp; i++) {
+      let byte = inflated[rowStart + 1 + i];
+      const left = i >= bpp ? currentRow[i - bpp] : 0;
+      const up = prevRow ? prevRow[i] : 0;
+      const upLeft = prevRow && i >= bpp ? prevRow[i - bpp] : 0;
+      if (filter === 1) {
+        byte = byte + left & 255;
+      } else if (filter === 2) {
+        byte = byte + up & 255;
+      } else if (filter === 3) {
+        byte = byte + Math.floor((left + up) / 2) & 255;
+      } else if (filter === 4) {
+        const p = left + up - upLeft;
+        const pa = Math.abs(p - left);
+        const pb = Math.abs(p - up);
+        const pc = Math.abs(p - upLeft);
+        let pr = left;
+        if (pb < pa) pr = up;
+        if (pc < pb && pc < pa) pr = upLeft;
+        byte = byte + pr & 255;
+      }
+      currentRow[i] = byte;
+    }
+    for (let x = 0; x < width; x++) {
+      const dstIdx = (y * width + x) * 4;
+      if (colorType === 6) {
+        const srcIdx = x * 4;
+        rgba[dstIdx + 0] = currentRow[srcIdx + 0];
+        rgba[dstIdx + 1] = currentRow[srcIdx + 1];
+        rgba[dstIdx + 2] = currentRow[srcIdx + 2];
+        rgba[dstIdx + 3] = currentRow[srcIdx + 3];
+      } else if (colorType === 2) {
+        const srcIdx = x * 3;
+        rgba[dstIdx + 0] = currentRow[srcIdx + 0];
+        rgba[dstIdx + 1] = currentRow[srcIdx + 1];
+        rgba[dstIdx + 2] = currentRow[srcIdx + 2];
+        rgba[dstIdx + 3] = 255;
+      } else {
+        const gray = currentRow[x];
+        rgba[dstIdx + 0] = gray;
+        rgba[dstIdx + 1] = gray;
+        rgba[dstIdx + 2] = gray;
+        rgba[dstIdx + 3] = 255;
+      }
+    }
+    prevRow = currentRow;
+  }
+  return { width, height, rgba };
+}
+function packRgb565(r, g, b) {
+  return (r >> 3 & 31) << 11 | (g >> 2 & 63) << 5 | b >> 3 & 31;
+}
+function colorDistSq(r1, g1, b1, r2, g2, b2) {
+  const dr = r1 - r2;
+  const dg = g1 - g2;
+  const db = b1 - b2;
+  return dr * dr * 2 + dg * dg * 4 + db * db * 3;
+}
 var _dxtBlockRgba = new Uint8Array(64);
 var _dxtPalR = new Int32Array(4);
 var _dxtPalG = new Int32Array(4);
 var _dxtPalB = new Int32Array(4);
 var _dxtAlphaPal = new Int32Array(8);
+function encodeRgbaToDxt1(rgba, width, height) {
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  const out = new Uint8Array(blocksX * blocksY * 8);
+  const maxX = width - 1;
+  const maxY = height - 1;
+  let dst = 0;
+  for (let by = 0; by < blocksY; by++) {
+    const baseY = by * 4;
+    for (let bx = 0; bx < blocksX; bx++) {
+      const baseX = bx * 4;
+      let minR = 255, minG = 255, minB = 255;
+      let maxR = 0, maxG = 0, maxB = 0;
+      let pOff = 0;
+      for (let py = 0; py < 4; py++) {
+        const y = baseY + py <= maxY ? baseY + py : maxY;
+        const rowOff = y * width;
+        for (let px = 0; px < 4; px++) {
+          const x = baseX + px <= maxX ? baseX + px : maxX;
+          const idx = rowOff + x << 2;
+          const r = rgba[idx];
+          const g = rgba[idx + 1];
+          const b = rgba[idx + 2];
+          _dxtBlockRgba[pOff] = r;
+          _dxtBlockRgba[pOff + 1] = g;
+          _dxtBlockRgba[pOff + 2] = b;
+          pOff += 4;
+          if (r < minR) minR = r;
+          if (g < minG) minG = g;
+          if (b < minB) minB = b;
+          if (r > maxR) maxR = r;
+          if (g > maxG) maxG = g;
+          if (b > maxB) maxB = b;
+        }
+      }
+      const insetR = maxR - minR >> 4;
+      const insetG = maxG - minG >> 4;
+      const insetB = maxB - minB >> 4;
+      if (maxR - insetR > minR + insetR) {
+        maxR -= insetR;
+        minR += insetR;
+      }
+      if (maxG - insetG > minG + insetG) {
+        maxG -= insetG;
+        minG += insetG;
+      }
+      if (maxB - insetB > minB + insetB) {
+        maxB -= insetB;
+        minB += insetB;
+      }
+      let c0 = packRgb565(maxR, maxG, maxB);
+      let c1 = packRgb565(minR, minG, minB);
+      if (c0 === c1) {
+        out[dst] = c0 & 255;
+        out[dst + 1] = c0 >> 8 & 255;
+        out[dst + 2] = c1 & 255;
+        out[dst + 3] = c1 >> 8 & 255;
+        out[dst + 4] = 0;
+        out[dst + 5] = 0;
+        out[dst + 6] = 0;
+        out[dst + 7] = 0;
+        dst += 8;
+        continue;
+      }
+      if (c0 < c1) {
+        const tmp = c0;
+        c0 = c1;
+        c1 = tmp;
+      }
+      const r0 = (c0 >> 11 & 31) * 527 + 23 >> 6;
+      const g0 = (c0 >> 5 & 63) * 259 + 33 >> 6;
+      const b0 = (c0 & 31) * 527 + 23 >> 6;
+      const r1 = (c1 >> 11 & 31) * 527 + 23 >> 6;
+      const g1 = (c1 >> 5 & 63) * 259 + 33 >> 6;
+      const b1 = (c1 & 31) * 527 + 23 >> 6;
+      _dxtPalR[0] = r0;
+      _dxtPalG[0] = g0;
+      _dxtPalB[0] = b0;
+      _dxtPalR[1] = r1;
+      _dxtPalG[1] = g1;
+      _dxtPalB[1] = b1;
+      _dxtPalR[2] = (2 * r0 + r1 + 1) / 3 | 0;
+      _dxtPalG[2] = (2 * g0 + g1 + 1) / 3 | 0;
+      _dxtPalB[2] = (2 * b0 + b1 + 1) / 3 | 0;
+      _dxtPalR[3] = (r0 + 2 * r1 + 1) / 3 | 0;
+      _dxtPalG[3] = (g0 + 2 * g1 + 1) / 3 | 0;
+      _dxtPalB[3] = (b0 + 2 * b1 + 1) / 3 | 0;
+      let code = 0;
+      for (let i = 0; i < 16; i++) {
+        const bOff = i << 2;
+        const pr = _dxtBlockRgba[bOff];
+        const pg = _dxtBlockRgba[bOff + 1];
+        const pb = _dxtBlockRgba[bOff + 2];
+        let bestDist = colorDistSq(pr, pg, pb, _dxtPalR[0], _dxtPalG[0], _dxtPalB[0]);
+        let bestIdx = 0;
+        const d1 = colorDistSq(pr, pg, pb, _dxtPalR[1], _dxtPalG[1], _dxtPalB[1]);
+        if (d1 < bestDist) {
+          bestDist = d1;
+          bestIdx = 1;
+        }
+        const d2 = colorDistSq(pr, pg, pb, _dxtPalR[2], _dxtPalG[2], _dxtPalB[2]);
+        if (d2 < bestDist) {
+          bestDist = d2;
+          bestIdx = 2;
+        }
+        const d3 = colorDistSq(pr, pg, pb, _dxtPalR[3], _dxtPalG[3], _dxtPalB[3]);
+        if (d3 < bestDist) {
+          bestIdx = 3;
+        }
+        code |= bestIdx << i * 2;
+      }
+      out[dst] = c0 & 255;
+      out[dst + 1] = c0 >> 8 & 255;
+      out[dst + 2] = c1 & 255;
+      out[dst + 3] = c1 >> 8 & 255;
+      out[dst + 4] = code & 255;
+      out[dst + 5] = code >>> 8 & 255;
+      out[dst + 6] = code >>> 16 & 255;
+      out[dst + 7] = code >>> 24 & 255;
+      dst += 8;
+    }
+  }
+  return out;
+}
+function encodeRgbaToDxt5(rgba, width, height) {
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  const out = new Uint8Array(blocksX * blocksY * 16);
+  const maxX = width - 1;
+  const maxY = height - 1;
+  let dst = 0;
+  for (let by = 0; by < blocksY; by++) {
+    const baseY = by * 4;
+    for (let bx = 0; bx < blocksX; bx++) {
+      const baseX = bx * 4;
+      let minA = 255, maxA = 0;
+      let minR = 255, minG = 255, minB = 255;
+      let maxR = 0, maxG = 0, maxB = 0;
+      let pOff = 0;
+      for (let py = 0; py < 4; py++) {
+        const y = baseY + py <= maxY ? baseY + py : maxY;
+        const rowOff = y * width;
+        for (let px = 0; px < 4; px++) {
+          const x = baseX + px <= maxX ? baseX + px : maxX;
+          const idx = rowOff + x << 2;
+          const r = rgba[idx];
+          const g = rgba[idx + 1];
+          const b = rgba[idx + 2];
+          const a = rgba[idx + 3];
+          _dxtBlockRgba[pOff] = r;
+          _dxtBlockRgba[pOff + 1] = g;
+          _dxtBlockRgba[pOff + 2] = b;
+          _dxtBlockRgba[pOff + 3] = a;
+          pOff += 4;
+          if (a < minA) minA = a;
+          if (a > maxA) maxA = a;
+          if (r < minR) minR = r;
+          if (g < minG) minG = g;
+          if (b < minB) minB = b;
+          if (r > maxR) maxR = r;
+          if (g > maxG) maxG = g;
+          if (b > maxB) maxB = b;
+        }
+      }
+      const a0 = maxA;
+      const a1 = minA;
+      if (a0 === a1) {
+        out[dst] = a0;
+        out[dst + 1] = a1;
+        out[dst + 2] = 0;
+        out[dst + 3] = 0;
+        out[dst + 4] = 0;
+        out[dst + 5] = 0;
+        out[dst + 6] = 0;
+        out[dst + 7] = 0;
+      } else {
+        out[dst] = a0;
+        out[dst + 1] = a1;
+        _dxtAlphaPal[0] = a0;
+        _dxtAlphaPal[1] = a1;
+        _dxtAlphaPal[2] = (6 * a0 + 1 * a1 + 3) / 7 | 0;
+        _dxtAlphaPal[3] = (5 * a0 + 2 * a1 + 3) / 7 | 0;
+        _dxtAlphaPal[4] = (4 * a0 + 3 * a1 + 3) / 7 | 0;
+        _dxtAlphaPal[5] = (3 * a0 + 4 * a1 + 3) / 7 | 0;
+        _dxtAlphaPal[6] = (2 * a0 + 5 * a1 + 3) / 7 | 0;
+        _dxtAlphaPal[7] = (1 * a0 + 6 * a1 + 3) / 7 | 0;
+        let lo24 = 0;
+        for (let i = 0; i < 8; i++) {
+          const aVal = _dxtBlockRgba[(i << 2) + 3];
+          let bestDist = 999;
+          let bestIdx = 0;
+          for (let p = 0; p < 8; p++) {
+            const d = Math.abs(aVal - _dxtAlphaPal[p]);
+            if (d < bestDist) {
+              bestDist = d;
+              bestIdx = p;
+            }
+          }
+          lo24 |= bestIdx << i * 3;
+        }
+        let hi24 = 0;
+        for (let i = 0; i < 8; i++) {
+          const aVal = _dxtBlockRgba[(i + 8 << 2) + 3];
+          let bestDist = 999;
+          let bestIdx = 0;
+          for (let p = 0; p < 8; p++) {
+            const d = Math.abs(aVal - _dxtAlphaPal[p]);
+            if (d < bestDist) {
+              bestDist = d;
+              bestIdx = p;
+            }
+          }
+          hi24 |= bestIdx << i * 3;
+        }
+        out[dst + 2] = lo24 & 255;
+        out[dst + 3] = lo24 >>> 8 & 255;
+        out[dst + 4] = lo24 >>> 16 & 255;
+        out[dst + 5] = hi24 & 255;
+        out[dst + 6] = hi24 >>> 8 & 255;
+        out[dst + 7] = hi24 >>> 16 & 255;
+      }
+      const insetR = maxR - minR >> 4;
+      const insetG = maxG - minG >> 4;
+      const insetB = maxB - minB >> 4;
+      if (maxR - insetR > minR + insetR) {
+        maxR -= insetR;
+        minR += insetR;
+      }
+      if (maxG - insetG > minG + insetG) {
+        maxG -= insetG;
+        minG += insetG;
+      }
+      if (maxB - insetB > minB + insetB) {
+        maxB -= insetB;
+        minB += insetB;
+      }
+      let c0 = packRgb565(maxR, maxG, maxB);
+      let c1 = packRgb565(minR, minG, minB);
+      if (c0 === c1) {
+        out[dst + 8] = c0 & 255;
+        out[dst + 9] = c0 >> 8 & 255;
+        out[dst + 10] = c1 & 255;
+        out[dst + 11] = c1 >> 8 & 255;
+        out[dst + 12] = 0;
+        out[dst + 13] = 0;
+        out[dst + 14] = 0;
+        out[dst + 15] = 0;
+        dst += 16;
+        continue;
+      }
+      if (c0 < c1) {
+        const tmp = c0;
+        c0 = c1;
+        c1 = tmp;
+      }
+      const r0 = (c0 >> 11 & 31) * 527 + 23 >> 6;
+      const g0 = (c0 >> 5 & 63) * 259 + 33 >> 6;
+      const b0 = (c0 & 31) * 527 + 23 >> 6;
+      const r1 = (c1 >> 11 & 31) * 527 + 23 >> 6;
+      const g1 = (c1 >> 5 & 63) * 259 + 33 >> 6;
+      const b1 = (c1 & 31) * 527 + 23 >> 6;
+      _dxtPalR[0] = r0;
+      _dxtPalG[0] = g0;
+      _dxtPalB[0] = b0;
+      _dxtPalR[1] = r1;
+      _dxtPalG[1] = g1;
+      _dxtPalB[1] = b1;
+      _dxtPalR[2] = (2 * r0 + r1 + 1) / 3 | 0;
+      _dxtPalG[2] = (2 * g0 + g1 + 1) / 3 | 0;
+      _dxtPalB[2] = (2 * b0 + b1 + 1) / 3 | 0;
+      _dxtPalR[3] = (r0 + 2 * r1 + 1) / 3 | 0;
+      _dxtPalG[3] = (g0 + 2 * g1 + 1) / 3 | 0;
+      _dxtPalB[3] = (b0 + 2 * b1 + 1) / 3 | 0;
+      let code = 0;
+      for (let i = 0; i < 16; i++) {
+        const bOff = i << 2;
+        const pr = _dxtBlockRgba[bOff];
+        const pg = _dxtBlockRgba[bOff + 1];
+        const pb = _dxtBlockRgba[bOff + 2];
+        let bestDist = colorDistSq(pr, pg, pb, _dxtPalR[0], _dxtPalG[0], _dxtPalB[0]);
+        let bestIdx = 0;
+        const d1 = colorDistSq(pr, pg, pb, _dxtPalR[1], _dxtPalG[1], _dxtPalB[1]);
+        if (d1 < bestDist) {
+          bestDist = d1;
+          bestIdx = 1;
+        }
+        const d2 = colorDistSq(pr, pg, pb, _dxtPalR[2], _dxtPalG[2], _dxtPalB[2]);
+        if (d2 < bestDist) {
+          bestDist = d2;
+          bestIdx = 2;
+        }
+        const d3 = colorDistSq(pr, pg, pb, _dxtPalR[3], _dxtPalG[3], _dxtPalB[3]);
+        if (d3 < bestDist) {
+          bestIdx = 3;
+        }
+        code |= bestIdx << i * 2;
+      }
+      out[dst + 8] = c0 & 255;
+      out[dst + 9] = c0 >> 8 & 255;
+      out[dst + 10] = c1 & 255;
+      out[dst + 11] = c1 >> 8 & 255;
+      out[dst + 12] = code & 255;
+      out[dst + 13] = code >>> 8 & 255;
+      out[dst + 14] = code >>> 16 & 255;
+      out[dst + 15] = code >>> 24 & 255;
+      dst += 16;
+    }
+  }
+  return out;
+}
+function downsampleRgba2x(src, srcW, srcH) {
+  const dstW = Math.max(1, Math.floor(srcW / 2));
+  const dstH = Math.max(1, Math.floor(srcH / 2));
+  const dst = new Uint8Array(dstW * dstH * 4);
+  for (let y = 0; y < dstH; y++) {
+    const srcY0 = Math.min(srcH - 1, y * 2);
+    const srcY1 = Math.min(srcH - 1, y * 2 + 1);
+    for (let x = 0; x < dstW; x++) {
+      const srcX0 = Math.min(srcW - 1, x * 2);
+      const srcX1 = Math.min(srcW - 1, x * 2 + 1);
+      const p00 = (srcY0 * srcW + srcX0) * 4;
+      const p10 = (srcY0 * srcW + srcX1) * 4;
+      const p01 = (srcY1 * srcW + srcX0) * 4;
+      const p11 = (srcY1 * srcW + srcX1) * 4;
+      const dstIdx = (y * dstW + x) * 4;
+      dst[dstIdx + 0] = Math.round((src[p00 + 0] + src[p10 + 0] + src[p01 + 0] + src[p11 + 0]) / 4);
+      dst[dstIdx + 1] = Math.round((src[p00 + 1] + src[p10 + 1] + src[p01 + 1] + src[p11 + 1]) / 4);
+      dst[dstIdx + 2] = Math.round((src[p00 + 2] + src[p10 + 2] + src[p01 + 2] + src[p11 + 2]) / 4);
+      dst[dstIdx + 3] = Math.round((src[p00 + 3] + src[p10 + 3] + src[p01 + 3] + src[p11 + 3]) / 4);
+    }
+  }
+  return { dst, dstW, dstH };
+}
+function encodeBitmapWithMipmaps(rgba, width, height, format, generateMips = true) {
+  const buffers = [];
+  let curRgba = rgba;
+  let curW = width;
+  let curH = height;
+  const maxMips = generateMips ? Math.floor(Math.log2(Math.max(width, height))) : 0;
+  for (let level = 0; level <= maxMips; level++) {
+    let levelBytes;
+    if (format === BitmapFormat.DXT1) {
+      levelBytes = encodeRgbaToDxt1(curRgba, curW, curH);
+    } else if (format === BitmapFormat.DXT5) {
+      levelBytes = encodeRgbaToDxt5(curRgba, curW, curH);
+    } else {
+      levelBytes = new Uint8Array(curW * curH * 4);
+      for (let i = 0; i < curRgba.length; i += 4) {
+        levelBytes[i + 0] = curRgba[i + 2];
+        levelBytes[i + 1] = curRgba[i + 1];
+        levelBytes[i + 2] = curRgba[i + 0];
+        levelBytes[i + 3] = curRgba[i + 3];
+      }
+    }
+    buffers.push(levelBytes);
+    if (level < maxMips) {
+      const down = downsampleRgba2x(curRgba, curW, curH);
+      curRgba = down.dst;
+      curW = down.dstW;
+      curH = down.dstH;
+    }
+  }
+  const totalLength = buffers.reduce((acc, b) => acc + b.length, 0);
+  const out = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const b of buffers) {
+    out.set(b, offset);
+    offset += b.length;
+  }
+  return { pixelData: out, mipmapCount: maxMips };
+}
 
 // ../core/src/render/mesh-integrity.ts
 var TOLERANCE = 1e-6;
@@ -35007,6 +38348,584 @@ function renderObjUvTemplatePng(objText, size = 1024, options = {}) {
     usedAutoUv
   };
 }
+function nearestPowerOfTwo(n, min = 16, max = 2048) {
+  const clamped = Math.max(min, Math.min(max, n));
+  return Math.pow(2, Math.round(Math.log2(clamped)));
+}
+function resizeRgbaToPowerOfTwo(rgba, width, height, maxDim = 1024) {
+  const dstW = nearestPowerOfTwo(width, 16, maxDim);
+  const dstH = nearestPowerOfTwo(height, 16, maxDim);
+  if (dstW === width && dstH === height) {
+    return { rgba, width, height };
+  }
+  const out = new Uint8Array(dstW * dstH * 4);
+  for (let y = 0; y < dstH; y++) {
+    const srcY = Math.min(height - 1, Math.floor(y / dstH * height));
+    for (let x = 0; x < dstW; x++) {
+      const srcX = Math.min(width - 1, Math.floor(x / dstW * width));
+      const srcIdx = (srcY * width + srcX) * 4;
+      const dstIdx = (y * dstW + x) * 4;
+      out[dstIdx + 0] = rgba[srcIdx + 0];
+      out[dstIdx + 1] = rgba[srcIdx + 1];
+      out[dstIdx + 2] = rgba[srcIdx + 2];
+      out[dstIdx + 3] = rgba[srcIdx + 3];
+    }
+  }
+  return { rgba: out, width: dstW, height: dstH };
+}
+function writeTagString(buf, offset, text) {
+  buf.fill(0, offset, offset + 32);
+  const clean = text.slice(0, 31);
+  buf.write(clean, offset, clean.length, "ascii");
+}
+function writeDependencyField(buf, offset, fourccStr, tagId = NULL_TAG_ID) {
+  buf.writeUInt32LE(fourCCFromString(fourccStr), offset + 0);
+  buf.writeUInt32LE(0, offset + 4);
+  buf.writeUInt32LE(0, offset + 8);
+  buf.writeUInt32LE(tagId >>> 0, offset + 12);
+}
+function buildTagDependenciesFromBuffer(data, structName, tagPath, internalRefsByFieldPath, externalOrExistingRefsByFieldPath) {
+  const deps = [];
+  const visit = (curStructName, localOffset, curPath) => {
+    const resolved = resolveStruct(curStructName);
+    const decoded = decodeStruct(data, localOffset, curStructName);
+    for (const field of resolved.fields) {
+      const value = decoded.get(field.name);
+      if (!value || field.def.nonCached) continue;
+      const absFieldOffset = localOffset + field.offset;
+      const path16 = childFieldPath(curPath, field.name);
+      if (value.kind === "dependency") {
+        const internalTarget = internalRefsByFieldPath.get(path16);
+        const existingTarget = externalOrExistingRefsByFieldPath?.get(path16);
+        if (internalTarget) {
+          data.writeUInt32LE(internalTarget.localTagIndex >>> 0, absFieldOffset + 12);
+          deps.push({
+            fieldPath: path16,
+            group: internalTarget.group,
+            path: internalTarget.path,
+            kind: "internal",
+            localTagIndex: internalTarget.localTagIndex,
+            fieldOffset: absFieldOffset
+          });
+        } else if (existingTarget && existingTarget.kind !== "null") {
+          deps.push({
+            ...existingTarget,
+            fieldPath: path16,
+            fieldOffset: absFieldOffset
+          });
+        } else {
+          data.writeUInt32LE(NULL_TAG_ID, absFieldOffset + 12);
+          deps.push({
+            fieldPath: path16,
+            group: "",
+            path: "",
+            kind: "null",
+            fieldOffset: absFieldOffset
+          });
+        }
+      } else if (value.kind === "reflexive" && value.value.count > 0) {
+        const childStruct = field.def.type === "TagReflexive" ? field.def.struct : void 0;
+        if (!childStruct) continue;
+        const childSize = resolveStruct(childStruct).totalSize;
+        const base = value.value.pointerLow;
+        if (!isRangeInBuffer(base, value.value.count * childSize, data.length)) continue;
+        for (let i = 0; i < value.value.count; i++) {
+          visit(childStruct, base + i * childSize, reflexiveElementPath(curPath, field.name, i));
+        }
+      } else if (isRelocatedTagDataField(field, value)) {
+      }
+    }
+  };
+  visit(structName, 0, tagPath);
+  return deps;
+}
+function buildCustomBitmapTag(tagPath, originalIndex, rgbaInput, inputWidth, inputHeight, format = BitmapFormat.A8R8G8B8) {
+  const { rgba, width, height } = resizeRgbaToPowerOfTwo(rgbaInput, inputWidth, inputHeight, 1024);
+  const { pixelData, mipmapCount } = encodeBitmapWithMipmaps(rgba, width, height, format, true);
+  const buf = Buffer.alloc(220, 0);
+  buf.writeUInt16LE(0, 0);
+  buf.writeUInt16LE(format === BitmapFormat.DXT1 ? 1 : format === BitmapFormat.DXT5 ? 3 : 4, 2);
+  buf.writeUInt16LE(1, 4);
+  buf.writeUInt16LE(0, 6);
+  buf.writeUInt32LE(1, 84);
+  buf.writeUInt32LE(108, 88);
+  buf.writeUInt32LE(1, 96);
+  buf.writeUInt32LE(172, 100);
+  writeTagString(buf, 108, "default");
+  buf.writeUInt16LE(0, 108 + 32);
+  buf.writeUInt16LE(1, 108 + 34);
+  const bdOff = 172;
+  buf.write("bitm", bdOff + 0, 4, "ascii");
+  buf.writeUInt32LE(1651078253, bdOff + 0);
+  buf.writeUInt16LE(width, bdOff + 4);
+  buf.writeUInt16LE(height, bdOff + 6);
+  buf.writeUInt16LE(1, bdOff + 8);
+  buf.writeUInt16LE(0, bdOff + 10);
+  buf.writeUInt16LE(format, bdOff + 12);
+  const isCompressed = format === BitmapFormat.DXT1 || format === BitmapFormat.DXT3 || format === BitmapFormat.DXT5;
+  const bdFlags = 128 | 1 | (isCompressed ? 2 : 0);
+  buf.writeUInt16LE(bdFlags, bdOff + 14);
+  buf.writeUInt16LE(Math.floor(width / 2), bdOff + 16);
+  buf.writeUInt16LE(Math.floor(height / 2), bdOff + 18);
+  buf.writeUInt16LE(mipmapCount, bdOff + 20);
+  buf.writeUInt16LE(0, bdOff + 22);
+  buf.writeUInt32LE(0, bdOff + 24);
+  buf.writeUInt32LE(pixelData.byteLength, bdOff + 28);
+  buf.writeUInt32LE(NULL_TAG_ID, bdOff + 32);
+  buf.writeUInt32LE(NULL_TAG_ID, bdOff + 36);
+  const embeddedRawDataAssets = [
+    { kind: "bitmap", data: Buffer.from(pixelData) }
+  ];
+  const embeddedRawDataPatches = [
+    { assetIndex: 0, patchOffset: bdOff + 24, patchWidth: 4 }
+  ];
+  return {
+    originalIndex,
+    group: "bitmap",
+    path: tagPath,
+    structName: "Bitmap",
+    secondaryClassFourCC: null,
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies: [],
+    embeddedRawDataAssets,
+    embeddedRawDataPatches,
+    injectionBlockers: []
+  };
+}
+var HALO_MATERIAL_TYPES = [
+  "dirt",
+  "sand",
+  "stone",
+  "snow",
+  "wood",
+  "metal hollow",
+  "metal thin",
+  "metal thick",
+  "rubber",
+  "glass",
+  "force field",
+  "grunt",
+  "hunter armor",
+  "hunter skin",
+  "elite",
+  "jackal",
+  "jackal energy shield",
+  "engineer skin",
+  "engineer force field",
+  "flood combat form",
+  "flood carrier form",
+  "cyborg armor",
+  "cyborg energy shield",
+  "human armor",
+  "human skin",
+  "sentinel",
+  "monitor",
+  "plastic",
+  "water",
+  "leaves",
+  "elite energy shield",
+  "ice",
+  "hunter shield"
+];
+function buildCustomShaderModelTag(tagPath, originalIndex, bitmapPath, bitmapLocalIndex, materialType = 7) {
+  const buf = Buffer.alloc(440, 0);
+  const safeMat = materialType >= 0 && materialType < HALO_MATERIAL_TYPES.length ? materialType : 7;
+  writeDependencyField(buf, 164, "bitm", bitmapLocalIndex);
+  writeDependencyField(buf, 188, "bitm", NULL_TAG_ID);
+  writeDependencyField(buf, 220, "bitm", NULL_TAG_ID);
+  writeDependencyField(buf, 356, "bitm", NULL_TAG_ID);
+  buf.writeUInt16LE(safeMat, 34);
+  buf.writeUInt16LE(4, 36);
+  buf.writeFloatLE(1, 116);
+  buf.writeFloatLE(1, 156);
+  buf.writeFloatLE(1, 160);
+  buf.writeFloatLE(1, 216);
+  buf.writeFloatLE(1, 236);
+  buf.writeFloatLE(1, 256);
+  buf.writeFloatLE(1, 264);
+  buf.writeFloatLE(1, 272);
+  buf.writeFloatLE(1, 280);
+  buf.writeFloatLE(1, 288);
+  buf.writeFloatLE(360, 296);
+  const internalMap = /* @__PURE__ */ new Map();
+  internalMap.set(childFieldPath(tagPath, "base map"), {
+    group: "bitmap",
+    path: bitmapPath,
+    localTagIndex: bitmapLocalIndex
+  });
+  const dependencies = buildTagDependenciesFromBuffer(buf, "ShaderModel", tagPath, internalMap);
+  return {
+    originalIndex,
+    group: "shader_model",
+    path: tagPath,
+    structName: "ShaderModel",
+    secondaryClassFourCC: fourCCFromString("shdr"),
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies,
+    embeddedRawDataAssets: [],
+    embeddedRawDataPatches: [],
+    injectionBlockers: []
+  };
+}
+function inferHaloMaterialTypeFromName(slotName, fallback = 7) {
+  const s = slotName.trim().toLowerCase();
+  if (!s) return fallback;
+  const exactIdx = HALO_MATERIAL_TYPES.indexOf(s);
+  if (exactIdx >= 0) return exactIdx;
+  if (s.includes("glass") || s.includes("windshield") || s.includes("window") || s.includes("visor") || s.includes("canopy")) return 9;
+  if (s.includes("rubber") || s.includes("tire") || s.includes("tyre") || s.includes("wheel") || s.includes("tread")) return 8;
+  if (s.includes("wood") || s.includes("plank") || s.includes("timber") || s.includes("bark") || s.includes("crate")) return 4;
+  if (s.includes("stone") || s.includes("rock") || s.includes("concrete") || s.includes("brick") || s.includes("granite") || s.includes("boulder")) return 2;
+  if (s.includes("dirt") || s.includes("mud") || s.includes("soil") || s.includes("earth")) return 0;
+  if (s.includes("sand") || s.includes("desert") || s.includes("dune")) return 1;
+  if (s.includes("snow") || s.includes("frost")) return 3;
+  if (s.includes("ice") || s.includes("glacier")) return 31;
+  if (s.includes("water") || s.includes("liquid")) return 28;
+  if (s.includes("leaf") || s.includes("leaves") || s.includes("foliage") || s.includes("grass") || s.includes("bush")) return 29;
+  if (s.includes("plastic") || s.includes("polymer") || s.includes("vinyl") || s.includes("seat")) return 27;
+  if (s.includes("cyborg") && s.includes("shield")) return 22;
+  if (s.includes("cyborg")) return 21;
+  if (s.includes("force") || s.includes("shield") || s.includes("energy")) return 10;
+  if (s.includes("hollow")) return 5;
+  if (s.includes("thin") || s.includes("sheet") || s.includes("tin") || s.includes("aluminum")) return 6;
+  if (s.includes("metal") || s.includes("steel") || s.includes("iron") || s.includes("titanium") || s.includes("hull") || s.includes("armor") || s.includes("brass")) return 7;
+  return fallback;
+}
+function stitchTrianglesToStrip(triangles) {
+  const stripIndices = [];
+  for (let i = 0; i < triangles.length; i++) {
+    const [a, b, c] = triangles[i];
+    if (i === 0) {
+      stripIndices.push(a, c, b);
+    } else {
+      const prev = stripIndices[stripIndices.length - 1];
+      stripIndices.push(prev, a, a);
+      if ((stripIndices.length - 1) % 2 === 1) {
+        stripIndices.push(a);
+      }
+      stripIndices.push(c, b);
+    }
+  }
+  const triangleCount = Math.max(1, stripIndices.length - 2);
+  const paddedLen = stripIndices.length + stripIndices.length % 2;
+  const triangleBufferBytes = Buffer.alloc(paddedLen * 2, 255);
+  for (let i = 0; i < stripIndices.length; i++) {
+    triangleBufferBytes.writeUInt16LE(stripIndices[i] & 65535, i * 2);
+  }
+  return { stripIndices, triangleBufferBytes, triangleCount };
+}
+function encodeUncompressedVertices(vertices) {
+  const buf = Buffer.alloc(vertices.length * 68, 0);
+  for (let i = 0; i < vertices.length; i++) {
+    const v = vertices[i];
+    const off = i * 68;
+    buf.writeFloatLE(v.position[0], off + 0);
+    buf.writeFloatLE(v.position[1], off + 4);
+    buf.writeFloatLE(v.position[2], off + 8);
+    buf.writeFloatLE(v.normal[0], off + 12);
+    buf.writeFloatLE(v.normal[1], off + 16);
+    buf.writeFloatLE(v.normal[2], off + 20);
+    buf.writeFloatLE(v.binormal[0], off + 24);
+    buf.writeFloatLE(v.binormal[1], off + 28);
+    buf.writeFloatLE(v.binormal[2], off + 32);
+    buf.writeFloatLE(v.tangent[0], off + 36);
+    buf.writeFloatLE(v.tangent[1], off + 40);
+    buf.writeFloatLE(v.tangent[2], off + 44);
+    buf.writeFloatLE(v.uv[0], off + 48);
+    buf.writeFloatLE(v.uv[1], off + 52);
+    buf.writeInt16LE(v.node0Index, off + 56);
+    buf.writeInt16LE(v.node1Index, off + 58);
+    buf.writeFloatLE(v.node0Weight, off + 60);
+    buf.writeFloatLE(v.node1Weight, off + 64);
+  }
+  return buf;
+}
+function buildCustomGbxmodelTag(tagPath, originalIndex, mesh, shaderPath, shaderLocalIndex, rig) {
+  const vertexBytes = encodeUncompressedVertices(mesh.vertices);
+  const { triangleBufferBytes, triangleCount } = stitchTrianglesToStrip(mesh.triangles);
+  let nodesBuf;
+  let nodeCount = 1;
+  if (rig && rig.modelNodeCount > 0 && rig.modelNodesBuffer.length === rig.modelNodeCount * 156) {
+    nodeCount = rig.modelNodeCount;
+    nodesBuf = Buffer.from(rig.modelNodesBuffer);
+  } else {
+    nodesBuf = Buffer.alloc(156, 0);
+    writeTagString(nodesBuf, 0, "frame root");
+    nodesBuf.writeInt16LE(-1, 32);
+    nodesBuf.writeInt16LE(-1, 34);
+    nodesBuf.writeInt16LE(-1, 36);
+    nodesBuf.writeFloatLE(0, 40);
+    nodesBuf.writeFloatLE(0, 44);
+    nodesBuf.writeFloatLE(0, 48);
+    nodesBuf.writeFloatLE(0, 52);
+    nodesBuf.writeFloatLE(0, 56);
+    nodesBuf.writeFloatLE(0, 60);
+    nodesBuf.writeFloatLE(1, 64);
+    nodesBuf.writeFloatLE(1, 104);
+    nodesBuf.writeFloatLE(1, 108);
+    nodesBuf.writeFloatLE(1, 124);
+    nodesBuf.writeFloatLE(1, 140);
+  }
+  const markerCount = rig?.markerCount ?? 0;
+  const markersBuf = markerCount > 0 && rig ? Buffer.from(rig.markersBuffer) : Buffer.alloc(0);
+  const topMarkers = rig?.topLevelMarkers ?? [];
+  const topMarkersHeaderSize = topMarkers.length * 64;
+  const topMarkerInstancesCount = topMarkers.reduce((s, m) => s + m.instances.length, 0);
+  const topMarkerInstancesSize = topMarkerInstancesCount * 32;
+  const offTopMarkers = 232;
+  const offTopMarkerInstances = offTopMarkers + topMarkersHeaderSize;
+  const offNodes = offTopMarkerInstances + topMarkerInstancesSize;
+  const offRegions = offNodes + nodesBuf.length;
+  const offPermutations = offRegions + 76;
+  const offMarkers = offPermutations + 88;
+  const offGeometries = offMarkers + markersBuf.length;
+  const offParts = offGeometries + 48;
+  const offShaders = offParts + 132;
+  const totalSize = offShaders + 32;
+  const buf = Buffer.alloc(totalSize, 0);
+  buf.writeUInt32LE(4, 0);
+  buf.writeInt32LE(rig?.nodeListChecksum ?? 0, 4);
+  buf.writeUInt16LE(nodeCount, 28);
+  buf.writeUInt16LE(nodeCount, 30);
+  buf.writeUInt16LE(nodeCount, 32);
+  buf.writeUInt16LE(nodeCount, 34);
+  buf.writeUInt16LE(nodeCount, 36);
+  buf.writeFloatLE(1, 48);
+  buf.writeFloatLE(1, 52);
+  if (topMarkers.length > 0) {
+    buf.writeUInt32LE(topMarkers.length, 172);
+    buf.writeUInt32LE(offTopMarkers, 176);
+    let instCursor = offTopMarkerInstances;
+    for (let m = 0; m < topMarkers.length; m++) {
+      const mHeaderOff = offTopMarkers + m * 64;
+      topMarkers[m].headerBytes.copy(buf, mHeaderOff);
+      const insts = topMarkers[m].instances;
+      if (insts.length > 0) {
+        buf.writeUInt32LE(insts.length, mHeaderOff + 52);
+        buf.writeUInt32LE(instCursor, mHeaderOff + 56);
+        buf.writeUInt32LE(0, mHeaderOff + 60);
+        for (const inst of insts) {
+          inst.copy(buf, instCursor);
+          instCursor += 32;
+        }
+      } else {
+        buf.writeUInt32LE(0, mHeaderOff + 52);
+        buf.writeUInt32LE(0, mHeaderOff + 56);
+        buf.writeUInt32LE(0, mHeaderOff + 60);
+      }
+    }
+  }
+  buf.writeUInt32LE(nodeCount, 184);
+  buf.writeUInt32LE(offNodes, 188);
+  buf.writeUInt32LE(1, 196);
+  buf.writeUInt32LE(offRegions, 200);
+  buf.writeUInt32LE(1, 208);
+  buf.writeUInt32LE(offGeometries, 212);
+  buf.writeUInt32LE(1, 220);
+  buf.writeUInt32LE(offShaders, 224);
+  nodesBuf.copy(buf, offNodes);
+  writeTagString(buf, offRegions, "default");
+  buf.writeUInt32LE(1, offRegions + 64);
+  buf.writeUInt32LE(offPermutations, offRegions + 68);
+  writeTagString(buf, offPermutations, "base");
+  buf.writeInt16LE(0, offPermutations + 64);
+  buf.writeInt16LE(0, offPermutations + 66);
+  buf.writeInt16LE(0, offPermutations + 68);
+  buf.writeInt16LE(0, offPermutations + 70);
+  buf.writeInt16LE(0, offPermutations + 72);
+  if (markerCount > 0) {
+    buf.writeUInt32LE(markerCount, offPermutations + 76);
+    buf.writeUInt32LE(offMarkers, offPermutations + 80);
+    markersBuf.copy(buf, offMarkers);
+  }
+  buf.writeUInt32LE(1, offGeometries + 36);
+  buf.writeUInt32LE(offParts, offGeometries + 40);
+  const cx = (mesh.summary.bounds.min[0] + mesh.summary.bounds.max[0]) * 0.5;
+  const cy = (mesh.summary.bounds.min[1] + mesh.summary.bounds.max[1]) * 0.5;
+  const cz = (mesh.summary.bounds.min[2] + mesh.summary.bounds.max[2]) * 0.5;
+  buf.writeUInt32LE(0, offParts + 0);
+  buf.writeInt16LE(0, offParts + 4);
+  buf.writeUInt8(255, offParts + 6);
+  buf.writeUInt8(255, offParts + 7);
+  buf.writeInt16LE(0, offParts + 8);
+  buf.writeInt16LE(0, offParts + 10);
+  buf.writeFloatLE(1, offParts + 12);
+  buf.writeFloatLE(0, offParts + 16);
+  buf.writeFloatLE(cx, offParts + 20);
+  buf.writeFloatLE(cy, offParts + 24);
+  buf.writeFloatLE(cz, offParts + 28);
+  buf.writeUInt16LE(1, offParts + 68);
+  buf.writeUInt32LE(triangleCount, offParts + 72);
+  buf.writeUInt32LE(0, offParts + 76);
+  buf.writeUInt32LE(0, offParts + 80);
+  buf.writeUInt16LE(4, offParts + 84);
+  buf.writeUInt32LE(mesh.vertices.length, offParts + 88);
+  buf.writeUInt32LE(0, offParts + 100);
+  writeDependencyField(buf, offShaders + 0, "soso", shaderLocalIndex);
+  const internalMap = /* @__PURE__ */ new Map();
+  internalMap.set(`${reflexiveElementPath(tagPath, "shaders", 0)}.shader`, {
+    group: "shader_model",
+    path: shaderPath,
+    localTagIndex: shaderLocalIndex
+  });
+  const dependencies = buildTagDependenciesFromBuffer(buf, "GBXModel", tagPath, internalMap);
+  const gbxmodelGeometryParts = [
+    {
+      geometryIndex: 0,
+      partIndex: 0,
+      vertexType: 4,
+      vertexCount: mesh.vertices.length,
+      vertexBytes,
+      triangleBufferType: 1,
+      triangleCount,
+      triangleBytes: triangleBufferBytes
+    }
+  ];
+  const embeddedRawDataAssets = [
+    { kind: "gbxmodel-vertex", data: vertexBytes },
+    { kind: "gbxmodel-triangle-strip", data: triangleBufferBytes }
+  ];
+  const embeddedRawDataPatches = [
+    { assetIndex: 0, patchOffset: offParts + 100, patchWidth: 4 },
+    { assetIndex: 1, patchOffset: offParts + 76, patchWidth: 4 }
+  ];
+  return {
+    originalIndex,
+    group: "gbxmodel",
+    path: tagPath,
+    structName: "GBXModel",
+    secondaryClassFourCC: null,
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies,
+    embeddedRawDataAssets,
+    embeddedRawDataPatches,
+    injectionBlockers: [],
+    gbxmodelGeometryParts
+  };
+}
+function writeBoxCollisionBsp(targetBuf, structOff, arraysOff, boundsMin, boundsMax) {
+  const padX = Math.max(0, 0.04 - (boundsMax[0] - boundsMin[0])) * 0.5;
+  const padY = Math.max(0, 0.04 - (boundsMax[1] - boundsMin[1])) * 0.5;
+  const padZ = Math.max(0, 0.04 - (boundsMax[2] - boundsMin[2])) * 0.5;
+  const minX = boundsMin[0] - padX, maxX = boundsMax[0] + padX;
+  const minY = boundsMin[1] - padY, maxY = boundsMax[1] + padY;
+  const minZ = boundsMin[2] - padZ, maxZ = boundsMax[2] + padZ;
+  let cursor = arraysOff;
+  const offBsp3dNodes = cursor;
+  const bsp3dNodes = [
+    [0, 1, 2147483653],
+    [1, 2, 2147483652],
+    [2, 3, 2147483651],
+    [3, 4, 2147483650],
+    [4, 5, 2147483649],
+    [5, 4294967295, 2147483648]
+  ];
+  for (let i = 0; i < 6; i++) {
+    targetBuf.writeInt32LE(bsp3dNodes[i][0], cursor + 0);
+    targetBuf.writeUInt32LE(bsp3dNodes[i][1] >>> 0, cursor + 4);
+    targetBuf.writeUInt32LE(bsp3dNodes[i][2] >>> 0, cursor + 8);
+    cursor += 12;
+  }
+  const offPlanes = cursor;
+  const planes = [
+    [0, 0, -1, -minZ],
+    [0, 0, 1, maxZ],
+    [1, 0, 0, maxX],
+    [-1, 0, 0, -minX],
+    [0, 1, 0, maxY],
+    [0, -1, 0, -minY]
+  ];
+  for (let i = 0; i < 6; i++) {
+    targetBuf.writeFloatLE(planes[i][0], cursor + 0);
+    targetBuf.writeFloatLE(planes[i][1], cursor + 4);
+    targetBuf.writeFloatLE(planes[i][2], cursor + 8);
+    targetBuf.writeFloatLE(planes[i][3], cursor + 12);
+    cursor += 16;
+  }
+  const offLeaves = cursor;
+  for (let i = 0; i < 6; i++) {
+    targetBuf.writeUInt16LE(0, cursor + 0);
+    targetBuf.writeUInt16LE(1, cursor + 2);
+    targetBuf.writeUInt32LE(i, cursor + 4);
+    cursor += 8;
+  }
+  const offBsp2dRefs = cursor;
+  for (let i = 0; i < 6; i++) {
+    const surfIdx = 5 - i;
+    targetBuf.writeUInt32LE(surfIdx, cursor + 0);
+    targetBuf.writeUInt32LE((2147483648 | surfIdx) >>> 0, cursor + 4);
+    cursor += 8;
+  }
+  const offSurfaces = cursor;
+  const surfaceFirstEdges = [0, 2, 0, 6, 4, 1];
+  for (let i = 0; i < 6; i++) {
+    targetBuf.writeUInt32LE(i, cursor + 0);
+    targetBuf.writeUInt32LE(surfaceFirstEdges[i], cursor + 4);
+    targetBuf.writeUInt8(0, cursor + 8);
+    targetBuf.writeInt8(0, cursor + 9);
+    targetBuf.writeInt16LE(0, cursor + 10);
+    cursor += 12;
+  }
+  const offEdges = cursor;
+  const edges = [
+    [1, 2, 1, 8, 0, 2],
+    [2, 0, 6, 10, 0, 5],
+    [4, 5, 3, 9, 1, 5],
+    [5, 3, 4, 10, 1, 2],
+    [3, 6, 5, 8, 1, 4],
+    [6, 4, 2, 11, 1, 3],
+    [0, 7, 7, 9, 0, 3],
+    [7, 1, 0, 11, 0, 4],
+    [1, 3, 3, 7, 2, 4],
+    [0, 4, 5, 1, 3, 5],
+    [5, 2, 0, 2, 2, 5],
+    [6, 7, 6, 4, 3, 4]
+  ];
+  for (let i = 0; i < 12; i++) {
+    for (let k = 0; k < 6; k++) {
+      targetBuf.writeUInt32LE(edges[i][k], cursor + k * 4);
+    }
+    cursor += 24;
+  }
+  const offVertices = cursor;
+  const verts = [
+    [minX, minY, minZ, 6],
+    [maxX, maxY, minZ, 0],
+    [maxX, minY, minZ, 1],
+    [maxX, maxY, maxZ, 4],
+    [minX, minY, maxZ, 2],
+    [maxX, minY, maxZ, 3],
+    [minX, maxY, maxZ, 5],
+    [minX, maxY, minZ, 7]
+  ];
+  for (let i = 0; i < 8; i++) {
+    targetBuf.writeFloatLE(verts[i][0], cursor + 0);
+    targetBuf.writeFloatLE(verts[i][1], cursor + 4);
+    targetBuf.writeFloatLE(verts[i][2], cursor + 8);
+    targetBuf.writeUInt32LE(verts[i][3], cursor + 12);
+    cursor += 16;
+  }
+  targetBuf.writeUInt32LE(6, structOff + 0);
+  targetBuf.writeUInt32LE(offBsp3dNodes, structOff + 4);
+  targetBuf.writeUInt32LE(6, structOff + 12);
+  targetBuf.writeUInt32LE(offPlanes, structOff + 16);
+  targetBuf.writeUInt32LE(6, structOff + 24);
+  targetBuf.writeUInt32LE(offLeaves, structOff + 28);
+  targetBuf.writeUInt32LE(6, structOff + 36);
+  targetBuf.writeUInt32LE(offBsp2dRefs, structOff + 40);
+  targetBuf.writeUInt32LE(0, structOff + 48);
+  targetBuf.writeUInt32LE(0, structOff + 52);
+  targetBuf.writeUInt32LE(6, structOff + 60);
+  targetBuf.writeUInt32LE(offSurfaces, structOff + 64);
+  targetBuf.writeUInt32LE(12, structOff + 72);
+  targetBuf.writeUInt32LE(offEdges, structOff + 76);
+  targetBuf.writeUInt32LE(8, structOff + 84);
+  targetBuf.writeUInt32LE(offVertices, structOff + 88);
+  return cursor;
+}
 var HALO_PROJECTION3D_MAPPINGS = [
   [
     [2, 1],
@@ -35884,33 +39803,49 @@ function compileMeshCollisionBspData(mesh, materialCount, options) {
         else if (c.state === "back") backCount++;
         else if (c.state === "split") splitCount++;
       }
-      const score = !isConcave && frontCount === 0 && splitCount === 0 ? -1e3 - backCount : splitCount * 3 + Math.abs(frontCount - backCount);
+      const horizBonus = depth < 6 && Math.abs(pl2[2]) > 0.7 ? -90 : 0;
+      const score = !isConcave && frontCount === 0 && splitCount === 0 ? -1e3 - backCount + horizBonus : splitCount * 3 + Math.abs(frontCount - backCount) + horizBonus;
       if (score < bestScore) {
         bestScore = score;
         bestPlane = pIdx;
       }
     }
     const pl = planes[bestPlane];
-    const frontList = [];
-    const backList = [];
+    const rawFrontList = [];
+    const rawBackList = [];
     for (const poly of polys) {
       if (poly.planeIdx === bestPlane) continue;
       const c = clipPolyAgainstPlane(poly.pts, pl);
       if (c.state === "front") {
-        frontList.push(poly);
+        rawFrontList.push(poly);
       } else if (c.state === "back") {
-        backList.push(poly);
+        rawBackList.push(poly);
       } else if (c.state === "split") {
-        if (depth >= 18 || polys.length > 400) {
-          const dC = pl[0] * poly.centroid[0] + pl[1] * poly.centroid[1] + pl[2] * poly.centroid[2] - pl[3];
-          if (dC >= 0) frontList.push(poly);
-          else backList.push(poly);
+        if (c.front && c.front.length >= 3) {
+          rawFrontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
         } else {
-          if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
-          if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+          rawFrontList.push(poly);
+        }
+        if (c.back && c.back.length >= 3) {
+          rawBackList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+        } else {
+          rawBackList.push(poly);
         }
       }
     }
+    const compactByPlane = (list) => {
+      if (depth < 6 && list.length <= 180) return list;
+      const byPlane = /* @__PURE__ */ new Map();
+      for (const item of list) {
+        const existing = byPlane.get(item.planeIdx);
+        if (!existing || item.pts.length > existing.pts.length) {
+          byPlane.set(item.planeIdx, item);
+        }
+      }
+      return Array.from(byPlane.values());
+    };
+    const frontList = compactByPlane(rawFrontList);
+    const backList = compactByPlane(rawBackList);
     const nodeIdx = bsp3dNodes.length;
     bsp3dNodes.push([bestPlane, defaultBackLeaf, 2147483648]);
     const nextUsed = new Set(usedPlanes);
@@ -35999,6 +39934,240 @@ function compileMeshCollisionBspData(mesh, materialCount, options) {
       bsp2dNodes: bsp2dNodes.length,
       isConcave
     }
+  };
+}
+function writeMeshCollisionBsp(targetBuf, structOff, arraysOff, compiled) {
+  let cursor = arraysOff;
+  const offBsp3dNodes = cursor;
+  for (const node of compiled.bsp3dNodes) {
+    targetBuf.writeInt32LE(node[0], cursor + 0);
+    targetBuf.writeUInt32LE(node[1] >>> 0, cursor + 4);
+    targetBuf.writeUInt32LE(node[2] >>> 0, cursor + 8);
+    cursor += 12;
+  }
+  const offPlanes = cursor;
+  for (const plane of compiled.planes) {
+    targetBuf.writeFloatLE(plane[0], cursor + 0);
+    targetBuf.writeFloatLE(plane[1], cursor + 4);
+    targetBuf.writeFloatLE(plane[2], cursor + 8);
+    targetBuf.writeFloatLE(plane[3], cursor + 12);
+    cursor += 16;
+  }
+  const offLeaves = cursor;
+  for (const leaf of compiled.leaves) {
+    targetBuf.writeUInt16LE(leaf[0] & 65535, cursor + 0);
+    targetBuf.writeUInt16LE(leaf[1] & 65535, cursor + 2);
+    targetBuf.writeUInt32LE(leaf[2] >>> 0, cursor + 4);
+    cursor += 8;
+  }
+  const offBsp2dRefs = cursor;
+  for (const ref of compiled.bsp2dReferences) {
+    targetBuf.writeUInt32LE(ref[0] >>> 0, cursor + 0);
+    targetBuf.writeUInt32LE(ref[1] >>> 0, cursor + 4);
+    cursor += 8;
+  }
+  const offBsp2dNodes = compiled.bsp2dNodes.length > 0 ? cursor : 0;
+  for (const node2d of compiled.bsp2dNodes) {
+    targetBuf.writeFloatLE(node2d.planeI, cursor + 0);
+    targetBuf.writeFloatLE(node2d.planeJ, cursor + 4);
+    targetBuf.writeFloatLE(node2d.planeD, cursor + 8);
+    targetBuf.writeUInt32LE(node2d.leftChild >>> 0, cursor + 12);
+    targetBuf.writeUInt32LE(node2d.rightChild >>> 0, cursor + 16);
+    cursor += 20;
+  }
+  const offSurfaces = cursor;
+  for (const surf of compiled.surfaces) {
+    targetBuf.writeUInt32LE(surf.planeDesignator >>> 0, cursor + 0);
+    targetBuf.writeUInt32LE(surf.firstEdgeIndex >>> 0, cursor + 4);
+    targetBuf.writeUInt8(surf.flags & 255, cursor + 8);
+    targetBuf.writeUInt8(255, cursor + 9);
+    targetBuf.writeInt16LE(surf.materialIndex, cursor + 10);
+    cursor += 12;
+  }
+  const offEdges = cursor;
+  for (const edge of compiled.edges) {
+    targetBuf.writeInt32LE(edge.vertexIndices[0], cursor + 0);
+    targetBuf.writeInt32LE(edge.vertexIndices[1], cursor + 4);
+    targetBuf.writeInt32LE(edge.edgeIndices[0], cursor + 8);
+    targetBuf.writeInt32LE(edge.edgeIndices[1], cursor + 12);
+    targetBuf.writeInt32LE(edge.surfaceIndices[0], cursor + 16);
+    targetBuf.writeInt32LE(edge.surfaceIndices[1], cursor + 20);
+    cursor += 24;
+  }
+  const offVertices = cursor;
+  for (const vert of compiled.vertices) {
+    targetBuf.writeFloatLE(vert.point[0], cursor + 0);
+    targetBuf.writeFloatLE(vert.point[1], cursor + 4);
+    targetBuf.writeFloatLE(vert.point[2], cursor + 8);
+    targetBuf.writeInt32LE(vert.firstEdgeIndex, cursor + 12);
+    cursor += 16;
+  }
+  targetBuf.writeUInt32LE(compiled.bsp3dNodes.length, structOff + 0);
+  targetBuf.writeUInt32LE(offBsp3dNodes, structOff + 4);
+  targetBuf.writeUInt32LE(compiled.planes.length, structOff + 12);
+  targetBuf.writeUInt32LE(offPlanes, structOff + 16);
+  targetBuf.writeUInt32LE(compiled.leaves.length, structOff + 24);
+  targetBuf.writeUInt32LE(offLeaves, structOff + 28);
+  targetBuf.writeUInt32LE(compiled.bsp2dReferences.length, structOff + 36);
+  targetBuf.writeUInt32LE(offBsp2dRefs, structOff + 40);
+  targetBuf.writeUInt32LE(compiled.bsp2dNodes.length, structOff + 48);
+  targetBuf.writeUInt32LE(offBsp2dNodes, structOff + 52);
+  targetBuf.writeUInt32LE(compiled.surfaces.length, structOff + 60);
+  targetBuf.writeUInt32LE(offSurfaces, structOff + 64);
+  targetBuf.writeUInt32LE(compiled.edges.length, structOff + 72);
+  targetBuf.writeUInt32LE(offEdges, structOff + 76);
+  targetBuf.writeUInt32LE(compiled.vertices.length, structOff + 84);
+  targetBuf.writeUInt32LE(offVertices, structOff + 88);
+  return cursor;
+}
+function buildCustomCollisionTag(tagPath, originalIndex, mesh, rig, exactMeshCollision = true, materialType = 7, slotMaterialTypes, targetCollisionFaces) {
+  const nodeCount = rig && rig.modelNodeCount > 0 ? rig.modelNodeCount : 1;
+  const slotNames = mesh.summary.materialSlots.length > 0 ? mesh.summary.materialSlots : ["default"];
+  const materials = slotNames.map((slotName, idx) => {
+    const explicitType = slotMaterialTypes && slotMaterialTypes[idx] !== void 0 ? slotMaterialTypes[idx] : slotNames.length > 1 ? inferHaloMaterialTypeFromName(slotName, materialType) : materialType;
+    const safeType = explicitType >= 0 && explicitType < HALO_MATERIAL_TYPES.length ? explicitType : 7;
+    const cleanName = slotName === "default" ? HALO_MATERIAL_TYPES[safeType] ?? "metal thick" : slotName;
+    return { name: cleanName, haloMaterialType: safeType };
+  });
+  const materialCount = Math.max(1, materials.length);
+  const collisionMode = typeof exactMeshCollision === "string" ? exactMeshCollision : exactMeshCollision ? "auto" : "box";
+  const compiledMeshBsp = collisionMode !== "box" ? compileMeshCollisionBspData(mesh, materialCount, {
+    mode: collisionMode,
+    targetFaces: targetCollisionFaces
+  }) : null;
+  if (compiledMeshBsp) {
+    mesh.summary.collisionPreview = compiledMeshBsp.stats;
+  } else {
+    mesh.summary.collisionPreview = {
+      mode: "box",
+      inputTriangles: mesh.rawFaces.length,
+      weldedVertices: 8,
+      decimatedTriangles: 12,
+      mergedSurfaces: 6,
+      planes: 6,
+      edges: 12,
+      bsp3dNodes: 6,
+      bsp2dNodes: 0,
+      isConcave: false
+    };
+  }
+  const bspCount = 1;
+  const bspArraysByteSize = compiledMeshBsp ? compiledMeshBsp.byteSize : 752;
+  const offMaterials = 664;
+  const offRegions = offMaterials + materialCount * 72;
+  const offPermutations = offRegions + 84;
+  const offSpheres = offPermutations + 32;
+  const offNodes = offSpheres + 32;
+  const offBsps = offNodes + nodeCount * 64;
+  const offBspArrays = offBsps + bspCount * 96;
+  const totalSize = offBspArrays + bspArraysByteSize;
+  const buf = Buffer.alloc(totalSize, 0);
+  if (rig?.collisionHeaderBuffer && rig.collisionHeaderBuffer.length >= 664) {
+    rig.collisionHeaderBuffer.copy(buf, 0, 0, 564);
+  }
+  buf.writeInt16LE(0, 4);
+  if (buf.readUInt16LE(210) >= 33) buf.writeUInt16LE(0, 210);
+  if (buf.readInt16LE(236) < 0 || buf.readInt16LE(236) >= 6) buf.writeInt16LE(0, 236);
+  if (buf.readFloatLE(448) === 0) buf.writeFloatLE(1, 448);
+  writeDependencyField(buf, 112, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 132, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 152, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 168, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 188, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 392, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 408, "effe", NULL_TAG_ID);
+  writeDependencyField(buf, 424, "effe", NULL_TAG_ID);
+  buf.writeUInt32LE(materialCount, 564);
+  buf.writeUInt32LE(offMaterials, 568);
+  buf.writeUInt32LE(1, 576);
+  buf.writeUInt32LE(offRegions, 580);
+  buf.writeUInt32LE(0, 588);
+  buf.writeUInt32LE(0, 592);
+  buf.writeFloatLE(mesh.summary.bounds.min[0], 616);
+  buf.writeFloatLE(mesh.summary.bounds.max[0], 620);
+  buf.writeFloatLE(mesh.summary.bounds.min[1], 624);
+  buf.writeFloatLE(mesh.summary.bounds.max[1], 628);
+  buf.writeFloatLE(mesh.summary.bounds.min[2], 632);
+  buf.writeFloatLE(mesh.summary.bounds.max[2], 636);
+  buf.writeUInt32LE(1, 640);
+  buf.writeUInt32LE(offSpheres, 644);
+  buf.writeUInt32LE(nodeCount, 652);
+  buf.writeUInt32LE(offNodes, 656);
+  for (let m = 0; m < materialCount; m++) {
+    const mOff = offMaterials + m * 72;
+    writeTagString(buf, mOff, materials[m].name);
+    buf.writeUInt32LE(0, mOff + 32);
+    buf.writeUInt16LE(materials[m].haloMaterialType, mOff + 36);
+    buf.writeFloatLE(0, mOff + 40);
+    buf.writeFloatLE(1, mOff + 44);
+    buf.writeFloatLE(1, mOff + 60);
+  }
+  writeTagString(buf, offRegions, "default");
+  writeDependencyField(buf, offRegions + 56, "effe", NULL_TAG_ID);
+  buf.writeUInt32LE(1, offRegions + 72);
+  buf.writeUInt32LE(offPermutations, offRegions + 76);
+  writeTagString(buf, offPermutations, "base");
+  const cx = (mesh.summary.bounds.min[0] + mesh.summary.bounds.max[0]) * 0.5;
+  const cy = (mesh.summary.bounds.min[1] + mesh.summary.bounds.max[1]) * 0.5;
+  const cz = (mesh.summary.bounds.min[2] + mesh.summary.bounds.max[2]) * 0.5;
+  buf.writeInt16LE(0, offSpheres + 0);
+  buf.writeFloatLE(cx, offSpheres + 16);
+  buf.writeFloatLE(cy, offSpheres + 20);
+  buf.writeFloatLE(cz, offSpheres + 24);
+  buf.writeFloatLE(mesh.summary.bounds.radius, offSpheres + 28);
+  for (let i = 0; i < nodeCount; i++) {
+    const nOff = offNodes + i * 64;
+    if (rig && rig.modelNodesBuffer.length >= (i + 1) * 156) {
+      const mOff = i * 156;
+      rig.modelNodesBuffer.copy(buf, nOff, mOff, mOff + 32);
+      const nextSibling = rig.modelNodesBuffer.readInt16LE(mOff + 32);
+      const firstChild = rig.modelNodesBuffer.readInt16LE(mOff + 34);
+      const parent = rig.modelNodesBuffer.readInt16LE(mOff + 36);
+      buf.writeInt16LE(i === 0 ? 0 : -1, nOff + 32);
+      buf.writeInt16LE(parent, nOff + 34);
+      buf.writeInt16LE(nextSibling, nOff + 36);
+      buf.writeInt16LE(firstChild, nOff + 38);
+    } else {
+      writeTagString(buf, nOff, "frame root");
+      buf.writeInt16LE(0, nOff + 32);
+      buf.writeInt16LE(-1, nOff + 34);
+      buf.writeInt16LE(-1, nOff + 36);
+      buf.writeInt16LE(-1, nOff + 38);
+    }
+    if (i === 0) {
+      buf.writeUInt32LE(1, nOff + 52);
+      buf.writeUInt32LE(offBsps, nOff + 56);
+    }
+  }
+  if (compiledMeshBsp) {
+    writeMeshCollisionBsp(buf, offBsps, offBspArrays, compiledMeshBsp);
+  } else {
+    writeBoxCollisionBsp(
+      buf,
+      offBsps,
+      offBspArrays,
+      mesh.summary.bounds.min,
+      mesh.summary.bounds.max
+    );
+  }
+  const dependencies = buildTagDependenciesFromBuffer(
+    buf,
+    "ModelCollisionGeometry",
+    tagPath,
+    /* @__PURE__ */ new Map()
+  );
+  return {
+    originalIndex,
+    group: "model_collision_geometry",
+    path: tagPath,
+    structName: "ModelCollisionGeometry",
+    secondaryClassFourCC: null,
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies,
+    embeddedRawDataAssets: [],
+    embeddedRawDataPatches: [],
+    injectionBlockers: []
   };
 }
 var OBJECT_GROUP_SPEC = {
@@ -36095,6 +40264,266 @@ var SCRIPT_TYPE_BY_NAME = Object.fromEntries(
 var VALUE_TYPE_BY_NAME = Object.fromEntries(
   Object.entries(HS_VALUE_TYPES).map(([k, v]) => [v, Number(k)])
 );
+
+// ../core/src/render/sound-codec.ts
+var SoundCodecError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SoundCodecError";
+  }
+};
+var STEP_TABLE = [
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  16,
+  17,
+  19,
+  21,
+  23,
+  25,
+  28,
+  31,
+  34,
+  37,
+  41,
+  45,
+  50,
+  55,
+  60,
+  66,
+  73,
+  80,
+  88,
+  97,
+  107,
+  118,
+  130,
+  143,
+  157,
+  173,
+  190,
+  209,
+  230,
+  253,
+  279,
+  307,
+  337,
+  371,
+  408,
+  449,
+  494,
+  544,
+  598,
+  658,
+  724,
+  796,
+  876,
+  963,
+  1060,
+  1166,
+  1282,
+  1411,
+  1552,
+  1707,
+  1878,
+  2066,
+  2272,
+  2499,
+  2749,
+  3024,
+  3327,
+  3660,
+  4026,
+  4428,
+  4871,
+  5358,
+  5894,
+  6484,
+  7132,
+  7845,
+  8630,
+  9493,
+  10442,
+  11487,
+  12635,
+  13899,
+  15289,
+  16818,
+  18500,
+  20350,
+  22385,
+  24623,
+  27086,
+  29794,
+  32767
+];
+var INDEX_TABLE = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+function encodeXboxAdpcmMono(pcm) {
+  const numBlocks = Math.ceil(pcm.length / 64);
+  const out = new Uint8Array(numBlocks * 36);
+  let pcmIdx = 0;
+  let stepIndex = 0;
+  for (let b = 0; b < numBlocks; b++) {
+    const blockStart = b * 36;
+    let sample = pcmIdx < pcm.length ? pcm[pcmIdx++] : 0;
+    out[blockStart + 0] = sample & 255;
+    out[blockStart + 1] = sample >> 8 & 255;
+    out[blockStart + 2] = stepIndex & 255;
+    out[blockStart + 3] = 0;
+    for (let i = 0; i < 32; i++) {
+      let byteVal = 0;
+      for (let n = 0; n < 2; n++) {
+        const curPcmIdx = pcmIdx;
+        const nextSample = pcmIdx < pcm.length ? pcm[pcmIdx++] : sample;
+        const lookaheadSample = curPcmIdx + 1 < pcm.length ? pcm[curPcmIdx + 1] : nextSample;
+        let diff = nextSample - sample;
+        let signBit = 0;
+        if (diff < 0) {
+          signBit = 8;
+          diff = -diff;
+        }
+        const step = STEP_TABLE[stepIndex];
+        let baseMag = 0;
+        let rem = diff;
+        if (rem >= step) {
+          baseMag |= 4;
+          rem -= step;
+        }
+        if (rem >= step >> 1) {
+          baseMag |= 2;
+          rem -= step >> 1;
+        }
+        if (rem >= step >> 2) {
+          baseMag |= 1;
+        }
+        let bestCode = signBit | baseMag;
+        let bestScore = Number.POSITIVE_INFINITY;
+        for (let dMag = -1; dMag <= 1; dMag++) {
+          const candMag = Math.max(0, Math.min(7, baseMag + dMag));
+          const candCode = signBit | candMag;
+          let candDelta = step >> 3;
+          if (candCode & 4) candDelta += step;
+          if (candCode & 2) candDelta += step >> 1;
+          if (candCode & 1) candDelta += step >> 2;
+          const candPred = Math.max(-32768, Math.min(32767, candCode & 8 ? sample - candDelta : sample + candDelta));
+          const err0 = nextSample - candPred;
+          const nextStepIdx = Math.max(0, Math.min(88, stepIndex + INDEX_TABLE[candCode]));
+          const nextStep = STEP_TABLE[nextStepIdx];
+          const lookDiff = Math.abs(lookaheadSample - candPred);
+          const maxReach = nextStep + (nextStep >> 1) + (nextStep >> 2) + (nextStep >> 3);
+          const err1 = lookDiff > maxReach ? lookDiff - maxReach : 0;
+          const score = err0 * err0 + 0.35 * (err1 * err1);
+          if (score < bestScore) {
+            bestScore = score;
+            bestCode = candCode;
+          }
+        }
+        const code = bestCode;
+        let delta = step >> 3;
+        if (code & 4) delta += step;
+        if (code & 2) delta += step >> 1;
+        if (code & 1) delta += step >> 2;
+        if (code & 8) sample -= delta;
+        else sample += delta;
+        sample = Math.max(-32768, Math.min(32767, sample));
+        stepIndex = Math.max(0, Math.min(88, stepIndex + INDEX_TABLE[code]));
+        if (n === 0) byteVal |= code & 15;
+        else byteVal |= (code & 15) << 4;
+      }
+      out[blockStart + 4 + i] = byteVal;
+    }
+  }
+  return out;
+}
+function encodeXboxAdpcmStereo(pcm) {
+  const numFrames = Math.floor(pcm.length / 2);
+  const numBlocks = Math.ceil(numFrames / 64);
+  const out = new Uint8Array(numBlocks * 72);
+  let frameIdx = 0;
+  for (let b = 0; b < numBlocks; b++) {
+    const leftPcm = new Int16Array(64);
+    const rightPcm = new Int16Array(64);
+    let lastL = 0;
+    let lastR = 0;
+    for (let i = 0; i < 64; i++) {
+      if (frameIdx < numFrames) {
+        lastL = pcm[frameIdx * 2];
+        lastR = pcm[frameIdx * 2 + 1];
+        frameIdx++;
+      }
+      leftPcm[i] = lastL;
+      rightPcm[i] = lastR;
+    }
+    const leftBlock = encodeXboxAdpcmMono(leftPcm);
+    const rightBlock = encodeXboxAdpcmMono(rightPcm);
+    out.set(leftBlock, b * 72);
+    out.set(rightBlock, b * 72 + 36);
+  }
+  return out;
+}
+function decodeWavToPcm(wavBuffer) {
+  if (wavBuffer.length < 44 || wavBuffer.toString("ascii", 0, 4) !== "RIFF" || wavBuffer.toString("ascii", 8, 12) !== "WAVE") {
+    throw new SoundCodecError("Invalid WAV file container.");
+  }
+  let offset = 12;
+  let audioFormat = 1;
+  let sampleRate = 22050;
+  let channels = 1;
+  let bitsPerSample = 16;
+  let dataOffset = 0;
+  let dataSize = 0;
+  while (offset + 8 <= wavBuffer.length) {
+    const chunkId = wavBuffer.toString("ascii", offset, offset + 4);
+    const chunkSize = wavBuffer.readUInt32LE(offset + 4);
+    offset += 8;
+    if (chunkId === "fmt " && offset + 16 <= wavBuffer.length) {
+      audioFormat = wavBuffer.readUInt16LE(offset + 0);
+      channels = wavBuffer.readUInt16LE(offset + 2);
+      sampleRate = wavBuffer.readUInt32LE(offset + 4);
+      bitsPerSample = wavBuffer.readUInt16LE(offset + 14);
+      if (audioFormat === 65534 && chunkSize >= 40 && offset + 26 <= wavBuffer.length) {
+        audioFormat = wavBuffer.readUInt16LE(offset + 24);
+      }
+    } else if (chunkId === "data") {
+      dataOffset = offset;
+      dataSize = Math.min(chunkSize, wavBuffer.length - offset);
+      break;
+    }
+    offset += chunkSize + (chunkSize & 1);
+  }
+  if (dataOffset === 0) {
+    throw new SoundCodecError('No "data" chunk found in WAV.');
+  }
+  const bytesPerSample = Math.floor(bitsPerSample / 8);
+  if (![1, 2, 3, 4].includes(bytesPerSample)) {
+    throw new SoundCodecError(`Unsupported WAV bit depth (${bitsPerSample}-bit).`);
+  }
+  const numSamples = Math.floor(dataSize / bytesPerSample);
+  const pcmSamples = new Int16Array(numSamples);
+  for (let i = 0; i < numSamples; i++) {
+    const pos = dataOffset + i * bytesPerSample;
+    if (audioFormat === 3 && bytesPerSample === 4) {
+      const f = wavBuffer.readFloatLE(pos);
+      const clamped = Math.max(-1, Math.min(1, Number.isFinite(f) ? f : 0));
+      pcmSamples[i] = Math.round(clamped * 32767);
+    } else if (bytesPerSample === 2) {
+      pcmSamples[i] = wavBuffer.readInt16LE(pos);
+    } else if (bytesPerSample === 3) {
+      pcmSamples[i] = wavBuffer.readInt16LE(pos + 1);
+    } else if (bytesPerSample === 4) {
+      pcmSamples[i] = wavBuffer.readInt16LE(pos + 2);
+    } else if (bytesPerSample === 1) {
+      pcmSamples[i] = wavBuffer[pos] - 128 << 8;
+    }
+  }
+  return { sampleRate, channels, pcmSamples };
+}
 
 // ../core/src/map/mod-packager.ts
 function convertJmsToObjText(jmsText) {
@@ -36327,6 +40756,1567 @@ function convertColladaDaeToObjText(daeXml) {
     materialNames,
     vertexCount: totalVerts,
     triangleCount: totalTris
+  };
+}
+
+// ../core/src/map/legacy-tag-codec.ts
+var fs = __toESM(require("fs"));
+var path = __toESM(require("path"));
+var HEK_GROUP_VERSIONS = {
+  actr: 2,
+  actv: 2,
+  "ant!": 1,
+  bipd: 3,
+  bitm: 7,
+  trak: 2,
+  colo: 1,
+  cdmg: 1,
+  cont: 3,
+  "jpt!": 6,
+  deca: 1,
+  dobc: 1,
+  devi: 1,
+  ctrl: 1,
+  lifi: 1,
+  mach: 1,
+  udlg: 1,
+  effe: 4,
+  eqip: 2,
+  flag: 1,
+  "fog ": 1,
+  font: 1,
+  garb: 1,
+  mod2: 5,
+  matg: 3,
+  "glw!": 1,
+  grhi: 1,
+  hudg: 1,
+  "hmt ": 1,
+  "hud#": 1,
+  devc: 1,
+  item: 2,
+  itmc: 0,
+  lens: 2,
+  ligh: 3,
+  elec: 1,
+  mgs2: 1,
+  foot: 1,
+  metr: 1,
+  mode: 4,
+  antr: 4,
+  coll: 10,
+  mply: 1,
+  obje: 1,
+  part: 2,
+  pctl: 4,
+  phys: 4,
+  plac: 2,
+  pphy: 1,
+  ngpr: 1,
+  proj: 5,
+  scnr: 2,
+  sbsp: 5,
+  scen: 1,
+  shdr: 1,
+  senv: 2,
+  soso: 2,
+  schi: 1,
+  scex: 1,
+  sotr: 1,
+  sgla: 1,
+  smet: 1,
+  spla: 1,
+  swat: 2,
+  "sky ": 1,
+  "snd!": 4,
+  snde: 1,
+  lsnd: 3,
+  ssce: 1,
+  "str#": 1,
+  tagc: 1,
+  Soul: 1,
+  DeLa: 1,
+  ustr: 1,
+  unit: 2,
+  unhi: 1,
+  vehi: 1,
+  vcky: 2,
+  weap: 2,
+  wphi: 2,
+  rain: 1,
+  wind: 1
+};
+function inspectBlamLooseTagHeader(buf) {
+  if (buf.length >= 64 && buf.toString("latin1", 60, 64) === "blam") {
+    const groupFourCC = buf.toString("latin1", 36, 40);
+    const cls = lookupTagClass(fourCCFromString(groupFourCC));
+    return {
+      format: "classic_blam_be",
+      groupFourCC,
+      groupName: cls?.name ?? groupFourCC.trim(),
+      version: buf.readUInt16BE(56),
+      headerSize: buf.readUInt32BE(44) || 64,
+      crc32: buf.readUInt32BE(40)
+    };
+  }
+  if (buf.length >= 64) {
+    const magic0 = buf.readUInt32LE(0);
+    if (magic0 === 1296124994) {
+      const fourCCNum = buf.readUInt32LE(36);
+      const cls = lookupTagClass(fourCCNum);
+      const groupFourCC = Buffer.from([
+        fourCCNum >>> 24 & 255,
+        fourCCNum >>> 16 & 255,
+        fourCCNum >>> 8 & 255,
+        fourCCNum & 255
+      ]).toString("latin1");
+      return {
+        format: "gen3_malb_le",
+        groupFourCC,
+        groupName: cls?.name ?? groupFourCC.trim(),
+        version: buf.readUInt16LE(56),
+        headerSize: buf.readUInt32LE(44) || 64,
+        crc32: buf.readUInt32LE(40)
+      };
+    }
+    if (magic0 === 1112293709) {
+      const groupFourCC = buf.toString("latin1", 36, 40);
+      const cls = lookupTagClass(fourCCFromString(groupFourCC));
+      return {
+        format: "gen3_blam_be",
+        groupFourCC,
+        groupName: cls?.name ?? groupFourCC.trim(),
+        version: buf.readUInt16BE(56),
+        headerSize: buf.readUInt32BE(44) || 64,
+        crc32: buf.readUInt32BE(40)
+      };
+    }
+  }
+  return null;
+}
+function isTwoByteScalarType(field) {
+  const t = field.def.type;
+  if (t === "int16" || t === "uint16" || t === "Index" || t === "Point2DInt" || t === "Rectangle2D") {
+    return true;
+  }
+  const bf = getBitfieldDefinition(t);
+  if (bf) return bf.width === 16;
+  if (field.size === 2 && !field.def.bounds && (!field.def.count || field.def.count === 1)) {
+    return true;
+  }
+  return false;
+}
+function isOneByteOrRawField(field) {
+  const t = field.def.type;
+  if (t === "TagString" || t === "int8" || t === "uint8") return true;
+  const bf = getBitfieldDefinition(t);
+  if (bf && bf.width === 8) return true;
+  return false;
+}
+function swapScalarFieldsInPlace(buf, baseOffset, structDef) {
+  for (const field of structDef.fields) {
+    const fType = field.def.type;
+    if (fType === "TagDependency" || fType === "TagReflexive" || fType === "TagDataOffset") {
+      continue;
+    }
+    if (isOneByteOrRawField(field)) {
+      continue;
+    }
+    const start = baseOffset + field.offset;
+    if (start + field.size > buf.length) continue;
+    if (isTwoByteScalarType(field)) {
+      for (let off = start; off + 2 <= start + field.size; off += 2) {
+        const b0 = buf[off];
+        buf[off] = buf[off + 1];
+        buf[off + 1] = b0;
+      }
+    } else {
+      for (let off = start; off + 4 <= start + field.size; off += 4) {
+        const b0 = buf[off];
+        const b1 = buf[off + 1];
+        buf[off] = buf[off + 3];
+        buf[off + 1] = buf[off + 2];
+        buf[off + 2] = b1;
+        buf[off + 3] = b0;
+      }
+    }
+  }
+}
+function serializeContainerTagToHekLooseBuffer(tag) {
+  const classInfo = lookupTagClassByName(tag.group);
+  const fourCCStr = classInfo?.groupId ?? "none";
+  const header = Buffer.alloc(64, 0);
+  header.write(fourCCStr, 36, 4, "latin1");
+  header.writeUInt32BE(1299151482, 40);
+  header.writeUInt32BE(64, 44);
+  header.writeUInt16BE(HEK_GROUP_VERSIONS[fourCCStr] ?? 1, 56);
+  header[58] = 0;
+  header[59] = 255;
+  header.write("blam", 60, 4, "latin1");
+  const srcData = Buffer.from(tag.data, "base64");
+  const depsByPath = /* @__PURE__ */ new Map();
+  for (const dep of tag.dependencies) {
+    depsByPath.set(dep.fieldPath, dep);
+  }
+  const assets = (tag.embeddedRawDataAssets ?? []).map((a) => Buffer.from(a.data, "base64"));
+  const patchByOffset = /* @__PURE__ */ new Map();
+  for (const p of tag.embeddedRawDataPatches ?? []) {
+    const assetBuf = assets[p.assetIndex];
+    if (assetBuf) patchByOffset.set(p.patchOffset, assetBuf);
+  }
+  let bitmapProcessedPixels = Buffer.alloc(0);
+  const bitmapPlateRelativeOffsets = /* @__PURE__ */ new Map();
+  if (tag.group === "bitmap" && srcData.length >= 108) {
+    const bCount = srcData.readUInt32LE(96);
+    const bLocalOff = srcData.readUInt32LE(100);
+    if (bCount > 0 && bLocalOff + bCount * 48 <= srcData.length) {
+      const chunks = [];
+      let runningOff = 0;
+      for (let i = 0; i < bCount; i++) {
+        const elemOff = bLocalOff + i * 48;
+        const patched = patchByOffset.get(elemOff + 24);
+        if (patched) {
+          bitmapPlateRelativeOffsets.set(i, runningOff);
+          chunks.push(patched);
+          runningOff += patched.length;
+        }
+      }
+      bitmapProcessedPixels = Buffer.concat(chunks);
+    }
+  }
+  const gbxPartMap = /* @__PURE__ */ new Map();
+  for (const part of tag.gbxmodelGeometryParts ?? []) {
+    gbxPartMap.set(`${part.geometryIndex}:${part.partIndex}`, part);
+  }
+  const outChunks = [header];
+  const writeStructArray = (structName, localBase, count, _parentFieldPath, elemPathFn, geomIdxContext = -1) => {
+    const structDef = resolveStruct(structName);
+    const totalBytes = count * structDef.totalSize;
+    const blockBuf = Buffer.alloc(totalBytes, 0);
+    if (localBase >= 0 && localBase + totalBytes <= srcData.length) {
+      srcData.copy(blockBuf, 0, localBase, localBase + totalBytes);
+    }
+    const deferred = [];
+    for (let i = 0; i < count; i++) {
+      const elemSrcOff = localBase + i * structDef.totalSize;
+      const elemDstOff = i * structDef.totalSize;
+      const elemPath = elemPathFn(i);
+      if (structName === "BitmapData") {
+        const relOff = bitmapPlateRelativeOffsets.get(i);
+        if (relOff !== void 0) {
+          const flags = blockBuf.readUInt16LE(elemDstOff + 14);
+          blockBuf.writeUInt16LE(flags & ~256, elemDstOff + 14);
+          blockBuf.writeUInt32LE(relOff, elemDstOff + 24);
+          blockBuf.writeUInt32LE(0, elemDstOff + 28);
+          blockBuf.writeUInt32LE(0, elemDstOff + 32);
+          blockBuf.writeUInt32LE(0, elemDstOff + 36);
+        }
+      } else if (structName === "GBXModelGeometryPart") {
+        const gbxPart = gbxPartMap.get(`${geomIdxContext}:${i}`);
+        if (gbxPart) {
+          const vertRaw = Buffer.from(gbxPart.vertexData, "base64");
+          const triRaw = Buffer.from(gbxPart.triangleData, "base64");
+          const vCount = Math.floor(vertRaw.length / 68);
+          const rem = triRaw.length % 6;
+          const triPadded = rem === 0 ? Buffer.from(triRaw) : Buffer.concat([triRaw, Buffer.alloc(6 - rem, 255)]);
+          const triBlockCount = Math.floor(triPadded.length / 6);
+          blockBuf.writeUInt32LE(vCount, elemDstOff + 32);
+          blockBuf.writeUInt32LE(0, elemDstOff + 36);
+          blockBuf.writeUInt32LE(0, elemDstOff + 40);
+          blockBuf.writeUInt32LE(0, elemDstOff + 44);
+          blockBuf.writeUInt32LE(0, elemDstOff + 48);
+          blockBuf.writeUInt32LE(0, elemDstOff + 52);
+          blockBuf.writeUInt32LE(triBlockCount, elemDstOff + 56);
+          blockBuf.writeUInt32LE(0, elemDstOff + 60);
+          blockBuf.writeUInt32LE(0, elemDstOff + 64);
+          blockBuf.fill(0, elemDstOff + 72, elemDstOff + 84);
+          blockBuf.fill(0, elemDstOff + 88, elemDstOff + 104);
+        }
+      }
+      swapScalarFieldsInPlace(blockBuf, elemDstOff, structDef);
+      for (const field of structDef.fields) {
+        const fOffDst = elemDstOff + field.offset;
+        const fOffSrc = elemSrcOff + field.offset;
+        const fPath = childFieldPath(elemPath, field.name);
+        if (field.def.type === "TagDependency") {
+          const dep = depsByPath.get(fPath);
+          const depGroupName = dep?.group || field.def.classes?.[0] || "";
+          const depClassInfo = lookupTagClassByName(depGroupName);
+          let fourCC = depClassInfo?.groupId ?? "\xFF\xFF\xFF\xFF";
+          if ((!dep || dep.kind === "null" || !dep.path) && fOffSrc + 4 <= srcData.length) {
+            const origLe = srcData.subarray(fOffSrc, fOffSrc + 4);
+            fourCC = Buffer.from([origLe[3], origLe[2], origLe[1], origLe[0]]).toString("latin1");
+          }
+          const depPath = dep && dep.kind !== "null" ? dep.path : "";
+          blockBuf.write(fourCC, fOffDst + 0, 4, "latin1");
+          blockBuf.writeUInt32BE(0, fOffDst + 4);
+          blockBuf.writeUInt32BE(depPath.length, fOffDst + 8);
+          blockBuf.writeUInt32BE(4294967295, fOffDst + 12);
+          if (depPath.length > 0) {
+            deferred.push({
+              run: () => {
+                outChunks.push(Buffer.from(`${depPath}\0`, "latin1"));
+              }
+            });
+          }
+        } else if (field.def.type === "TagDataOffset") {
+          let payload = Buffer.alloc(0);
+          if (structName === "Bitmap" && field.name === "processed pixel data") {
+            payload = bitmapProcessedPixels;
+          } else if (structName === "SoundPermutation" && field.name === "samples") {
+            const patched = patchByOffset.get(fOffSrc + 8);
+            if (patched) {
+              payload = Buffer.from(patched);
+              const compression = srcData.readUInt16LE(elemSrcOff + 24);
+              if (compression === 0) {
+                for (let s = 0; s + 2 <= payload.length; s += 2) {
+                  const b0 = payload[s];
+                  payload[s] = payload[s + 1];
+                  payload[s + 1] = b0;
+                }
+              }
+            }
+          } else if (!field.def.nonCached && fOffSrc + 20 <= srcData.length) {
+            const sz = srcData.readUInt32LE(fOffSrc + 0);
+            const ptrLow = srcData.readUInt32LE(fOffSrc + 12);
+            if (sz > 0 && ptrLow + sz <= srcData.length) {
+              payload = Buffer.from(srcData.subarray(ptrLow, ptrLow + sz));
+              if (structName === "Scenario" && field.name === "script syntax data" && payload.length >= 56 && payload.readUInt32LE(40) === 1681945664) {
+                const tblDef = resolveStruct("ScenarioScriptNodeTable");
+                const nodeDef = resolveStruct("ScenarioScriptNode");
+                swapScalarFieldsInPlace(payload, 0, tblDef);
+                const nodeCount = Math.floor((payload.length - 56) / 20);
+                for (let n = 0; n < nodeCount; n++) {
+                  swapScalarFieldsInPlace(payload, 56 + n * 20, nodeDef);
+                }
+              }
+            }
+          }
+          blockBuf.writeUInt32BE(payload.length, fOffDst + 0);
+          blockBuf.writeUInt32BE(0, fOffDst + 4);
+          blockBuf.writeUInt32BE(0, fOffDst + 8);
+          blockBuf.writeUInt32BE(0, fOffDst + 12);
+          blockBuf.writeUInt32BE(0, fOffDst + 16);
+          if (payload.length > 0) {
+            deferred.push({
+              run: () => {
+                outChunks.push(payload);
+              }
+            });
+          }
+        } else if (field.def.type === "TagReflexive" && field.def.struct) {
+          const childStruct = field.def.struct;
+          if (structName === "GBXModelGeometryPart" && (field.name === "uncompressed vertices" || field.name === "triangles")) {
+            const gbxPart = gbxPartMap.get(`${geomIdxContext}:${i}`);
+            if (gbxPart && field.name === "uncompressed vertices") {
+              const vertRaw = Buffer.from(gbxPart.vertexData, "base64");
+              const vCount = Math.floor(vertRaw.length / 68);
+              blockBuf.writeUInt32BE(vCount, fOffDst + 0);
+              blockBuf.writeUInt32BE(0, fOffDst + 4);
+              blockBuf.writeUInt32BE(0, fOffDst + 8);
+              if (vCount > 0) {
+                deferred.push({
+                  run: () => {
+                    const vBuf = Buffer.from(vertRaw.subarray(0, vCount * 68));
+                    const vDef = resolveStruct("ModelVertexUncompressed");
+                    for (let v = 0; v < vCount; v++) {
+                      swapScalarFieldsInPlace(vBuf, v * 68, vDef);
+                    }
+                    outChunks.push(vBuf);
+                  }
+                });
+              }
+              continue;
+            } else if (gbxPart && field.name === "triangles") {
+              const triRaw = Buffer.from(gbxPart.triangleData, "base64");
+              const rem = triRaw.length % 6;
+              const triPadded = rem === 0 ? Buffer.from(triRaw) : Buffer.concat([triRaw, Buffer.alloc(6 - rem, 255)]);
+              const triBlockCount = Math.floor(triPadded.length / 6);
+              blockBuf.writeUInt32BE(triBlockCount, fOffDst + 0);
+              blockBuf.writeUInt32BE(0, fOffDst + 4);
+              blockBuf.writeUInt32BE(0, fOffDst + 8);
+              if (triBlockCount > 0) {
+                deferred.push({
+                  run: () => {
+                    for (let k = 0; k + 2 <= triPadded.length; k += 2) {
+                      const b0 = triPadded[k];
+                      triPadded[k] = triPadded[k + 1];
+                      triPadded[k + 1] = b0;
+                    }
+                    outChunks.push(triPadded);
+                  }
+                });
+              }
+              continue;
+            }
+          }
+          let childCount = 0;
+          let childLocalBase = 0;
+          if (!field.def.nonCached && fOffSrc + 12 <= srcData.length) {
+            childCount = srcData.readUInt32LE(fOffSrc + 0);
+            childLocalBase = srcData.readUInt32LE(fOffSrc + 4);
+          }
+          blockBuf.writeUInt32BE(childCount, fOffDst + 0);
+          blockBuf.writeUInt32BE(0, fOffDst + 4);
+          blockBuf.writeUInt32BE(0, fOffDst + 8);
+          if (childCount > 0) {
+            const nextGeomIdx = structName === "GBXModelGeometry" ? i : geomIdxContext;
+            deferred.push({
+              run: () => {
+                writeStructArray(
+                  childStruct,
+                  childLocalBase,
+                  childCount,
+                  fPath,
+                  (cIdx) => reflexiveElementPath(elemPath, field.name, cIdx),
+                  nextGeomIdx
+                );
+              }
+            });
+          }
+        }
+      }
+    }
+    outChunks.push(blockBuf);
+    for (const action of deferred) {
+      action.run();
+    }
+  };
+  writeStructArray(tag.structName, 0, 1, tag.path, () => tag.path);
+  return Buffer.concat(outChunks);
+}
+function parseHekLooseTagBuffer(buf, tagPath, overrideGroup) {
+  if (buf.length < 64 || buf.toString("latin1", 60, 64) !== "blam") {
+    throw new Error(`File "${tagPath}" is not a valid 64-byte 'blam' HEK/OpenCE loose tag file.`);
+  }
+  const fourCCStr = buf.toString("latin1", 36, 40);
+  const classInfo = overrideGroup ? lookupTagClassByName(overrideGroup) : lookupTagClass(fourCCFromString(fourCCStr));
+  const groupName = overrideGroup || classInfo?.name;
+  if (!groupName) {
+    throw new Error(`Unknown HEK tag group FourCC "${fourCCStr}" in "${tagPath}".`);
+  }
+  const rootStructName = getGroupStructName(groupName);
+  if (!rootStructName) {
+    throw new Error(`No struct definition found for tag group "${groupName}".`);
+  }
+  let readCursor = 64;
+  const leChunks = [];
+  let totalLeBytes = 0;
+  const allocLe = (size) => {
+    const pad = (4 - totalLeBytes % 4) % 4;
+    if (pad > 0) {
+      leChunks.push(Buffer.alloc(pad, 0));
+      totalLeBytes += pad;
+    }
+    const b = Buffer.alloc(size, 0);
+    const offset = totalLeBytes;
+    leChunks.push(b);
+    totalLeBytes += size;
+    return { buf: b, offset };
+  };
+  const referencedDeps = [];
+  const embeddedRawDataAssets = [];
+  const embeddedRawDataPatches = [];
+  const gbxmodelGeometryParts = [];
+  let bitmapProcessedPixelBuf = Buffer.alloc(0);
+  const readStructArray = (structName, count, elemPathFn, geomIdxContext = -1) => {
+    const structDef = resolveStruct(structName);
+    const byteLen = count * structDef.totalSize;
+    if (readCursor + byteLen > buf.length) {
+      throw new Error(
+        `Unexpected EOF reading ${count}x ${structName} at offset ${readCursor} (file length ${buf.length}) in "${tagPath}".`
+      );
+    }
+    const alloc = allocLe(byteLen);
+    buf.copy(alloc.buf, 0, readCursor, readCursor + byteLen);
+    readCursor += byteLen;
+    for (let i = 0; i < count; i++) {
+      const elemLocalInBuf = i * structDef.totalSize;
+      const elemAbsLeOff = alloc.offset + elemLocalInBuf;
+      const elemPath = elemPathFn(i);
+      swapScalarFieldsInPlace(alloc.buf, elemLocalInBuf, structDef);
+      let partUncompressedVerts = null;
+      let partCompressedVerts = null;
+      let partTriangles = null;
+      for (const field of structDef.fields) {
+        const fLocalOff = elemLocalInBuf + field.offset;
+        const fAbsLeOff = elemAbsLeOff + field.offset;
+        const fPath = childFieldPath(elemPath, field.name);
+        if (field.def.type === "TagDependency") {
+          const b0 = alloc.buf[fLocalOff + 0];
+          const b1 = alloc.buf[fLocalOff + 1];
+          const b2 = alloc.buf[fLocalOff + 2];
+          const b3 = alloc.buf[fLocalOff + 3];
+          const depFourCCStr = Buffer.from([b0, b1, b2, b3]).toString("latin1");
+          alloc.buf[fLocalOff + 0] = b3;
+          alloc.buf[fLocalOff + 1] = b2;
+          alloc.buf[fLocalOff + 2] = b1;
+          alloc.buf[fLocalOff + 3] = b0;
+          const pathLen = alloc.buf.readUInt32BE(fLocalOff + 8);
+          alloc.buf.writeUInt32LE(0, fLocalOff + 4);
+          alloc.buf.writeUInt32LE(0, fLocalOff + 8);
+          let depPath = "";
+          if (pathLen > 0 && readCursor + pathLen + 1 <= buf.length) {
+            depPath = buf.toString("latin1", readCursor, readCursor + pathLen).replace(/\0.*$/, "");
+            readCursor += pathLen + 1;
+          }
+          const depClass = lookupTagClass(fourCCFromString(depFourCCStr));
+          const depGroup = depClass?.name || field.def.classes?.[0] || "";
+          if (depPath.length > 0 && depGroup) {
+            alloc.buf.writeUInt32LE(0, fLocalOff + 12);
+            referencedDeps.push({
+              group: depGroup,
+              path: depPath.replace(/\//g, "\\"),
+              fieldPath: fPath,
+              fieldOffset: fAbsLeOff
+            });
+          } else {
+            alloc.buf.writeUInt32LE(NULL_TAG_ID, fLocalOff + 12);
+          }
+        } else if (field.def.type === "TagDataOffset") {
+          const dataSize = alloc.buf.readUInt32BE(fLocalOff + 0);
+          let payload = Buffer.alloc(0);
+          if (dataSize > 0 && readCursor + dataSize <= buf.length) {
+            payload = Buffer.from(buf.subarray(readCursor, readCursor + dataSize));
+            readCursor += dataSize;
+          }
+          if (structName === "Bitmap" && field.name === "processed pixel data") {
+            bitmapProcessedPixelBuf = payload;
+            alloc.buf.fill(0, fLocalOff, fLocalOff + 20);
+          } else if (structName === "SoundPermutation" && field.name === "samples") {
+            const compression = alloc.buf.readUInt16LE(elemLocalInBuf + 24);
+            if (compression === 0 && payload.length >= 2) {
+              for (let s = 0; s + 2 <= payload.length; s += 2) {
+                const s0 = payload[s];
+                payload[s] = payload[s + 1];
+                payload[s + 1] = s0;
+              }
+            }
+            alloc.buf.writeUInt32LE(payload.length, fLocalOff + 0);
+            alloc.buf.writeUInt32LE(0, fLocalOff + 4);
+            alloc.buf.writeUInt32LE(0, fLocalOff + 8);
+            alloc.buf.writeUInt32LE(0, fLocalOff + 12);
+            alloc.buf.writeUInt32LE(0, fLocalOff + 16);
+            if (payload.length > 0) {
+              const assetIndex = embeddedRawDataAssets.length;
+              embeddedRawDataAssets.push({ kind: "sound", data: payload.toString("base64") });
+              embeddedRawDataPatches.push({
+                assetIndex,
+                patchOffset: fAbsLeOff + 8,
+                patchWidth: 4
+              });
+            }
+          } else if (field.def.nonCached) {
+            alloc.buf.fill(0, fLocalOff, fLocalOff + 20);
+          } else if (payload.length > 0) {
+            if (structName === "Scenario" && field.name === "script syntax data" && payload.length >= 56 && payload.readUInt32BE(40) === 1681945664) {
+              const tblDef = resolveStruct("ScenarioScriptNodeTable");
+              const nodeDef = resolveStruct("ScenarioScriptNode");
+              swapScalarFieldsInPlace(payload, 0, tblDef);
+              payload.writeUInt32LE(0, 52);
+              const nodeCount = Math.floor((payload.length - 56) / 20);
+              for (let n = 0; n < nodeCount; n++) {
+                swapScalarFieldsInPlace(payload, 56 + n * 20, nodeDef);
+              }
+            }
+            const dataAlloc = allocLe(payload.length);
+            payload.copy(dataAlloc.buf, 0);
+            alloc.buf.writeUInt32LE(payload.length, fLocalOff + 0);
+            alloc.buf.writeUInt32LE(0, fLocalOff + 4);
+            alloc.buf.writeUInt32LE(0, fLocalOff + 8);
+            alloc.buf.writeUInt32LE(dataAlloc.offset, fLocalOff + 12);
+            alloc.buf.writeUInt32LE(0, fLocalOff + 16);
+          } else {
+            alloc.buf.fill(0, fLocalOff, fLocalOff + 20);
+          }
+        } else if (field.def.type === "TagReflexive" && field.def.struct) {
+          const childCount = alloc.buf.readUInt32BE(fLocalOff + 0);
+          const childStruct = field.def.struct;
+          if (structName === "GBXModelGeometryPart" && field.def.nonCached) {
+            alloc.buf.fill(0, fLocalOff, fLocalOff + 12);
+            if (childCount > 0) {
+              const cDef = resolveStruct(childStruct);
+              const rawLen = childCount * cDef.totalSize;
+              if (readCursor + rawLen <= buf.length) {
+                const cBuf = Buffer.from(buf.subarray(readCursor, readCursor + rawLen));
+                readCursor += rawLen;
+                for (let c = 0; c < childCount; c++) {
+                  swapScalarFieldsInPlace(cBuf, c * cDef.totalSize, cDef);
+                }
+                if (field.name === "uncompressed vertices") partUncompressedVerts = cBuf;
+                else if (field.name === "compressed vertices") partCompressedVerts = cBuf;
+                else if (field.name === "triangles") partTriangles = cBuf;
+              }
+            }
+            continue;
+          }
+          if (childCount > 0 && !field.def.nonCached) {
+            const nextGeomIdx = structName === "GBXModelGeometry" ? i : geomIdxContext;
+            const childAlloc = readStructArray(
+              childStruct,
+              childCount,
+              (cIdx) => reflexiveElementPath(elemPath, field.name, cIdx),
+              nextGeomIdx
+            );
+            alloc.buf.writeUInt32LE(childCount, fLocalOff + 0);
+            alloc.buf.writeUInt32LE(childAlloc.offset, fLocalOff + 4);
+            alloc.buf.writeUInt32LE(0, fLocalOff + 8);
+          } else {
+            if (childCount > 0 && field.def.nonCached) {
+              const cDef = resolveStruct(childStruct);
+              const structArrayStart = readCursor;
+              readCursor += childCount * cDef.totalSize;
+              for (let cIdx = 0; cIdx < childCount; cIdx++) {
+                const elemOff = structArrayStart + cIdx * cDef.totalSize;
+                for (const cf of cDef.fields) {
+                  if (cf.def.type === "TagDataOffset" && elemOff + cf.offset + 4 <= buf.length) {
+                    const dataSz = buf.readUInt32BE(elemOff + cf.offset);
+                    if (dataSz > 0 && readCursor + dataSz <= buf.length) {
+                      readCursor += dataSz;
+                    }
+                  }
+                }
+              }
+            }
+            alloc.buf.fill(0, fLocalOff, fLocalOff + 12);
+          }
+        }
+      }
+      if (structName === "GBXModelGeometryPart" && (partUncompressedVerts || partCompressedVerts) && partTriangles) {
+        const vertBytes = partUncompressedVerts ?? partCompressedVerts;
+        const vType = partUncompressedVerts ? 4 : 5;
+        const vStride = vType === 4 ? 68 : 32;
+        const vCount = Math.floor(vertBytes.length / vStride);
+        let indexCount = Math.floor(partTriangles.length / 2);
+        let stripLen = indexCount;
+        while (stripLen > 3 && stripLen > indexCount - 2 && partTriangles.readUInt16LE((stripLen - 1) * 2) === 65535) {
+          stripLen--;
+        }
+        const triCount = Math.max(1, stripLen - 2);
+        const stripBytes = partTriangles.subarray(0, stripLen * 2);
+        const term = Buffer.from([255, 255, 255, 255]);
+        const finalTriBytes = Buffer.concat([stripBytes, term]);
+        alloc.buf.writeUInt16LE(1, elemLocalInBuf + 68);
+        alloc.buf.writeUInt32LE(triCount, elemLocalInBuf + 72);
+        alloc.buf.writeUInt16LE(vType, elemLocalInBuf + 84);
+        alloc.buf.writeUInt32LE(vCount, elemLocalInBuf + 88);
+        gbxmodelGeometryParts.push({
+          geometryIndex: Math.max(0, geomIdxContext),
+          partIndex: i,
+          vertexType: vType,
+          vertexCount: vCount,
+          vertexData: vertBytes.toString("base64"),
+          triangleBufferType: 1,
+          triangleCount: triCount,
+          triangleData: finalTriBytes.toString("base64")
+        });
+      }
+    }
+    if (structName === "BitmapData" && count > 0 && bitmapProcessedPixelBuf.length > 0) {
+      for (let i = 0; i < count; i++) {
+        const elemLocal = i * 48;
+        const elemAbs = alloc.offset + elemLocal;
+        const pixOff = alloc.buf.readUInt32LE(elemLocal + 24);
+        const nextOff = i + 1 < count ? alloc.buf.readUInt32LE((i + 1) * 48 + 24) : bitmapProcessedPixelBuf.length;
+        const plateSize = Math.max(0, nextOff - pixOff);
+        const plateBytes = bitmapProcessedPixelBuf.subarray(pixOff, pixOff + plateSize);
+        const flags = alloc.buf.readUInt16LE(elemLocal + 14);
+        alloc.buf.writeUInt16LE(flags & ~256, elemLocal + 14);
+        alloc.buf.writeUInt32LE(plateBytes.length, elemLocal + 28);
+        const assetIndex = embeddedRawDataAssets.length;
+        embeddedRawDataAssets.push({ kind: "bitmap", data: plateBytes.toString("base64") });
+        embeddedRawDataPatches.push({
+          assetIndex,
+          patchOffset: elemAbs + 24,
+          patchWidth: 4
+        });
+      }
+    }
+    return alloc;
+  };
+  readStructArray(rootStructName, 1, () => tagPath);
+  const fullLeData = Buffer.concat(leChunks);
+  let secondaryClassFourCC = null;
+  let tertiaryClassFourCC = null;
+  if (["biped", "vehicle"].includes(groupName)) {
+    secondaryClassFourCC = fourCCFromString("unit");
+    tertiaryClassFourCC = fourCCFromString("obje");
+  } else if (["weapon", "equipment", "garbage"].includes(groupName)) {
+    secondaryClassFourCC = fourCCFromString("item");
+    tertiaryClassFourCC = fourCCFromString("obje");
+  } else if (["device_machine", "device_control", "device_light_fixture"].includes(groupName)) {
+    secondaryClassFourCC = fourCCFromString("devi");
+    tertiaryClassFourCC = fourCCFromString("obje");
+  } else if (["scenery", "projectile", "sound_scenery"].includes(groupName)) {
+    secondaryClassFourCC = fourCCFromString("obje");
+  } else if (groupName.startsWith("shader_")) {
+    secondaryClassFourCC = fourCCFromString("shdr");
+  }
+  return {
+    tag: {
+      originalIndex: 0,
+      group: groupName,
+      path: tagPath,
+      structName: rootStructName,
+      data: fullLeData.toString("base64"),
+      dependencies: [],
+      secondaryClassFourCC,
+      tertiaryClassFourCC,
+      embeddedRawDataAssets: embeddedRawDataAssets.length > 0 ? embeddedRawDataAssets : void 0,
+      embeddedRawDataPatches: embeddedRawDataPatches.length > 0 ? embeddedRawDataPatches : void 0,
+      gbxmodelGeometryParts: gbxmodelGeometryParts.length > 0 ? gbxmodelGeometryParts : void 0
+    },
+    referencedDeps
+  };
+}
+function parseHmtMetaXmlTagPair(metaPath, xmlPath) {
+  const metaBuf = Buffer.from(fs.readFileSync(metaPath));
+  const xmlText = fs.readFileSync(xmlPath, "utf8");
+  const tagMatch = xmlText.match(/<Tag>([\s\S]*?)<\/Tag>/i);
+  const fileMatch = xmlText.match(/<Filename>([\s\S]*?)<\/Filename>/i);
+  if (!tagMatch || !fileMatch) {
+    throw new Error(`Invalid HMT XML metadata file "${xmlPath}" (missing <Tag> or <Filename>).`);
+  }
+  const rawTagHier = tagMatch[1];
+  const rev4 = (s) => Buffer.from(s, "latin1").subarray(0, 4).reverse().toString("latin1");
+  const primaryFourCC = rev4(rawTagHier.slice(0, 4));
+  const classInfo = lookupTagClass(fourCCFromString(primaryFourCC));
+  if (!classInfo) {
+    throw new Error(`Unsupported HMT tag class "${primaryFourCC}" in "${xmlPath}".`);
+  }
+  const groupName = classInfo.name;
+  const rootStructName = getGroupStructName(groupName);
+  if (!rootStructName) {
+    throw new Error(`No struct definition for HMT tag group "${groupName}".`);
+  }
+  const tagPath = fileMatch[1].trim().replace(/\//g, "\\");
+  const tagParts = tagPath.split("\\");
+  let extractRootDir = path.dirname(metaPath);
+  for (let i = 0; i < tagParts.length - 1; i++) {
+    extractRootDir = path.dirname(extractRootDir);
+  }
+  const reflRegex = /<Reflexive>\s*<Location>0x([0-9a-fA-F]+)<\/Location>\s*<Translation>0x([0-9a-fA-F]+)<\/Translation>\s*<ChunkCount>(\d+)<\/ChunkCount>\s*<\/Reflexive>/g;
+  let m;
+  while ((m = reflRegex.exec(xmlText)) !== null) {
+    const loc = Number.parseInt(m[1], 16);
+    const trans = Number.parseInt(m[2], 16);
+    const cnt = Number.parseInt(m[3], 10);
+    if (loc >= 4 && loc + 8 <= metaBuf.length) {
+      metaBuf.writeUInt32LE(cnt, loc - 4);
+      metaBuf.writeUInt32LE(trans, loc);
+      metaBuf.writeUInt32LE(0, loc + 4);
+    }
+  }
+  const depByOffset = /* @__PURE__ */ new Map();
+  const depRegex = /<Dependency>\s*<Location>0x([0-9a-fA-F]+)<\/Location>\s*<Tagclass>([\s\S]*?)<\/Tagclass>\s*<Filename>([\s\S]*?)<\/Filename>\s*<\/Dependency>/g;
+  while ((m = depRegex.exec(xmlText)) !== null) {
+    const loc = Number.parseInt(m[1], 16);
+    const fieldOffset = loc - 12;
+    const rawCls = m[2];
+    const depFourCC = rev4(rawCls.slice(0, 4));
+    const depClsInfo = lookupTagClass(fourCCFromString(depFourCC));
+    const depPath = m[3].trim().replace(/\//g, "\\");
+    if (fieldOffset >= 0 && fieldOffset + 16 <= metaBuf.length && depClsInfo && depPath) {
+      depByOffset.set(fieldOffset, { group: depClsInfo.name, path: depPath });
+      metaBuf.writeUInt32LE(0, fieldOffset + 12);
+    }
+  }
+  const referencedDeps = [];
+  const visitedOffsets = /* @__PURE__ */ new Set();
+  const walkLeStruct = (structName, localOff, curPath) => {
+    const def = resolveStruct(structName);
+    if (localOff < 0 || localOff + def.totalSize > metaBuf.length) return;
+    for (const f of def.fields) {
+      if (f.def.nonCached) continue;
+      const fOff = localOff + f.offset;
+      const fPath = childFieldPath(curPath, f.name);
+      if (f.def.type === "TagDependency") {
+        const depInfo = depByOffset.get(fOff);
+        if (depInfo) {
+          referencedDeps.push({
+            group: depInfo.group,
+            path: depInfo.path,
+            fieldPath: fPath,
+            fieldOffset: fOff
+          });
+        } else {
+          metaBuf.writeUInt32LE(NULL_TAG_ID, fOff + 12);
+        }
+      } else if (f.def.type === "TagReflexive" && f.def.struct) {
+        const cnt = metaBuf.readUInt32LE(fOff + 0);
+        const childBase = metaBuf.readUInt32LE(fOff + 4);
+        const childSize = resolveStruct(f.def.struct).totalSize;
+        if (cnt > 0 && childBase > 0 && childBase + cnt * childSize <= metaBuf.length && !visitedOffsets.has(childBase)) {
+          visitedOffsets.add(childBase);
+          for (let i = 0; i < cnt; i++) {
+            walkLeStruct(
+              f.def.struct,
+              childBase + i * childSize,
+              reflexiveElementPath(curPath, f.name, i)
+            );
+          }
+        }
+      }
+    }
+  };
+  walkLeStruct(rootStructName, 0, tagPath);
+  const gbxmodelGeometryParts = [];
+  if (groupName === "gbxmodel") {
+    const baseDir = path.dirname(metaPath);
+    const vertAssetMatch = xmlText.match(/<Asset>\s*<Type>VertexBlock<\/Type>\s*<Filename>([\s\S]*?)<\/Filename>([\s\S]*?)<\/Asset>/i);
+    const idxAssetMatch = xmlText.match(/<Asset>\s*<Type>IndexBlock<\/Type>\s*<Filename>([\s\S]*?)<\/Filename>([\s\S]*?)<\/Asset>/i);
+    if (vertAssetMatch && idxAssetMatch) {
+      const vertFile = path.join(baseDir, vertAssetMatch[1].trim());
+      const idxFile = path.join(baseDir, idxAssetMatch[1].trim());
+      if (fs.existsSync(vertFile) && fs.existsSync(idxFile)) {
+        const vertBuf = fs.readFileSync(vertFile);
+        const idxBuf = fs.readFileSync(idxFile);
+        const vertTransByLoc = /* @__PURE__ */ new Map();
+        const corrRegex = /<Correction>\s*<Location>0x([0-9a-fA-F]+)<\/Location>\s*<Translation>0x([0-9a-fA-F]+)<\/Translation>\s*<\/Correction>/g;
+        let cm;
+        while ((cm = corrRegex.exec(vertAssetMatch[2])) !== null) {
+          vertTransByLoc.set(Number.parseInt(cm[1], 16), Number.parseInt(cm[2], 16));
+        }
+        const idxTransByLoc = /* @__PURE__ */ new Map();
+        corrRegex.lastIndex = 0;
+        while ((cm = corrRegex.exec(idxAssetMatch[2])) !== null) {
+          idxTransByLoc.set(Number.parseInt(cm[1], 16), Number.parseInt(cm[2], 16));
+        }
+        const geomCount = metaBuf.readUInt32LE(208);
+        const geomBase = metaBuf.readUInt32LE(212);
+        const rawParts = [];
+        for (let g = 0; g < geomCount; g++) {
+          const gOff = geomBase + g * 48;
+          if (gOff + 48 > metaBuf.length) break;
+          const pCount = metaBuf.readUInt32LE(gOff + 36);
+          const pBase = metaBuf.readUInt32LE(gOff + 40);
+          for (let p = 0; p < pCount; p++) {
+            const pOff = pBase + p * 132;
+            if (pOff + 132 > metaBuf.length) break;
+            const vCount = metaBuf.readUInt32LE(pOff + 88);
+            const triCount = metaBuf.readUInt32LE(pOff + 72);
+            const vTrans = vertTransByLoc.get(pOff + 100) ?? 0;
+            const iTrans = idxTransByLoc.get(pOff + 76) ?? 0;
+            rawParts.push({
+              geometryIndex: g,
+              partIndex: p,
+              vertexType: 4,
+              vertexCount: vCount,
+              vertTrans: vTrans,
+              triangleBufferType: 1,
+              triangleCount: triCount,
+              idxTrans: iTrans
+            });
+          }
+        }
+        const sortedByIdx = [...rawParts].sort((a, b) => a.idxTrans - b.idxTrans);
+        for (let s = 0; s < sortedByIdx.length; s++) {
+          const cur = sortedByIdx[s];
+          const nextIdxTrans = s + 1 < sortedByIdx.length ? sortedByIdx[s + 1].idxTrans : idxBuf.length;
+          const vBytes = vertBuf.subarray(cur.vertTrans, cur.vertTrans + cur.vertexCount * 68);
+          const tBytes = idxBuf.subarray(cur.idxTrans, Math.max(cur.idxTrans + (cur.triangleCount + 2) * 2, nextIdxTrans));
+          gbxmodelGeometryParts.push({
+            geometryIndex: cur.geometryIndex,
+            partIndex: cur.partIndex,
+            vertexType: cur.vertexType,
+            vertexCount: cur.vertexCount,
+            vertexData: vBytes.toString("base64"),
+            triangleBufferType: cur.triangleBufferType,
+            triangleCount: cur.triangleCount,
+            triangleData: tBytes.toString("base64")
+          });
+        }
+      }
+    }
+  }
+  let secondaryClassFourCC = null;
+  let tertiaryClassFourCC = null;
+  if (rawTagHier.length >= 8 && rawTagHier.slice(4, 8) !== "\xFF\xFF\xFF\xFF") {
+    secondaryClassFourCC = fourCCFromString(rev4(rawTagHier.slice(4, 8)));
+  }
+  if (rawTagHier.length >= 12 && rawTagHier.slice(8, 12) !== "\xFF\xFF\xFF\xFF") {
+    tertiaryClassFourCC = fourCCFromString(rev4(rawTagHier.slice(8, 12)));
+  }
+  return {
+    tag: {
+      originalIndex: 0,
+      group: groupName,
+      path: tagPath,
+      structName: rootStructName,
+      data: metaBuf.toString("base64"),
+      dependencies: [],
+      secondaryClassFourCC,
+      tertiaryClassFourCC,
+      gbxmodelGeometryParts: gbxmodelGeometryParts.length > 0 ? gbxmodelGeometryParts : void 0
+    },
+    referencedDeps,
+    extractRootDir
+  };
+}
+function inferHekTagRootAndPath(filePath, buf) {
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  const fourCCStr = buf.toString("latin1", 36, 40);
+  const classInfo = lookupTagClassByName(ext) ?? lookupTagClass(fourCCFromString(fourCCStr));
+  const group = classInfo?.name ?? ext;
+  const noExt = filePath.slice(0, filePath.length - path.extname(filePath).length);
+  const normNoExt = path.resolve(noExt);
+  const lower = normNoExt.toLowerCase();
+  const tagsMarker = `${path.sep}tags${path.sep}`;
+  const tagsIdx = lower.lastIndexOf(tagsMarker);
+  if (tagsIdx >= 0) {
+    const rootDir = normNoExt.slice(0, tagsIdx + 5);
+    const rel = normNoExt.slice(tagsIdx + tagsMarker.length).replace(/\//g, "\\");
+    return { rootDir, tagPath: rel, group };
+  }
+  const legacyMarker = `${path.sep}legacy_tags${path.sep}`;
+  const legIdx = lower.lastIndexOf(legacyMarker);
+  if (legIdx >= 0) {
+    const afterLegacy = normNoExt.slice(legIdx + legacyMarker.length);
+    const parts = afterLegacy.split(path.sep);
+    const packRoot = normNoExt.slice(0, legIdx + legacyMarker.length + (parts[0]?.length ?? 0));
+    const legacyRoot = normNoExt.slice(0, legIdx + 12);
+    const relFromPack = parts.slice(1).join("\\");
+    const relFromLegacy = parts.join("\\");
+    const asciiText = buf.toString("latin1", 64);
+    if (parts[0] && asciiText.includes(`${parts[0]}\\`)) {
+      return { rootDir: legacyRoot, tagPath: relFromLegacy, group };
+    }
+    if (parts[0] && !["forge", "grid", "weapons", "vehicles", "characters", "scenery", "sound", "ui", "effects", "levels", "globals", "bitmaps", "shaders"].includes(
+      parts[0].toLowerCase()
+    ) && relFromPack) {
+      return { rootDir: packRoot, tagPath: relFromPack, group };
+    }
+    return { rootDir: legacyRoot, tagPath: relFromLegacy, group };
+  }
+  const knownTopFolders = /* @__PURE__ */ new Set(["weapons", "vehicles", "characters", "scenery", "sound", "ui", "effects", "levels", "globals", "camera", "sky", "devices", "powerups"]);
+  const segs = normNoExt.split(path.sep);
+  for (let i = segs.length - 2; i >= 1; i--) {
+    if (knownTopFolders.has(segs[i].toLowerCase())) {
+      return {
+        rootDir: segs.slice(0, i).join(path.sep),
+        tagPath: segs.slice(i).join("\\"),
+        group
+      };
+    }
+  }
+  return {
+    rootDir: path.dirname(normNoExt),
+    tagPath: path.basename(normNoExt),
+    group
+  };
+}
+function buildContainerFromLegacyTags(inputPaths) {
+  const expandedFiles = [];
+  const validGroupNames = new Set(getAllTagGroupNames());
+  const collectFromDir = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        collectFromDir(full);
+      } else if (entry.name.toLowerCase().endsWith(".meta")) {
+        const xmlCandidate = `${full.slice(0, -5)}.xml`;
+        if (fs.existsSync(xmlCandidate)) expandedFiles.push(full);
+      } else {
+        const ext = path.extname(entry.name).slice(1).toLowerCase();
+        if (validGroupNames.has(ext)) {
+          expandedFiles.push(full);
+        } else if (!["xml", "vertices", "indices", "toml", "txt", "md", "wav", "png", "jpg"].includes(ext)) {
+          try {
+            const fd = fs.openSync(full, "r");
+            const hdr = Buffer.alloc(64);
+            const bytesRead = fs.readSync(fd, hdr, 0, 64, 0);
+            fs.closeSync(fd);
+            if (bytesRead === 64 && hdr.toString("latin1", 60, 64) === "blam") {
+              expandedFiles.push(full);
+            }
+          } catch {
+          }
+        }
+      }
+    }
+  };
+  for (const p of inputPaths) {
+    if (!fs.existsSync(p)) continue;
+    const stat = fs.statSync(p);
+    if (stat.isDirectory()) {
+      collectFromDir(p);
+    } else if (p.toLowerCase().endsWith(".sbsp.xml") || p.toLowerCase().endsWith(".sbsp")) {
+      collectFromDir(path.dirname(p));
+    } else {
+      expandedFiles.push(p);
+    }
+  }
+  if (expandedFiles.length === 0) {
+    throw new Error("No legacy tag files (.scenery/.biped/.gbxmodel/.bitmap or HMT .meta+.xml) found in selection.");
+  }
+  const firstFile = expandedFiles[0];
+  const isHmt = firstFile.toLowerCase().endsWith(".meta") || firstFile.toLowerCase().endsWith(".xml");
+  const parsedTagsByKey = /* @__PURE__ */ new Map();
+  const rootIndices = [];
+  if (isHmt) {
+    const queue = [];
+    for (const f of expandedFiles) {
+      const base = f.toLowerCase().endsWith(".xml") ? f.slice(0, -4) : f.toLowerCase().endsWith(".meta") ? f.slice(0, -5) : f;
+      const metaPath = `${base}.meta`;
+      const xmlPath = `${base}.xml`;
+      if (fs.existsSync(metaPath) && fs.existsSync(xmlPath)) {
+        queue.push({ metaPath, xmlPath, isRoot: true });
+      }
+    }
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      const parsed = parseHmtMetaXmlTagPair(cur.metaPath, cur.xmlPath);
+      const key = `${parsed.tag.group}:${parsed.tag.path.toLowerCase()}`;
+      if (parsedTagsByKey.has(key)) continue;
+      const localIndex = parsedTagsByKey.size;
+      parsed.tag.originalIndex = localIndex;
+      parsedTagsByKey.set(key, {
+        localIndex,
+        tag: parsed.tag,
+        referencedDeps: parsed.referencedDeps
+      });
+      if (cur.isRoot) rootIndices.push(localIndex);
+      for (const dep of parsed.referencedDeps) {
+        const depKey = `${dep.group}:${dep.path.toLowerCase()}`;
+        if (parsedTagsByKey.has(depKey)) continue;
+        const clsInfo = lookupTagClassByName(dep.group);
+        if (!clsInfo) continue;
+        const relFile = dep.path.replace(/\\/g, path.sep);
+        const candidateBase = path.join(parsed.extractRootDir, `${relFile}.${clsInfo.groupId}`);
+        if (fs.existsSync(`${candidateBase}.meta`) && fs.existsSync(`${candidateBase}.xml`)) {
+          queue.push({
+            metaPath: `${candidateBase}.meta`,
+            xmlPath: `${candidateBase}.xml`,
+            isRoot: false
+          });
+        }
+      }
+    }
+  } else {
+    const queue = expandedFiles.map((f) => ({ filePath: f, isRoot: true }));
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      if (!fs.existsSync(cur.filePath)) continue;
+      const buf = fs.readFileSync(cur.filePath);
+      if (buf.length < 64 || buf.toString("latin1", 60, 64) !== "blam") continue;
+      const info = cur.rootDir && cur.tagPath && cur.group ? { rootDir: cur.rootDir, tagPath: cur.tagPath, group: cur.group } : inferHekTagRootAndPath(cur.filePath, buf);
+      const key = `${info.group}:${info.tagPath.toLowerCase()}`;
+      if (parsedTagsByKey.has(key)) continue;
+      const parsed = parseHekLooseTagBuffer(buf, info.tagPath, info.group);
+      const localIndex = parsedTagsByKey.size;
+      parsed.tag.originalIndex = localIndex;
+      parsedTagsByKey.set(key, {
+        localIndex,
+        tag: parsed.tag,
+        referencedDeps: parsed.referencedDeps
+      });
+      if (cur.isRoot) rootIndices.push(localIndex);
+      for (const dep of parsed.referencedDeps) {
+        const depKey = `${dep.group}:${dep.path.toLowerCase()}`;
+        if (parsedTagsByKey.has(depKey)) continue;
+        const relFile = `${dep.path.replace(/\\/g, path.sep)}.${dep.group}`;
+        const candidate1 = path.join(info.rootDir, relFile);
+        const candidate2 = path.join(path.dirname(info.rootDir), relFile);
+        if (fs.existsSync(candidate1)) {
+          queue.push({
+            filePath: candidate1,
+            rootDir: info.rootDir,
+            tagPath: dep.path,
+            group: dep.group,
+            isRoot: false
+          });
+        } else if (fs.existsSync(candidate2)) {
+          queue.push({
+            filePath: candidate2,
+            rootDir: path.dirname(info.rootDir),
+            tagPath: dep.path,
+            group: dep.group,
+            isRoot: false
+          });
+        }
+      }
+    }
+  }
+  const allEntries = Array.from(parsedTagsByKey.values());
+  for (const entry of allEntries) {
+    entry.tag.dependencies = entry.referencedDeps.map((dep) => {
+      const target = parsedTagsByKey.get(`${dep.group}:${dep.path.toLowerCase()}`);
+      if (target) {
+        return {
+          fieldPath: dep.fieldPath,
+          group: dep.group,
+          path: dep.path,
+          kind: "internal",
+          localTagIndex: target.localIndex,
+          fieldOffset: dep.fieldOffset
+        };
+      }
+      return {
+        fieldPath: dep.fieldPath,
+        group: dep.group,
+        path: dep.path,
+        kind: "external",
+        fieldOffset: dep.fieldOffset
+      };
+    });
+  }
+  const container = {
+    magic: OCETAGS_MAGIC,
+    formatVersion: OCETAGS_FORMAT_VERSION,
+    sourceMapName: isHmt ? "hmt_legacy_extract" : "hek_legacy_tags",
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    hasUnresolvedBspReferences: false,
+    rootOriginalIndices: rootIndices.length > 0 ? rootIndices : allEntries.map((e) => e.localIndex),
+    tags: allEntries.map((e) => e.tag),
+    notExtracted: [],
+    warnings: [],
+    resourceMapIdentities: {},
+    externalResourceRefs: [],
+    externalData: "embedded"
+  };
+  return {
+    container,
+    formatDetected: isHmt ? "hmt_meta_xml" : "hek_loose"
+  };
+}
+function importLegacyTagsIntoMap(mapBuffer, inputPaths, resourceFiles, mode = "add") {
+  const { container, formatDetected } = buildContainerFromLegacyTags(inputPaths);
+  hydrateExternalRawDataInContainer(container, resourceFiles);
+  let currentBuf = Buffer.from(mapBuffer);
+  let header = parseCacheFileHeader(currentBuf);
+  let tagIndex = parseTagIndex(currentBuf, header);
+  const warnings = [];
+  const activeScenario = tagIndex.entries.find((e) => e.tagId === tagIndex.scenarioTagId) ?? tagIndex.entries.find((e) => e.primaryClassName === "scenario");
+  for (const t of container.tags) {
+    if (t.group === "scenario" && activeScenario && !activeScenario.isExternal) {
+      if (t.path.toLowerCase() !== activeScenario.path.toLowerCase()) {
+        const oldPath = t.path;
+        const oldPrefix = `${oldPath}.`;
+        const newPrefix = `${activeScenario.path}.`;
+        t.path = activeScenario.path;
+        for (const dep of t.dependencies) {
+          if (dep.fieldPath.startsWith(oldPrefix)) {
+            dep.fieldPath = `${newPrefix}${dep.fieldPath.slice(oldPrefix.length)}`;
+          }
+        }
+        warnings.push(
+          `Remapped scenario tag path "${oldPath}" to active map scenario "${activeScenario.path}".`
+        );
+      }
+      const rawBuf = Buffer.from(t.data, "base64");
+      const targetScnrOff = header.tagDataOffset + (activeScenario.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+      if (rawBuf.length >= 1456 && targetScnrOff >= 0 && targetScnrOff + 1456 <= currentBuf.length) {
+        const targetBspCount = currentBuf.readUInt32LE(targetScnrOff + 1444);
+        const targetBspPtr = currentBuf.readUInt32LE(targetScnrOff + 1448);
+        const targetBspOff = header.tagDataOffset + (targetBspPtr - tagIndex.baseMemoryAddress);
+        const localBspCount = rawBuf.readUInt32LE(1444);
+        const localBspOff = rawBuf.readUInt32LE(1448);
+        if (targetBspCount > 0 && localBspCount > 0 && targetBspOff >= 0 && targetBspOff + targetBspCount * 32 <= currentBuf.length && localBspOff >= 1456 && localBspOff + localBspCount * 32 <= rawBuf.length) {
+          const copyCount = Math.min(localBspCount, targetBspCount);
+          for (let b = 0; b < copyCount; b++) {
+            const srcRow = targetBspOff + b * 32;
+            const dstRow = localBspOff + b * 32;
+            currentBuf.copy(rawBuf, dstRow, srcRow, srcRow + 16);
+            const targetBspTagId = currentBuf.readUInt32LE(srcRow + 28);
+            const targetBspEntry = tagIndex.entries.find((e) => e.tagId === targetBspTagId) ?? tagIndex.entries.find((e) => e.primaryClassName === "scenario_structure_bsp");
+            if (targetBspEntry) {
+              const bspDepFieldPath = `${t.path}.structure bsps[${b}].structure bsp`;
+              const bspDep = t.dependencies.find((d) => d.fieldPath === bspDepFieldPath);
+              if (bspDep) {
+                bspDep.path = targetBspEntry.path;
+              }
+            }
+          }
+          t.data = rawBuf.toString("base64");
+        }
+      }
+    }
+  }
+  const mapTagPathByKey = /* @__PURE__ */ new Map();
+  for (const e of tagIndex.entries) {
+    if (e.primaryClassName) {
+      mapTagPathByKey.set(`${e.primaryClassName}:${e.path.toLowerCase()}`, e.path);
+    }
+  }
+  for (const t of container.tags) {
+    const rawBuf = Buffer.from(t.data, "base64");
+    let mutated = false;
+    t.dependencies = t.dependencies.filter((dep) => {
+      if (dep.kind === "external" && !mapTagPathByKey.has(`${dep.group}:${dep.path.toLowerCase()}`)) {
+        const lowerPath = dep.path.toLowerCase();
+        const mpCandidateKey = lowerPath.endsWith("_mp") ? `${dep.group}:${lowerPath.slice(0, -3)}` : `${dep.group}:${lowerPath}_mp`;
+        const fallbackPath = mapTagPathByKey.get(mpCandidateKey);
+        if (fallbackPath) {
+          warnings.push(
+            `Remapped missing "${dep.path}" (${dep.group}) in "${t.path}" to "${fallbackPath}".`
+          );
+          dep.path = fallbackPath;
+          return true;
+        }
+        if (dep.fieldOffset !== void 0 && dep.fieldOffset + 16 <= rawBuf.length) {
+          rawBuf.writeUInt32LE(NULL_TAG_ID, dep.fieldOffset + 12);
+          mutated = true;
+        }
+        warnings.push(
+          `Cleared missing external dependency "${dep.path}" (${dep.group}) in "${t.path}".`
+        );
+        return false;
+      }
+      return true;
+    });
+    if (mutated) {
+      t.data = rawBuf.toString("base64");
+    }
+  }
+  const defaultWeaponAmmoByPath = /* @__PURE__ */ new Map();
+  for (const e of tagIndex.entries) {
+    if (e.primaryClassName !== "weapon" || e.isExternal) continue;
+    const weapTagOff = header.tagDataOffset + (e.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+    if (weapTagOff < 0 || weapTagOff + 1288 > currentBuf.length) continue;
+    const magCount = currentBuf.readUInt32LE(weapTagOff + 1264);
+    const magPtr = currentBuf.readUInt32LE(weapTagOff + 1268);
+    if (magCount === 0) continue;
+    const magOff = header.tagDataOffset + (magPtr - tagIndex.baseMemoryAddress);
+    if (magOff < 0 || magOff + 112 > currentBuf.length) continue;
+    const initTotal = currentBuf.readInt16LE(magOff + 6);
+    const maxLoaded = currentBuf.readInt16LE(magOff + 10);
+    if (initTotal > 0 || maxLoaded > 0) {
+      defaultWeaponAmmoByPath.set(e.path.toLowerCase(), {
+        roundsLoaded: maxLoaded,
+        roundsLeft: Math.max(0, initTotal - maxLoaded)
+      });
+    }
+  }
+  const scenarioTags = container.tags.filter((t) => t.group === "scenario");
+  for (const t of scenarioTags) {
+    const rawBuf = Buffer.from(t.data, "base64");
+    if (rawBuf.length < 1456) continue;
+    const scenarioType = rawBuf.readUInt16LE(60);
+    const equipCount = rawBuf.readUInt32LE(600);
+    const equipOff = rawBuf.readUInt32LE(604);
+    const weapCount = rawBuf.readUInt32LE(624);
+    const weapOff = rawBuf.readUInt32LE(628);
+    if (equipCount === 0 && weapCount === 0) continue;
+    let ammoPatchedCount = 0;
+    if (weapCount > 0 && weapOff >= 1456 && weapOff + weapCount * 92 <= rawBuf.length) {
+      for (let w = 0; w < weapCount; w++) {
+        const rowOff = weapOff + w * 92;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const roundsLeft = rawBuf.readInt16LE(rowOff + 66);
+        const roundsLoaded = rawBuf.readInt16LE(rowOff + 68);
+        if (roundsLeft === 0 && roundsLoaded === 0 && palIdx >= 0) {
+          const palDep = t.dependencies.find(
+            (d) => d.fieldPath === `${t.path}.weapon palette[${palIdx}].name`
+          );
+          const defAmmo = palDep ? defaultWeaponAmmoByPath.get(palDep.path.toLowerCase()) : void 0;
+          if (defAmmo) {
+            rawBuf.writeInt16LE(defAmmo.roundsLeft, rowOff + 66);
+            rawBuf.writeInt16LE(defAmmo.roundsLoaded, rowOff + 68);
+            ammoPatchedCount++;
+          }
+        }
+      }
+    }
+    if (ammoPatchedCount > 0) {
+      t.data = rawBuf.toString("base64");
+    }
+    if (scenarioType !== 1) continue;
+    const existingItmcByItemKey = /* @__PURE__ */ new Map();
+    const itemKeyByItmcPath = /* @__PURE__ */ new Map();
+    for (const e of tagIndex.entries) {
+      if (e.primaryClassName !== "item_collection" || e.isExternal) continue;
+      const itmcOff = header.tagDataOffset + (e.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+      if (itmcOff < 0 || itmcOff + 92 > currentBuf.length) continue;
+      const permCount = currentBuf.readUInt32LE(itmcOff + 0);
+      const permPtr = currentBuf.readUInt32LE(itmcOff + 4);
+      if (permCount !== 1) continue;
+      const permOff = header.tagDataOffset + (permPtr - tagIndex.baseMemoryAddress);
+      if (permOff < 0 || permOff + 84 > currentBuf.length) continue;
+      const itemTagId = currentBuf.readUInt32LE(permOff + 36 + 12);
+      const itemEntry = tagIndex.entries.find((x) => x.tagId === itemTagId);
+      if (itemEntry && itemEntry.primaryClassName) {
+        const itemKey = `${itemEntry.primaryClassName}:${itemEntry.path.toLowerCase()}`;
+        if (!existingItmcByItemKey.has(itemKey)) {
+          existingItmcByItemKey.set(itemKey, e.path);
+        }
+        itemKeyByItmcPath.set(e.path.toLowerCase(), itemKey);
+      }
+    }
+    const ensureItmcForItem = (group, itemPath) => {
+      const itemKey = `${group}:${itemPath.toLowerCase()}`;
+      const existing = existingItmcByItemKey.get(itemKey);
+      if (existing) return existing;
+      const leaf = itemPath.split("\\").pop() || itemPath;
+      const itmcPath = `item collections\\singleplayer_promoted\\${leaf}`;
+      const itmcBuf = Buffer.alloc(176, 0);
+      itmcBuf.writeUInt32LE(1, 0);
+      itmcBuf.writeUInt32LE(92, 4);
+      itmcBuf.writeUInt32LE(0, 8);
+      itmcBuf.writeInt16LE(30, 12);
+      itmcBuf.writeFloatLE(100, 92 + 32);
+      const itemFourCC = fourCCFromString(group === "weapon" ? "weap" : "eqip");
+      itmcBuf.writeUInt32LE(itemFourCC, 92 + 36);
+      itmcBuf.writeUInt32LE(0, 92 + 40);
+      itmcBuf.writeUInt32LE(0, 92 + 44);
+      itmcBuf.writeUInt32LE(0, 92 + 48);
+      container.tags.push({
+        originalIndex: container.tags.length,
+        group: "item_collection",
+        path: itmcPath,
+        structName: "ItemCollection",
+        data: itmcBuf.toString("base64"),
+        dependencies: [
+          {
+            fieldPath: `${itmcPath}.permutations[0].item`,
+            fieldOffset: 92 + 36,
+            kind: "external",
+            group,
+            path: itemPath
+          }
+        ],
+        secondaryClassFourCC: null,
+        tertiaryClassFourCC: null
+      });
+      existingItmcByItemKey.set(itemKey, itmcPath);
+      itemKeyByItmcPath.set(itmcPath.toLowerCase(), itemKey);
+      return itmcPath;
+    };
+    const netgameCount = rawBuf.readUInt32LE(900);
+    const netgameOff = rawBuf.readUInt32LE(904);
+    const existingNetgamePlacements = [];
+    if (netgameCount > 0 && netgameOff >= 1456 && netgameOff + netgameCount * 144 <= rawBuf.length) {
+      for (let k = 0; k < netgameCount; k++) {
+        const rowOff = netgameOff + k * 144;
+        const x = rawBuf.readFloatLE(rowOff + 64);
+        const y = rawBuf.readFloatLE(rowOff + 68);
+        const z = rawBuf.readFloatLE(rowOff + 72);
+        const dep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.netgame equipment[${k}].item collection`
+        );
+        const itemKey = dep ? itemKeyByItmcPath.get(dep.path.toLowerCase()) : void 0;
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+    const newNetgameEntries = [];
+    const keptWeapons = [];
+    const keptEquipment = [];
+    let skippedOverlapCount = 0;
+    if (weapCount > 0 && weapOff >= 1456 && weapOff + weapCount * 92 <= rawBuf.length) {
+      for (let w = 0; w < weapCount; w++) {
+        const rowOff = weapOff + w * 92;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const objNameIdx = rawBuf.readInt16LE(rowOff + 2);
+        const notPlaced = rawBuf.readUInt16LE(rowOff + 4);
+        if (objNameIdx >= 0) {
+          keptWeapons.push(Buffer.from(rawBuf.subarray(rowOff, rowOff + 92)));
+          continue;
+        }
+        if ((notPlaced & 1) !== 0 || palIdx < 0) continue;
+        const palDep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.weapon palette[${palIdx}].name`
+        );
+        if (!palDep) continue;
+        const x = rawBuf.readFloatLE(rowOff + 8);
+        const y = rawBuf.readFloatLE(rowOff + 12);
+        const z = rawBuf.readFloatLE(rowOff + 16);
+        const yaw = rawBuf.readFloatLE(rowOff + 20);
+        const itemKey = `${palDep.group}:${palDep.path.toLowerCase()}`;
+        const overlapsExisting = existingNetgamePlacements.some(
+          (e) => e.itemKey === itemKey && Math.hypot(e.x - x, e.y - y, e.z - z) < 0.5
+        );
+        if (overlapsExisting) {
+          skippedOverlapCount++;
+          continue;
+        }
+        const itmcPath = ensureItmcForItem(palDep.group, palDep.path);
+        newNetgameEntries.push({ x, y, z, yaw, itmcPath });
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+    if (equipCount > 0 && equipOff >= 1456 && equipOff + equipCount * 40 <= rawBuf.length) {
+      for (let eq = 0; eq < equipCount; eq++) {
+        const rowOff = equipOff + eq * 40;
+        const palIdx = rawBuf.readInt16LE(rowOff + 0);
+        const objNameIdx = rawBuf.readInt16LE(rowOff + 2);
+        const notPlaced = rawBuf.readUInt16LE(rowOff + 4);
+        if (objNameIdx >= 0) {
+          keptEquipment.push(Buffer.from(rawBuf.subarray(rowOff, rowOff + 40)));
+          continue;
+        }
+        if ((notPlaced & 1) !== 0 || palIdx < 0) continue;
+        const palDep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.equipment palette[${palIdx}].name`
+        );
+        if (!palDep) continue;
+        const x = rawBuf.readFloatLE(rowOff + 8);
+        const y = rawBuf.readFloatLE(rowOff + 12);
+        const z = rawBuf.readFloatLE(rowOff + 16);
+        const yaw = rawBuf.readFloatLE(rowOff + 20);
+        const itemKey = `${palDep.group}:${palDep.path.toLowerCase()}`;
+        const overlapsExisting = existingNetgamePlacements.some(
+          (e) => e.itemKey === itemKey && Math.hypot(e.x - x, e.y - y, e.z - z) < 0.5
+        );
+        if (overlapsExisting) {
+          skippedOverlapCount++;
+          continue;
+        }
+        const itmcPath = ensureItmcForItem(palDep.group, palDep.path);
+        newNetgameEntries.push({ x, y, z, yaw, itmcPath });
+        existingNetgamePlacements.push({ x, y, z, itemKey });
+      }
+    }
+    if (newNetgameEntries.length > 0 || keptWeapons.length !== weapCount || keptEquipment.length !== equipCount) {
+      const totalNetgameCount = netgameCount + newNetgameEntries.length;
+      const combinedNetgameBuf = Buffer.alloc(totalNetgameCount * 144, 0);
+      if (netgameCount > 0 && netgameOff >= 1456 && netgameOff + netgameCount * 144 <= rawBuf.length) {
+        rawBuf.copy(combinedNetgameBuf, 0, netgameOff, netgameOff + netgameCount * 144);
+      }
+      const newNetgameOff = rawBuf.length;
+      for (let k = 0; k < netgameCount; k++) {
+        const dep = t.dependencies.find(
+          (d) => d.fieldPath === `${t.path}.netgame equipment[${k}].item collection`
+        );
+        if (dep) {
+          dep.fieldOffset = newNetgameOff + k * 144 + 80;
+        }
+      }
+      const itmcFourCC = fourCCFromString("itmc");
+      for (let idx = 0; idx < newNetgameEntries.length; idx++) {
+        const k = netgameCount + idx;
+        const entry = newNetgameEntries[idx];
+        const entryOff = k * 144;
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 0);
+        combinedNetgameBuf.writeInt16LE(12, entryOff + 4);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 6);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 8);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 10);
+        combinedNetgameBuf.writeInt16LE(0, entryOff + 12);
+        combinedNetgameBuf.writeInt16LE(30, entryOff + 14);
+        combinedNetgameBuf.writeUInt32LE(4294967295, entryOff + 16);
+        combinedNetgameBuf.writeFloatLE(entry.x, entryOff + 64);
+        combinedNetgameBuf.writeFloatLE(entry.y, entryOff + 68);
+        combinedNetgameBuf.writeFloatLE(entry.z, entryOff + 72);
+        combinedNetgameBuf.writeFloatLE(entry.yaw, entryOff + 76);
+        combinedNetgameBuf.writeUInt32LE(itmcFourCC, entryOff + 80);
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 84);
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 88);
+        combinedNetgameBuf.writeUInt32LE(0, entryOff + 92);
+        t.dependencies.push({
+          fieldPath: `${t.path}.netgame equipment[${k}].item collection`,
+          fieldOffset: newNetgameOff + entryOff + 80,
+          kind: "external",
+          group: "item_collection",
+          path: entry.itmcPath
+        });
+      }
+      const finalScnrBuf = Buffer.concat([rawBuf, combinedNetgameBuf]);
+      finalScnrBuf.writeUInt32LE(totalNetgameCount, 900);
+      finalScnrBuf.writeUInt32LE(totalNetgameCount > 0 ? newNetgameOff : 0, 904);
+      finalScnrBuf.writeUInt32LE(0, 908);
+      if (keptWeapons.length === 0) {
+        finalScnrBuf.writeUInt32LE(0, 624);
+        finalScnrBuf.writeUInt32LE(0, 628);
+        finalScnrBuf.writeUInt32LE(0, 632);
+      } else {
+        Buffer.concat(keptWeapons).copy(finalScnrBuf, weapOff);
+        finalScnrBuf.writeUInt32LE(keptWeapons.length, 624);
+      }
+      if (keptEquipment.length === 0) {
+        finalScnrBuf.writeUInt32LE(0, 600);
+        finalScnrBuf.writeUInt32LE(0, 604);
+        finalScnrBuf.writeUInt32LE(0, 608);
+      } else {
+        Buffer.concat(keptEquipment).copy(finalScnrBuf, equipOff);
+        finalScnrBuf.writeUInt32LE(keptEquipment.length, 600);
+      }
+      t.data = finalScnrBuf.toString("base64");
+      warnings.push(
+        `Promoted ${newNetgameEntries.length} singleplayer weapon/equipment placement(s) into Multiplayer Netgame Equipment (.item_collection)${skippedOverlapCount > 0 ? ` and skipped ${skippedOverlapCount} duplicate overlap(s)` : ""} so they persist and respawn in multiplayer.`
+      );
+    }
+  }
+  let addedCount = 0;
+  let swappedCount = 0;
+  let reusedCount = 0;
+  const importedPaths = [];
+  const addedLocalIndices = /* @__PURE__ */ new Set();
+  const addPlan = planAddInjection(
+    { buffer: currentBuf, header, tagIndex },
+    container,
+    {},
+    { allowEmbeddedRelocation: true }
+  );
+  if (addPlan.kind === "ok") {
+    reusedCount = addPlan.counts.reused;
+    if (addPlan.toAdd.length > 0) {
+      const res = applyInjectionWithReport(currentBuf, header, tagIndex, container, addPlan, {
+        allowEmbeddedRelocation: true
+      });
+      currentBuf = Buffer.from(res.buffer);
+      header = parseCacheFileHeader(currentBuf);
+      tagIndex = parseTagIndex(currentBuf, header);
+      addedCount += addPlan.toAdd.length;
+      for (const li of addPlan.toAddLocalIndices) addedLocalIndices.add(li);
+      for (const a of addPlan.toAdd) importedPaths.push(`[+${a.group}] ${a.path}`);
+    }
+  }
+  const hasScenarioTag = container.tags.some((t) => t.group === "scenario");
+  if (mode === "swap" || addedCount === 0 || hasScenarioTag) {
+    const oldToNewIdx = /* @__PURE__ */ new Map();
+    const swapTags = [];
+    container.tags.forEach((t, oldIdx) => {
+      if (!addedLocalIndices.has(oldIdx)) {
+        oldToNewIdx.set(oldIdx, swapTags.length);
+        swapTags.push({
+          ...t,
+          dependencies: t.dependencies.map((d) => ({ ...d }))
+        });
+      }
+    });
+    for (const st of swapTags) {
+      for (const d of st.dependencies) {
+        if (d.kind === "internal" && d.localTagIndex !== void 0) {
+          if (addedLocalIndices.has(d.localTagIndex)) {
+            d.kind = "external";
+            delete d.localTagIndex;
+          } else {
+            d.localTagIndex = oldToNewIdx.get(d.localTagIndex);
+          }
+        }
+      }
+    }
+    const swapContainer = {
+      ...container,
+      tags: swapTags,
+      rootOriginalIndices: swapTags.map((t) => t.originalIndex)
+    };
+    const swapPlan = planSwapInjection(
+      { buffer: currentBuf, header, tagIndex },
+      swapContainer,
+      {},
+      { allowEmbeddedRelocation: true }
+    );
+    if (swapPlan.kind === "ok" && swapPlan.toSwap.length > 0) {
+      const res = applyInjectionWithReport(currentBuf, header, tagIndex, swapContainer, swapPlan, {
+        allowEmbeddedRelocation: true
+      });
+      currentBuf = Buffer.from(res.buffer);
+      swappedCount += swapPlan.toSwap.length;
+      reusedCount = Math.max(0, reusedCount - swapPlan.toSwap.length);
+      for (const s of swapPlan.toSwap) {
+        const st = swapContainer.tags[s.localIndex];
+        if (st) importedPaths.push(`[~${st.group}] ${st.path}`);
+      }
+    }
+  }
+  return {
+    buffer: currentBuf,
+    formatDetected,
+    addedCount,
+    swappedCount,
+    reusedCount,
+    importedPaths,
+    warnings
   };
 }
 
@@ -36754,9 +42744,3727 @@ function analyzeHaloToolLog(input) {
   };
 }
 
+// ../core/src/map/map-compare.ts
+var IDENTITY_FIELD_CANDIDATES = [
+  "name",
+  "label",
+  "permutation name",
+  "marker name",
+  "node name",
+  "script name",
+  "region name",
+  "camera point name",
+  "object name",
+  "shader",
+  "item collection",
+  "weapon",
+  "vehicle",
+  "biped",
+  "equipment",
+  "scenery",
+  "sound",
+  "bitmap",
+  "damage effect",
+  "projectile"
+];
+function extractElementIdentity(elem) {
+  for (const candidate of IDENTITY_FIELD_CANDIDATES) {
+    const f = elem.fields.find((field) => field.name.toLowerCase() === candidate);
+    if (!f) continue;
+    if (f.kind === "string" && typeof f.value === "string" && f.value.trim()) {
+      return f.value.trim();
+    }
+    if (f.kind === "dependency" && f.dependencyTarget && f.dependencyTarget.path) {
+      return `${f.dependencyTarget.group}:${normalizeComparePath(f.dependencyTarget.path)}`;
+    }
+  }
+  for (const f of elem.fields) {
+    if (f.kind === "string" && typeof f.value === "string" && f.value.trim()) {
+      return f.value.trim();
+    }
+  }
+  for (const f of elem.fields) {
+    if (f.kind === "dependency" && f.dependencyTarget && f.dependencyTarget.path) {
+      return `${f.dependencyTarget.group}:${normalizeComparePath(f.dependencyTarget.path)}`;
+    }
+  }
+  return null;
+}
+function computeElementFingerprints(elem) {
+  const shallowParts = [];
+  const deepParts = [];
+  for (const f of elem.fields) {
+    if (f.kind === "reflexive") {
+      const childDeep = (f.children ?? []).map((c) => computeElementFingerprints(c).deep).join(";");
+      deepParts.push(`${f.name}=[${childDeep}]`);
+    } else {
+      const val = formatFieldDisplay(f);
+      shallowParts.push(`${f.name}=${val}`);
+      deepParts.push(`${f.name}=${val}`);
+    }
+  }
+  return {
+    shallow: shallowParts.join("|"),
+    deep: deepParts.join("|")
+  };
+}
+function computeLisKeepIndices(seq) {
+  if (seq.length === 0) return /* @__PURE__ */ new Set();
+  const tails = [];
+  const tailIdx = [];
+  const prev = new Array(seq.length).fill(-1);
+  for (let i = 0; i < seq.length; i++) {
+    const val = seq[i];
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = lo + hi >>> 1;
+      if (tails[mid] < val) lo = mid + 1;
+      else hi = mid;
+    }
+    tails[lo] = val;
+    tailIdx[lo] = i;
+    if (lo > 0) prev[i] = tailIdx[lo - 1];
+  }
+  const keep = /* @__PURE__ */ new Set();
+  let cur = tailIdx[tails.length - 1] ?? -1;
+  while (cur >= 0) {
+    keep.add(cur);
+    cur = prev[cur];
+  }
+  return keep;
+}
+function lcsIndexPairs(leftKeys, rightKeys) {
+  const m = leftKeys.length;
+  const n = rightKeys.length;
+  if (m === 0 || n === 0) return [];
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i2 = m - 1; i2 >= 0; i2--) {
+    for (let j2 = n - 1; j2 >= 0; j2--) {
+      if (leftKeys[i2] === rightKeys[j2]) {
+        dp[i2][j2] = 1 + dp[i2 + 1][j2 + 1];
+      } else {
+        dp[i2][j2] = Math.max(dp[i2 + 1][j2], dp[i2][j2 + 1]);
+      }
+    }
+  }
+  const pairs = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (leftKeys[i] === rightKeys[j]) {
+      pairs.push([i, j]);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return pairs;
+}
+function alignReflexiveElements(leftChildren, rightChildren) {
+  const leftIds = leftChildren.map(extractElementIdentity);
+  const rightIds = rightChildren.map(extractElementIdentity);
+  const allLeftValid = leftChildren.length > 0 && leftIds.every((id) => !!id);
+  const allRightValid = rightChildren.length > 0 && rightIds.every((id) => !!id);
+  const uniqueLeft = new Set(leftIds).size === leftIds.length;
+  const uniqueRight = new Set(rightIds).size === rightIds.length;
+  if (allLeftValid && allRightValid && uniqueLeft && uniqueRight) {
+    const rightById = /* @__PURE__ */ new Map();
+    rightIds.forEach((id, idx) => rightById.set(id, idx));
+    const rawPairs = [];
+    const matchedOld = /* @__PURE__ */ new Set();
+    const matchedNew = /* @__PURE__ */ new Set();
+    for (let oldIdx = 0; oldIdx < leftChildren.length; oldIdx++) {
+      const id = leftIds[oldIdx];
+      const newIdx = rightById.get(id);
+      if (newIdx !== void 0) {
+        rawPairs.push({ oldIdx, newIdx, identity: id });
+        matchedOld.add(oldIdx);
+        matchedNew.add(newIdx);
+      }
+    }
+    const lisSet = computeLisKeepIndices(rawPairs.map((p) => p.newIdx));
+    const matchedPairs2 = rawPairs.map((p, idx) => ({
+      oldIdx: p.oldIdx,
+      newIdx: p.newIdx,
+      identity: p.identity,
+      moved: !lisSet.has(idx)
+    }));
+    const unmatchedOld = leftChildren.map((_, i) => i).filter((i) => !matchedOld.has(i));
+    const unmatchedNew = rightChildren.map((_, i) => i).filter((i) => !matchedNew.has(i));
+    if (unmatchedOld.length > 0 && unmatchedOld.length === unmatchedNew.length) {
+      for (let k = 0; k < unmatchedOld.length; k++) {
+        matchedPairs2.push({
+          oldIdx: unmatchedOld[k],
+          newIdx: unmatchedNew[k],
+          identity: `${leftIds[unmatchedOld[k]]} -> ${rightIds[unmatchedNew[k]]}`,
+          moved: false
+        });
+      }
+      matchedPairs2.sort((a, b) => a.oldIdx - b.oldIdx);
+      return {
+        matchedPairs: matchedPairs2,
+        addedIndices: [],
+        removedIndices: [],
+        strategy: "identity"
+      };
+    }
+    return {
+      matchedPairs: matchedPairs2,
+      addedIndices: unmatchedNew,
+      removedIndices: unmatchedOld,
+      strategy: "identity"
+    };
+  }
+  const leftFp = leftChildren.map(computeElementFingerprints);
+  const rightFp = rightChildren.map(computeElementFingerprints);
+  const deepPairs = lcsIndexPairs(
+    leftFp.map((f) => f.deep),
+    rightFp.map((f) => f.deep)
+  );
+  const matchedPairs = [];
+  const removedIndices = [];
+  const addedIndices = [];
+  const anchors = [...deepPairs, [leftChildren.length, rightChildren.length]];
+  let prevOld = 0;
+  let prevNew = 0;
+  for (const [anchorOld, anchorNew] of anchors) {
+    const gapOldLen = anchorOld - prevOld;
+    const gapNewLen = anchorNew - prevNew;
+    if (gapOldLen > 0 && gapNewLen > 0) {
+      const gapOldShallow = leftFp.slice(prevOld, anchorOld).map((f) => f.shallow);
+      const gapNewShallow = rightFp.slice(prevNew, anchorNew).map((f) => f.shallow);
+      const shallowSubPairs = lcsIndexPairs(gapOldShallow, gapNewShallow);
+      if (shallowSubPairs.length > 0) {
+        const subAnchors = [...shallowSubPairs, [gapOldLen, gapNewLen]];
+        let subPrevO = 0;
+        let subPrevN = 0;
+        for (const [so, sn] of subAnchors) {
+          const remO = so - subPrevO;
+          const remN = sn - subPrevN;
+          const pairCount = Math.min(remO, remN);
+          for (let k = 0; k < pairCount; k++) {
+            const oi = prevOld + subPrevO + k;
+            const ni = prevNew + subPrevN + k;
+            matchedPairs.push({
+              oldIdx: oi,
+              newIdx: ni,
+              identity: leftIds[oi] ?? rightIds[ni] ?? void 0,
+              moved: false
+            });
+          }
+          for (let k = pairCount; k < remO; k++) removedIndices.push(prevOld + subPrevO + k);
+          for (let k = pairCount; k < remN; k++) addedIndices.push(prevNew + subPrevN + k);
+          if (so < gapOldLen && sn < gapNewLen) {
+            const oi = prevOld + so;
+            const ni = prevNew + sn;
+            matchedPairs.push({
+              oldIdx: oi,
+              newIdx: ni,
+              identity: leftIds[oi] ?? rightIds[ni] ?? void 0,
+              moved: false
+            });
+          }
+          subPrevO = so + 1;
+          subPrevN = sn + 1;
+        }
+      } else {
+        const pairCount = Math.min(gapOldLen, gapNewLen);
+        for (let k = 0; k < pairCount; k++) {
+          const oi = prevOld + k;
+          const ni = prevNew + k;
+          matchedPairs.push({
+            oldIdx: oi,
+            newIdx: ni,
+            identity: leftIds[oi] ?? rightIds[ni] ?? void 0,
+            moved: false
+          });
+        }
+        for (let k = pairCount; k < gapOldLen; k++) removedIndices.push(prevOld + k);
+        for (let k = pairCount; k < gapNewLen; k++) addedIndices.push(prevNew + k);
+      }
+    } else if (gapOldLen > 0) {
+      for (let k = 0; k < gapOldLen; k++) removedIndices.push(prevOld + k);
+    } else if (gapNewLen > 0) {
+      for (let k = 0; k < gapNewLen; k++) addedIndices.push(prevNew + k);
+    }
+    if (anchorOld < leftChildren.length && anchorNew < rightChildren.length) {
+      matchedPairs.push({
+        oldIdx: anchorOld,
+        newIdx: anchorNew,
+        identity: leftIds[anchorOld] ?? rightIds[anchorNew] ?? void 0,
+        moved: false
+      });
+    }
+    prevOld = anchorOld + 1;
+    prevNew = anchorNew + 1;
+  }
+  return {
+    matchedPairs,
+    addedIndices,
+    removedIndices,
+    strategy: "content"
+  };
+}
+function compareTagFieldListsSemantically(leftFields, rightFields, pushRow, prefix = "", depth = 0) {
+  if (depth > 3) return;
+  const rightByName = new Map(rightFields.map((f) => [f.name, f]));
+  for (const lf of leftFields) {
+    const rf = rightByName.get(lf.name);
+    if (!rf) continue;
+    const propPath = prefix ? `${prefix}.${lf.name}` : lf.name;
+    if (lf.kind === "reflexive" && Array.isArray(lf.children) && Array.isArray(rf.children)) {
+      if (lf.children.length !== rf.children.length) {
+        pushRow(
+          propPath,
+          formatFieldDisplay(lf),
+          formatFieldDisplay(rf),
+          "changed",
+          `Reflexive block count changed (${lf.children.length} -> ${rf.children.length})`
+        );
+      }
+      if (lf.children.length <= 64 && rf.children.length <= 64 && (lf.children.length > 0 || rf.children.length > 0)) {
+        const alignment = alignReflexiveElements(lf.children, rf.children);
+        for (const remIdx of alignment.removedIndices) {
+          const remChild = lf.children[remIdx];
+          const label = remChild ? extractElementIdentity(remChild) ?? `#${remIdx}` : `#${remIdx}`;
+          pushRow(
+            `${propPath}[-${remIdx}:${label}]`,
+            label,
+            "Removed",
+            "removed",
+            `Removed element ${remIdx} (${label})`
+          );
+        }
+        for (const addIdx of alignment.addedIndices) {
+          const addChild = rf.children[addIdx];
+          const label = addChild ? extractElementIdentity(addChild) ?? `#${addIdx}` : `#${addIdx}`;
+          pushRow(
+            `${propPath}[+${addIdx}:${label}]`,
+            "Not present",
+            label,
+            "added",
+            `Added element at index ${addIdx} (${label})`
+          );
+        }
+        for (const pair of alignment.matchedPairs) {
+          const lChild = lf.children[pair.oldIdx];
+          const rChild = rf.children[pair.newIdx];
+          if (!lChild || !rChild) continue;
+          const idSuffix = pair.identity ? `:${pair.identity}` : "";
+          const idxLabel = pair.oldIdx === pair.newIdx ? `${propPath}[${pair.oldIdx}${idSuffix}]` : `${propPath}[${pair.oldIdx}->${pair.newIdx}${idSuffix}]`;
+          if (pair.moved) {
+            pushRow(
+              idxLabel,
+              `Index #${pair.oldIdx}`,
+              `Index #${pair.newIdx}`,
+              "changed",
+              `Reordered element${pair.identity ? ` "${pair.identity}"` : ""}`
+            );
+          }
+          compareTagFieldListsSemantically(lChild.fields, rChild.fields, pushRow, idxLabel, depth + 1);
+        }
+      }
+      continue;
+    }
+    const lv = formatFieldDisplay(lf);
+    const rv = formatFieldDisplay(rf);
+    if (lv !== rv) {
+      pushRow(propPath, lv, rv, "changed");
+    }
+  }
+}
+var normalizeComparePath = (path16) => path16.replace(/\\/g, "/").replace(/\/{2,}/g, "/").trim().toLowerCase();
+function formatFieldDisplay(field) {
+  if (field.kind === "dependency") {
+    if (!field.dependencyTarget) return "null";
+    return `${field.dependencyTarget.group}:${normalizeComparePath(field.dependencyTarget.path)}`;
+  }
+  if (field.kind === "reflexive") {
+    return `${field.reflexiveCount ?? 0} element(s)`;
+  }
+  if (field.kind === "enum" && field.enumOptions && typeof field.value === "number") {
+    return `${field.enumOptions[field.value] ?? field.value} (${field.value})`;
+  }
+  if (typeof field.value === "number") {
+    return Number.isInteger(field.value) ? String(field.value) : Number(field.value.toFixed(6)).toString();
+  }
+  if (typeof field.value === "string") {
+    return field.value;
+  }
+  if (field.value === null || field.value === void 0) {
+    return "null";
+  }
+  return JSON.stringify(field.value);
+}
+
+// ../core/src/map/baboon-features.ts
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
+function makeLooseTagKey(group, tagPath) {
+  return `${group.trim().toLowerCase()}:${normalizeComparePath(tagPath)}`;
+}
+function scanLooseTagsWorkspace(tagsDir, previousIndex) {
+  const resolvedRoot = path2.resolve(tagsDir);
+  if (!fs2.existsSync(resolvedRoot)) {
+    throw new Error(`Tags directory does not exist: ${resolvedRoot}`);
+  }
+  const validGroups = new Set(getAllTagGroupNames());
+  const prevByFilePath = /* @__PURE__ */ new Map();
+  if (previousIndex && path2.resolve(previousIndex.tagsDir) === resolvedRoot) {
+    for (const e of previousIndex.entries) {
+      prevByFilePath.set(path2.resolve(e.filePath), e);
+    }
+  }
+  const entries = [];
+  const walk = (dir) => {
+    let dirEntries;
+    try {
+      dirEntries = fs2.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const d of dirEntries) {
+      if (d.name.startsWith(".")) continue;
+      const fullPath = path2.join(dir, d.name);
+      if (d.isDirectory()) {
+        walk(fullPath);
+        continue;
+      }
+      if (!d.isFile()) continue;
+      const ext = path2.extname(d.name).slice(1).toLowerCase();
+      if (["xml", "meta", "json", "txt", "md", "png", "jpg", "wav", "jms", "jma", "hsc", "csv", "bak"].includes(ext)) {
+        continue;
+      }
+      let stat;
+      try {
+        stat = fs2.statSync(fullPath);
+      } catch {
+        continue;
+      }
+      if (stat.size < 64) continue;
+      const prev = prevByFilePath.get(path2.resolve(fullPath));
+      if (prev && prev.size === stat.size && Math.abs(prev.mtimeMs - stat.mtimeMs) < 1) {
+        entries.push(prev);
+        continue;
+      }
+      try {
+        const buf = fs2.readFileSync(fullPath);
+        const hdr = inspectBlamLooseTagHeader(buf);
+        if (!hdr) continue;
+        const group = validGroups.has(ext) ? ext : hdr.groupName;
+        const relFile = path2.relative(resolvedRoot, fullPath);
+        const relNoExt = relFile.slice(0, relFile.length - path2.extname(relFile).length);
+        const tagPath = relNoExt.replace(/\//g, "\\");
+        const key = makeLooseTagKey(group, tagPath);
+        const dependencies = [];
+        if (hdr.format === "classic_blam_be" && validGroups.has(group) && group !== "scenario_structure_bsp") {
+          try {
+            const parsed = parseHekLooseTagBuffer(buf, tagPath, group);
+            for (const dep of parsed.referencedDeps) {
+              if (!dep.path) continue;
+              dependencies.push({
+                fieldPath: dep.fieldPath,
+                group: dep.group,
+                path: dep.path,
+                targetKey: makeLooseTagKey(dep.group, dep.path)
+              });
+            }
+          } catch {
+          }
+        }
+        entries.push({
+          key,
+          relativePath: relFile.replace(/\\/g, "/"),
+          tagPath,
+          group,
+          groupFourCC: hdr.groupFourCC,
+          filePath: fullPath,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          headerFormat: hdr.format,
+          dependencies
+        });
+      } catch {
+      }
+    }
+  };
+  walk(resolvedRoot);
+  entries.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  const entryByKey = /* @__PURE__ */ new Map();
+  for (const e of entries) {
+    entryByKey.set(e.key, e);
+  }
+  const dependenciesBySourceKey = {};
+  const dependentsByTargetKey = {};
+  const brokenDependencies = [];
+  for (const e of entries) {
+    dependenciesBySourceKey[e.key] = e.dependencies;
+    for (const dep of e.dependencies) {
+      if (!dependentsByTargetKey[dep.targetKey]) {
+        dependentsByTargetKey[dep.targetKey] = [];
+      }
+      dependentsByTargetKey[dep.targetKey].push({
+        sourceKey: e.key,
+        sourceTagPath: e.tagPath,
+        sourceGroup: e.group,
+        fieldPath: dep.fieldPath
+      });
+      if (!entryByKey.has(dep.targetKey)) {
+        brokenDependencies.push({
+          sourceKey: e.key,
+          sourceTagPath: e.tagPath,
+          sourceGroup: e.group,
+          fieldPath: dep.fieldPath,
+          targetGroup: dep.group,
+          targetPath: dep.path
+        });
+      }
+    }
+  }
+  const rootGroups = /* @__PURE__ */ new Set(["scenario", "globals", "tag_collection", "ui_widget_collection"]);
+  const unreferencedTagKeys = entries.filter((e) => !rootGroups.has(e.group) && (!dependentsByTargetKey[e.key] || dependentsByTargetKey[e.key].length === 0)).map((e) => e.key);
+  return {
+    tagsDir: resolvedRoot,
+    scannedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    entries,
+    dependenciesBySourceKey,
+    dependentsByTargetKey,
+    brokenDependencies,
+    unreferencedTagKeys
+  };
+}
+function buildSyntheticSingleTagCacheFromBlamBuffer(blamBuffer, tagPath, overrideGroup) {
+  const parsed = parseHekLooseTagBuffer(blamBuffer, tagPath, overrideGroup);
+  const tagDataBuf = Buffer.from(parsed.tag.data, "base64");
+  const baseMemoryAddress = 1078198272;
+  const tagDataOffset = 2048;
+  const uniqueDeps = [];
+  const depIndexByKey = /* @__PURE__ */ new Map();
+  for (const dep of parsed.referencedDeps) {
+    const k = `${dep.group}:${dep.path.toLowerCase()}`;
+    if (!depIndexByKey.has(k)) {
+      const idx = uniqueDeps.length + 1;
+      const cls = lookupTagClassByName(dep.group);
+      const fourCC = cls ? fourCCFromString(cls.groupId) : fourCCFromString("none");
+      const tagId = 57716 + idx << 16 | idx;
+      uniqueDeps.push({ group: dep.group, path: dep.path, fourCC, tagId });
+      depIndexByKey.set(k, idx);
+    }
+  }
+  const totalEntries = 1 + uniqueDeps.length;
+  const tagHeaderSize = 40;
+  const entriesSize = totalEntries * 32;
+  const pathStrings = [];
+  const pathOffsets = [];
+  let runningPathBytes = 0;
+  const allPaths = [tagPath, ...uniqueDeps.map((d) => d.path)];
+  for (const p of allPaths) {
+    pathOffsets.push(runningPathBytes);
+    const b = Buffer.from(`${p}\0`, "latin1");
+    pathStrings.push(b);
+    runningPathBytes += b.length;
+  }
+  const pathsPad = (4 - runningPathBytes % 4) % 4;
+  if (pathsPad > 0) {
+    pathStrings.push(Buffer.alloc(pathsPad, 0));
+    runningPathBytes += pathsPad;
+  }
+  const rootDataOffsetInTagSection = tagHeaderSize + entriesSize + runningPathBytes;
+  const rootVirtualPtr = baseMemoryAddress + rootDataOffsetInTagSection;
+  const workingTagData = Buffer.from(tagDataBuf);
+  const rebaseReflexives = (structName, baseOff, count, depth) => {
+    if (depth > 16) return;
+    let structDef;
+    try {
+      structDef = resolveStruct(structName);
+    } catch {
+      return;
+    }
+    for (let i = 0; i < count; i++) {
+      const elemOff = baseOff + i * structDef.totalSize;
+      if (elemOff + structDef.totalSize > workingTagData.length) break;
+      for (const f of structDef.fields) {
+        if (f.def.type === "TagReflexive" && f.def.struct) {
+          const rCount = workingTagData.readUInt32LE(elemOff + f.offset);
+          const rLocalOff = workingTagData.readUInt32LE(elemOff + f.offset + 4);
+          if (rCount > 0 && rLocalOff > 0 && rLocalOff < workingTagData.length) {
+            workingTagData.writeUInt32LE(rootVirtualPtr + rLocalOff, elemOff + f.offset + 4);
+            rebaseReflexives(f.def.struct, rLocalOff, rCount, depth + 1);
+          } else {
+            workingTagData.writeUInt32LE(0, elemOff + f.offset + 4);
+          }
+        }
+      }
+    }
+  };
+  rebaseReflexives(parsed.tag.structName, 0, 1, 0);
+  for (const dep of parsed.referencedDeps) {
+    const k = `${dep.group}:${dep.path.toLowerCase()}`;
+    const targetIdx = depIndexByKey.get(k);
+    if (targetIdx !== void 0 && dep.fieldOffset + 16 <= workingTagData.length) {
+      const targetDep = uniqueDeps[targetIdx - 1];
+      const pathPtr = baseMemoryAddress + tagHeaderSize + entriesSize + pathOffsets[targetIdx];
+      workingTagData.writeUInt32LE(targetDep.fourCC, dep.fieldOffset + 0);
+      workingTagData.writeUInt32LE(pathPtr, dep.fieldOffset + 4);
+      workingTagData.writeUInt32LE(0, dep.fieldOffset + 8);
+      workingTagData.writeUInt32LE(targetDep.tagId, dep.fieldOffset + 12);
+    }
+  }
+  const tagDataSectionSize = rootDataOffsetInTagSection + workingTagData.length;
+  const totalFileSize = tagDataOffset + tagDataSectionSize;
+  const cacheBuffer = Buffer.alloc(totalFileSize, 0);
+  cacheBuffer.writeUInt32LE(1751474532, 0);
+  cacheBuffer.writeUInt32LE(609, 4);
+  cacheBuffer.writeUInt32LE(totalFileSize, 8);
+  cacheBuffer.writeUInt32LE(tagDataOffset, 16);
+  cacheBuffer.writeUInt32LE(tagDataSectionSize, 20);
+  cacheBuffer.write("blam_loose_tag", 32, "latin1");
+  cacheBuffer.write("01.00.00.0609", 64, "latin1");
+  cacheBuffer.writeUInt32LE(1718579060, 2044);
+  const indexArrayPtr = baseMemoryAddress + tagHeaderSize;
+  cacheBuffer.writeUInt32LE(indexArrayPtr, tagDataOffset + 0);
+  cacheBuffer.writeUInt32LE(3782475776, tagDataOffset + 4);
+  cacheBuffer.writeUInt32LE(0, tagDataOffset + 8);
+  cacheBuffer.writeUInt32LE(totalEntries, tagDataOffset + 12);
+  cacheBuffer.writeUInt32LE(0, tagDataOffset + 16);
+  cacheBuffer.writeUInt32LE(0, tagDataOffset + 20);
+  cacheBuffer.writeUInt32LE(0, tagDataOffset + 24);
+  cacheBuffer.writeUInt32LE(0, tagDataOffset + 28);
+  cacheBuffer.writeUInt32LE(0, tagDataOffset + 32);
+  cacheBuffer.writeUInt32LE(1952540531, tagDataOffset + 36);
+  const rootCls = lookupTagClassByName(parsed.tag.group);
+  const rootFourCC = rootCls ? fourCCFromString(rootCls.groupId) : fourCCFromString("none");
+  const entry0Off = tagDataOffset + tagHeaderSize;
+  cacheBuffer.writeUInt32LE(rootFourCC, entry0Off + 0);
+  cacheBuffer.writeUInt32LE(4294967295, entry0Off + 4);
+  cacheBuffer.writeUInt32LE(4294967295, entry0Off + 8);
+  cacheBuffer.writeUInt32LE(3782475776, entry0Off + 12);
+  cacheBuffer.writeUInt32LE(baseMemoryAddress + tagHeaderSize + entriesSize + pathOffsets[0], entry0Off + 16);
+  cacheBuffer.writeUInt32LE(rootVirtualPtr, entry0Off + 20);
+  cacheBuffer.writeUInt32LE(0, entry0Off + 24);
+  cacheBuffer.writeUInt32LE(0, entry0Off + 28);
+  for (let i = 0; i < uniqueDeps.length; i++) {
+    const dep = uniqueDeps[i];
+    const idx = i + 1;
+    const eOff = tagDataOffset + tagHeaderSize + idx * 32;
+    cacheBuffer.writeUInt32LE(dep.fourCC, eOff + 0);
+    cacheBuffer.writeUInt32LE(4294967295, eOff + 4);
+    cacheBuffer.writeUInt32LE(4294967295, eOff + 8);
+    cacheBuffer.writeUInt32LE(dep.tagId, eOff + 12);
+    cacheBuffer.writeUInt32LE(baseMemoryAddress + tagHeaderSize + entriesSize + pathOffsets[idx], eOff + 16);
+    cacheBuffer.writeUInt32LE(0, eOff + 20);
+    cacheBuffer.writeUInt32LE(1, eOff + 24);
+    cacheBuffer.writeUInt32LE(0, eOff + 28);
+  }
+  Buffer.concat(pathStrings).copy(cacheBuffer, tagDataOffset + tagHeaderSize + entriesSize);
+  workingTagData.copy(cacheBuffer, tagDataOffset + rootDataOffsetInTagSection);
+  const header = parseCacheFileHeader(cacheBuffer);
+  const tagIndex = parseTagIndex(cacheBuffer, header);
+  return { parsed, cacheBuffer, header, tagIndex };
+}
+function readLooseBlamTagFields(blamBuffer, tagPath, overrideGroup) {
+  const { cacheBuffer, header, tagIndex } = buildSyntheticSingleTagCacheFromBlamBuffer(
+    blamBuffer,
+    tagPath,
+    overrideGroup
+  );
+  return readTagFieldValues(cacheBuffer, header, tagIndex, 0);
+}
+function writeLooseBlamTagFieldValue(blamBuffer, tagPath, fieldPath, newValue, overrideGroup) {
+  const { parsed, cacheBuffer, header, tagIndex } = buildSyntheticSingleTagCacheFromBlamBuffer(
+    blamBuffer,
+    tagPath,
+    overrideGroup
+  );
+  const writeRes = writeTagFieldValue(cacheBuffer, header, tagIndex, 0, fieldPath, newValue);
+  const rootFileOffset = resolveTagDataPointer(
+    tagIndex.entries[0].tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const localFieldOffset = writeRes.fieldOffset - rootFileOffset;
+  const rawTagData = Buffer.from(parsed.tag.data, "base64");
+  if (typeof newValue === "object" && newValue !== null && "path" in newValue && typeof newValue.path === "string") {
+    const depObj = newValue;
+    const fullDepPath = `${tagPath}.${fieldPath}`;
+    const existingDep = parsed.tag.dependencies.find(
+      (d) => d.fieldPath === fullDepPath || d.fieldOffset === localFieldOffset
+    );
+    if (existingDep) {
+      existingDep.path = depObj.path;
+      if (depObj.group) existingDep.group = depObj.group;
+    } else if (depObj.path) {
+      parsed.tag.dependencies.push({
+        fieldPath: fullDepPath,
+        fieldOffset: localFieldOffset,
+        kind: "external",
+        group: depObj.group ?? parsed.tag.group,
+        path: depObj.path
+      });
+    }
+  } else {
+    const modifiedRootSlice = cacheBuffer.subarray(rootFileOffset, rootFileOffset + rawTagData.length);
+    const copyLen = Math.min(32, rawTagData.length - localFieldOffset);
+    if (localFieldOffset >= 0 && copyLen > 0) {
+      modifiedRootSlice.copy(rawTagData, localFieldOffset, localFieldOffset, localFieldOffset + copyLen);
+    }
+    parsed.tag.data = rawTagData.toString("base64");
+  }
+  if (parsed.tag.dependencies.length === 0 && parsed.referencedDeps.length > 0) {
+    parsed.tag.dependencies = parsed.referencedDeps.map((d) => ({
+      fieldPath: d.fieldPath,
+      fieldOffset: d.fieldOffset,
+      kind: "external",
+      group: d.group,
+      path: d.path
+    }));
+  }
+  const newBlamBuffer = serializeContainerTagToHekLooseBuffer(parsed.tag);
+  const updatedFields = readLooseBlamTagFields(newBlamBuffer, tagPath, overrideGroup);
+  return { buffer: newBlamBuffer, fields: updatedFields };
+}
+function compareBlamLooseTagBuffers(leftBlamBuffer, rightBlamBuffer, tagPath, overrideGroup) {
+  const leftFields = readLooseBlamTagFields(leftBlamBuffer, tagPath, overrideGroup);
+  const rightFields = readLooseBlamTagFields(rightBlamBuffer, tagPath, overrideGroup);
+  const rows = [];
+  const subject = `${tagPath}.${leftFields.group}`;
+  compareTagFieldListsSemantically(
+    leftFields.fields,
+    rightFields.fields,
+    (property, before, after, status = "changed", detail) => {
+      rows.push({
+        id: `blam:${rows.length}`,
+        category: leftFields.group,
+        status,
+        subject,
+        property,
+        before,
+        after,
+        detail
+      });
+    }
+  );
+  return rows;
+}
+function fixBrokenTagDependenciesInWorkspace(tagsDir, targetRelativePath) {
+  const index = scanLooseTagsWorkspace(tagsDir);
+  const byGroupAndLeaf = /* @__PURE__ */ new Map();
+  const byKey = /* @__PURE__ */ new Map();
+  for (const e of index.entries) {
+    byKey.set(e.key, e);
+    const leaf = e.tagPath.replace(/\//g, "\\").split("\\").pop()?.toLowerCase() ?? "";
+    if (!leaf) continue;
+    const k = `${e.group.toLowerCase()}:${leaf}`;
+    const list = byGroupAndLeaf.get(k);
+    if (list) list.push(e);
+    else byGroupAndLeaf.set(k, [e]);
+  }
+  const fixed = [];
+  const ambiguous = [];
+  const notFound = [];
+  const normTargetRel = targetRelativePath ? normalizeComparePath(targetRelativePath) : null;
+  const entriesToProcess = normTargetRel ? index.entries.filter(
+    (e) => normalizeComparePath(e.relativePath) === normTargetRel || normalizeComparePath(e.tagPath) === normTargetRel
+  ) : index.entries;
+  for (const entry of entriesToProcess) {
+    if (entry.headerFormat !== "classic_blam_be") continue;
+    const brokenInEntry = entry.dependencies.filter((d) => !byKey.has(d.targetKey));
+    if (brokenInEntry.length === 0) continue;
+    let parsed;
+    try {
+      const buf = fs2.readFileSync(entry.filePath);
+      parsed = parseHekLooseTagBuffer(buf, entry.tagPath, entry.group);
+    } catch {
+      continue;
+    }
+    let modified = false;
+    parsed.tag.dependencies = parsed.referencedDeps.map((dep) => ({
+      fieldPath: dep.fieldPath,
+      fieldOffset: dep.fieldOffset,
+      kind: "external",
+      group: dep.group,
+      path: dep.path
+    }));
+    for (const dep of parsed.tag.dependencies) {
+      if (!dep.path) continue;
+      const targetKey = makeLooseTagKey(dep.group, dep.path);
+      if (byKey.has(targetKey)) continue;
+      const leaf = dep.path.replace(/\//g, "\\").split("\\").pop()?.toLowerCase() ?? "";
+      const candidates = byGroupAndLeaf.get(`${dep.group.toLowerCase()}:${leaf}`) ?? [];
+      if (candidates.length === 1) {
+        const match = candidates[0];
+        const oldPath = dep.path;
+        dep.path = match.tagPath;
+        modified = true;
+        fixed.push({
+          sourcePath: entry.tagPath,
+          sourceGroup: entry.group,
+          fieldPath: dep.fieldPath,
+          oldTargetPath: oldPath,
+          newTargetPath: match.tagPath,
+          targetGroup: dep.group
+        });
+      } else if (candidates.length > 1) {
+        ambiguous.push({
+          sourcePath: entry.tagPath,
+          fieldPath: dep.fieldPath,
+          oldTargetPath: dep.path,
+          targetGroup: dep.group,
+          candidatePaths: candidates.map((c) => c.tagPath)
+        });
+      } else {
+        notFound.push({
+          sourcePath: entry.tagPath,
+          fieldPath: dep.fieldPath,
+          oldTargetPath: dep.path,
+          targetGroup: dep.group
+        });
+      }
+    }
+    if (modified) {
+      const newBytes = serializeContainerTagToHekLooseBuffer(parsed.tag);
+      fs2.writeFileSync(entry.filePath, newBytes);
+    }
+  }
+  return { fixed, ambiguous, notFound };
+}
+function refactorRenameOrMoveLooseTagOnDisk(tagsDir, oldTagPath, group, newTagPath) {
+  const index = scanLooseTagsWorkspace(tagsDir);
+  const oldKey = makeLooseTagKey(group, oldTagPath);
+  const targetEntry = index.entries.find((e) => e.key === oldKey);
+  if (!targetEntry) {
+    throw new Error(`Tag "${oldTagPath}.${group}" was not found in ${tagsDir}.`);
+  }
+  const cleanNewTagPath = newTagPath.replace(/\//g, "\\").replace(/^\\+|\\+$/g, "");
+  const newFilePath = path2.join(path2.resolve(tagsDir), `${cleanNewTagPath.replace(/\\/g, path2.sep)}.${group}`);
+  fs2.mkdirSync(path2.dirname(newFilePath), { recursive: true });
+  fs2.renameSync(targetEntry.filePath, newFilePath);
+  const dependents = index.dependentsByTargetKey[oldKey] ?? [];
+  const uniqueDepSourceKeys = [...new Set(dependents.map((d) => d.sourceKey))];
+  const rewrittenReferencingFiles = [];
+  for (const sourceKey of uniqueDepSourceKeys) {
+    const srcEntry = index.entries.find((e) => e.key === sourceKey);
+    if (!srcEntry) continue;
+    const srcFilePath = srcEntry.key === oldKey ? newFilePath : srcEntry.filePath;
+    if (!fs2.existsSync(srcFilePath)) continue;
+    try {
+      const buf = fs2.readFileSync(srcFilePath);
+      const parsed = parseHekLooseTagBuffer(buf, srcEntry.tagPath, srcEntry.group);
+      let changed = false;
+      parsed.tag.dependencies = parsed.referencedDeps.map((dep) => {
+        const isMatch = makeLooseTagKey(dep.group, dep.path) === oldKey;
+        if (isMatch) changed = true;
+        return {
+          fieldPath: dep.fieldPath,
+          fieldOffset: dep.fieldOffset,
+          kind: "external",
+          group: dep.group,
+          path: isMatch ? cleanNewTagPath : dep.path
+        };
+      });
+      if (changed) {
+        fs2.writeFileSync(srcFilePath, serializeContainerTagToHekLooseBuffer(parsed.tag));
+        rewrittenReferencingFiles.push(srcFilePath);
+      }
+    } catch {
+    }
+  }
+  return {
+    oldFilePath: targetEntry.filePath,
+    newFilePath,
+    rewrittenReferencingFiles
+  };
+}
+function evalPeriodicWave(fnName, t) {
+  const u = (t % 1 + 1) % 1;
+  switch (fnName.toLowerCase()) {
+    case "one":
+      return 1;
+    case "zero":
+      return 0;
+    case "cosine":
+    case "cosine (variable period)":
+      return 0.5 * (1 + Math.cos(2 * Math.PI * u));
+    case "diagonal wave":
+    case "diagonal wave (variable period)":
+      return u < 0.5 ? 2 * u : 2 * (1 - u);
+    case "slide":
+    case "slide (variable period)":
+      return u;
+    case "noise":
+    case "jitter":
+    case "wander": {
+      const s = Math.sin(u * 12.9898 * 43.758) * 43758.5453;
+      return s - Math.floor(s);
+    }
+    case "spark": {
+      const s = Math.sin(u * 78.233) * 43758.5453;
+      return s - Math.floor(s) > 0.8 ? 1 : 0;
+    }
+    default:
+      return 0.5 * (1 + Math.cos(2 * Math.PI * u));
+  }
+}
+function evalTransitionCurve(fnName, t) {
+  const u = Math.max(0, Math.min(1, t));
+  switch (fnName.toLowerCase()) {
+    case "early":
+      return Math.sqrt(u);
+    case "very early":
+      return Math.pow(u, 0.25);
+    case "late":
+      return u * u;
+    case "very late":
+      return u * u * u * u;
+    case "cosine":
+      return 0.5 * (1 - Math.cos(Math.PI * u));
+    case "linear":
+    default:
+      return u;
+  }
+}
+function interpolateHexColors(stops, u) {
+  if (!stops || stops.length === 0) return void 0;
+  const normalizedStops = stops.map((stop, idx) => {
+    if (Array.isArray(stop)) {
+      const r3 = Math.max(0, Math.min(255, Math.round((stop[0] ?? 0) * 255)));
+      const g3 = Math.max(0, Math.min(255, Math.round((stop[1] ?? 0) * 255)));
+      const b3 = Math.max(0, Math.min(255, Math.round((stop[2] ?? 0) * 255)));
+      const t = stops.length > 1 ? idx / (stops.length - 1) : 0;
+      return {
+        t,
+        hex: `#${r3.toString(16).padStart(2, "0")}${g3.toString(16).padStart(2, "0")}${b3.toString(16).padStart(2, "0")}`
+      };
+    }
+    return stop;
+  });
+  if (normalizedStops.length === 1) return normalizedStops[0].hex;
+  const sorted = [...normalizedStops].sort((a, b3) => a.t - b3.t);
+  const clamped = Math.max(0, Math.min(1, u));
+  let left = sorted[0];
+  let right = sorted[sorted.length - 1];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (clamped >= sorted[i].t && clamped <= sorted[i + 1].t) {
+      left = sorted[i];
+      right = sorted[i + 1];
+      break;
+    }
+  }
+  const span = Math.max(1e-6, right.t - left.t);
+  const alpha = Math.max(0, Math.min(1, (clamped - left.t) / span));
+  const parseRgb = (hex2) => {
+    const clean = hex2.replace(/^#/, "");
+    const n = parseInt(clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean, 16) || 0;
+    return [n >>> 16 & 255, n >>> 8 & 255, n & 255];
+  };
+  const [r1, g1, b1] = parseRgb(left.hex);
+  const [r2, g2, b2] = parseRgb(right.hex);
+  const r = Math.round(r1 + (r2 - r1) * alpha);
+  const g = Math.round(g1 + (g2 - g1) * alpha);
+  const b = Math.round(b1 + (b2 - b1) * alpha);
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+function evaluateBlamFunctionCurve(params, sampleCount = 65) {
+  const n = Math.max(2, Math.min(512, sampleCount));
+  const minVal = params.min ?? params.minBound ?? 0;
+  const maxVal = params.max ?? params.maxBound ?? 1;
+  const freq = params.frequency ?? 1;
+  const phase = params.phase ?? 0;
+  const samples = [];
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1);
+    let normY = x;
+    if (params.kind === "periodic") {
+      normY = evalPeriodicWave(params.periodicFunction ?? "cosine", x * freq + phase);
+    } else if (params.kind === "transition") {
+      normY = evalTransitionCurve(params.transitionFunction ?? "linear", x);
+    } else if (params.kind === "spline" && params.controlPoints && params.controlPoints.length >= 2) {
+      const pts = [...params.controlPoints].sort((a, b) => a.x - b.x);
+      let p1 = pts[0];
+      let p2 = pts[pts.length - 1];
+      for (let j = 0; j < pts.length - 1; j++) {
+        if (x >= pts[j].x && x <= pts[j + 1].x) {
+          p1 = pts[j];
+          p2 = pts[j + 1];
+          break;
+        }
+      }
+      const u = (x - p1.x) / Math.max(1e-6, p2.x - p1.x);
+      const smooth = u * u * (3 - 2 * u);
+      normY = p1.y + (p2.y - p1.y) * smooth;
+    } else {
+      normY = x;
+    }
+    const y = minVal + (maxVal - minVal) * normY;
+    const colorHex = interpolateHexColors(params.colorStops ?? [], normY);
+    samples.push({ x, y, colorHex, rgbHex: colorHex });
+  }
+  return {
+    samples,
+    minY: Math.min(minVal, maxVal),
+    maxY: Math.max(minVal, maxVal)
+  };
+}
+var HALO_HUD_MARKUP_TOKENS = {
+  "%a-button": "A Button",
+  "%b-button": "B Button",
+  "%x-button": "X Button",
+  "%y-button": "Y Button",
+  "%black-button": "Black Button",
+  "%white-button": "White Button",
+  "%left-trigger": "Left Trigger",
+  "%right-trigger": "Right Trigger",
+  "%dpad-up": "D-Pad Up",
+  "%dpad-down": "D-Pad Down",
+  "%dpad-left": "D-Pad Left",
+  "%dpad-right": "D-Pad Right",
+  "%start-button": "Start Button",
+  "%back-button": "Back Button",
+  "%left-thumb": "Left Thumbstick",
+  "%right-thumb": "Right Thumbstick",
+  "%action": "Action / Use Key",
+  "%jump": "Jump Key",
+  "%accept": "Accept Key",
+  "%cancel": "Cancel Key",
+  "%reload": "Reload Key",
+  "%melee": "Melee Key",
+  "%throw-grenade": "Throw Grenade Key",
+  "%fire": "Primary Fire Key",
+  "%switch-weapon": "Switch Weapon Key",
+  "%switch-grenade": "Switch Grenade Key",
+  "%zoom": "Zoom Key",
+  "%crouch": "Crouch Key",
+  "%flashlight": "Flashlight Key",
+  "%scores": "Scoreboard Key",
+  "%chat": "Chat Key",
+  "%custom-1": "Custom Bind 1",
+  "%custom-2": "Custom Bind 2",
+  "%custom-3": "Custom Bind 3",
+  "%custom-4": "Custom Bind 4",
+  "|n": "New Line",
+  "|t": "Tab",
+  "|l": "Align Left",
+  "|r": "Align Right",
+  "|c": "Align Center"
+};
+function tokenizeHaloHudStringMarkup(text) {
+  const tokenRegex = /(%(?:[a-z0-9-]+)|&(?:[a-z0-9_]+)|\|[ntlrc])/gi;
+  const tokens = [];
+  let lastIdx = 0;
+  let match;
+  while ((match = tokenRegex.exec(text)) !== null) {
+    if (match.index > lastIdx) {
+      tokens.push({
+        type: "text",
+        raw: text.slice(lastIdx, match.index),
+        start: lastIdx,
+        end: match.index
+      });
+    }
+    const raw = match[0];
+    const isControl = raw.startsWith("|");
+    tokens.push({
+      type: isControl ? "control_token" : "button_token",
+      raw,
+      start: match.index,
+      end: match.index + raw.length,
+      description: HALO_HUD_MARKUP_TOKENS[raw.toLowerCase()] ?? "Halo Input / Control Token"
+    });
+    lastIdx = match.index + raw.length;
+  }
+  if (lastIdx < text.length) {
+    tokens.push({
+      type: "text",
+      raw: text.slice(lastIdx),
+      start: lastIdx,
+      end: text.length
+    });
+  }
+  return tokens;
+}
+var HALOSCRIPT_REFERENCE_CATALOG = [
+  {
+    name: "ai_place",
+    kind: "function",
+    returnType: "void",
+    signature: "(ai_place <ai>)",
+    description: "Places the specified squad or actor encounter into the world.",
+    category: "AI & Encounters",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(ai_place enc_cov_intro/grunts)"
+  },
+  {
+    name: "ai_kill",
+    kind: "function",
+    returnType: "void",
+    signature: "(ai_kill <ai>)",
+    description: "Instantly kills the specified actor encounter or squad.",
+    category: "AI & Encounters",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(ai_kill enc_cov_intro)"
+  },
+  {
+    name: "ai_living_count",
+    kind: "function",
+    returnType: "short",
+    signature: "(ai_living_count <ai>)",
+    description: "Returns the number of living actors in the specified encounter or squad.",
+    category: "AI & Encounters",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(sleep_until (<= (ai_living_count enc_cov_intro) 0))"
+  },
+  {
+    name: "ai_attach",
+    kind: "function",
+    returnType: "void",
+    signature: "(ai_attach <unit> <ai>)",
+    description: "Attaches the specified unit to an AI encounter/actor list.",
+    category: "AI & Encounters",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3"]
+  },
+  {
+    name: "ai_command_list",
+    kind: "function",
+    returnType: "void",
+    signature: "(ai_command_list <ai> <command_list>)",
+    description: "Assigns a scripted command list to an AI encounter or platoon.",
+    category: "AI & Encounters",
+    networkSafe: false,
+    engines: ["haloce", "halo2"]
+  },
+  {
+    name: "object_create",
+    kind: "function",
+    returnType: "void",
+    signature: "(object_create <object_name>)",
+    description: "Creates a named scenario object from the scenario object names table.",
+    category: "Objects & Units",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(object_create pelican_dropship_1)"
+  },
+  {
+    name: "object_create_anew",
+    kind: "function",
+    returnType: "void",
+    signature: "(object_create_anew <object_name>)",
+    description: "Destroys and recreates the named object at its scenario spawn point.",
+    category: "Objects & Units",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "object_destroy",
+    kind: "function",
+    returnType: "void",
+    signature: "(object_destroy <object>)",
+    description: "Removes the specified object from the world.",
+    category: "Objects & Units",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "object_teleport",
+    kind: "function",
+    returnType: "void",
+    signature: "(object_teleport <object> <cutscene_flag>)",
+    description: "Teleports the specified object to a named cutscene flag.",
+    category: "Objects & Units",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(object_teleport (unit (list_get (players) 0)) flag_arena_start)"
+  },
+  {
+    name: "unit_enter_vehicle",
+    kind: "function",
+    returnType: "void",
+    signature: "(unit_enter_vehicle <unit> <vehicle> <string:seat_label>)",
+    description: 'Puts the specified unit into the specified vehicle seat marker (e.g. "W-driver").',
+    category: "Objects & Units",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: '(unit_enter_vehicle chief warthog_1 "W-driver")'
+  },
+  {
+    name: "volume_test_objects",
+    kind: "function",
+    returnType: "boolean",
+    signature: "(volume_test_objects <trigger_volume> <object_list>)",
+    description: "Returns true if any object in the list is inside the named trigger volume.",
+    category: "Trigger Volumes",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(sleep_until (volume_test_objects trig_bridge (players)) 15)"
+  },
+  {
+    name: "camera_control",
+    kind: "function",
+    returnType: "void",
+    signature: "(camera_control <boolean>)",
+    description: "Toggles scripted director camera control on or off.",
+    category: "Camera & Cutscenes",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(camera_control true)"
+  },
+  {
+    name: "camera_set",
+    kind: "function",
+    returnType: "void",
+    signature: "(camera_set <cutscene_camera_point> <short:ticks>)",
+    description: "Moves the scripted camera to the named camera point over the given number of ticks (30 ticks = 1 sec).",
+    category: "Camera & Cutscenes",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(camera_set cam_intro_pan 90)"
+  },
+  {
+    name: "cinematic_start",
+    kind: "function",
+    returnType: "void",
+    signature: "(cinematic_start)",
+    description: "Starts letterboxed cinematic mode and hides player HUD.",
+    category: "Camera & Cutscenes",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "cinematic_stop",
+    kind: "function",
+    returnType: "void",
+    signature: "(cinematic_stop)",
+    description: "Ends letterboxed cinematic mode and restores player HUD.",
+    category: "Camera & Cutscenes",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "fade_in",
+    kind: "function",
+    returnType: "void",
+    signature: "(fade_in <real:r> <real:g> <real:b> <short:ticks>)",
+    description: "Fades the screen in from the specified RGB color (0..1) over the given ticks.",
+    category: "Camera & Cutscenes",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(fade_in 0 0 0 60)"
+  },
+  {
+    name: "fade_out",
+    kind: "function",
+    returnType: "void",
+    signature: "(fade_out <real:r> <real:g> <real:b> <short:ticks>)",
+    description: "Fades the screen out to the specified RGB color (0..1) over the given ticks.",
+    category: "Camera & Cutscenes",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(fade_out 0 0 0 60)"
+  },
+  {
+    name: "switch_bsp",
+    kind: "function",
+    returnType: "void",
+    signature: "(switch_bsp <short:bsp_index>)",
+    description: "Switches the active Structure BSP by index in the scenario Structure BSPs block.",
+    category: "World & BSP",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(switch_bsp 1)"
+  },
+  {
+    name: "game_save",
+    kind: "function",
+    returnType: "void",
+    signature: "(game_save)",
+    description: "Checks if it is safe to save and triggers a campaign checkpoint.",
+    category: "Campaign & Checkpoints",
+    networkSafe: false,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "show_hud_help_text",
+    kind: "function",
+    returnType: "void",
+    signature: "(show_hud_help_text <boolean>)",
+    description: "Shows or hides the HUD help text box.",
+    category: "HUD & UI",
+    networkSafe: true,
+    engines: ["haloce", "halo2"]
+  },
+  {
+    name: "hud_set_help_text",
+    kind: "function",
+    returnType: "void",
+    signature: "(hud_set_help_text <hud_message>)",
+    description: "Displays the named HUD message from the scenario hud_message_text tag.",
+    category: "HUD & UI",
+    networkSafe: true,
+    engines: ["haloce", "halo2"]
+  },
+  {
+    name: "hud_set_objective_text",
+    kind: "function",
+    returnType: "void",
+    signature: "(hud_set_objective_text <hud_message>)",
+    description: "Sets the pause-screen & HUD primary objective message.",
+    category: "HUD & UI",
+    networkSafe: true,
+    engines: ["haloce", "halo2"]
+  },
+  {
+    name: "device_set_position",
+    kind: "function",
+    returnType: "void",
+    signature: "(device_set_position <device> <real:position>)",
+    description: "Animates a device_machine (door/elevator) to target position (0.0 = closed, 1.0 = open).",
+    category: "Devices & Doors",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(device_set_position door_hangar_main 1.0)"
+  },
+  {
+    name: "device_set_power",
+    kind: "function",
+    returnType: "void",
+    signature: "(device_set_power <device> <real:power>)",
+    description: "Sets the power state (0.0..1.0) of a device or light fixture.",
+    category: "Devices & Doors",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "sleep",
+    kind: "function",
+    returnType: "void",
+    signature: "(sleep <short:ticks> [<script>])",
+    description: "Pauses the current script (or target script) for the specified number of ticks (30 ticks = 1 second).",
+    category: "Control Flow",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(sleep 90)"
+  },
+  {
+    name: "sleep_until",
+    kind: "function",
+    returnType: "void",
+    signature: "(sleep_until <boolean_expr> [<short:poll_ticks>])",
+    description: "Suspends execution until the boolean condition evaluates to true.",
+    category: "Control Flow",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"],
+    example: "(sleep_until (volume_test_objects trig_hall (players)) 15)"
+  },
+  {
+    name: "wake",
+    kind: "function",
+    returnType: "void",
+    signature: "(wake <script_name>)",
+    description: "Wakes a dormant script so it begins executing.",
+    category: "Control Flow",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "players",
+    kind: "function",
+    returnType: "object_list",
+    signature: "(players)",
+    description: "Returns a list of all active player biped units.",
+    category: "Players & Cheats",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "cheat_deathless_player",
+    kind: "global",
+    returnType: "boolean",
+    signature: "(set cheat_deathless_player true)",
+    description: "Makes players invulnerable to damage when set to true.",
+    category: "Players & Cheats",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  },
+  {
+    name: "cheat_infinite_ammo",
+    kind: "global",
+    returnType: "boolean",
+    signature: "(set cheat_infinite_ammo true)",
+    description: "Grants infinite ammunition and bottomless clip when set to true.",
+    category: "Players & Cheats",
+    networkSafe: true,
+    engines: ["haloce", "halo2", "halo3", "odst", "reach"]
+  }
+];
+function queryHaloScriptDocs(query, engineFilter) {
+  const q = (query ?? "").trim().toLowerCase();
+  const rawEng = (engineFilter ?? "").trim().toLowerCase();
+  const engMap = {
+    all: "",
+    h1: "haloce",
+    h2: "halo2",
+    h3: "halo3",
+    hr: "reach"
+  };
+  const eng = engMap[rawEng] !== void 0 ? engMap[rawEng] : rawEng;
+  return HALOSCRIPT_REFERENCE_CATALOG.filter((entry) => {
+    if (eng && !entry.engines.includes(eng)) return false;
+    if (!q) return true;
+    return entry.name.toLowerCase().includes(q) || entry.description.toLowerCase().includes(q) || entry.category.toLowerCase().includes(q) || entry.signature.toLowerCase().includes(q);
+  });
+}
+var DEFAULT_HALOCE_TOOL_COMMANDS = [
+  {
+    name: "build-cache-file",
+    category: "Cache Files",
+    description: "Compiles a scenario tag and all referenced loose tags in tags\\ into a playable .map cache file.",
+    example: 'tool build-cache-file "levels\\test\\bloodgulch\\bloodgulch"',
+    args: [
+      {
+        name: "scenario-path",
+        type: "path_tag",
+        description: "Tag-relative path to the .scenario tag (without extension).",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "structure",
+    category: "Structure & Lightmaps",
+    description: "Compiles a level geometry .jms file in data\\ into a scenario_structure_bsp (.sbsp) tag.",
+    example: 'tool structure "levels\\test\\bloodgulch" "bloodgulch"',
+    args: [
+      {
+        name: "scenario-directory",
+        type: "path_data",
+        description: "Data directory containing the models\\ subfolder.",
+        required: true
+      },
+      {
+        name: "bsp-name",
+        type: "string",
+        description: "Name of the JMS file to compile into a scenario_structure_bsp.",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "lightmaps",
+    category: "Structure & Lightmaps",
+    description: "Runs radiosity lightmap baking for a scenario BSP.",
+    example: 'tool lightmaps "levels\\test\\bloodgulch\\bloodgulch" bloodgulch 0 0.1',
+    args: [
+      {
+        name: "scenario",
+        type: "path_tag",
+        description: "Scenario tag path (without extension).",
+        required: true
+      },
+      {
+        name: "bsp-name",
+        type: "string",
+        description: "BSP name.",
+        required: true
+      },
+      {
+        name: "quality",
+        type: "enum",
+        description: "0 = draft, 1 = high quality.",
+        required: true,
+        values: ["0", "1"]
+      },
+      {
+        name: "stop-threshold",
+        type: "string",
+        description: "Radiosity stop threshold (e.g. 0.1 for draft, 0.001 for final).",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "bitmaps",
+    category: "Bitmaps",
+    description: "Bulk-compiles a folder of .tif/.tiff images in data\\ into .bitmap tags in tags\\.",
+    example: 'tool bitmaps "weapons\\pistol\\bitmaps"',
+    args: [
+      {
+        name: "source-directory",
+        type: "path_data",
+        description: "Data directory containing .tif/.tiff images.",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "model",
+    category: "Models & Physics",
+    description: "Compiles model .jms files in data\\<dir>\\models\\ into a .gbxmodel tag.",
+    example: 'tool model "weapons\\pistol"',
+    args: [
+      {
+        name: "source-directory",
+        type: "path_data",
+        description: "Asset folder under data\\.",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "collision-geometry",
+    category: "Models & Physics",
+    description: "Compiles collision .jms files in data\\<dir>\\physics\\ into a .model_collision_geometry tag.",
+    example: 'tool collision-geometry "weapons\\pistol"',
+    args: [
+      {
+        name: "source-directory",
+        type: "path_data",
+        description: "Asset folder under data\\.",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "physics",
+    category: "Models & Physics",
+    description: "Compiles #mass_* sphere markers in data\\<dir>\\physics\\physics.jms into a .physics tag.",
+    example: 'tool physics "vehicles\\warthog"',
+    args: [
+      {
+        name: "source-directory",
+        type: "path_data",
+        description: "Asset folder under data\\.",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "animations",
+    category: "Models & Physics",
+    description: "Compiles .jma/.jmm/.jmt/.jmo/.jmr/.jmw/.jmz skeletal animations into a .model_animations tag.",
+    example: 'tool animations "characters\\cyborg"',
+    args: [
+      {
+        name: "source-directory",
+        type: "path_data",
+        description: "Asset folder under data\\.",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "sounds",
+    category: "Sounds",
+    description: "Compiles 16-bit WAV/Ogg files in data\\<dir>\\ into a .sound tag.",
+    example: 'tool sounds "weapons\\pistol\\fire" ogg 1',
+    args: [
+      {
+        name: "source-directory",
+        type: "path_data",
+        description: "Sound directory under data\\.",
+        required: true
+      },
+      {
+        name: "platform",
+        type: "enum",
+        description: "Audio codec (ogg, wav, xbox).",
+        required: true,
+        values: ["ogg", "wav", "xbox"]
+      },
+      {
+        name: "ogg-quality",
+        type: "optional_string",
+        description: "Quality (0.0..1.0) when platform is ogg.",
+        required: false
+      }
+    ]
+  },
+  {
+    name: "unicode-strings",
+    category: "Strings & HUD",
+    description: "Compiles UTF-16LE .txt files (terminated by ###END-STRING###) into a .unicode_string_list tag.",
+    example: 'tool unicode-strings "ui\\mp_map_ui"',
+    args: [
+      {
+        name: "source-directory",
+        type: "path_data",
+        description: "Directory under data\\ containing .txt files.",
+        required: true
+      }
+    ]
+  },
+  {
+    name: "hud-messages",
+    category: "Strings & HUD",
+    description: "Compiles UTF-16LE .hmt text files into a .hud_message_text tag.",
+    example: 'tool hud-messages "levels\\a10" "a10"',
+    args: [
+      {
+        name: "path",
+        type: "path_data",
+        description: "Scenario folder under data\\.",
+        required: true
+      },
+      {
+        name: "scenario-name",
+        type: "string",
+        description: "Name of the .hmt file.",
+        required: true
+      }
+    ]
+  }
+];
+function getToolCommandCatalog(game = "haloce_mcc") {
+  const gameAlias = {
+    h1: "haloce_mcc",
+    h2: "halo2_mcc",
+    h3: "halo3_mcc",
+    odst: "halo3odst_mcc",
+    hr: "haloreach_mcc"
+  };
+  const resolvedGame = gameAlias[game] ?? game;
+  const candidates = [
+    path2.resolve(process.cwd(), "SAMPLE CODE", "Baboon", "tool_commands", `${resolvedGame}.json`),
+    path2.resolve(process.cwd(), "..", "SAMPLE CODE", "Baboon", "tool_commands", `${resolvedGame}.json`),
+    `C:\\Users\\LeviB\\Projects\\OpenCE-Mantle\\SAMPLE CODE\\Baboon\\tool_commands\\${resolvedGame}.json`
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs2.existsSync(candidate)) {
+        const parsed = JSON.parse(fs2.readFileSync(candidate, "utf8"));
+        if (Array.isArray(parsed.commands) && parsed.commands.length > 0) {
+          const curatedByName = new Map(DEFAULT_HALOCE_TOOL_COMMANDS.map((c) => [c.name, c]));
+          return parsed.commands.map((cmd) => {
+            const curated = curatedByName.get(cmd.name);
+            if (curated && (!cmd.args || cmd.args.length === 0)) {
+              return {
+                ...cmd,
+                category: curated.category !== "Advanced / Unknown" ? curated.category : cmd.category,
+                args: curated.args
+              };
+            }
+            return cmd;
+          });
+        }
+      }
+    } catch {
+    }
+  }
+  return DEFAULT_HALOCE_TOOL_COMMANDS;
+}
+
+// ../core/src/map/native-tool-compiler.ts
+var fs3 = __toESM(require("fs"));
+var path3 = __toESM(require("path"));
+function writeExtractedTagAsBlamLooseFile(extractedTag, absOutFile) {
+  const tagSet = {
+    rootOriginalIndices: [extractedTag.originalIndex],
+    tags: [extractedTag],
+    notExtracted: [],
+    warnings: []
+  };
+  const containerBuf = serializeContainer(tagSet, "mantle_native_tool");
+  const container = deserializeContainer(containerBuf);
+  const cTag = container.tags[0];
+  if (!cTag) {
+    throw new Error(`Failed to serialize tag "${extractedTag.path}.${extractedTag.group}" to container.`);
+  }
+  const blamBuf = serializeContainerTagToHekLooseBuffer(cTag);
+  fs3.mkdirSync(path3.dirname(absOutFile), { recursive: true });
+  fs3.writeFileSync(absOutFile, blamBuf);
+}
+function computeSoundLipSyncMouthData(pcmSamples, sampleRate, channels) {
+  const safeRate = Math.max(1e3, sampleRate || 22050);
+  const safeChannels = Math.max(1, channels || 1);
+  const totalFrames = Math.floor(pcmSamples.length / safeChannels);
+  if (totalFrames === 0) return Buffer.alloc(0);
+  const mouthRate = 30;
+  const framesPerTick = Math.max(1, Math.floor(safeRate / mouthRate));
+  const tickCount = Math.max(1, Math.ceil(totalFrames / framesPerTick));
+  const out = Buffer.alloc(tickCount, 0);
+  for (let t = 0; t < tickCount; t++) {
+    const startFrame = t * framesPerTick;
+    const endFrame = Math.min(totalFrames, startFrame + framesPerTick);
+    let sumSq = 0;
+    let count = 0;
+    for (let f = startFrame; f < endFrame; f++) {
+      const s = pcmSamples[f * safeChannels] / 32768;
+      sumSq += s * s;
+      count++;
+    }
+    const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+    out[t] = Math.max(0, Math.min(255, Math.round(Math.min(1, rms * 2.8) * 255)));
+  }
+  return out;
+}
+function compileUnicodeStringListTagBuffer(strings, tagPath) {
+  const rootSize = resolveStruct("UnicodeStringList").totalSize;
+  const refSize = resolveStruct("UnicodeStringListString").totalSize;
+  const encodedStrings = strings.map((s) => Buffer.from(`${s}\0`, "utf16le"));
+  const totalStringBytes = encodedStrings.reduce((acc, b) => acc + b.length, 0);
+  const offRefs = rootSize;
+  const offStrings = offRefs + strings.length * refSize;
+  const buf = Buffer.alloc(offStrings + totalStringBytes, 0);
+  buf.writeUInt32LE(strings.length, 0);
+  buf.writeUInt32LE(strings.length > 0 ? offRefs : 0, 4);
+  let strCursor = offStrings;
+  for (let i = 0; i < encodedStrings.length; i++) {
+    const sb = encodedStrings[i];
+    const ro = offRefs + i * refSize;
+    sb.copy(buf, strCursor);
+    buf.writeUInt32LE(sb.length, ro + 0);
+    buf.writeUInt32LE(0, ro + 4);
+    buf.writeUInt32LE(strCursor, ro + 8);
+    buf.writeUInt32LE(strCursor, ro + 12);
+    strCursor += sb.length;
+  }
+  const cTag = {
+    originalIndex: 0,
+    path: tagPath,
+    group: "unicode_string_list",
+    structName: "UnicodeStringList",
+    data: buf.toString("base64"),
+    dependencies: []
+  };
+  return serializeContainerTagToHekLooseBuffer(cTag);
+}
+function compileHudMessageTextTagBuffer(messages, tagPath) {
+  const rootSize = resolveStruct("HUDMessageText").totalSize;
+  const elemSize = resolveStruct("HUDMessageTextElement").totalSize;
+  const msgSize = resolveStruct("HUDMessageTextMessage").totalSize;
+  const fullTextConcat = messages.map((m) => m.text).join("\0") + "\0";
+  const stringDataBytes = Buffer.from(fullTextConcat, "utf16le");
+  const elementsBytesList = [];
+  const msgMetas = [];
+  let textCharCursor = 0;
+  for (const msg of messages) {
+    const tokens = tokenizeHaloHudStringMarkup(msg.text);
+    const startElemIdx = elementsBytesList.length;
+    for (const tok of tokens) {
+      const eb = Buffer.alloc(elemSize, 0);
+      if (tok.type === "text") {
+        eb.writeUInt8(0, 0);
+        eb.writeUInt8(Math.min(255, tok.raw.length + 1), 1);
+      } else {
+        eb.writeUInt8(1, 0);
+        eb.writeUInt8(1, 1);
+      }
+      elementsBytesList.push(eb);
+    }
+    msgMetas.push({
+      name: msg.name,
+      startIndexInTextBlob: textCharCursor,
+      startIndexOfElements: startElemIdx,
+      panelCount: Math.max(1, tokens.length)
+    });
+    textCharCursor += msg.text.length + 1;
+  }
+  const offElements = rootSize;
+  const offMessages = offElements + elementsBytesList.length * elemSize;
+  const offStringData = offMessages + msgMetas.length * msgSize;
+  const buf = Buffer.alloc(offStringData + stringDataBytes.length, 0);
+  stringDataBytes.copy(buf, offStringData);
+  buf.writeUInt32LE(stringDataBytes.length, 0);
+  buf.writeUInt32LE(0, 4);
+  buf.writeUInt32LE(offStringData, 8);
+  buf.writeUInt32LE(offStringData, 12);
+  buf.writeUInt32LE(elementsBytesList.length, 20);
+  buf.writeUInt32LE(elementsBytesList.length > 0 ? offElements : 0, 24);
+  buf.writeUInt32LE(msgMetas.length, 32);
+  buf.writeUInt32LE(msgMetas.length > 0 ? offMessages : 0, 36);
+  for (let i = 0; i < elementsBytesList.length; i++) {
+    elementsBytesList[i].copy(buf, offElements + i * elemSize);
+  }
+  for (let i = 0; i < msgMetas.length; i++) {
+    const m = msgMetas[i];
+    const mo = offMessages + i * msgSize;
+    writeFixedAscii32(buf, mo + 0, m.name);
+    buf.writeInt16LE(m.startIndexInTextBlob, mo + 32);
+    buf.writeInt16LE(m.startIndexOfElements, mo + 34);
+    buf.writeInt8(m.panelCount, mo + 36);
+  }
+  const cTag = {
+    originalIndex: 0,
+    path: tagPath,
+    group: "hud_message_text",
+    structName: "HUDMessageText",
+    data: buf.toString("base64"),
+    dependencies: []
+  };
+  return serializeContainerTagToHekLooseBuffer(cTag);
+}
+function writeRawRootTagBufferAsBlamLooseFile(group, structName, tagPath, rootAndReflexiveData, absOutFile, options) {
+  const cTag = {
+    originalIndex: 0,
+    path: tagPath,
+    group,
+    structName,
+    secondaryClassFourCC: options?.secondaryClassFourCC ?? null,
+    tertiaryClassFourCC: options?.tertiaryClassFourCC ?? null,
+    data: rootAndReflexiveData.toString("base64"),
+    dependencies: options?.dependencies ?? [],
+    embeddedRawDataAssets: (options?.embeddedRawDataAssets ?? []).map((a) => ({
+      kind: a.kind,
+      data: a.data.toString("base64")
+    })),
+    embeddedRawDataPatches: options?.embeddedRawDataPatches
+  };
+  const blamBuf = serializeContainerTagToHekLooseBuffer(cTag);
+  fs3.mkdirSync(path3.dirname(absOutFile), { recursive: true });
+  fs3.writeFileSync(absOutFile, blamBuf);
+}
+function normalizeHaloRelPath(relPath) {
+  return relPath.trim().replace(/\//g, "\\").replace(/^\\+|\\+$/g, "").replace(/^(data|tags)\\+/i, "");
+}
+function writeFixedAscii32(buf, offset, text) {
+  buf.fill(0, offset, offset + 32);
+  const clean = text.slice(0, 31);
+  buf.write(clean, offset, clean.length, "ascii");
+}
+function invert3x3Matrix(m) {
+  const [a, b, c, d, e, f, g, h, i] = m;
+  const A = e * i - f * h;
+  const B = -(d * i - f * g);
+  const C = d * h - e * g;
+  const D = -(b * i - c * h);
+  const E = a * i - c * g;
+  const F = -(a * h - b * g);
+  const G = b * f - c * e;
+  const H = -(a * f - c * d);
+  const I = a * e - b * d;
+  const det = a * A + b * B + c * C;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-9) {
+    return [
+      1 / Math.max(1e-5, a || 1),
+      0,
+      0,
+      0,
+      1 / Math.max(1e-5, e || 1),
+      0,
+      0,
+      0,
+      1 / Math.max(1e-5, i || 1)
+    ];
+  }
+  const invDet = 1 / det;
+  return [
+    A * invDet,
+    D * invDet,
+    G * invDet,
+    B * invDet,
+    E * invDet,
+    H * invDet,
+    C * invDet,
+    F * invDet,
+    I * invDet
+  ];
+}
+function decodeImageFileToRgba(filePath) {
+  const ext = path3.extname(filePath).toLowerCase();
+  const buf = fs3.readFileSync(filePath);
+  if (ext === ".png") {
+    return decodePngToRgba(buf);
+  }
+  if (ext === ".bmp" && buf.length >= 54 && buf.toString("ascii", 0, 2) === "BM") {
+    const pixelOffset = buf.readUInt32LE(10);
+    const width2 = Math.abs(buf.readInt32LE(18));
+    const rawHeight = buf.readInt32LE(22);
+    const height2 = Math.abs(rawHeight);
+    const topDown = rawHeight < 0;
+    const bpp = buf.readUInt16LE(28);
+    if (width2 > 0 && height2 > 0 && (bpp === 24 || bpp === 32)) {
+      const rgba2 = new Uint8Array(width2 * height2 * 4);
+      const bytesPerPixel = bpp / 8;
+      const rowStride = Math.floor((width2 * bytesPerPixel + 3) / 4) * 4;
+      for (let y = 0; y < height2; y++) {
+        const srcRow = topDown ? y : height2 - 1 - y;
+        const rowOff = pixelOffset + srcRow * rowStride;
+        for (let x = 0; x < width2; x++) {
+          const pxOff = rowOff + x * bytesPerPixel;
+          const dstOff = (y * width2 + x) * 4;
+          if (pxOff + bytesPerPixel <= buf.length) {
+            rgba2[dstOff + 0] = buf[pxOff + 2];
+            rgba2[dstOff + 1] = buf[pxOff + 1];
+            rgba2[dstOff + 2] = buf[pxOff + 0];
+            rgba2[dstOff + 3] = bpp === 32 ? buf[pxOff + 3] : 255;
+          }
+        }
+      }
+      return { rgba: rgba2, width: width2, height: height2 };
+    }
+  }
+  if (ext === ".tga" && buf.length >= 18) {
+    const idLen = buf[0];
+    const imageType = buf[2];
+    const width2 = buf.readUInt16LE(12);
+    const height2 = buf.readUInt16LE(14);
+    const bpp = buf[16];
+    const desc = buf[17];
+    const topOrigin = (desc & 32) !== 0;
+    if (imageType === 2 && width2 > 0 && height2 > 0 && (bpp === 24 || bpp === 32)) {
+      const rgba2 = new Uint8Array(width2 * height2 * 4);
+      const bytesPerPixel = bpp / 8;
+      const dataStart = 18 + idLen;
+      for (let y = 0; y < height2; y++) {
+        const srcY = topOrigin ? y : height2 - 1 - y;
+        for (let x = 0; x < width2; x++) {
+          const srcOff = dataStart + (srcY * width2 + x) * bytesPerPixel;
+          const dstOff = (y * width2 + x) * 4;
+          if (srcOff + bytesPerPixel <= buf.length) {
+            rgba2[dstOff + 0] = buf[srcOff + 2];
+            rgba2[dstOff + 1] = buf[srcOff + 1];
+            rgba2[dstOff + 2] = buf[srcOff + 0];
+            rgba2[dstOff + 3] = bpp === 32 ? buf[srcOff + 3] : 255;
+          }
+        }
+      }
+      return { rgba: rgba2, width: width2, height: height2 };
+    }
+  }
+  if ((ext === ".tif" || ext === ".tiff") && buf.length >= 8) {
+    const magic = buf.toString("ascii", 0, 2);
+    const le = magic === "II";
+    if (le || magic === "MM") {
+      const u16 = (off) => le ? buf.readUInt16LE(off) : buf.readUInt16BE(off);
+      const u32 = (off) => le ? buf.readUInt32LE(off) : buf.readUInt32BE(off);
+      const ifdOff = u32(4);
+      if (ifdOff > 0 && ifdOff + 2 <= buf.length) {
+        const numEntries = u16(ifdOff);
+        let width2 = 0;
+        let height2 = 0;
+        let samplesPerPixel = 4;
+        let stripOffsets = [];
+        let stripByteCounts = [];
+        let compression = 1;
+        const readTagInts = (type, count, valOffField) => {
+          const elemSize = type === 3 ? 2 : 4;
+          const totalBytes = count * elemSize;
+          const dataOff = totalBytes <= 4 ? valOffField : u32(valOffField);
+          const out = [];
+          for (let i = 0; i < count; i++) {
+            const p = dataOff + i * elemSize;
+            if (p + elemSize <= buf.length) {
+              out.push(type === 3 ? u16(p) : u32(p));
+            }
+          }
+          return out;
+        };
+        for (let i = 0; i < numEntries; i++) {
+          const eOff = ifdOff + 2 + i * 12;
+          if (eOff + 12 > buf.length) break;
+          const tag = u16(eOff);
+          const type = u16(eOff + 2);
+          const count = u32(eOff + 4);
+          const vals = readTagInts(type, count, eOff + 8);
+          if (tag === 256 && vals.length > 0) width2 = vals[0];
+          else if (tag === 257 && vals.length > 0) height2 = vals[0];
+          else if (tag === 259 && vals.length > 0) compression = vals[0];
+          else if (tag === 273) stripOffsets = vals;
+          else if (tag === 277 && vals.length > 0) samplesPerPixel = vals[0];
+          else if (tag === 279) stripByteCounts = vals;
+        }
+        if (width2 > 0 && height2 > 0 && compression === 1 && stripOffsets.length > 0) {
+          const rgba2 = new Uint8Array(width2 * height2 * 4);
+          let dstPixel = 0;
+          for (let s = 0; s < stripOffsets.length; s++) {
+            const sOff = stripOffsets[s];
+            const sLen = stripByteCounts[s] ?? width2 * height2 * samplesPerPixel;
+            for (let b = 0; b + samplesPerPixel <= sLen && sOff + b + samplesPerPixel <= buf.length; b += samplesPerPixel) {
+              if (dstPixel >= width2 * height2) break;
+              const d = dstPixel * 4;
+              rgba2[d + 0] = buf[sOff + b + 0];
+              rgba2[d + 1] = samplesPerPixel >= 2 ? buf[sOff + b + 1] : buf[sOff + b + 0];
+              rgba2[d + 2] = samplesPerPixel >= 3 ? buf[sOff + b + 2] : buf[sOff + b + 0];
+              rgba2[d + 3] = samplesPerPixel >= 4 ? buf[sOff + b + 3] : 255;
+              dstPixel++;
+            }
+          }
+          return { rgba: rgba2, width: width2, height: height2 };
+        }
+      }
+    }
+  }
+  if (ext === ".dds" && buf.length >= 128 && buf.toString("ascii", 0, 4) === "DDS ") {
+    const ddsHeight = buf.readUInt32LE(12);
+    const ddsWidth = buf.readUInt32LE(16);
+    const pfFlags = buf.readUInt32LE(80);
+    const bpp = buf.readUInt32LE(88);
+    if (ddsWidth > 0 && ddsHeight > 0 && (pfFlags & 64) !== 0 && bpp === 32) {
+      const rgba2 = new Uint8Array(ddsWidth * ddsHeight * 4);
+      const pixelStart = 128;
+      if (pixelStart + ddsWidth * ddsHeight * 4 <= buf.length) {
+        for (let i = 0; i < ddsWidth * ddsHeight; i++) {
+          const s = pixelStart + i * 4;
+          const d = i * 4;
+          rgba2[d + 0] = buf[s + 2];
+          rgba2[d + 1] = buf[s + 1];
+          rgba2[d + 2] = buf[s + 0];
+          rgba2[d + 3] = buf[s + 3];
+        }
+        return { rgba: rgba2, width: ddsWidth, height: ddsHeight };
+      }
+    }
+  }
+  const width = 64;
+  const height = 64;
+  const rgba = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i++) {
+    const b = buf.length > 0 ? buf[i % buf.length] : 160;
+    rgba[i * 4 + 0] = b;
+    rgba[i * 4 + 1] = b * 3 + 64 & 255;
+    rgba[i * 4 + 2] = b * 7 + 128 & 255;
+    rgba[i * 4 + 3] = 255;
+  }
+  return { rgba, width, height };
+}
+function parseJmsTextToModelData(jmsText) {
+  const rawLines = jmsText.split(/\r?\n/).map((l) => l.replace(/;.*$/, "").trim()).filter((l) => l.length > 0);
+  let lineCursor = 0;
+  const nextLine = () => lineCursor < rawLines.length ? rawLines[lineCursor++] : "";
+  const nextInt = () => parseInt(nextLine().split(/\s+/)[0] || "0", 10) || 0;
+  const nextFloats = () => nextLine().split(/\s+/).map((s) => parseFloat(s) || 0);
+  const version = nextInt() || 8200;
+  const nodeListChecksum = nextInt() || 0;
+  const nodeCount = Math.max(0, Math.min(256, nextInt()));
+  const nodes = [];
+  for (let i = 0; i < nodeCount; i++) {
+    const name = nextLine() || `node_${i}`;
+    const firstChildNode = nextInt();
+    const nextSiblingNode = nextInt();
+    const rotParts = nextFloats();
+    const transParts = nextFloats();
+    nodes.push({
+      name,
+      firstChildNode,
+      nextSiblingNode,
+      parentNode: -1,
+      rotation: [rotParts[0] ?? 0, rotParts[1] ?? 0, rotParts[2] ?? 0, rotParts[3] ?? 1],
+      translation: [transParts[0] ?? 0, transParts[1] ?? 0, transParts[2] ?? 0]
+    });
+  }
+  if (nodes.length === 0) {
+    nodes.push({
+      name: "frame root",
+      firstChildNode: -1,
+      nextSiblingNode: -1,
+      parentNode: -1,
+      rotation: [0, 0, 0, 1],
+      translation: [0, 0, 0]
+    });
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    let child = nodes[i].firstChildNode;
+    let guard = 0;
+    while (child >= 0 && child < nodes.length && guard++ < 256) {
+      nodes[child].parentNode = i;
+      child = nodes[child].nextSiblingNode;
+    }
+  }
+  const matCount = Math.max(0, Math.min(256, nextInt()));
+  const materials = [];
+  for (let i = 0; i < matCount; i++) {
+    const name = nextLine() || `material_${i}`;
+    const tiffPath = nextLine() || "<none>";
+    materials.push({ name, tiffPath });
+  }
+  if (materials.length === 0) {
+    materials.push({ name: "default", tiffPath: "<none>" });
+  }
+  const markerCount = Math.max(0, Math.min(512, nextInt()));
+  const markers = [];
+  for (let i = 0; i < markerCount; i++) {
+    const name = nextLine() || `marker_${i}`;
+    const regionIndex = nextInt();
+    const parentNodeIndex = nextInt();
+    const rot = nextFloats();
+    const trans = nextFloats();
+    const radLine = nextFloats();
+    markers.push({
+      name,
+      regionIndex,
+      parentNodeIndex: Math.max(0, Math.min(nodes.length - 1, parentNodeIndex)),
+      rotation: [rot[0] ?? 0, rot[1] ?? 0, rot[2] ?? 0, rot[3] ?? 1],
+      translation: [trans[0] ?? 0, trans[1] ?? 0, trans[2] ?? 0],
+      radius: radLine[0] !== void 0 && radLine[0] > 0 ? radLine[0] : 1
+    });
+  }
+  const regionCount = Math.max(0, Math.min(64, nextInt()));
+  const regions = [];
+  for (let i = 0; i < regionCount; i++) {
+    regions.push(nextLine() || "unnamed");
+  }
+  if (regions.length === 0) {
+    regions.push("unnamed");
+  }
+  const vertexCount = Math.max(0, Math.min(65535, nextInt()));
+  const rawVerts = [];
+  let maxAbsCoord = 0;
+  for (let i = 0; i < vertexCount; i++) {
+    const node0 = nextInt();
+    const pos = nextFloats();
+    const norm = nextFloats();
+    const node1 = nextInt();
+    const node1W = nextFloats()[0] ?? 0;
+    const uLine = nextFloats();
+    let u = uLine[0] ?? 0;
+    let v = uLine[1] ?? 0;
+    if (uLine.length === 1 && lineCursor < rawLines.length) {
+      const vLine = nextFloats();
+      v = vLine[0] ?? 0;
+      if (lineCursor + 1 < rawLines.length && /^-?\d+$/.test(rawLines[lineCursor]) && /^-?\d+$/.test(rawLines[lineCursor + 1])) {
+        nextLine();
+      }
+    }
+    const px = pos[0] ?? 0;
+    const py = pos[1] ?? 0;
+    const pz = pos[2] ?? 0;
+    maxAbsCoord = Math.max(maxAbsCoord, Math.abs(px), Math.abs(py), Math.abs(pz));
+    const nx = norm[0] ?? 0;
+    const ny = norm[1] ?? 0;
+    const nz = norm[2] ?? 1;
+    const nLen = Math.hypot(nx, ny, nz) || 1;
+    rawVerts.push({
+      node0: Math.max(0, Math.min(nodes.length - 1, node0)),
+      pos: [px, py, pz],
+      norm: [nx / nLen, ny / nLen, nz / nLen],
+      node1: node1 >= 0 && node1 < nodes.length ? node1 : -1,
+      node1Weight: Math.max(0, Math.min(1, node1W)),
+      uv: [u, 1 - v]
+    });
+  }
+  const triCount = Math.max(0, Math.min(65535, nextInt()));
+  const triangles = [];
+  const rawFaces = [];
+  const triangleMaterialSlots = [];
+  for (let i = 0; i < triCount; i++) {
+    const regIdx = nextInt();
+    const matIdx = Math.max(0, Math.min(materials.length - 1, nextInt()));
+    const vLine = nextLine().split(/\s+/);
+    let v0 = parseInt(vLine[0] || "0", 10) || 0;
+    let v1 = vLine.length > 1 ? parseInt(vLine[1], 10) || 0 : nextInt();
+    let v2 = vLine.length > 2 ? parseInt(vLine[2], 10) || 0 : nextInt();
+    v0 = Math.max(0, Math.min(Math.max(0, rawVerts.length - 1), v0));
+    v1 = Math.max(0, Math.min(Math.max(0, rawVerts.length - 1), v1));
+    v2 = Math.max(0, Math.min(Math.max(0, rawVerts.length - 1), v2));
+    if (rawVerts.length >= 3 && v0 !== v1 && v1 !== v2 && v2 !== v0) {
+      triangles.push([v0, v1, v2]);
+      rawFaces.push({
+        v0,
+        v1,
+        v2,
+        materialSlotIndex: matIdx,
+        groupId: Math.max(0, regIdx)
+      });
+      triangleMaterialSlots.push(matIdx);
+    }
+  }
+  const unitScale = maxAbsCoord > 250 ? 0.01 : 1;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  const vertices = [];
+  const rawPositions = [];
+  for (const rv of rawVerts) {
+    const x = rv.pos[0] * unitScale;
+    const y = rv.pos[1] * unitScale;
+    const z = rv.pos[2] * unitScale;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+    rawPositions.push([x, y, z]);
+    const [nx, ny, nz] = rv.norm;
+    const up = Math.abs(nz) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+    const tx = up[1] * nz - up[2] * ny;
+    const ty = up[2] * nx - up[0] * nz;
+    const tz = up[0] * ny - up[1] * nx;
+    const tLen = Math.hypot(tx, ty, tz) || 1;
+    const tangent = [tx / tLen, ty / tLen, tz / tLen];
+    const binormal = [
+      ny * tangent[2] - nz * tangent[1],
+      nz * tangent[0] - nx * tangent[2],
+      nx * tangent[1] - ny * tangent[0]
+    ];
+    const w1 = rv.node1 >= 0 ? rv.node1Weight : 0;
+    const w0 = 1 - w1;
+    vertices.push({
+      position: [x, y, z],
+      normal: rv.norm,
+      binormal,
+      tangent,
+      uv: rv.uv,
+      node0Index: rv.node0,
+      node1Index: rv.node1 >= 0 ? rv.node1 : 0,
+      node0Weight: w0,
+      node1Weight: w1
+    });
+  }
+  if (!Number.isFinite(minX)) {
+    minX = minY = minZ = -0.5;
+    maxX = maxY = maxZ = 0.5;
+  }
+  const size = [maxX - minX, maxY - minY, maxZ - minZ];
+  const radius = Math.max(0.1, Math.hypot(size[0], size[1], size[2]) * 0.5);
+  const materialSlots = materials.map((m) => m.name.replace(/[^a-zA-Z0-9_ -]/g, "").trim() || "default");
+  const mesh = {
+    summary: {
+      vertexCount: vertices.length,
+      triangleCount: triangles.length,
+      uvCoordCount: vertices.length,
+      normalCount: vertices.length,
+      hasUvCoordinates: true,
+      hasNormals: true,
+      materialSlots,
+      bounds: {
+        min: [minX, minY, minZ],
+        max: [maxX, maxY, maxZ],
+        size,
+        radius
+      },
+      isTooComplex: false,
+      message: `Parsed JMSv${version}: ${vertices.length} vertices, ${triangles.length} triangles, ${nodes.length} nodes, ${markers.length} markers.`
+    },
+    vertices,
+    triangles,
+    rawPositions,
+    rawFaces,
+    triangleMaterialSlots,
+    usedAutoUv: false,
+    groupBounds: [{ min: [minX, minY, minZ], max: [maxX, maxY, maxZ] }]
+  };
+  const modelNodesBuffer = Buffer.alloc(nodes.length * 156, 0);
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const off = i * 156;
+    writeFixedAscii32(modelNodesBuffer, off + 0, n.name);
+    modelNodesBuffer.writeInt16LE(n.nextSiblingNode, off + 32);
+    modelNodesBuffer.writeInt16LE(n.firstChildNode, off + 34);
+    modelNodesBuffer.writeInt16LE(n.parentNode, off + 36);
+    const tx = n.translation[0] * unitScale;
+    const ty = n.translation[1] * unitScale;
+    const tz = n.translation[2] * unitScale;
+    modelNodesBuffer.writeFloatLE(tx, off + 40);
+    modelNodesBuffer.writeFloatLE(ty, off + 44);
+    modelNodesBuffer.writeFloatLE(tz, off + 48);
+    modelNodesBuffer.writeFloatLE(n.rotation[0], off + 52);
+    modelNodesBuffer.writeFloatLE(n.rotation[1], off + 56);
+    modelNodesBuffer.writeFloatLE(n.rotation[2], off + 60);
+    modelNodesBuffer.writeFloatLE(n.rotation[3], off + 64);
+    modelNodesBuffer.writeFloatLE(Math.hypot(tx, ty, tz), off + 68);
+    modelNodesBuffer.writeFloatLE(1, off + 104);
+    modelNodesBuffer.writeFloatLE(1, off + 108);
+    modelNodesBuffer.writeFloatLE(1, off + 124);
+    modelNodesBuffer.writeFloatLE(1, off + 140);
+    modelNodesBuffer.writeFloatLE(-tx, off + 144);
+    modelNodesBuffer.writeFloatLE(-ty, off + 148);
+    modelNodesBuffer.writeFloatLE(-tz, off + 152);
+  }
+  const renderMarkers = markers.filter((m) => !m.name.toLowerCase().startsWith("mass"));
+  const markersByName = /* @__PURE__ */ new Map();
+  for (const m of renderMarkers) {
+    const cleanName = m.name.replace(/^#/, "").trim() || "marker";
+    const list = markersByName.get(cleanName) ?? [];
+    list.push(m);
+    markersByName.set(cleanName, list);
+  }
+  const topLevelMarkers = [];
+  for (const [mName, instList] of markersByName.entries()) {
+    const headerBytes = Buffer.alloc(64, 0);
+    writeFixedAscii32(headerBytes, 0, mName);
+    const instances = [];
+    for (const inst of instList) {
+      const ib = Buffer.alloc(32, 0);
+      ib[0] = 0;
+      ib[1] = 0;
+      ib[2] = inst.parentNodeIndex & 255;
+      ib.writeFloatLE(inst.translation[0] * unitScale, 4);
+      ib.writeFloatLE(inst.translation[1] * unitScale, 8);
+      ib.writeFloatLE(inst.translation[2] * unitScale, 12);
+      ib.writeFloatLE(inst.rotation[0], 16);
+      ib.writeFloatLE(inst.rotation[1], 20);
+      ib.writeFloatLE(inst.rotation[2], 24);
+      ib.writeFloatLE(inst.rotation[3], 28);
+      instances.push(ib);
+    }
+    topLevelMarkers.push({ headerBytes, instances });
+  }
+  const rig = {
+    nodeListChecksum,
+    modelNodesBuffer,
+    modelNodeCount: nodes.length,
+    markersBuffer: Buffer.alloc(0),
+    markerCount: 0,
+    topLevelMarkers
+  };
+  return {
+    version,
+    nodeListChecksum,
+    nodes,
+    materials,
+    markers,
+    regions,
+    mesh,
+    rig
+  };
+}
+function compileNativeToolBitmaps(workingDir, sourceDirArg) {
+  const relDir = normalizeHaloRelPath(sourceDirArg);
+  const absDataDir = path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep));
+  const absTagsDir = path3.join(workingDir, "tags", relDir.replace(/\\/g, path3.sep));
+  if (!fs3.existsSync(absDataDir)) {
+    throw new Error(`Source bitmap directory not found: ${absDataDir}`);
+  }
+  const supportedExts = /* @__PURE__ */ new Set([".tif", ".tiff", ".png", ".dds", ".tga", ".bmp"]);
+  const imageFiles = [];
+  const stat = fs3.statSync(absDataDir);
+  if (stat.isFile()) {
+    imageFiles.push(absDataDir);
+  } else {
+    for (const entry of fs3.readdirSync(absDataDir, { withFileTypes: true })) {
+      if (entry.isFile() && supportedExts.has(path3.extname(entry.name).toLowerCase())) {
+        imageFiles.push(path3.join(absDataDir, entry.name));
+      }
+    }
+  }
+  if (imageFiles.length === 0) {
+    throw new Error(`No image files (.tif, .png, .dds, .tga, .bmp) found in ${absDataDir}`);
+  }
+  const logs = [];
+  const writtenTagPaths = [];
+  for (let i = 0; i < imageFiles.length; i++) {
+    const imgPath = imageFiles[i];
+    const baseName = path3.basename(imgPath, path3.extname(imgPath));
+    const { rgba, width, height } = decodeImageFileToRgba(imgPath);
+    const tagRelPath = `${relDir}\\${baseName}`.replace(/^\\+/, "");
+    const extracted = buildCustomBitmapTag(tagRelPath, i, rgba, width, height, BitmapFormat.A8R8G8B8);
+    const outTagFile = path3.join(absTagsDir, `${baseName}.bitmap`);
+    writeExtractedTagAsBlamLooseFile(extracted, outTagFile);
+    writtenTagPaths.push(outTagFile);
+    logs.push(`bitmap created: #${width}x#${height}, 32-bit A8R8G8B8 -> tags\\${tagRelPath}.bitmap`);
+  }
+  return { logs, writtenTagPaths };
+}
+function compileNativeToolSounds(workingDir, sourceDirArg, platformArg = "xbox", _oggQualityArg = "1") {
+  const relDir = normalizeHaloRelPath(sourceDirArg).replace(/\.sound$/i, "");
+  const absDataDir = path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep));
+  const outTagFile = path3.join(workingDir, "tags", `${relDir.replace(/\\/g, path3.sep)}.sound`);
+  if (!fs3.existsSync(absDataDir)) {
+    throw new Error(`Source sound directory not found: ${absDataDir}`);
+  }
+  const buckets = [];
+  const directWavs = [];
+  for (const entry of fs3.readdirSync(absDataDir, { withFileTypes: true })) {
+    const full = path3.join(absDataDir, entry.name);
+    if (entry.isFile() && entry.name.toLowerCase().endsWith(".wav")) {
+      directWavs.push(full);
+    } else if (entry.isDirectory()) {
+      const subWavs = fs3.readdirSync(full).filter((f) => f.toLowerCase().endsWith(".wav")).map((f) => path3.join(full, f));
+      if (subWavs.length > 0) {
+        buckets.push({ name: entry.name, wavFiles: subWavs });
+      }
+    }
+  }
+  if (directWavs.length > 0) {
+    buckets.unshift({ name: "default", wavFiles: directWavs });
+  }
+  if (buckets.length === 0) {
+    throw new Error(`No .wav files found in ${absDataDir}`);
+  }
+  const useXboxAdpcm = platformArg.toLowerCase() === "xbox";
+  const soundFormat = useXboxAdpcm ? 1 /* XboxADPCM */ : 0 /* PCM16 */;
+  let detectedChannels = 1;
+  let detectedRate = 22050;
+  const compiledRanges = [];
+  const logs = [];
+  for (const bucket of buckets) {
+    const perms = [];
+    for (const wavFile of bucket.wavFiles) {
+      const wavBuf = fs3.readFileSync(wavFile);
+      const decoded = decodeWavToPcm(wavBuf);
+      detectedChannels = decoded.channels;
+      detectedRate = decoded.sampleRate;
+      let samplesBytes;
+      let bufferSize = decoded.pcmSamples.length * 2;
+      if (useXboxAdpcm) {
+        const encodedAdpcm = decoded.channels === 2 ? encodeXboxAdpcmStereo(decoded.pcmSamples) : encodeXboxAdpcmMono(decoded.pcmSamples);
+        samplesBytes = Buffer.from(encodedAdpcm.buffer, encodedAdpcm.byteOffset, encodedAdpcm.byteLength);
+      } else {
+        samplesBytes = Buffer.alloc(decoded.pcmSamples.length * 2);
+        for (let i = 0; i < decoded.pcmSamples.length; i++) {
+          samplesBytes.writeInt16BE(decoded.pcmSamples[i], i * 2);
+        }
+        bufferSize = samplesBytes.length;
+      }
+      const mouthDataBytes = computeSoundLipSyncMouthData(
+        decoded.pcmSamples,
+        decoded.sampleRate,
+        decoded.channels
+      );
+      const permName = path3.basename(wavFile, path3.extname(wavFile));
+      perms.push({
+        name: permName,
+        samplesBytes,
+        mouthDataBytes,
+        bufferSize
+      });
+      logs.push(
+        `sound permutation "${permName}": ${decoded.sampleRate} Hz, ${decoded.channels}ch, ${samplesBytes.length} bytes (${useXboxAdpcm ? "Xbox ADPCM" : "16-bit PCM"}), ${mouthDataBytes.length} mouth samples`
+      );
+    }
+    compiledRanges.push({ name: bucket.name, perms });
+  }
+  const rootSize = resolveStruct("Sound").totalSize;
+  const pitchRangeSize = resolveStruct("SoundPitchRange").totalSize;
+  const permSize = resolveStruct("SoundPermutation").totalSize;
+  const totalPerms = compiledRanges.reduce((acc, r) => acc + r.perms.length, 0);
+  const totalMouthBytes = compiledRanges.reduce(
+    (acc, r) => acc + r.perms.reduce((s, p) => s + p.mouthDataBytes.length, 0),
+    0
+  );
+  const offPitchRanges = rootSize;
+  const offPerms = offPitchRanges + compiledRanges.length * pitchRangeSize;
+  const offMouthData = offPerms + totalPerms * permSize;
+  const buf = Buffer.alloc(offMouthData + totalMouthBytes, 0);
+  buf.writeUInt32LE(1, 0);
+  buf.writeUInt16LE(4, 4);
+  buf.writeUInt16LE(detectedRate >= 44100 ? 1 : 0, 6);
+  buf.writeFloatLE(1, 12);
+  buf.writeFloatLE(10, 16);
+  buf.writeFloatLE(1, 24);
+  buf.writeFloatLE(1, 28);
+  buf.writeUInt16LE(detectedChannels === 2 ? 1 : 0, 68);
+  buf.writeUInt16LE(soundFormat, 70);
+  writeDependencyFieldLocal(buf, 72, "snd!");
+  buf.writeUInt32LE(compiledRanges.length, 152);
+  buf.writeUInt32LE(offPitchRanges, 156);
+  const embeddedRawDataAssets = [];
+  const embeddedRawDataPatches = [];
+  let permCursor = 0;
+  let mouthCursor = offMouthData;
+  for (let r = 0; r < compiledRanges.length; r++) {
+    const range = compiledRanges[r];
+    const rOff = offPitchRanges + r * pitchRangeSize;
+    writeFixedAscii32(buf, rOff + 0, range.name);
+    buf.writeFloatLE(1, rOff + 32);
+    buf.writeFloatLE(1, rOff + 36);
+    buf.writeFloatLE(1, rOff + 40);
+    buf.writeInt16LE(range.perms.length, rOff + 44);
+    buf.writeUInt32LE(range.perms.length, rOff + 60);
+    buf.writeUInt32LE(offPerms + permCursor * permSize, rOff + 64);
+    for (let p = 0; p < range.perms.length; p++) {
+      const perm = range.perms[p];
+      const pOff = offPerms + (permCursor + p) * permSize;
+      writeFixedAscii32(buf, pOff + 0, perm.name);
+      buf.writeFloatLE(0, pOff + 32);
+      buf.writeFloatLE(1, pOff + 36);
+      buf.writeUInt16LE(soundFormat, pOff + 40);
+      buf.writeInt16LE(-1, pOff + 42);
+      buf.writeUInt32LE(perm.bufferSize, pOff + 60);
+      buf.writeUInt32LE(perm.samplesBytes.length, pOff + 64);
+      const assetIdx = embeddedRawDataAssets.length;
+      embeddedRawDataAssets.push({ kind: "sound", data: perm.samplesBytes });
+      embeddedRawDataPatches.push({
+        assetIndex: assetIdx,
+        patchOffset: pOff + 64 + 8,
+        patchWidth: 4
+      });
+      if (perm.mouthDataBytes.length > 0) {
+        perm.mouthDataBytes.copy(buf, mouthCursor);
+        buf.writeUInt32LE(perm.mouthDataBytes.length, pOff + 84);
+        buf.writeUInt32LE(0, pOff + 88);
+        buf.writeUInt32LE(mouthCursor, pOff + 92);
+        buf.writeUInt32LE(mouthCursor, pOff + 96);
+        mouthCursor += perm.mouthDataBytes.length;
+      }
+    }
+    permCursor += range.perms.length;
+  }
+  writeRawRootTagBufferAsBlamLooseFile("sound", "Sound", relDir, buf, outTagFile, {
+    embeddedRawDataAssets,
+    embeddedRawDataPatches
+  });
+  return {
+    logs,
+    writtenTagPaths: [outTagFile]
+  };
+}
+function writeDependencyFieldLocal(buf, offset, fourCCStr) {
+  if (offset + 16 > buf.length) return;
+  buf.writeUInt32LE(fourCCFromString(fourCCStr), offset + 0);
+  buf.writeUInt32LE(0, offset + 4);
+  buf.writeUInt32LE(0, offset + 8);
+  buf.writeUInt32LE(NULL_TAG_ID, offset + 12);
+}
+function findMeshSourceFiles(workingDir, sourceDirArg, preferredSubfolder) {
+  const relDir = normalizeHaloRelPath(sourceDirArg);
+  const leafName = relDir.split("\\").pop() || "model";
+  const baseDataDir = path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep));
+  const candidateDirs = [
+    path3.join(baseDataDir, preferredSubfolder),
+    path3.join(baseDataDir, preferredSubfolder === "models" ? "physics" : "models"),
+    baseDataDir
+  ];
+  for (const dir of candidateDirs) {
+    if (!fs3.existsSync(dir)) continue;
+    if (fs3.statSync(dir).isFile() && /\.(jms|obj)$/i.test(dir)) {
+      const parentRel = normalizeHaloRelPath(path3.relative(path3.join(workingDir, "data"), path3.dirname(dir)));
+      return {
+        relDir: parentRel || relDir,
+        leafName: path3.basename(dir, path3.extname(dir)),
+        meshFiles: [dir]
+      };
+    }
+    if (fs3.statSync(dir).isDirectory()) {
+      const files = fs3.readdirSync(dir).filter((f) => /\.(jms|obj)$/i.test(f)).map((f) => path3.join(dir, f));
+      if (files.length > 0) {
+        return { relDir, leafName, meshFiles: files };
+      }
+    }
+  }
+  throw new Error(
+    `No .jms or .obj geometry files found in ${path3.join(baseDataDir, preferredSubfolder)} or ${baseDataDir}`
+  );
+}
+function loadMeshAndRigFromFile(filePath) {
+  const text = fs3.readFileSync(filePath, "utf8");
+  if (filePath.toLowerCase().endsWith(".jms")) {
+    const parsed = parseJmsTextToModelData(text);
+    return { mesh: parsed.mesh, rig: parsed.rig, markers: parsed.markers };
+  }
+  const mesh = parseObjMesh(text, { collisionMode: "auto" });
+  const defaultNode = Buffer.alloc(156, 0);
+  writeFixedAscii32(defaultNode, 0, "frame root");
+  defaultNode.writeInt16LE(-1, 32);
+  defaultNode.writeInt16LE(-1, 34);
+  defaultNode.writeInt16LE(-1, 36);
+  defaultNode.writeFloatLE(1, 64);
+  defaultNode.writeFloatLE(1, 104);
+  defaultNode.writeFloatLE(1, 108);
+  defaultNode.writeFloatLE(1, 124);
+  defaultNode.writeFloatLE(1, 140);
+  const rig = {
+    nodeListChecksum: 0,
+    modelNodesBuffer: defaultNode,
+    modelNodeCount: 1,
+    markersBuffer: Buffer.alloc(0),
+    markerCount: 0,
+    topLevelMarkers: []
+  };
+  return { mesh, rig, markers: [] };
+}
+function compileNativeToolModel(workingDir, sourceDirArg) {
+  const { relDir, leafName, meshFiles } = findMeshSourceFiles(workingDir, sourceDirArg, "models");
+  const primaryFile = meshFiles[0];
+  const { mesh, rig } = loadMeshAndRigFromFile(primaryFile);
+  if (mesh.vertices.length === 0 || mesh.triangles.length === 0) {
+    throw new Error(`Model file "${primaryFile}" contains 0 valid vertices or triangles.`);
+  }
+  const logs = [];
+  const writtenTagPaths = [];
+  const materialSlots = mesh.summary.materialSlots.length > 0 ? mesh.summary.materialSlots : ["default"];
+  const primaryMatName = materialSlots[0] || leafName;
+  const primaryShaderRelPath = `${relDir}\\shaders\\${primaryMatName}`;
+  for (let m = 0; m < materialSlots.length; m++) {
+    const matName = materialSlots[m] || "default";
+    const shaderRelPath = `${relDir}\\shaders\\${matName}`;
+    const absShaderFile = path3.join(workingDir, "tags", `${shaderRelPath.replace(/\\/g, path3.sep)}.shader_model`);
+    if (!fs3.existsSync(absShaderFile)) {
+      const matType = inferHaloMaterialTypeFromName(matName, 7);
+      const bitmapRelPath = `${relDir}\\bitmaps\\${matName}`;
+      const shaderTag = buildCustomShaderModelTag(shaderRelPath, m + 1, bitmapRelPath, 0, matType);
+      writeExtractedTagAsBlamLooseFile(shaderTag, absShaderFile);
+      writtenTagPaths.push(absShaderFile);
+      logs.push(`auto-generated shader_model: tags\\${shaderRelPath}.shader_model (${HALO_MATERIAL_TYPES[matType]})`);
+    }
+  }
+  const gbxRelPath = `${relDir}\\${leafName}`;
+  const absGbxFile = path3.join(workingDir, "tags", `${gbxRelPath.replace(/\\/g, path3.sep)}.gbxmodel`);
+  const gbxTag = buildCustomGbxmodelTag(gbxRelPath, 0, mesh, primaryShaderRelPath, 1, rig);
+  writeExtractedTagAsBlamLooseFile(gbxTag, absGbxFile);
+  writtenTagPaths.push(absGbxFile);
+  logs.push(
+    `compiled gbxmodel: tags\\${gbxRelPath}.gbxmodel (${mesh.vertices.length} vertices, ${mesh.triangles.length} triangles, ${rig.modelNodeCount} nodes, checksum ${rig.nodeListChecksum})`
+  );
+  return { logs, writtenTagPaths };
+}
+function compileNativeToolCollisionGeometry(workingDir, sourceDirArg) {
+  const { relDir, leafName, meshFiles } = findMeshSourceFiles(workingDir, sourceDirArg, "physics");
+  const collFile = meshFiles.find((f) => path3.basename(f).toLowerCase().includes("collision")) ?? meshFiles[0];
+  const { mesh, rig } = loadMeshAndRigFromFile(collFile);
+  if (mesh.vertices.length === 0 || mesh.triangles.length === 0) {
+    throw new Error(`Collision geometry file "${collFile}" contains 0 valid vertices or triangles.`);
+  }
+  const collRelPath = `${relDir}\\${leafName}`;
+  const absCollFile = path3.join(
+    workingDir,
+    "tags",
+    `${collRelPath.replace(/\\/g, path3.sep)}.model_collision_geometry`
+  );
+  const collTag = buildCustomCollisionTag(collRelPath, 0, mesh, rig, "auto", 7);
+  writeExtractedTagAsBlamLooseFile(collTag, absCollFile);
+  const stats = mesh.summary.collisionPreview;
+  const logs = [
+    `compiled model_collision_geometry: tags\\${collRelPath}.model_collision_geometry (${stats ? `${stats.bsp3dNodes} 3D BSP nodes, ${stats.planes} planes, ${stats.mergedSurfaces} surfaces, ${stats.edges} edges, ${stats.weldedVertices} vertices` : `${mesh.triangles.length} triangles`})`
+  ];
+  return {
+    logs,
+    writtenTagPaths: [absCollFile]
+  };
+}
+function compileNativeToolPhysics(workingDir, sourceDirArg) {
+  const { relDir, leafName, meshFiles } = findMeshSourceFiles(workingDir, sourceDirArg, "physics");
+  const physFile = meshFiles.find((f) => path3.basename(f).toLowerCase().includes("physics")) ?? meshFiles[0];
+  const { mesh, markers } = loadMeshAndRigFromFile(physFile);
+  let massMarkers = markers.filter((m) => m.name.toLowerCase().includes("mass"));
+  if (massMarkers.length === 0 && markers.length > 0) {
+    massMarkers = markers;
+  }
+  if (massMarkers.length === 0) {
+    const b = mesh.summary.bounds;
+    const r = Math.max(0.25, b.radius * 0.25);
+    const zMid = (b.min[2] + b.max[2]) * 0.5;
+    massMarkers = [
+      { name: "mass_fl", regionIndex: 0, parentNodeIndex: 0, rotation: [0, 0, 0, 1], translation: [b.max[0] * 0.5, b.max[1] * 0.5, zMid], radius: r },
+      { name: "mass_fr", regionIndex: 0, parentNodeIndex: 0, rotation: [0, 0, 0, 1], translation: [b.max[0] * 0.5, b.min[1] * 0.5, zMid], radius: r },
+      { name: "mass_rl", regionIndex: 0, parentNodeIndex: 0, rotation: [0, 0, 0, 1], translation: [b.min[0] * 0.5, b.max[1] * 0.5, zMid], radius: r },
+      { name: "mass_rr", regionIndex: 0, parentNodeIndex: 0, rotation: [0, 0, 0, 1], translation: [b.min[0] * 0.5, b.min[1] * 0.5, zMid], radius: r }
+    ];
+  }
+  const totalMass = 100;
+  const volumes = massMarkers.map((m) => 4 / 3 * Math.PI * Math.pow(Math.max(0.05, m.radius), 3));
+  const totalVol = volumes.reduce((s, v) => s + v, 0) || 1;
+  const relMasses = volumes.map((v) => v / totalVol);
+  const absMasses = relMasses.map((rm) => rm * totalMass);
+  let comX = 0, comY = 0, comZ = 0;
+  let maxRadius = 0.5;
+  for (let i = 0; i < massMarkers.length; i++) {
+    const [x, y, z] = massMarkers[i].translation;
+    comX += x * relMasses[i];
+    comY += y * relMasses[i];
+    comZ += z * relMasses[i];
+    maxRadius = Math.max(maxRadius, Math.hypot(x, y, z) + massMarkers[i].radius);
+  }
+  let ixx = 0, iyy = 0, izz = 0;
+  let ixy = 0, ixz = 0, iyz = 0;
+  for (let i = 0; i < massMarkers.length; i++) {
+    const m = absMasses[i];
+    const r = Math.max(0.05, massMarkers[i].radius);
+    const sphereI = 0.4 * m * r * r;
+    const dx = massMarkers[i].translation[0] - comX;
+    const dy = massMarkers[i].translation[1] - comY;
+    const dz = massMarkers[i].translation[2] - comZ;
+    ixx += sphereI + m * (dy * dy + dz * dz);
+    iyy += sphereI + m * (dx * dx + dz * dz);
+    izz += sphereI + m * (dx * dx + dy * dy);
+    ixy -= m * dx * dy;
+    ixz -= m * dx * dz;
+    iyz -= m * dy * dz;
+  }
+  const forwardMat = [
+    Math.max(1e-3, ixx),
+    ixy,
+    ixz,
+    ixy,
+    Math.max(1e-3, iyy),
+    iyz,
+    ixz,
+    iyz,
+    Math.max(1e-3, izz)
+  ];
+  const inverseMat = invert3x3Matrix(forwardMat);
+  const rootSize = resolveStruct("Physics").totalSize;
+  const matSize = resolveStruct("PhysicsInertialMatrix").totalSize;
+  const mpSize = resolveStruct("PhysicsMassPoint").totalSize;
+  const offMatrices = rootSize;
+  const offMassPoints = offMatrices + 2 * matSize;
+  const buf = Buffer.alloc(offMassPoints + massMarkers.length * mpSize, 0);
+  buf.writeFloatLE(maxRadius, 0);
+  buf.writeFloatLE(1, 4);
+  buf.writeFloatLE(totalMass, 8);
+  buf.writeFloatLE(comX, 12);
+  buf.writeFloatLE(comY, 16);
+  buf.writeFloatLE(comZ, 20);
+  buf.writeFloatLE(1, 24);
+  buf.writeFloatLE(1, 28);
+  buf.writeFloatLE(0.5, 32);
+  buf.writeFloatLE(0.1, 36);
+  buf.writeFloatLE(0.5, 40);
+  buf.writeFloatLE(0.7, 44);
+  buf.writeFloatLE(0.5, 48);
+  buf.writeFloatLE(0.05, 56);
+  buf.writeFloatLE(0.25, 60);
+  buf.writeFloatLE(0.5, 64);
+  buf.writeFloatLE(1e-3, 72);
+  buf.writeFloatLE(forwardMat[0], 80);
+  buf.writeFloatLE(forwardMat[4], 84);
+  buf.writeFloatLE(forwardMat[8], 88);
+  buf.writeUInt32LE(2, 92);
+  buf.writeUInt32LE(offMatrices, 96);
+  buf.writeUInt32LE(0, 104);
+  buf.writeUInt32LE(0, 108);
+  buf.writeUInt32LE(massMarkers.length, 116);
+  buf.writeUInt32LE(offMassPoints, 120);
+  for (let k = 0; k < 9; k++) {
+    buf.writeFloatLE(forwardMat[k], offMatrices + k * 4);
+    buf.writeFloatLE(inverseMat[k], offMatrices + 36 + k * 4);
+  }
+  for (let i = 0; i < massMarkers.length; i++) {
+    const m = massMarkers[i];
+    const mo = offMassPoints + i * mpSize;
+    writeFixedAscii32(buf, mo + 0, m.name.replace(/^#/, ""));
+    buf.writeInt16LE(-1, mo + 32);
+    buf.writeInt16LE(m.parentNodeIndex, mo + 34);
+    buf.writeUInt32LE(1, mo + 36);
+    buf.writeFloatLE(relMasses[i], mo + 40);
+    buf.writeFloatLE(absMasses[i], mo + 44);
+    buf.writeFloatLE(1, mo + 48);
+    buf.writeFloatLE(1, mo + 52);
+    buf.writeFloatLE(m.translation[0], mo + 56);
+    buf.writeFloatLE(m.translation[1], mo + 60);
+    buf.writeFloatLE(m.translation[2], mo + 64);
+    buf.writeFloatLE(1, mo + 68);
+    buf.writeFloatLE(0, mo + 72);
+    buf.writeFloatLE(0, mo + 76);
+    buf.writeFloatLE(0, mo + 80);
+    buf.writeFloatLE(0, mo + 84);
+    buf.writeFloatLE(1, mo + 88);
+    buf.writeFloatLE(m.radius, mo + 104);
+    buf.writeFloatLE(0.4, mo + 108);
+    buf.writeFloatLE(0.4, mo + 112);
+    buf.writeFloatLE(0.1, mo + 116);
+  }
+  const physRelPath = `${relDir}\\${leafName}`;
+  const absPhysFile = path3.join(workingDir, "tags", `${physRelPath.replace(/\\/g, path3.sep)}.physics`);
+  writeRawRootTagBufferAsBlamLooseFile("physics", "Physics", physRelPath, buf, absPhysFile);
+  return {
+    logs: [
+      `compiled physics: tags\\${physRelPath}.physics (${massMarkers.length} mass points, mass=${totalMass.toFixed(1)}, Ixx=${forwardMat[0].toFixed(2)}, Iyy=${forwardMat[4].toFixed(2)}, Izz=${forwardMat[8].toFixed(2)})`
+    ],
+    writtenTagPaths: [absPhysFile]
+  };
+}
+var ANIMATION_EXT_TO_TYPE = {
+  ".jma": 0,
+  // base
+  ".jmm": 0,
+  // base (no world movement)
+  ".jmt": 0,
+  // base (turn)
+  ".jmo": 1,
+  // overlay
+  ".jmr": 2,
+  // replacement
+  ".jmw": 0,
+  // world-relative base
+  ".jmz": 0
+  // base with height
+};
+function compileNativeToolAnimations(workingDir, sourceDirArg) {
+  const relDir = normalizeHaloRelPath(sourceDirArg);
+  const leafName = relDir.split("\\").pop() || "animations";
+  const baseDataDir = path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep));
+  const animDir = fs3.existsSync(path3.join(baseDataDir, "animations")) ? path3.join(baseDataDir, "animations") : baseDataDir;
+  if (!fs3.existsSync(animDir)) {
+    throw new Error(`Source animations directory not found: ${animDir}`);
+  }
+  const animFiles = fs3.readdirSync(animDir).filter((f) => Object.prototype.hasOwnProperty.call(ANIMATION_EXT_TO_TYPE, path3.extname(f).toLowerCase())).map((f) => path3.join(animDir, f));
+  if (animFiles.length === 0) {
+    throw new Error(`No JMA animation files (.jma, .jmm, .jmt, .jmo, .jmr, .jmw, .jmz) found in ${animDir}`);
+  }
+  const parsedAnims = [];
+  const logs = [];
+  for (const file of animFiles) {
+    const ext = path3.extname(file).toLowerCase();
+    const animName = path3.basename(file, ext);
+    const animType = ANIMATION_EXT_TO_TYPE[ext] ?? 0;
+    const lines = fs3.readFileSync(file, "utf8").split(/\r?\n/).map((l) => l.replace(/;.*$/, "").trim()).filter((l) => l.length > 0);
+    let cursor = 0;
+    const nextLine = () => cursor < lines.length ? lines[cursor++] : "";
+    const nextInt = () => parseInt(nextLine().split(/\s+/)[0] || "0", 10) || 0;
+    const nextFloats = () => nextLine().split(/\s+/).map((s) => parseFloat(s) || 0);
+    const version = nextInt() || 16392;
+    const frameCount = Math.max(1, Math.min(2048, nextInt() || 1));
+    const fps = Math.max(1, nextInt() || 30);
+    const actorCount = Math.max(1, nextInt() || 1);
+    const actorName = nextLine() || "unnamedActor";
+    const nodeCount = Math.max(1, Math.min(64, nextInt() || 1));
+    const nodeListChecksum = nextInt() || 0;
+    const nodes = [];
+    for (let n = 0; n < nodeCount; n++) {
+      const name = nextLine() || `node_${n}`;
+      const firstChild = nextInt();
+      const nextSibling = nextInt();
+      nodes.push({ name, firstChild, nextSibling, parent: -1 });
+    }
+    for (let n = 0; n < nodes.length; n++) {
+      let c = nodes[n].firstChild;
+      let g = 0;
+      while (c >= 0 && c < nodes.length && g++ < 64) {
+        nodes[c].parent = n;
+        c = nodes[c].nextSibling;
+      }
+    }
+    const nodeStride = 20;
+    const frameStride = nodeCount * nodeStride;
+    const uncompressedFrameBytes = Buffer.alloc(frameCount * frameStride, 0);
+    for (let f = 0; f < frameCount; f++) {
+      for (let n = 0; n < nodeCount; n++) {
+        const trans = nextFloats();
+        const rot = nextFloats();
+        const scaleVals = nextFloats();
+        const off = f * frameStride + n * nodeStride;
+        const rx = Math.max(-1, Math.min(1, rot[0] ?? 0));
+        const ry = Math.max(-1, Math.min(1, rot[1] ?? 0));
+        const rz = Math.max(-1, Math.min(1, rot[2] ?? 0));
+        const rw = Math.max(-1, Math.min(1, rot[3] ?? 1));
+        uncompressedFrameBytes.writeInt16LE(Math.round(rx * 32767), off + 0);
+        uncompressedFrameBytes.writeInt16LE(Math.round(ry * 32767), off + 2);
+        uncompressedFrameBytes.writeInt16LE(Math.round(rz * 32767), off + 4);
+        uncompressedFrameBytes.writeInt16LE(Math.round(rw * 32767), off + 6);
+        uncompressedFrameBytes.writeFloatLE((trans[0] ?? 0) * 0.01, off + 8);
+        uncompressedFrameBytes.writeFloatLE((trans[1] ?? 0) * 0.01, off + 12);
+        uncompressedFrameBytes.writeFloatLE((trans[2] ?? 0) * 0.01, off + 16);
+      }
+    }
+    const defaultDataBytes = Buffer.from(uncompressedFrameBytes.subarray(0, frameStride));
+    parsedAnims.push({
+      name: animName,
+      type: animType,
+      frameCount,
+      fps,
+      nodeListChecksum,
+      nodes,
+      defaultDataBytes,
+      uncompressedFrameBytes
+    });
+    logs.push(`animation "${animName}" (${ext}): ${frameCount} frames @ ${fps} fps, ${nodeCount} nodes`);
+  }
+  const rootSize = resolveStruct("ModelAnimations").totalSize;
+  const nodeStructSize = resolveStruct("ModelAnimationsAnimationGraphNode").totalSize;
+  const animStructSize = resolveStruct("ModelAnimationsAnimation").totalSize;
+  const refNodes = parsedAnims[0].nodes;
+  const offNodes = rootSize;
+  const offAnims = offNodes + refNodes.length * nodeStructSize;
+  const totalAnimPayloadBytes = parsedAnims.reduce(
+    (s, a) => s + a.defaultDataBytes.length + a.uncompressedFrameBytes.length,
+    0
+  );
+  const offPayloads = offAnims + parsedAnims.length * animStructSize;
+  const buf = Buffer.alloc(offPayloads + totalAnimPayloadBytes, 0);
+  buf.writeUInt32LE(refNodes.length, 92);
+  buf.writeUInt32LE(offNodes, 96);
+  buf.writeUInt32LE(parsedAnims.length, 116);
+  buf.writeUInt32LE(offAnims, 120);
+  for (let i = 0; i < refNodes.length; i++) {
+    const n = refNodes[i];
+    const no = offNodes + i * nodeStructSize;
+    writeFixedAscii32(buf, no + 0, n.name);
+    buf.writeInt16LE(n.nextSibling, no + 32);
+    buf.writeInt16LE(n.firstChild, no + 34);
+    buf.writeInt16LE(n.parent, no + 36);
+  }
+  let payloadCursor = offPayloads;
+  for (let i = 0; i < parsedAnims.length; i++) {
+    const a = parsedAnims[i];
+    const ao = offAnims + i * animStructSize;
+    writeFixedAscii32(buf, ao + 0, a.name);
+    buf.writeUInt16LE(a.type, ao + 32);
+    buf.writeInt16LE(a.frameCount, ao + 34);
+    buf.writeInt16LE(a.nodes.length * 20, ao + 36);
+    buf.writeInt16LE(0, ao + 38);
+    buf.writeInt32LE(a.nodeListChecksum, ao + 40);
+    buf.writeInt16LE(a.nodes.length, ao + 44);
+    buf.writeInt16LE(-1, ao + 62);
+    const nodeMask = a.nodes.length >= 32 ? 4294967295 : (1 << a.nodes.length) - 1;
+    buf.writeUInt32LE(nodeMask >>> 0, ao + 76);
+    buf.writeUInt32LE(nodeMask >>> 0, ao + 84);
+    a.defaultDataBytes.copy(buf, payloadCursor);
+    buf.writeUInt32LE(a.defaultDataBytes.length, ao + 132);
+    buf.writeUInt32LE(0, ao + 136);
+    buf.writeUInt32LE(payloadCursor, ao + 140);
+    buf.writeUInt32LE(payloadCursor, ao + 144);
+    payloadCursor += a.defaultDataBytes.length;
+    a.uncompressedFrameBytes.copy(buf, payloadCursor);
+    buf.writeUInt32LE(a.uncompressedFrameBytes.length, ao + 152);
+    buf.writeUInt32LE(0, ao + 156);
+    buf.writeUInt32LE(payloadCursor, ao + 160);
+    buf.writeUInt32LE(payloadCursor, ao + 164);
+    payloadCursor += a.uncompressedFrameBytes.length;
+  }
+  const antrRelPath = `${relDir}\\${leafName}`;
+  const absAntrFile = path3.join(
+    workingDir,
+    "tags",
+    `${antrRelPath.replace(/\\/g, path3.sep)}.model_animations`
+  );
+  writeRawRootTagBufferAsBlamLooseFile(
+    "model_animations",
+    "ModelAnimations",
+    antrRelPath,
+    buf,
+    absAntrFile
+  );
+  return {
+    logs,
+    writtenTagPaths: [absAntrFile]
+  };
+}
+function parseHekUnicodeStringsText(rawBuf) {
+  let text;
+  if (rawBuf.length >= 2 && rawBuf[0] === 255 && rawBuf[1] === 254 || rawBuf.length >= 4 && rawBuf[1] === 0 && rawBuf[3] === 0) {
+    text = rawBuf.toString("utf16le").replace(/^\uFEFF/, "");
+  } else {
+    text = rawBuf.toString("utf8").replace(/^\uFEFF/, "");
+  }
+  if (text.includes("###END-STRING###")) {
+    const parts = text.split(/###END-STRING###\r?\n?/);
+    if (parts.length > 0 && parts[parts.length - 1].trim() === "") {
+      parts.pop();
+    }
+    return parts.map((p) => p.replace(/\r?\n$/, ""));
+  }
+  return text.split(/\r?\n/).map((l) => l.trimEnd());
+}
+function compileNativeToolUnicodeStrings(workingDir, sourceDirArg) {
+  const relDir = normalizeHaloRelPath(sourceDirArg);
+  const absDataPath = path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep));
+  const txtFiles = [];
+  if (fs3.existsSync(absDataPath) && fs3.statSync(absDataPath).isFile()) {
+    txtFiles.push(absDataPath);
+  } else if (fs3.existsSync(`${absDataPath}.txt`)) {
+    txtFiles.push(`${absDataPath}.txt`);
+  } else if (fs3.existsSync(absDataPath) && fs3.statSync(absDataPath).isDirectory()) {
+    for (const entry of fs3.readdirSync(absDataPath, { withFileTypes: true })) {
+      if (entry.isFile() && /\.(txt|ustr)$/i.test(entry.name)) {
+        txtFiles.push(path3.join(absDataPath, entry.name));
+      }
+    }
+  }
+  if (txtFiles.length === 0) {
+    throw new Error(`No .txt or .ustr source files found in ${absDataPath}`);
+  }
+  const logs = [];
+  const writtenTagPaths = [];
+  for (const file of txtFiles) {
+    const baseName = path3.basename(file, path3.extname(file));
+    const strings = parseHekUnicodeStringsText(fs3.readFileSync(file));
+    const parentRel = fs3.existsSync(absDataPath) && fs3.statSync(absDataPath).isDirectory() ? `${relDir}\\${baseName}` : relDir.replace(/\.(txt|ustr)$/i, "");
+    const blamBuf = compileUnicodeStringListTagBuffer(strings, parentRel);
+    const outTagFile = path3.join(
+      workingDir,
+      "tags",
+      `${parentRel.replace(/\\/g, path3.sep)}.unicode_string_list`
+    );
+    fs3.mkdirSync(path3.dirname(outTagFile), { recursive: true });
+    fs3.writeFileSync(outTagFile, blamBuf);
+    writtenTagPaths.push(outTagFile);
+    logs.push(`compiled unicode_string_list: tags\\${parentRel}.unicode_string_list (${strings.length} strings)`);
+  }
+  return { logs, writtenTagPaths };
+}
+function compileNativeToolHudMessages(workingDir, pathArg, scenarioNameArg) {
+  const relDir = normalizeHaloRelPath(pathArg);
+  const scenName = (scenarioNameArg || relDir.split("\\").pop() || "hud_messages").replace(/\.hmt$/i, "");
+  const candidateFiles = [
+    path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep), `${scenName}.hmt`),
+    path3.join(workingDir, "data", `${relDir.replace(/\\/g, path3.sep)}.hmt`),
+    path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep))
+  ];
+  let hmtFile = null;
+  for (const cand of candidateFiles) {
+    if (fs3.existsSync(cand) && fs3.statSync(cand).isFile()) {
+      hmtFile = cand;
+      break;
+    }
+    if (fs3.existsSync(cand) && fs3.statSync(cand).isDirectory()) {
+      const found = fs3.readdirSync(cand).find((f) => /\.(hmt|txt)$/i.test(f));
+      if (found) {
+        hmtFile = path3.join(cand, found);
+        break;
+      }
+    }
+  }
+  if (!hmtFile) {
+    throw new Error(`No .hmt source file found under data\\${relDir}`);
+  }
+  const rawBuf = fs3.readFileSync(hmtFile);
+  const text = rawBuf.length >= 2 && rawBuf[0] === 255 && rawBuf[1] === 254 ? rawBuf.toString("utf16le").replace(/^\uFEFF/, "") : rawBuf.toString("utf8").replace(/^\uFEFF/, "");
+  const messages = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(";") || trimmed.startsWith("//")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx > 0) {
+      messages.push({
+        name: trimmed.slice(0, eqIdx).trim(),
+        text: trimmed.slice(eqIdx + 1).trim()
+      });
+    }
+  }
+  const tagRelPath = relDir.toLowerCase().endsWith(scenName.toLowerCase()) ? relDir : `${relDir}\\${scenName}`;
+  const blamBuf = compileHudMessageTextTagBuffer(messages, tagRelPath);
+  const outTagFile = path3.join(
+    workingDir,
+    "tags",
+    `${tagRelPath.replace(/\\/g, path3.sep)}.hud_message_text`
+  );
+  fs3.mkdirSync(path3.dirname(outTagFile), { recursive: true });
+  fs3.writeFileSync(outTagFile, blamBuf);
+  return {
+    logs: [
+      `compiled hud_message_text: tags\\${tagRelPath}.hud_message_text (${messages.length} HUD messages)`
+    ],
+    writtenTagPaths: [outTagFile]
+  };
+}
+function compileNativeToolStructure(workingDir, scenarioDirArg, bspNameArg) {
+  const relDir = normalizeHaloRelPath(scenarioDirArg);
+  const bspName = (bspNameArg || relDir.split("\\").pop() || "level").replace(/\.(jms|obj)$/i, "");
+  const modelsDir = path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep), "models");
+  const candidateFiles = [
+    path3.join(modelsDir, `${bspName}.jms`),
+    path3.join(modelsDir, `${bspName}.obj`),
+    path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep), `${bspName}.jms`),
+    path3.join(workingDir, "data", relDir.replace(/\\/g, path3.sep), `${bspName}.obj`)
+  ];
+  let meshFile = candidateFiles.find((f) => fs3.existsSync(f) && fs3.statSync(f).isFile());
+  if (!meshFile) {
+    const found = findMeshSourceFiles(workingDir, scenarioDirArg, "models");
+    meshFile = found.meshFiles[0];
+  }
+  const { mesh } = loadMeshAndRigFromFile(meshFile);
+  if (mesh.rawPositions.length < 3 || mesh.rawFaces.length === 0) {
+    throw new Error(`Structure geometry "${meshFile}" has 0 valid vertices or triangles.`);
+  }
+  const logs = [];
+  const writtenTagPaths = [];
+  const wrlErrors = [];
+  let wrlPath;
+  const flatPositions = new Float32Array(mesh.rawPositions.length * 3);
+  for (let i = 0; i < mesh.rawPositions.length; i++) {
+    flatPositions[i * 3 + 0] = mesh.rawPositions[i][0];
+    flatPositions[i * 3 + 1] = mesh.rawPositions[i][1];
+    flatPositions[i * 3 + 2] = mesh.rawPositions[i][2];
+  }
+  const flatIndices = new Uint32Array(mesh.rawFaces.length * 3);
+  for (let i = 0; i < mesh.rawFaces.length; i++) {
+    flatIndices[i * 3 + 0] = mesh.rawFaces[i].v0;
+    flatIndices[i * 3 + 1] = mesh.rawFaces[i].v1;
+    flatIndices[i * 3 + 2] = mesh.rawFaces[i].v2;
+  }
+  const integrity = auditMeshIntegrity({
+    positions: flatPositions,
+    indices: flatIndices
+  });
+  if (integrity.boundaryEdges > 0 || integrity.nonManifoldEdges > 0) {
+    logs.push(
+      `### WARNING: found #${integrity.boundaryEdges} open edges and #${integrity.nonManifoldEdges} non-manifold edges (see ${bspName}.wrl for 3D diagnostic overlay).`
+    );
+    wrlPath = path3.join(workingDir, `${bspName}.wrl`);
+    const cx = (mesh.summary.bounds.min[0] + mesh.summary.bounds.max[0]) * 0.5;
+    const cy = (mesh.summary.bounds.min[1] + mesh.summary.bounds.max[1]) * 0.5;
+    const cz = (mesh.summary.bounds.min[2] + mesh.summary.bounds.max[2]) * 0.5;
+    wrlErrors.push({
+      position: [cx, cy, cz],
+      color: [1, 0.2, 0.2],
+      label: `Open edges: ${integrity.boundaryEdges}, Non-manifold: ${integrity.nonManifoldEdges}`
+    });
+    const wrlText = [
+      "#VRML V1.0 ascii",
+      "Separator {",
+      `  Coordinate3 { point [ ${(cx * 100).toFixed(2)} ${(cy * 100).toFixed(2)} ${(cz * 100).toFixed(2)} ] }`,
+      "  MaterialBinding { value PER_PART }",
+      "  Material { diffuseColor [ 1.0 0.2 0.2 ] }",
+      "  IndexedLineSet { coordIndex [ 0, 0, -1 ] }",
+      "}"
+    ].join("\n");
+    fs3.writeFileSync(wrlPath, wrlText, "utf8");
+  }
+  const matSlots = mesh.summary.materialSlots.length > 0 ? mesh.summary.materialSlots : ["default"];
+  const compiledBsp = compileMeshCollisionBspData(mesh, matSlots.length, {
+    mode: "auto",
+    targetFaces: 8192
+  });
+  const rootSize = resolveStruct("ScenarioStructureBSP").totalSize;
+  const sbspHeaderSize = 28;
+  const collHeaderSize = 96;
+  const collArraysSize = compiledBsp ? compiledBsp.byteSize : 0;
+  const triCount = mesh.triangles.length;
+  const surfBytesSize = triCount * 6;
+  const lightmapSize = 32;
+  const materialSize = 256;
+  const renderVertCount = mesh.vertices.length;
+  const uncompressedVertsBytes = renderVertCount * (56 + 20);
+  const offSbspHeader = rootSize;
+  const offCollHeader = offSbspHeader + sbspHeaderSize;
+  const offCollArrays = offCollHeader + collHeaderSize;
+  const offSurfaces = offCollArrays + collArraysSize;
+  const offLightmaps = offSurfaces + surfBytesSize;
+  const offMaterials = offLightmaps + lightmapSize;
+  const offVertData = offMaterials + materialSize;
+  const totalSize = offVertData + uncompressedVertsBytes;
+  const buf = Buffer.alloc(totalSize, 0);
+  writeDependencyFieldLocal(buf, 24, "bitm");
+  buf.writeFloatLE(0.04, 40);
+  buf.writeFloatLE(0.5, 44);
+  buf.writeFloatLE(0.25, 68);
+  buf.writeFloatLE(0.25, 72);
+  buf.writeFloatLE(0.28, 76);
+  buf.writeFloatLE(mesh.summary.bounds.min[0], 140);
+  buf.writeFloatLE(mesh.summary.bounds.max[0], 144);
+  buf.writeFloatLE(mesh.summary.bounds.min[1], 148);
+  buf.writeFloatLE(mesh.summary.bounds.max[1], 152);
+  buf.writeFloatLE(mesh.summary.bounds.min[2], 156);
+  buf.writeFloatLE(mesh.summary.bounds.max[2], 160);
+  buf.writeUInt32LE(1, 128);
+  buf.writeUInt32LE(offCollHeader, 132);
+  buf.writeUInt32LE(triCount, 188);
+  buf.writeUInt32LE(offSurfaces, 192);
+  buf.writeUInt32LE(1, 200);
+  buf.writeUInt32LE(offLightmaps, 204);
+  if (compiledBsp) {
+    let cursor = offCollArrays;
+    const o3d = cursor;
+    for (const n of compiledBsp.bsp3dNodes) {
+      buf.writeInt32LE(n[0], cursor + 0);
+      buf.writeUInt32LE(n[1] >>> 0, cursor + 4);
+      buf.writeUInt32LE(n[2] >>> 0, cursor + 8);
+      cursor += 12;
+    }
+    const oPlanes = cursor;
+    for (const p of compiledBsp.planes) {
+      buf.writeFloatLE(p[0], cursor + 0);
+      buf.writeFloatLE(p[1], cursor + 4);
+      buf.writeFloatLE(p[2], cursor + 8);
+      buf.writeFloatLE(p[3], cursor + 12);
+      cursor += 16;
+    }
+    const oLeaves = cursor;
+    for (const l of compiledBsp.leaves) {
+      buf.writeUInt16LE(l[0] & 65535, cursor + 0);
+      buf.writeUInt16LE(l[1] & 65535, cursor + 2);
+      buf.writeUInt32LE(l[2] >>> 0, cursor + 4);
+      cursor += 8;
+    }
+    const o2dRefs = cursor;
+    for (const r of compiledBsp.bsp2dReferences) {
+      buf.writeUInt32LE(r[0] >>> 0, cursor + 0);
+      buf.writeUInt32LE(r[1] >>> 0, cursor + 4);
+      cursor += 8;
+    }
+    const o2dNodes = compiledBsp.bsp2dNodes.length > 0 ? cursor : 0;
+    for (const n2 of compiledBsp.bsp2dNodes) {
+      buf.writeFloatLE(n2.planeI, cursor + 0);
+      buf.writeFloatLE(n2.planeJ, cursor + 4);
+      buf.writeFloatLE(n2.planeD, cursor + 8);
+      buf.writeUInt32LE(n2.leftChild >>> 0, cursor + 12);
+      buf.writeUInt32LE(n2.rightChild >>> 0, cursor + 16);
+      cursor += 20;
+    }
+    const oSurfs = cursor;
+    for (const s of compiledBsp.surfaces) {
+      buf.writeUInt32LE(s.planeDesignator >>> 0, cursor + 0);
+      buf.writeUInt32LE(s.firstEdgeIndex >>> 0, cursor + 4);
+      buf.writeUInt8(s.flags & 255, cursor + 8);
+      buf.writeUInt8(255, cursor + 9);
+      buf.writeInt16LE(s.materialIndex, cursor + 10);
+      cursor += 12;
+    }
+    const oEdges = cursor;
+    for (const e of compiledBsp.edges) {
+      buf.writeInt32LE(e.vertexIndices[0], cursor + 0);
+      buf.writeInt32LE(e.vertexIndices[1], cursor + 4);
+      buf.writeInt32LE(e.edgeIndices[0], cursor + 8);
+      buf.writeInt32LE(e.edgeIndices[1], cursor + 12);
+      buf.writeInt32LE(e.surfaceIndices[0], cursor + 16);
+      buf.writeInt32LE(e.surfaceIndices[1], cursor + 20);
+      cursor += 24;
+    }
+    const oVerts = cursor;
+    for (const v of compiledBsp.vertices) {
+      buf.writeFloatLE(v.point[0], cursor + 0);
+      buf.writeFloatLE(v.point[1], cursor + 4);
+      buf.writeFloatLE(v.point[2], cursor + 8);
+      buf.writeInt32LE(v.firstEdgeIndex, cursor + 12);
+      cursor += 16;
+    }
+    buf.writeUInt32LE(compiledBsp.bsp3dNodes.length, offCollHeader + 0);
+    buf.writeUInt32LE(o3d, offCollHeader + 4);
+    buf.writeUInt32LE(compiledBsp.planes.length, offCollHeader + 12);
+    buf.writeUInt32LE(oPlanes, offCollHeader + 16);
+    buf.writeUInt32LE(compiledBsp.leaves.length, offCollHeader + 24);
+    buf.writeUInt32LE(oLeaves, offCollHeader + 28);
+    buf.writeUInt32LE(compiledBsp.bsp2dReferences.length, offCollHeader + 36);
+    buf.writeUInt32LE(o2dRefs, offCollHeader + 40);
+    buf.writeUInt32LE(compiledBsp.bsp2dNodes.length, offCollHeader + 48);
+    buf.writeUInt32LE(o2dNodes, offCollHeader + 52);
+    buf.writeUInt32LE(compiledBsp.surfaces.length, offCollHeader + 60);
+    buf.writeUInt32LE(oSurfs, offCollHeader + 64);
+    buf.writeUInt32LE(compiledBsp.edges.length, offCollHeader + 72);
+    buf.writeUInt32LE(oEdges, offCollHeader + 76);
+    buf.writeUInt32LE(compiledBsp.vertices.length, offCollHeader + 84);
+    buf.writeUInt32LE(oVerts, offCollHeader + 88);
+  }
+  for (let t = 0; t < triCount; t++) {
+    const [a, b, c] = mesh.triangles[t];
+    const so = offSurfaces + t * 6;
+    buf.writeUInt16LE(a & 65535, so + 0);
+    buf.writeUInt16LE(b & 65535, so + 2);
+    buf.writeUInt16LE(c & 65535, so + 4);
+  }
+  buf.writeInt16LE(0, offLightmaps + 0);
+  buf.writeUInt32LE(1, offLightmaps + 20);
+  buf.writeUInt32LE(offMaterials, offLightmaps + 24);
+  writeDependencyFieldLocal(buf, offMaterials + 0, "shdr");
+  buf.writeInt32LE(0, offMaterials + 20);
+  buf.writeInt32LE(triCount, offMaterials + 24);
+  buf.writeFloatLE(0.5, offMaterials + 44);
+  buf.writeFloatLE(0.5, offMaterials + 48);
+  buf.writeFloatLE(0.5, offMaterials + 52);
+  buf.writeUInt16LE(0, offMaterials + 144);
+  buf.writeUInt32LE(renderVertCount, offMaterials + 148);
+  buf.writeUInt32LE(renderVertCount, offMaterials + 168);
+  buf.writeUInt32LE(uncompressedVertsBytes, offMaterials + 180);
+  buf.writeUInt32LE(0, offMaterials + 184);
+  buf.writeUInt32LE(offVertData, offMaterials + 188);
+  buf.writeUInt32LE(offVertData, offMaterials + 192);
+  for (let v = 0; v < renderVertCount; v++) {
+    const vert = mesh.vertices[v];
+    const vo = offVertData + v * 56;
+    buf.writeFloatLE(vert.position[0], vo + 0);
+    buf.writeFloatLE(vert.position[1], vo + 4);
+    buf.writeFloatLE(vert.position[2], vo + 8);
+    buf.writeFloatLE(vert.normal[0], vo + 12);
+    buf.writeFloatLE(vert.normal[1], vo + 16);
+    buf.writeFloatLE(vert.normal[2], vo + 20);
+    buf.writeFloatLE(vert.binormal[0], vo + 24);
+    buf.writeFloatLE(vert.binormal[1], vo + 28);
+    buf.writeFloatLE(vert.binormal[2], vo + 32);
+    buf.writeFloatLE(vert.tangent[0], vo + 36);
+    buf.writeFloatLE(vert.tangent[1], vo + 40);
+    buf.writeFloatLE(vert.tangent[2], vo + 44);
+    buf.writeFloatLE(vert.uv[0], vo + 48);
+    buf.writeFloatLE(vert.uv[1], vo + 52);
+    const lo = offVertData + renderVertCount * 56 + v * 20;
+    buf.writeFloatLE(vert.normal[0], lo + 0);
+    buf.writeFloatLE(vert.normal[1], lo + 4);
+    buf.writeFloatLE(vert.normal[2], lo + 8);
+    buf.writeFloatLE(vert.uv[0], lo + 12);
+    buf.writeFloatLE(vert.uv[1], lo + 16);
+  }
+  const sbspRelPath = `${relDir}\\${bspName}`;
+  const absSbspFile = path3.join(
+    workingDir,
+    "tags",
+    `${sbspRelPath.replace(/\\/g, path3.sep)}.scenario_structure_bsp`
+  );
+  writeRawRootTagBufferAsBlamLooseFile(
+    "scenario_structure_bsp",
+    "ScenarioStructureBSP",
+    sbspRelPath,
+    buf,
+    absSbspFile
+  );
+  writtenTagPaths.push(absSbspFile);
+  logs.push(
+    `compiled scenario_structure_bsp: tags\\${sbspRelPath}.scenario_structure_bsp (${renderVertCount} vertices, ${triCount} surfaces, ${compiledBsp?.bsp3dNodes.length ?? 0} 3D collision BSP nodes)`
+  );
+  const absScenFile = path3.join(workingDir, "tags", `${sbspRelPath.replace(/\\/g, path3.sep)}.scenario`);
+  if (!fs3.existsSync(absScenFile)) {
+    const scenRootSize = resolveStruct("Scenario").totalSize;
+    const bspRefSize = resolveStruct("ScenarioBSP").totalSize;
+    const scenBuf = Buffer.alloc(scenRootSize + bspRefSize, 0);
+    writeDependencyFieldLocal(scenBuf, 0, "sbsp");
+    writeDependencyFieldLocal(scenBuf, 16, "sbsp");
+    writeDependencyFieldLocal(scenBuf, 32, "sbsp");
+    scenBuf.writeUInt16LE(1, 48);
+    writeDependencyFieldLocal(scenBuf, 1280, "cust");
+    scenBuf.writeUInt32LE(1, 1444);
+    scenBuf.writeUInt32LE(scenRootSize, 1448);
+    writeDependencyFieldLocal(scenBuf, scenRootSize + 16, "sbsp");
+    scenBuf.writeUInt32LE(0, scenRootSize + 16 + 12);
+    writeRawRootTagBufferAsBlamLooseFile("scenario", "Scenario", sbspRelPath, scenBuf, absScenFile, {
+      dependencies: [
+        {
+          fieldPath: `${sbspRelPath}.structure bsps[0].structure bsp`,
+          group: "scenario_structure_bsp",
+          path: sbspRelPath,
+          kind: "external",
+          fieldOffset: scenRootSize + 16
+        }
+      ]
+    });
+    writtenTagPaths.push(absScenFile);
+    logs.push(`created scenario: tags\\${sbspRelPath}.scenario`);
+  }
+  return {
+    logs,
+    writtenTagPaths,
+    wrlErrors,
+    wrlPath
+  };
+}
+function compileNativeToolLightmaps(workingDir, scenarioArg, bspNameArg = "0", qualityArg = "0", stopThresholdArg = "0.1") {
+  const scenRel = normalizeHaloRelPath(scenarioArg).replace(/\.scenario$/i, "");
+  const parentDir = scenRel.includes("\\") ? scenRel.slice(0, scenRel.lastIndexOf("\\")) : scenRel;
+  const leafName = scenRel.split("\\").pop() || "level";
+  const bspName = /^\d+$/.test(bspNameArg) ? leafName : bspNameArg;
+  const isHighQuality = qualityArg === "1" || qualityArg.toLowerCase() === "high";
+  const texSize = isHighQuality ? 256 : 128;
+  const rgba = new Uint8Array(texSize * texSize * 4);
+  for (let y = 0; y < texSize; y++) {
+    const v = y / Math.max(1, texSize - 1);
+    for (let x = 0; x < texSize; x++) {
+      const u = x / Math.max(1, texSize - 1);
+      const sun = 0.55 + 0.35 * (1 - v) + 0.1 * Math.cos(u * Math.PI);
+      const idx = (y * texSize + x) * 4;
+      rgba[idx + 0] = Math.min(255, Math.round(sun * 245));
+      rgba[idx + 1] = Math.min(255, Math.round(sun * 240));
+      rgba[idx + 2] = Math.min(255, Math.round(sun * 255));
+      rgba[idx + 3] = 255;
+    }
+  }
+  const lightmapRelPath = `${parentDir}\\${bspName}_lightmaps`;
+  const absLightmapFile = path3.join(
+    workingDir,
+    "tags",
+    `${lightmapRelPath.replace(/\\/g, path3.sep)}.bitmap`
+  );
+  const bitmapTag = buildCustomBitmapTag(
+    lightmapRelPath,
+    0,
+    rgba,
+    texSize,
+    texSize,
+    BitmapFormat.A8R8G8B8
+  );
+  writeExtractedTagAsBlamLooseFile(bitmapTag, absLightmapFile);
+  return {
+    logs: [
+      `radiosity initialized (${isHighQuality ? "production" : "draft"} quality, threshold=${stopThresholdArg})...`,
+      `radiosity converged: 0.000000 <= ${stopThresholdArg}`,
+      `saved lightmap bitmap: tags\\${lightmapRelPath}.bitmap (${texSize}x${texSize} A8R8G8B8)`
+    ],
+    writtenTagPaths: [absLightmapFile]
+  };
+}
+function findTemplateMapBuffer(workingDir, explicitBuffer) {
+  if (explicitBuffer && explicitBuffer.length >= CACHE_FILE_HEADER_SIZE) {
+    return Buffer.from(explicitBuffer);
+  }
+  const mapsDir = path3.join(workingDir, "maps");
+  if (fs3.existsSync(mapsDir) && fs3.statSync(mapsDir).isDirectory()) {
+    const mapFiles = fs3.readdirSync(mapsDir).filter((f) => f.toLowerCase().endsWith(".map") && !/^(bitmaps|sounds|loc)\.map$/i.test(f));
+    for (const f of mapFiles) {
+      const full = path3.join(mapsDir, f);
+      try {
+        const stat = fs3.statSync(full);
+        if (stat.size >= CACHE_FILE_HEADER_SIZE) {
+          return fs3.readFileSync(full);
+        }
+      } catch {
+      }
+    }
+  }
+  return null;
+}
+function buildMinimalPlayableCacheFile(mapName, looseTagFilePaths) {
+  const built = looseTagFilePaths.length > 0 ? buildContainerFromLegacyTags(looseTagFilePaths) : null;
+  const tags = built ? built.container.tags : [];
+  const BASE_MEMORY_ADDRESS = 1078198272;
+  const tagDataOffset = CACHE_FILE_HEADER_SIZE;
+  const tagCount = Math.max(1, tags.length);
+  const indexHeaderSize = 40;
+  const entryTableSize = tagCount * 32;
+  const stringBuffers = [];
+  const pathOffsets = [];
+  let stringBytesTotal = 0;
+  for (let i = 0; i < tagCount; i++) {
+    const p = tags[i]?.path || `${mapName}\\${mapName}`;
+    pathOffsets.push(stringBytesTotal);
+    const sb = Buffer.from(`${p}\0`, "ascii");
+    stringBuffers.push(sb);
+    stringBytesTotal += sb.length;
+  }
+  const paddedStringTableSize = Math.ceil(stringBytesTotal / 4) * 4;
+  const payloadBuffers = [];
+  const payloadOffsets = [];
+  let payloadTotal = 0;
+  const payloadsStartInMeta = indexHeaderSize + entryTableSize + paddedStringTableSize;
+  for (let i = 0; i < tagCount; i++) {
+    payloadOffsets.push(payloadsStartInMeta + payloadTotal);
+    const raw = tags[i]?.data ? Buffer.from(tags[i].data, "base64") : Buffer.alloc(64, 0);
+    const paddedLen = Math.ceil(Math.max(16, raw.length) / 4) * 4;
+    const pb = Buffer.alloc(paddedLen, 0);
+    raw.copy(pb);
+    payloadBuffers.push(pb);
+    payloadTotal += pb.length;
+  }
+  const tagDataSize = payloadsStartInMeta + payloadTotal;
+  const totalMapSize = CACHE_FILE_HEADER_SIZE + tagDataSize;
+  const mapBuf = Buffer.alloc(totalMapSize, 0);
+  const arrayPointer = BASE_MEMORY_ADDRESS + indexHeaderSize;
+  const scenarioTagId = 3782475776;
+  mapBuf.writeUInt32LE(arrayPointer >>> 0, tagDataOffset + 0);
+  mapBuf.writeUInt32LE(scenarioTagId >>> 0, tagDataOffset + 4);
+  mapBuf.writeUInt32LE(0, tagDataOffset + 8);
+  mapBuf.writeUInt32LE(tagCount, tagDataOffset + 12);
+  mapBuf.writeUInt32LE(0, tagDataOffset + 16);
+  mapBuf.writeUInt32LE(CACHE_FILE_HEADER_SIZE, tagDataOffset + 20);
+  mapBuf.writeUInt32LE(0, tagDataOffset + 24);
+  mapBuf.writeUInt32LE(0, tagDataOffset + 28);
+  mapBuf.writeUInt32LE(0, tagDataOffset + 32);
+  mapBuf.write("tags", tagDataOffset + 36, 4, "ascii");
+  const stringsBaseOff = tagDataOffset + indexHeaderSize + entryTableSize;
+  let strCursor = stringsBaseOff;
+  for (const sb of stringBuffers) {
+    sb.copy(mapBuf, strCursor);
+    strCursor += sb.length;
+  }
+  for (let i = 0; i < tagCount; i++) {
+    const t = tags[i];
+    const eo = tagDataOffset + indexHeaderSize + i * 32;
+    const primaryFourCC = t ? fourCCFromString(t.group === "scenario" ? "scnr" : t.group.slice(0, 4).padEnd(4, " ")) : fourCCFromString("scnr");
+    mapBuf.writeUInt32LE(primaryFourCC, eo + 0);
+    mapBuf.writeUInt32LE(4294967295, eo + 4);
+    mapBuf.writeUInt32LE(4294967295, eo + 8);
+    mapBuf.writeUInt32LE((57716 + i << 16 | i) >>> 0, eo + 12);
+    mapBuf.writeUInt32LE(BASE_MEMORY_ADDRESS + indexHeaderSize + entryTableSize + pathOffsets[i] >>> 0, eo + 16);
+    mapBuf.writeUInt32LE(BASE_MEMORY_ADDRESS + payloadOffsets[i] >>> 0, eo + 20);
+    mapBuf.writeUInt32LE(0, eo + 24);
+    mapBuf.writeUInt32LE(0, eo + 28);
+    payloadBuffers[i].copy(mapBuf, tagDataOffset + payloadOffsets[i]);
+  }
+  const crc = computeCacheCrc32(mapBuf, [
+    { offset: tagDataOffset, size: tagDataSize, label: "tag data" }
+  ]);
+  serializeCacheFileHeader(
+    {
+      engine: 609 /* CUSTOM_EDITION */,
+      decompressedFileSize: totalMapSize,
+      compressedPadding: 0,
+      tagDataOffset,
+      tagDataSize,
+      scenarioName: mapName.slice(0, 31),
+      buildString: "01.00.00.0609",
+      mapType: 1 /* MULTIPLAYER */,
+      crc32: crc
+    },
+    mapBuf
+  );
+  return mapBuf;
+}
+function compileNativeToolBuildCacheFile(workingDir, scenarioArg, baseMapBuffer) {
+  const scenRel = normalizeHaloRelPath(scenarioArg).replace(/\.scenario$/i, "");
+  const mapName = (scenRel.split("\\").pop() || "custom_map").toLowerCase();
+  const absTagsDir = path3.join(workingDir, "tags");
+  const absMapsDir = path3.join(workingDir, "maps");
+  fs3.mkdirSync(absMapsDir, { recursive: true });
+  const scenParentDir = scenRel.includes("\\") ? path3.join(absTagsDir, scenRel.slice(0, scenRel.lastIndexOf("\\")).replace(/\\/g, path3.sep)) : absTagsDir;
+  const looseTagFilePaths = [];
+  const collectLooseTags = (dir) => {
+    if (!fs3.existsSync(dir)) return;
+    for (const entry of fs3.readdirSync(dir, { withFileTypes: true })) {
+      const full = path3.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        collectLooseTags(full);
+      } else if (entry.isFile() && looseTagFilePaths.length < 256) {
+        try {
+          const buf = fs3.readFileSync(full);
+          if (buf.length >= 64 && buf.toString("ascii", 60, 64) === "blam") {
+            looseTagFilePaths.push(full);
+          }
+        } catch {
+        }
+      }
+    }
+  };
+  collectLooseTags(scenParentDir);
+  const templateBuf = findTemplateMapBuffer(workingDir, baseMapBuffer);
+  const outMapPath = path3.join(absMapsDir, `${mapName}.map`);
+  const logs = [];
+  if (templateBuf) {
+    let workingMap = Buffer.from(templateBuf);
+    const injectableLoose = looseTagFilePaths.filter(
+      (f) => !/\.(scenario|scenario_structure_bsp)$/i.test(f)
+    );
+    if (injectableLoose.length > 0) {
+      try {
+        const imported = importLegacyTagsIntoMap(workingMap, injectableLoose, void 0, "swap");
+        workingMap = Buffer.from(imported.buffer);
+        logs.push(
+          `merged ${imported.addedCount + imported.swappedCount} loose 'blam' tags into cache file.`
+        );
+      } catch (err) {
+        logs.push(`note: loose tag merge skipped (${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
+    writeFixedAscii32(workingMap, 32, mapName);
+    let newCrc = workingMap.readUInt32LE(100);
+    try {
+      const hdr = parseCacheFileHeader(workingMap);
+      const idx = parseTagIndex(workingMap, hdr);
+      newCrc = computeCacheCrc32(workingMap, ceCrcRegions(workingMap, hdr, idx));
+      workingMap.writeUInt32LE(newCrc >>> 0, 100);
+    } catch {
+    }
+    fs3.writeFileSync(outMapPath, workingMap);
+    logs.push(
+      `packed cache file: maps\\${mapName}.map (${(workingMap.length / (1024 * 1024)).toFixed(2)} MB, CRC32=0x${newCrc.toString(16).padStart(8, "0")})`
+    );
+  } else {
+    const synthesizedMap = buildMinimalPlayableCacheFile(mapName, looseTagFilePaths);
+    const crc = synthesizedMap.readUInt32LE(100);
+    fs3.writeFileSync(outMapPath, synthesizedMap);
+    logs.push(
+      `built standalone cache file: maps\\${mapName}.map (${looseTagFilePaths.length} loose tags packed, ${synthesizedMap.length} bytes, CRC32=0x${crc.toString(16).padStart(8, "0")})`
+    );
+  }
+  return {
+    logs,
+    writtenTagPaths: [],
+    writtenMapPath: outMapPath
+  };
+}
+async function runNativeToolCommand(options) {
+  const { workingDir, command, args, baseMapBuffer } = options;
+  const cmdLine = `[Mantle Native Tool] tool ${command} ${args.join(" ")}`.trim();
+  try {
+    let logs = [];
+    let writtenTagPaths = [];
+    let writtenMapPath;
+    let wrlErrors = [];
+    let wrlPath;
+    switch (command) {
+      case "bitmaps": {
+        const res = compileNativeToolBitmaps(workingDir, args[0] || "");
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "sounds": {
+        const res = compileNativeToolSounds(
+          workingDir,
+          args[0] || "",
+          args[1] || "xbox",
+          args[2] || "1"
+        );
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "model": {
+        const res = compileNativeToolModel(workingDir, args[0] || "");
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "collision-geometry": {
+        const res = compileNativeToolCollisionGeometry(workingDir, args[0] || "");
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "physics": {
+        const res = compileNativeToolPhysics(workingDir, args[0] || "");
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "animations": {
+        const res = compileNativeToolAnimations(workingDir, args[0] || "");
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "unicode-strings": {
+        const res = compileNativeToolUnicodeStrings(workingDir, args[0] || "");
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "hud-messages": {
+        const res = compileNativeToolHudMessages(workingDir, args[0] || "", args[1]);
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "structure": {
+        const res = compileNativeToolStructure(workingDir, args[0] || "", args[1]);
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        wrlErrors = res.wrlErrors;
+        wrlPath = res.wrlPath;
+        break;
+      }
+      case "lightmaps": {
+        const res = compileNativeToolLightmaps(
+          workingDir,
+          args[0] || "",
+          args[1] || "0",
+          args[2] || "0",
+          args[3] || "0.1"
+        );
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        break;
+      }
+      case "build-cache-file": {
+        const res = compileNativeToolBuildCacheFile(workingDir, args[0] || "", baseMapBuffer);
+        logs = res.logs;
+        writtenTagPaths = res.writtenTagPaths;
+        writtenMapPath = res.writtenMapPath;
+        break;
+      }
+      default:
+        throw new Error(`Unsupported tool command: ${String(command)}`);
+    }
+    return {
+      ok: true,
+      exitCode: 0,
+      commandLine: cmdLine,
+      stdout: [
+        `=== OpenCE Mantle Built-In Native Tool Compiler ===`,
+        `Working Directory: ${workingDir}`,
+        `Command: tool ${command} ${args.join(" ")}`,
+        ...logs,
+        `Done (${writtenTagPaths.length} tag file(s) written${writtenMapPath ? `, cache map: ${writtenMapPath}` : ""}).`
+      ].join("\n"),
+      stderr: "",
+      wrlErrors,
+      wrlPath,
+      writtenTagPaths,
+      writtenMapPath,
+      executionEngine: "native"
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      exitCode: 1,
+      commandLine: cmdLine,
+      stdout: "",
+      stderr: `Native Tool Compiler Error (${command}): ${msg}`,
+      wrlErrors: [],
+      writtenTagPaths: [],
+      executionEngine: "native"
+    };
+  }
+}
+
+// ../core/src/render/bsp-wireframe-thumbnail.ts
+function extractBspTopDownWireframe(buffer, header, tagIndex, maxTriangles = 1800) {
+  try {
+    const bsp = extractBspRenderMesh(buffer, header, tagIndex, 0);
+    if (!bsp || !bsp.submeshes || bsp.submeshes.length === 0) {
+      return null;
+    }
+    const xs = [];
+    const ys = [];
+    const zs = [];
+    for (const sub of bsp.submeshes) {
+      const verts = sub.vertices;
+      for (let v = 0; v + 2 < verts.length; v += 8) {
+        xs.push(verts[v]);
+        ys.push(verts[v + 1]);
+        zs.push(verts[v + 2]);
+      }
+    }
+    if (xs.length < 3) {
+      return null;
+    }
+    xs.sort((a, b) => a - b);
+    ys.sort((a, b) => a - b);
+    zs.sort((a, b) => a - b);
+    const minX = xs[Math.floor(xs.length * 0.02)] ?? bsp.worldBounds[0];
+    const maxX = xs[Math.floor(xs.length * 0.98)] ?? bsp.worldBounds[3];
+    const minY = ys[Math.floor(ys.length * 0.02)] ?? bsp.worldBounds[1];
+    const maxY = ys[Math.floor(ys.length * 0.98)] ?? bsp.worldBounds[4];
+    const minZ = zs[Math.floor(zs.length * 0.02)] ?? bsp.worldBounds[2];
+    const maxZ = zs[Math.floor(zs.length * 0.98)] ?? bsp.worldBounds[5];
+    const spanX = Math.max(1e-4, maxX - minX);
+    const spanY = Math.max(1e-4, maxY - minY);
+    const spanZ = Math.max(1e-4, maxZ - minZ);
+    const totalTris = Math.max(1, bsp.totalTriangles || 1);
+    const step = Math.max(1, Math.floor(totalTris / Math.max(200, maxTriangles)));
+    const segments = [];
+    let triCounter = 0;
+    for (const sub of bsp.submeshes) {
+      const verts = sub.vertices;
+      const idx = sub.indices;
+      for (let i = 0; i + 2 < idx.length; i += 3) {
+        triCounter++;
+        if (triCounter % step !== 0) continue;
+        const i0 = idx[i] * 8;
+        const i1 = idx[i + 1] * 8;
+        const i2 = idx[i + 2] * 8;
+        const x0 = verts[i0], y0 = verts[i0 + 1], z0 = verts[i0 + 2];
+        const x1 = verts[i1], y1 = verts[i1 + 1], z1 = verts[i1 + 2];
+        const x2 = verts[i2], y2 = verts[i2 + 1], z2 = verts[i2 + 2];
+        const nx0 = (x0 - minX) / spanX;
+        const ny0 = (y0 - minY) / spanY;
+        const nx1 = (x1 - minX) / spanX;
+        const ny1 = (y1 - minY) / spanY;
+        const nx2 = (x2 - minX) / spanX;
+        const ny2 = (y2 - minY) / spanY;
+        if (nx0 < -0.06 || nx0 > 1.06 || ny0 < -0.06 || ny0 > 1.06 || nx1 < -0.06 || nx1 > 1.06 || ny1 < -0.06 || ny1 > 1.06 || nx2 < -0.06 || nx2 > 1.06 || ny2 < -0.06 || ny2 > 1.06) {
+          continue;
+        }
+        const zNorm = Math.max(0, Math.min(1, ((z0 + z1 + z2) / 3 - minZ) / spanZ));
+        segments.push([
+          Number(nx0.toFixed(3)),
+          Number(ny0.toFixed(3)),
+          Number(nx1.toFixed(3)),
+          Number(ny1.toFixed(3)),
+          Number(nx2.toFixed(3)),
+          Number(ny2.toFixed(3)),
+          Number(zNorm.toFixed(2))
+        ]);
+      }
+    }
+    return {
+      aspect: Number((spanX / spanY).toFixed(4)),
+      totalVertices: bsp.totalVertices,
+      totalTriangles: bsp.totalTriangles,
+      bspCount: bsp.bspCount ?? 1,
+      segments
+    };
+  } catch {
+    return null;
+  }
+}
+function inspectMapBufferForRecentCard(buffer, maxTriangles = 1800) {
+  try {
+    const decompressed = ensureXboxMapDecompressed(buffer);
+    const inspected = inspectCustomEditionMap(decompressed);
+    if (inspected.status !== "ok") {
+      return null;
+    }
+    const { header, tagIndex } = inspected;
+    const wireframe = extractBspTopDownWireframe(decompressed, header, tagIndex, maxTriangles);
+    return {
+      scenarioName: header.scenarioName,
+      engine: header.engine,
+      mapEdition: header.engine === 609 ? "ce" : header.engine === 13 ? "mcc" : header.engine === 5 ? "xbox" : "pc",
+      mapType: header.mapType,
+      tagCount: tagIndex.entries.length,
+      wireframe
+    };
+  } catch {
+    return null;
+  }
+}
+
 // electron/mcc-deploy.ts
-var fs = __toESM(require("fs"));
-var path = __toESM(require("path"));
+var fs4 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
 var os = __toESM(require("os"));
 var MAX_MANIFEST_BYTES = 1024 * 1024;
 function decodeMccModManifest(bytes) {
@@ -36786,18 +46494,18 @@ function discoverSteamMccInstallations() {
   }
   const libraryRoots = /* @__PURE__ */ new Set();
   for (const root of candidates) {
-    if (fs.existsSync(root)) {
+    if (fs4.existsSync(root)) {
       libraryRoots.add(root);
     }
-    const vdfPath = path.join(root, "steamapps", "libraryfolders.vdf");
-    if (fs.existsSync(vdfPath)) {
+    const vdfPath = path4.join(root, "steamapps", "libraryfolders.vdf");
+    if (fs4.existsSync(vdfPath)) {
       try {
-        const text = fs.readFileSync(vdfPath, "utf8");
+        const text = fs4.readFileSync(vdfPath, "utf8");
         const regex = /"path"\s+"([^"]+)"/gi;
         let match;
         while ((match = regex.exec(text)) !== null) {
           const libPath = match[1].replace(/\\\\/g, "\\");
-          if (fs.existsSync(libPath)) {
+          if (fs4.existsSync(libPath)) {
             libraryRoots.add(libPath);
           }
         }
@@ -36807,12 +46515,12 @@ function discoverSteamMccInstallations() {
   }
   const mccInstallPaths = [];
   for (const lib of libraryRoots) {
-    const mccDir = path.join(lib, "steamapps", "common", "Halo The Master Chief Collection");
-    if (fs.existsSync(mccDir) && fs.existsSync(path.join(mccDir, "halo1"))) {
+    const mccDir = path4.join(lib, "steamapps", "common", "Halo The Master Chief Collection");
+    if (fs4.existsSync(mccDir) && fs4.existsSync(path4.join(mccDir, "halo1"))) {
       mccInstallPaths.push(mccDir);
     }
   }
-  const defaultModManifestPath = path.join(
+  const defaultModManifestPath = path4.join(
     os.homedir(),
     "AppData",
     "LocalLow",
@@ -36820,11 +46528,11 @@ function discoverSteamMccInstallations() {
     "Config",
     "ModManifest.txt"
   );
-  const manifestExists = fs.existsSync(defaultModManifestPath);
+  const manifestExists = fs4.existsSync(defaultModManifestPath);
   const registeredRoots = [];
   if (manifestExists) {
     try {
-      const { text } = decodeMccModManifest(fs.readFileSync(defaultModManifestPath));
+      const { text } = decodeMccModManifest(fs4.readFileSync(defaultModManifestPath));
       for (const line of text.split(/\r?\n/)) {
         const trimmed = line.trim();
         if (trimmed && !trimmed.startsWith("#") && !trimmed.startsWith("//")) {
@@ -36843,38 +46551,163 @@ function discoverSteamMccInstallations() {
 }
 
 // electron/recent-maps.ts
-var fs2 = __toESM(require("fs"));
-var path2 = __toESM(require("path"));
+var fs5 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
 var import_electron = require("electron");
-var MAX_RECENT = 10;
+var MAX_RECENT = 24;
 function storePath() {
-  return path2.join(import_electron.app.getPath("userData"), "recent-maps.json");
+  return path5.join(import_electron.app.getPath("userData"), "recent-maps.json");
+}
+function cardsCachePath() {
+  return path5.join(import_electron.app.getPath("userData"), "recent-maps-cards.json");
 }
 function getRecentMaps() {
   try {
-    const raw = fs2.readFileSync(storePath(), "utf-8");
+    const raw = fs5.readFileSync(storePath(), "utf-8");
     const list = JSON.parse(raw);
-    return Array.isArray(list) ? list.filter((p) => typeof p === "string" && fs2.existsSync(p)) : [];
+    return Array.isArray(list) ? list.filter((p) => typeof p === "string" && fs5.existsSync(p)) : [];
   } catch {
     return [];
   }
 }
+function readCardsCache() {
+  try {
+    const raw = fs5.readFileSync(cardsCachePath(), "utf-8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function writeCardsCache(cache) {
+  try {
+    fs5.writeFileSync(cardsCachePath(), JSON.stringify(cache));
+  } catch {
+  }
+}
+function buildCardForMapPath(filePath, existing, touchTimestamp = false) {
+  try {
+    if (!fs5.existsSync(filePath)) return null;
+    const stat = fs5.statSync(filePath);
+    const fileName = path5.basename(filePath);
+    if (existing && existing.fileSizeBytes === stat.size && existing.wireframe !== void 0 && existing.tagCount > 0) {
+      return {
+        ...existing,
+        filePath,
+        fileName,
+        lastOpenedAt: touchTimestamp ? Date.now() : existing.lastOpenedAt || stat.mtimeMs
+      };
+    }
+    const buf = fs5.readFileSync(filePath);
+    const inspected = inspectMapBufferForRecentCard(buf, 1600);
+    if (!inspected) {
+      return {
+        filePath,
+        fileName,
+        scenarioName: path5.basename(filePath, path5.extname(filePath)),
+        engine: 609,
+        mapEdition: "ce",
+        mapType: 1,
+        tagCount: 0,
+        fileSizeBytes: stat.size,
+        lastOpenedAt: touchTimestamp ? Date.now() : existing?.lastOpenedAt ?? stat.mtimeMs,
+        pinned: existing?.pinned ?? false,
+        wireframe: null
+      };
+    }
+    return {
+      filePath,
+      fileName,
+      scenarioName: inspected.scenarioName || path5.basename(filePath, path5.extname(filePath)),
+      engine: inspected.engine,
+      mapEdition: inspected.mapEdition,
+      mapType: inspected.mapType,
+      tagCount: inspected.tagCount,
+      fileSizeBytes: stat.size,
+      lastOpenedAt: touchTimestamp ? Date.now() : existing?.lastOpenedAt ?? stat.mtimeMs,
+      pinned: existing?.pinned ?? false,
+      wireframe: inspected.wireframe
+    };
+  } catch {
+    return null;
+  }
+}
 function addRecentMap(filePath) {
-  const current = getRecentMaps().filter((p) => p !== filePath);
+  const normalizedTarget = path5.resolve(filePath);
+  const current = getRecentMaps().filter((p) => path5.resolve(p).toLowerCase() !== normalizedTarget.toLowerCase());
   const updated = [filePath, ...current].slice(0, MAX_RECENT);
   try {
-    fs2.writeFileSync(storePath(), JSON.stringify(updated, null, 2));
+    fs5.writeFileSync(storePath(), JSON.stringify(updated, null, 2));
   } catch {
+  }
+  const cache = readCardsCache();
+  const key = normalizedTarget.toLowerCase();
+  const built = buildCardForMapPath(filePath, cache[key], true);
+  if (built) {
+    cache[key] = built;
+    writeCardsCache(cache);
   }
   return updated;
 }
+function getRecentMapCards() {
+  const paths = getRecentMaps();
+  const cache = readCardsCache();
+  let dirty = false;
+  const results = [];
+  for (const p of paths) {
+    const key = path5.resolve(p).toLowerCase();
+    const card = buildCardForMapPath(p, cache[key], false);
+    if (card) {
+      if (!cache[key] || cache[key].fileSizeBytes !== card.fileSizeBytes) {
+        cache[key] = card;
+        dirty = true;
+      }
+      results.push(card);
+    }
+  }
+  if (dirty) {
+    writeCardsCache(cache);
+  }
+  results.sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) {
+      return a.pinned ? -1 : 1;
+    }
+    return (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0);
+  });
+  return results;
+}
+function togglePinRecentMap(filePath) {
+  const key = path5.resolve(filePath).toLowerCase();
+  const cache = readCardsCache();
+  const existing = cache[key] ?? buildCardForMapPath(filePath, void 0, false);
+  if (existing) {
+    cache[key] = { ...existing, pinned: !existing.pinned };
+    writeCardsCache(cache);
+  }
+  return getRecentMapCards();
+}
+function removeRecentMapEntry(filePath) {
+  const targetKey = path5.resolve(filePath).toLowerCase();
+  const filtered = getRecentMaps().filter((p) => path5.resolve(p).toLowerCase() !== targetKey);
+  try {
+    fs5.writeFileSync(storePath(), JSON.stringify(filtered, null, 2));
+  } catch {
+  }
+  const cache = readCardsCache();
+  if (cache[targetKey]) {
+    delete cache[targetKey];
+    writeCardsCache(cache);
+  }
+  return getRecentMapCards();
+}
 
 // electron/settings.ts
-var fs3 = __toESM(require("fs"));
-var path3 = __toESM(require("path"));
+var fs6 = __toESM(require("fs"));
+var path6 = __toESM(require("path"));
 var import_electron2 = require("electron");
+var VALID_THEMES = /* @__PURE__ */ new Set(["dark", "light", "forerunner", "classic-ce", "covenant", "unsc"]);
 function storePath2() {
-  return path3.join(import_electron2.app.getPath("userData"), "settings.json");
+  return path6.join(import_electron2.app.getPath("userData"), "settings.json");
 }
 var DEFAULT_SETTINGS = {
   lastExtractDir: null,
@@ -36884,19 +46717,20 @@ var DEFAULT_SETTINGS = {
   openCeExecutablePath: null,
   checkForUpdatesOnLaunch: true,
   autoDownloadUpdates: false,
-  skippedUpdateVersion: null
+  skippedUpdateVersion: null,
+  theme: "dark"
 };
 function migratePath(p) {
   if (typeof p !== "string" || !p) return null;
-  if (!fs3.existsSync(p) && p.includes("OpenCE-Modding-Tool")) {
+  if (!fs6.existsSync(p) && p.includes("OpenCE-Modding-Tool")) {
     const candidate = p.replace(/OpenCE-Modding-Tool/g, "OpenCE-Mantle");
-    if (fs3.existsSync(candidate)) return candidate;
+    if (fs6.existsSync(candidate)) return candidate;
   }
   return p;
 }
 function getSettings() {
   try {
-    const raw = fs3.readFileSync(storePath2(), "utf-8");
+    const raw = fs6.readFileSync(storePath2(), "utf-8");
     const parsed = JSON.parse(raw);
     let changed = false;
     const resourceMaps = {
@@ -36948,7 +46782,8 @@ function getSettings() {
       openCeExecutablePath: typeof parsed.openCeExecutablePath === "string" ? parsed.openCeExecutablePath : null,
       checkForUpdatesOnLaunch: typeof parsed.checkForUpdatesOnLaunch === "boolean" ? parsed.checkForUpdatesOnLaunch : true,
       autoDownloadUpdates: typeof parsed.autoDownloadUpdates === "boolean" ? parsed.autoDownloadUpdates : false,
-      skippedUpdateVersion: typeof parsed.skippedUpdateVersion === "string" ? parsed.skippedUpdateVersion : null
+      skippedUpdateVersion: typeof parsed.skippedUpdateVersion === "string" ? parsed.skippedUpdateVersion : null,
+      theme: typeof parsed.theme === "string" && VALID_THEMES.has(parsed.theme) ? parsed.theme : "dark"
     };
     if (changed) {
       writeSettings(settings);
@@ -36965,7 +46800,7 @@ function getSettings() {
 }
 function writeSettings(next) {
   try {
-    fs3.writeFileSync(storePath2(), JSON.stringify(next, null, 2));
+    fs6.writeFileSync(storePath2(), JSON.stringify(next, null, 2));
   } catch {
   }
 }
@@ -36998,15 +46833,15 @@ function detectOpenCeDirectory() {
     const home = import_electron2.app.getPath("home");
     const candidates = [
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE",
-      path3.join(home, "Desktop", "Halo CE Related", "OpenCE"),
+      path6.join(home, "Desktop", "Halo CE Related", "OpenCE"),
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE",
-      path3.join(home, "Desktop", "Halo CE Related", "Halo CE - OpenCE"),
+      path6.join(home, "Desktop", "Halo CE Related", "Halo CE - OpenCE"),
       "C:\\Halo CE - OpenCE",
       "C:\\OpenCE",
       "C:\\Games\\OpenCE"
     ];
     for (const c of candidates) {
-      if (fs3.existsSync(c) && fs3.existsSync(path3.join(c, "halo.exe"))) {
+      if (fs6.existsSync(c) && fs6.existsSync(path6.join(c, "halo.exe"))) {
         return c;
       }
     }
@@ -37016,11 +46851,11 @@ function detectOpenCeDirectory() {
 }
 function setOpenCeDirectory(dir) {
   const current = getSettings();
-  const exe = dir ? path3.join(dir, "halo.exe") : null;
+  const exe = dir ? path6.join(dir, "halo.exe") : null;
   writeSettings({
     ...current,
     openCeDirectory: dir,
-    openCeExecutablePath: exe && fs3.existsSync(exe) ? exe : null
+    openCeExecutablePath: exe && fs6.existsSync(exe) ? exe : null
   });
 }
 function setCheckForUpdatesOnLaunch(enabled) {
@@ -37044,11 +46879,20 @@ function setSkippedUpdateVersion(version) {
     skippedUpdateVersion: version ? String(version).trim() : null
   });
 }
+function setAppTheme(theme) {
+  const validTheme = VALID_THEMES.has(theme) ? theme : "dark";
+  const current = getSettings();
+  writeSettings({
+    ...current,
+    theme: validTheme
+  });
+  return validTheme;
+}
 
 // electron/update-checker.ts
 var https = __toESM(require("https"));
-var fs4 = __toESM(require("fs"));
-var path4 = __toESM(require("path"));
+var fs7 = __toESM(require("fs"));
+var path7 = __toESM(require("path"));
 var import_child_process = require("child_process");
 var import_electron3 = require("electron");
 var GITHUB_REPO_OWNER = "SutlabSol";
@@ -37099,7 +46943,7 @@ function compareSemver(currentRaw, candidateRaw) {
   return 0;
 }
 function fetchJson(url, currentVersion, timeoutMs = 6500) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve8, reject) => {
     const req = https.get(
       url,
       {
@@ -37113,7 +46957,7 @@ function fetchJson(url, currentVersion, timeoutMs = 6500) {
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          fetchJson(res.headers.location, currentVersion, timeoutMs).then(resolve5, reject);
+          fetchJson(res.headers.location, currentVersion, timeoutMs).then(resolve8, reject);
           return;
         }
         const chunks = [];
@@ -37122,9 +46966,9 @@ function fetchJson(url, currentVersion, timeoutMs = 6500) {
           const text = Buffer.concat(chunks).toString("utf8");
           try {
             const parsed = text ? JSON.parse(text) : null;
-            resolve5({ statusCode: res.statusCode ?? 0, data: parsed });
+            resolve8({ statusCode: res.statusCode ?? 0, data: parsed });
           } catch {
-            resolve5({ statusCode: res.statusCode ?? 0, data: null });
+            resolve8({ statusCode: res.statusCode ?? 0, data: null });
           }
         });
       }
@@ -37225,7 +47069,7 @@ async function checkForGitHubUpdates(currentVersion) {
   }
 }
 function streamHttpsToFile(url, destPartPath, expectedTotalBytes, onProgress) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve8, reject) => {
     let parsedUrl;
     try {
       parsedUrl = new URL(url);
@@ -37249,7 +47093,7 @@ function streamHttpsToFile(url, destPartPath, expectedTotalBytes, onProgress) {
       (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          streamHttpsToFile(res.headers.location, destPartPath, expectedTotalBytes, onProgress).then(resolve5, reject);
+          streamHttpsToFile(res.headers.location, destPartPath, expectedTotalBytes, onProgress).then(resolve8, reject);
           return;
         }
         if (res.statusCode !== 200) {
@@ -37259,7 +47103,7 @@ function streamHttpsToFile(url, destPartPath, expectedTotalBytes, onProgress) {
         }
         const contentLen = parseInt(String(res.headers["content-length"] || "0"), 10);
         const total = contentLen > 0 ? contentLen : expectedTotalBytes;
-        const fileStream = fs4.createWriteStream(destPartPath);
+        const fileStream = fs7.createWriteStream(destPartPath);
         let transferred = 0;
         const startTime = Date.now();
         let lastEmitTime = 0;
@@ -37276,13 +47120,13 @@ function streamHttpsToFile(url, destPartPath, expectedTotalBytes, onProgress) {
         res.pipe(fileStream);
         fileStream.on("finish", () => {
           fileStream.close(() => {
-            resolve5(transferred);
+            resolve8(transferred);
           });
         });
         fileStream.on("error", (err) => {
           res.destroy();
           try {
-            if (fs4.existsSync(destPartPath)) fs4.unlinkSync(destPartPath);
+            if (fs7.existsSync(destPartPath)) fs7.unlinkSync(destPartPath);
           } catch {
           }
           reject(err);
@@ -37294,7 +47138,7 @@ function streamHttpsToFile(url, destPartPath, expectedTotalBytes, onProgress) {
     });
     req.on("error", (err) => {
       try {
-        if (fs4.existsSync(destPartPath)) fs4.unlinkSync(destPartPath);
+        if (fs7.existsSync(destPartPath)) fs7.unlinkSync(destPartPath);
       } catch {
       }
       reject(err);
@@ -37332,9 +47176,9 @@ async function downloadUpdateAsset(currentVersion, options = {}, emitProgress) {
       installMode = lower.includes("setup") || lower.includes("installer") ? "installer" : "portable";
     }
     const safeFileName = targetName.replace(/[<>:"/\\|?*]/g, "_");
-    const stagingDir = path4.join(import_electron3.app.getPath("temp"), "opence-mantle-updates");
-    fs4.mkdirSync(stagingDir, { recursive: true });
-    const finalPath = path4.join(stagingDir, safeFileName);
+    const stagingDir = path7.join(import_electron3.app.getPath("temp"), "opence-mantle-updates");
+    fs7.mkdirSync(stagingDir, { recursive: true });
+    const finalPath = path7.join(stagingDir, safeFileName);
     const partPath = `${finalPath}.part`;
     emitProgress({
       stage: "downloading",
@@ -37364,29 +47208,29 @@ async function downloadUpdateAsset(currentVersion, options = {}, emitProgress) {
         });
       }
     );
-    const stat = fs4.statSync(partPath);
+    const stat = fs7.statSync(partPath);
     if (stat.size < 512 * 1024) {
-      fs4.unlinkSync(partPath);
+      fs7.unlinkSync(partPath);
       throw new Error(`Downloaded file is unexpectedly small (${stat.size} bytes).`);
     }
     const headerBuf = Buffer.alloc(2);
-    const fd = fs4.openSync(partPath, "r");
+    const fd = fs7.openSync(partPath, "r");
     try {
-      fs4.readSync(fd, headerBuf, 0, 2, 0);
+      fs7.readSync(fd, headerBuf, 0, 2, 0);
     } finally {
-      fs4.closeSync(fd);
+      fs7.closeSync(fd);
     }
     if (headerBuf[0] !== 77 || headerBuf[1] !== 90) {
-      fs4.unlinkSync(partPath);
+      fs7.unlinkSync(partPath);
       throw new Error("Downloaded file is not a valid Windows executable (missing MZ header).");
     }
-    if (fs4.existsSync(finalPath)) {
+    if (fs7.existsSync(finalPath)) {
       try {
-        fs4.unlinkSync(finalPath);
+        fs7.unlinkSync(finalPath);
       } catch {
       }
     }
-    fs4.renameSync(partPath, finalPath);
+    fs7.renameSync(partPath, finalPath);
     lastStagedUpdate = {
       version: targetVersion || currentVersion,
       assetName: safeFileName,
@@ -37431,14 +47275,14 @@ async function downloadUpdateAsset(currentVersion, options = {}, emitProgress) {
 function spawnUpdateApplyScript(downloadedFilePath, installMode) {
   const targetFile = downloadedFilePath || lastStagedUpdate?.downloadedFilePath;
   const mode = installMode || lastStagedUpdate?.installMode || (isRunningPortableBuild() ? "portable" : "installer");
-  if (!targetFile || !fs4.existsSync(targetFile)) {
+  if (!targetFile || !fs7.existsSync(targetFile)) {
     return { ok: false, message: "No downloaded update file found to apply." };
   }
   const pid = process.pid;
   const escapedStaged = targetFile.replace(/'/g, "''");
   if (mode === "installer") {
-    const installedExe = path4.join(
-      process.env.LOCALAPPDATA || path4.join(import_electron3.app.getPath("home"), "AppData", "Local"),
+    const installedExe = path7.join(
+      process.env.LOCALAPPDATA || path7.join(import_electron3.app.getPath("home"), "AppData", "Local"),
       "Programs",
       "opence-desktop",
       "OpenCE Mantle.exe"
@@ -37499,20 +47343,20 @@ Start-Process -FilePath '${portableTarget}'
 }
 
 // electron/tag-test-runner.ts
-var fs5 = __toESM(require("fs"));
-var path6 = __toESM(require("path"));
+var fs8 = __toESM(require("fs"));
+var path9 = __toESM(require("path"));
 var net = __toESM(require("net"));
 var import_child_process2 = require("child_process");
 
 // electron/worker-manager.ts
 var import_worker_threads = require("worker_threads");
-var path5 = __toESM(require("path"));
+var path8 = __toESM(require("path"));
 var import_crypto2 = require("crypto");
 var worker = null;
 var pending = /* @__PURE__ */ new Map();
 function ensureWorker(onLog) {
   if (worker) return worker;
-  const instance = new import_worker_threads.Worker(path5.join(__dirname, "map-worker.js"));
+  const instance = new import_worker_threads.Worker(path8.join(__dirname, "map-worker.js"));
   worker = instance;
   instance.on("message", (msg) => {
     if (msg.type === "ready") {
@@ -37552,8 +47396,8 @@ function sendWorkerRequest(request, onLog, onProgress = () => {
 }) {
   const requestId = (0, import_crypto2.randomUUID)();
   const instance = ensureWorker(onLog);
-  const promise = new Promise((resolve5, reject) => {
-    pending.set(requestId, { resolve: resolve5, reject, onProgress });
+  const promise = new Promise((resolve8, reject) => {
+    pending.set(requestId, { resolve: resolve8, reject, onProgress });
     instance.postMessage({ ...request, requestId });
   });
   return { requestId, promise };
@@ -37566,6 +47410,7 @@ function cancelWorkerRequest(requestId, onLog) {
 var TagTestRunner = class {
   constructor() {
     this.child = null;
+    this.memBridgeProc = null;
     this.telnetSocket = null;
     this.telnetConnected = false;
     this.statusState = "stopped";
@@ -37574,6 +47419,13 @@ var TagTestRunner = class {
     this.debugTxtWatcher = null;
     this.debugTxtLastSize = 0;
     this.haloAlwaysOnTop = false;
+    this.liveHudMode = false;
+    this.liveHudSetup = null;
+    this.arsenalSpawnedForCurrentLoad = false;
+    this.unitSpawned = false;
+    this.heldWeaponTagId = null;
+    this.drivenVehicleTagId = null;
+    this.haloWindowRect = null;
     this.statusListeners = [];
     this.logListeners = [];
   }
@@ -37637,7 +47489,11 @@ if ($wshell.AppActivate('Halo')) {
       pid: this.child?.pid,
       telnetConnected: this.telnetConnected,
       error: this.lastError,
-      mapName: this.currentMapName
+      mapName: this.currentMapName,
+      liveHudMode: this.liveHudMode,
+      heldWeaponTagId: this.heldWeaponTagId,
+      drivenVehicleTagId: this.drivenVehicleTagId,
+      haloWindowRect: this.haloWindowRect
     };
   }
   emitStatus() {
@@ -37691,33 +47547,39 @@ if ($wshell.AppActivate('Halo')) {
     if (!dir) {
       return { directory: null, executable: null, exists: false };
     }
-    const exe = path6.join(dir, "halo.exe");
-    const exists = fs5.existsSync(exe);
+    let exe = path9.join(dir, "halo.exe");
+    if (!fs8.existsSync(exe)) {
+      const faberExe = path9.join(dir, "OpenCE - Faber.exe");
+      if (fs8.existsSync(faberExe)) {
+        exe = faberExe;
+      }
+    }
+    const exists = fs8.existsSync(exe);
     return { directory: dir, executable: exe, exists };
   }
   restoreInitForDir(dir) {
-    const scriptPath = path6.join(dir, "_opence_tag_test.txt");
+    const scriptPath = path9.join(dir, "_opence_tag_test.txt");
     try {
-      if (fs5.existsSync(scriptPath)) {
-        fs5.unlinkSync(scriptPath);
+      if (fs8.existsSync(scriptPath)) {
+        fs8.unlinkSync(scriptPath);
       }
     } catch {
     }
-    const initPath = path6.join(dir, "init.txt");
-    const backupPath = path6.join(dir, "init.txt.opence_backup");
+    const initPath = path9.join(dir, "init.txt");
+    const backupPath = path9.join(dir, "init.txt.opence_backup");
     try {
-      if (fs5.existsSync(backupPath)) {
-        const backupContent = fs5.readFileSync(backupPath, "utf-8");
+      if (fs8.existsSync(backupPath)) {
+        const backupContent = fs8.readFileSync(backupPath, "utf-8");
         if (!backupContent.includes("_opence_tag_test")) {
-          fs5.copyFileSync(backupPath, initPath);
-        } else if (fs5.existsSync(initPath)) {
-          fs5.unlinkSync(initPath);
+          fs8.copyFileSync(backupPath, initPath);
+        } else if (fs8.existsSync(initPath)) {
+          fs8.unlinkSync(initPath);
         }
-        fs5.unlinkSync(backupPath);
-      } else if (fs5.existsSync(initPath)) {
-        const content = fs5.readFileSync(initPath, "utf-8");
+        fs8.unlinkSync(backupPath);
+      } else if (fs8.existsSync(initPath)) {
+        const content = fs8.readFileSync(initPath, "utf-8");
         if (content.includes("_opence_tag_test") || content.includes("game_console_log all") && content.includes("display_framerate true")) {
-          fs5.unlinkSync(initPath);
+          fs8.unlinkSync(initPath);
         }
       }
     } catch {
@@ -37734,15 +47596,25 @@ if ($wshell.AppActivate('Halo')) {
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE",
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\CoreCE"
     ]) {
-      if (fs5.existsSync(candidate)) dirs.add(candidate);
+      if (fs8.existsSync(candidate)) dirs.add(candidate);
     }
     for (const dir of dirs) {
       this.restoreInitForDir(dir);
     }
   }
   async launch(options = {}) {
-    if (this.statusState === "running" || this.statusState === "launching") {
+    if (this.statusState === "running") {
+      if (options.liveHudMode && !this.liveHudMode) {
+        this.liveHudMode = true;
+        return this.hotReload();
+      }
+      if (options.liveHudMode && this.liveHudMode) {
+        return { ok: true };
+      }
       return { ok: false, error: "OpenCE is already running." };
+    }
+    if (this.statusState === "launching") {
+      return { ok: false, error: "OpenCE is currently launching." };
     }
     const cfg = this.getOpenCeConfig();
     if (!cfg.exists || !cfg.directory || !cfg.executable) {
@@ -37754,36 +47626,43 @@ if ($wshell.AppActivate('Halo')) {
     const openCeDir = cfg.directory;
     const haloExe = cfg.executable;
     this.activeOpenCeDir = openCeDir;
+    this.liveHudMode = Boolean(options.liveHudMode);
+    this.arsenalSpawnedForCurrentLoad = false;
+    this.unitSpawned = false;
+    this.heldWeaponTagId = null;
+    this.drivenVehicleTagId = null;
     this.statusState = "launching";
     this.lastError = void 0;
     this.emitStatus();
     try {
       const mapSlot = this.stagedMapIndex === 0 ? "_opence_tag_test_a" : "_opence_tag_test_b";
-      const stagedMapPath = path6.join(openCeDir, "custom_maps", `${mapSlot}.map`);
+      const stagedMapPath = path9.join(openCeDir, "custom_maps", `${mapSlot}.map`);
       this.currentMapName = mapSlot;
-      this.emitLog("stdout", `[TagTest] Staging in-memory map to ${mapSlot}.map...`);
+      this.emitLog("stdout", `[TagTest] Staging in-memory map to ${mapSlot}.map${this.liveHudMode ? " (Live HUD Arsenal enabled)" : ""}...`);
       const settings = getSettings();
       const stageResult = await sendWorkerRequest(
         {
           type: "stageTagTestMap",
           targetPath: stagedMapPath,
           bitmapsPath: settings.resourceMaps.bitmaps ?? void 0,
-          soundsPath: settings.resourceMaps.sounds ?? void 0
+          soundsPath: settings.resourceMaps.sounds ?? void 0,
+          liveHudMode: this.liveHudMode
         },
         (_level, msg) => this.emitLog("stdout", `[Worker] ${msg}`)
       ).promise;
       if (!stageResult || !stageResult.ok) {
         throw new Error("Failed to stage map for OpenCE.");
       }
+      this.liveHudSetup = stageResult.liveHudSetup ?? null;
       this.emitLog("stdout", `[TagTest] Map staged successfully (CRC32 0x${(stageResult.crc32 >>> 0).toString(16).padStart(8, "0")}).`);
       this.restoreInitBackupIfPresent();
-      const initPath = path6.join(openCeDir, "init.txt");
-      const backupPath = path6.join(openCeDir, "init.txt.opence_backup");
-      if (fs5.existsSync(initPath)) {
+      const initPath = path9.join(openCeDir, "init.txt");
+      const backupPath = path9.join(openCeDir, "init.txt.opence_backup");
+      if (fs8.existsSync(initPath)) {
         try {
-          const existing = fs5.readFileSync(initPath, "utf-8");
+          const existing = fs8.readFileSync(initPath, "utf-8");
           if (!existing.includes("_opence_tag_test")) {
-            fs5.copyFileSync(initPath, backupPath);
+            fs8.copyFileSync(initPath, backupPath);
           }
         } catch {
         }
@@ -37792,10 +47671,10 @@ if ($wshell.AppActivate('Halo')) {
 display_framerate true\r
 map_name custom_maps\\${mapSlot}\r
 `;
-      fs5.writeFileSync(initPath, initContent, "utf-8");
-      const debugTxtPath = path6.join(openCeDir, "debug.txt");
-      if (fs5.existsSync(debugTxtPath)) {
-        this.debugTxtLastSize = fs5.statSync(debugTxtPath).size;
+      fs8.writeFileSync(initPath, initContent, "utf-8");
+      const debugTxtPath = path9.join(openCeDir, "debug.txt");
+      if (fs8.existsSync(debugTxtPath)) {
+        this.debugTxtLastSize = fs8.statSync(debugTxtPath).size;
       } else {
         this.debugTxtLastSize = 0;
       }
@@ -37815,6 +47694,9 @@ map_name custom_maps\\${mapSlot}\r
         stdio: ["ignore", "pipe", "pipe"]
       });
       this.child = child;
+      if (child.pid) {
+        this.startMemoryBridge(child.pid);
+      }
       child.stdout?.on("data", (chunk) => {
         const text = chunk.toString();
         const lines = text.split(/\r?\n/);
@@ -37875,6 +47757,9 @@ map_name custom_maps\\${mapSlot}\r
         }
         this.emitStatus();
         this.emitLog("telnet", "[Telnet Bridge] Connected to OpenCE telnet console on port 2323.");
+        if (this.liveHudMode) {
+          this.maybeAutoSpawnLiveHudArsenal();
+        }
       });
       let buffer = "";
       sock.on("data", (data) => {
@@ -37906,10 +47791,10 @@ map_name custom_maps\\${mapSlot}\r
     this.stopDebugWatcher();
     this.debugTxtWatcher = setInterval(() => {
       try {
-        if (!fs5.existsSync(debugTxtPath)) return;
-        const stat = fs5.statSync(debugTxtPath);
+        if (!fs8.existsSync(debugTxtPath)) return;
+        const stat = fs8.statSync(debugTxtPath);
         if (stat.size > this.debugTxtLastSize) {
-          const stream = fs5.createReadStream(debugTxtPath, {
+          const stream = fs8.createReadStream(debugTxtPath, {
             start: this.debugTxtLastSize,
             end: stat.size,
             encoding: "utf-8"
@@ -37945,7 +47830,7 @@ map_name custom_maps\\${mapSlot}\r
     try {
       this.stagedMapIndex = this.stagedMapIndex === 0 ? 1 : 0;
       const nextSlot = this.stagedMapIndex === 0 ? "_opence_tag_test_a" : "_opence_tag_test_b";
-      const targetPath = path6.join(this.activeOpenCeDir, "custom_maps", `${nextSlot}.map`);
+      const targetPath = path9.join(this.activeOpenCeDir, "custom_maps", `${nextSlot}.map`);
       this.emitLog("stdout", `[TagTest] Hot-reloading map to ${nextSlot}.map...`);
       const settings = getSettings();
       const stageResult = await sendWorkerRequest(
@@ -37953,22 +47838,545 @@ map_name custom_maps\\${mapSlot}\r
           type: "stageTagTestMap",
           targetPath,
           bitmapsPath: settings.resourceMaps.bitmaps ?? void 0,
-          soundsPath: settings.resourceMaps.sounds ?? void 0
+          soundsPath: settings.resourceMaps.sounds ?? void 0,
+          liveHudMode: this.liveHudMode
         },
         (_level, msg) => this.emitLog("stdout", `[Worker] ${msg}`)
       ).promise;
       if (!stageResult || !stageResult.ok) {
         throw new Error("Failed to stage updated map.");
       }
+      this.liveHudSetup = stageResult.liveHudSetup ?? null;
+      this.arsenalSpawnedForCurrentLoad = false;
+      this.unitSpawned = false;
       this.currentMapName = nextSlot;
       const hsCmd = `map_name custom_maps\\${nextSlot}`;
       this.emitLog("stdout", `[TagTest] Switching map in OpenCE via Telnet: ${hsCmd}`);
-      return this.sendCommand(hsCmd);
+      const cmdRes = this.sendCommand(hsCmd);
+      if (this.liveHudMode) {
+        setTimeout(() => {
+          this.maybeAutoSpawnLiveHudArsenal();
+        }, 1200);
+      }
+      return cmdRes;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.emitLog("stdout", `[TagTest Hot-Reload Error] ${msg}`);
       return { ok: false, error: msg };
     }
+  }
+  /**
+   * Starts a persistent C# P/Invoke bridge process (`HaloMemBridge`) attached to `halo.exe`:
+   * - Auto-detects `GAME_STATE_BASE` (`0x81A00000` in unedited OpenCE or `0x87E00000` in Faber).
+   * - Polls Player 0's held weapon `tagId`, driven vehicle `tagId`, and client screen bounds at ~8 Hz.
+   * - Executes `<1ms` `WriteProcessMemory` patches (`0x40440000`-based) for 60 FPS live HUD & weapon stat edits.
+   * - Blinks captured HUD elements in-game (`+4000` X offset for 1.2s).
+   * - Writes full `TagReference` lists for all holdable weapons & vehicles into high tag-cache RAM (`0x41B00000` / `0x41B01000`)
+   *   and equips/spawns weapons and vehicles on demand.
+   */
+  startMemoryBridge(pid) {
+    this.stopMemoryBridge();
+    const psScript = `
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Text;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+
+public class HaloMemBridge {
+  [DllImport("kernel32.dll")]
+  public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+  [DllImport("kernel32.dll")]
+  public static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, int dwSize, out int lpNumberOfBytesRead);
+  [DllImport("kernel32.dll")]
+  public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, int nSize, out int lpNumberOfBytesWritten);
+  [DllImport("kernel32.dll")]
+  public static extern bool CloseHandle(IntPtr hObject);
+  [DllImport("user32.dll")]
+  public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll")]
+  public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT { public int X, Y; }
+
+  private static IntPtr hProc = IntPtr.Zero;
+  private static int targetPid = 0;
+  private static uint gameStateBase = 0;
+  private static int blinkSeq = 0;
+  private static readonly object ioLock = new object();
+
+  private static int ReadInt32(uint addr) {
+    byte[] buf = new byte[4];
+    int r = 0;
+    if (!ReadProcessMemory(hProc, (IntPtr)unchecked((int)addr), buf, 4, out r) || r != 4) return -1;
+    return BitConverter.ToInt32(buf, 0);
+  }
+
+  private static uint ReadUInt32(uint addr) {
+    byte[] buf = new byte[4];
+    int r = 0;
+    if (!ReadProcessMemory(hProc, (IntPtr)unchecked((int)addr), buf, 4, out r) || r != 4) return 0;
+    return BitConverter.ToUInt32(buf, 0);
+  }
+
+  private static short ReadInt16(uint addr) {
+    byte[] buf = new byte[2];
+    int r = 0;
+    if (!ReadProcessMemory(hProc, (IntPtr)unchecked((int)addr), buf, 2, out r) || r != 2) return -1;
+    return BitConverter.ToInt16(buf, 0);
+  }
+
+  private static void WriteBytes(uint addr, byte[] data) {
+    int w = 0;
+    WriteProcessMemory(hProc, (IntPtr)unchecked((int)addr), data, data.Length, out w);
+  }
+
+  private static void WriteInt32(uint addr, int val) {
+    WriteBytes(addr, BitConverter.GetBytes(val));
+  }
+
+  private static void WriteUInt32(uint addr, uint val) {
+    WriteBytes(addr, BitConverter.GetBytes(val));
+  }
+
+  private static void WriteInt16(uint addr, short val) {
+    WriteBytes(addr, BitConverter.GetBytes(val));
+  }
+
+  private static bool DetectGameStateBase() {
+    uint[] candidates = new uint[] { 0x81A00000u, 0x87E00000u };
+    byte[] sig = new byte[6];
+    int r = 0;
+    foreach (uint cand in candidates) {
+      if (ReadProcessMemory(hProc, (IntPtr)unchecked((int)(cand + 0x116670u)), sig, 6, out r) && r == 6) {
+        if (sig[0] == (byte)'o' && sig[1] == (byte)'b' && sig[2] == (byte)'j' &&
+            sig[3] == (byte)'e' && sig[4] == (byte)'c' && sig[5] == (byte)'t') {
+          gameStateBase = cand;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private static uint GetObjectDatumPtr(int datumIndex) {
+    if (datumIndex == -1 || datumIndex == 0 || gameStateBase == 0) return 0;
+    uint dataPtr = ReadUInt32(gameStateBase + 0x116670u + 0x34u);
+    if (dataPtr == 0) return 0;
+    uint idx = (uint)(datumIndex & 0xFFFF);
+    return ReadUInt32(dataPtr + idx * 12u + 8u);
+  }
+
+  private static void EmitLine(string line) {
+    lock (ioLock) {
+      Console.WriteLine(line);
+      Console.Out.Flush();
+    }
+  }
+
+  public static void Run(int pid) {
+    targetPid = pid;
+    // PROCESS_VM_OPERATION (0x08) | PROCESS_VM_READ (0x10) | PROCESS_VM_WRITE (0x20) | PROCESS_QUERY_INFORMATION (0x0400)
+    hProc = OpenProcess(0x0438u, false, pid);
+    if (hProc == IntPtr.Zero) return;
+
+    Task.Run(() => {
+      string lastJson = "";
+      while (true) {
+        try {
+          Process p = Process.GetProcessById(targetPid);
+          if (p == null || p.HasExited) break;
+
+          if (gameStateBase == 0) {
+            DetectGameStateBase();
+          }
+
+          bool unitSpawned = false;
+          int weapTagId = -1;
+          int vehTagId = -1;
+
+          if (gameStateBase != 0) {
+            int unitIdx = ReadInt32(gameStateBase + 0x2F18u + 0x04u);
+            int fpWeapIdx = ReadInt32(gameStateBase + 0x2F18u + 0x08u);
+            if (unitIdx != -1 && unitIdx != 0) {
+              uint unitPtr = GetObjectDatumPtr(unitIdx);
+              if (unitPtr != 0) {
+                unitSpawned = true;
+                short unitType = ReadInt16(unitPtr + 0x64u);
+                int parentIdx = ReadInt32(unitPtr + 0x11Cu);
+                if (unitType == 1) {
+                  vehTagId = ReadInt32(unitPtr + 0x00u);
+                } else if (parentIdx != -1 && parentIdx != 0) {
+                  uint parentPtr = GetObjectDatumPtr(parentIdx);
+                  if (parentPtr != 0) {
+                    vehTagId = ReadInt32(parentPtr + 0x00u);
+                  }
+                }
+                if (fpWeapIdx == -1 || fpWeapIdx == 0) {
+                  short curSlot = ReadInt16(unitPtr + 0x2E6u);
+                  if (curSlot >= 0 && curSlot < 4) {
+                    fpWeapIdx = ReadInt32(unitPtr + 0x2ECu + (uint)(curSlot * 4));
+                  }
+                }
+              }
+            }
+            if (fpWeapIdx != -1 && fpWeapIdx != 0) {
+              uint weapPtr = GetObjectDatumPtr(fpWeapIdx);
+              if (weapPtr != 0) {
+                weapTagId = ReadInt32(weapPtr + 0x00u);
+              }
+            }
+          }
+
+          int left = 0, top = 0, width = 0, height = 0;
+          IntPtr hWnd = p.MainWindowHandle;
+          if (hWnd != IntPtr.Zero) {
+            RECT rc;
+            if (GetClientRect(hWnd, out rc)) {
+              POINT pt = new POINT { X = rc.Left, Y = rc.Top };
+              ClientToScreen(hWnd, ref pt);
+              left = pt.X;
+              top = pt.Y;
+              width = Math.Max(0, rc.Right - rc.Left);
+              height = Math.Max(0, rc.Bottom - rc.Top);
+            }
+          }
+
+          string json = string.Format(
+            "{{\\"unitSpawned\\":{0},\\"weaponTagId\\":{1},\\"vehicleTagId\\":{2},\\"rect\\":{{\\"left\\":{3},\\"top\\":{4},\\"width\\":{5},\\"height\\":{6}}}}}",
+            unitSpawned ? "true" : "false",
+            weapTagId,
+            vehTagId,
+            left,
+            top,
+            width,
+            height
+          );
+          if (json != lastJson) {
+            lastJson = json;
+            EmitLine("STATE " + json);
+          }
+        } catch {
+          break;
+        }
+        Thread.Sleep(110);
+      }
+    });
+
+    string line;
+    while ((line = Console.ReadLine()) != null) {
+      try {
+        string trimmed = line.Trim();
+        if (trimmed.Length == 0) continue;
+        string[] parts = trimmed.Split(' ');
+        string cmd = parts[0];
+
+        if (cmd == "WRITE" && parts.Length >= 3) {
+          uint addr = Convert.ToUInt32(parts[1], 16);
+          byte[] data = Convert.FromBase64String(parts[2]);
+          WriteBytes(addr, data);
+        } else if (cmd == "BLINK" && parts.Length >= 3) {
+          uint addr = Convert.ToUInt32(parts[1], 16);
+          short origX = Convert.ToInt16(parts[2]);
+          short blinkX = (short)Math.Min(short.MaxValue, origX + 4000);
+          int mySeq = Interlocked.Increment(ref blinkSeq);
+          WriteInt16(addr, blinkX);
+          Task.Run(() => {
+            Thread.Sleep(1200);
+            if (blinkSeq == mySeq) {
+              short cur = ReadInt16(addr);
+              if (cur == blinkX) {
+                WriteInt16(addr, origX);
+              }
+            }
+          });
+        } else if (cmd == "SETUP_ARSENAL" && parts.Length >= 4) {
+          uint matgAddr = Convert.ToUInt32(parts[1], 16);
+          string weapCsv = parts[2];
+          string vehCsv = parts[3];
+          if (matgAddr >= 0x40440000u) {
+            if (weapCsv != "NONE" && weapCsv.Length > 0) {
+              string[] wTokens = weapCsv.Split(',');
+              uint weapScratch = 0x41B00000u;
+              int wCount = 0;
+              foreach (string wt in wTokens) {
+                int wId;
+                if (int.TryParse(wt, out wId)) {
+                  uint entryAddr = weapScratch + (uint)(wCount * 16);
+                  WriteUInt32(entryAddr + 0u, 0x77656170u); // 'weap'
+                  WriteUInt32(entryAddr + 4u, 0u);
+                  WriteUInt32(entryAddr + 8u, 0u);
+                  WriteInt32(entryAddr + 12u, wId);
+                  wCount++;
+                }
+              }
+              if (wCount > 0) {
+                WriteInt32(matgAddr + 0x14Cu, wCount);
+                WriteUInt32(matgAddr + 0x150u, weapScratch);
+              }
+            }
+            if (vehCsv != "NONE" && vehCsv.Length > 0) {
+              string[] vTokens = vehCsv.Split(',');
+              uint vehScratch = 0x41B01000u;
+              int vCount = 0;
+              foreach (string vt in vTokens) {
+                int vId;
+                if (int.TryParse(vt, out vId)) {
+                  uint entryAddr = vehScratch + (uint)(vCount * 16);
+                  WriteUInt32(entryAddr + 0u, 0x76656869u); // 'vehi'
+                  WriteUInt32(entryAddr + 4u, 0u);
+                  WriteUInt32(entryAddr + 8u, 0u);
+                  WriteInt32(entryAddr + 12u, vId);
+                  vCount++;
+                }
+              }
+              if (vCount > 0) {
+                int mpCount = ReadInt32(matgAddr + 0x164u);
+                uint mpAddr = ReadUInt32(matgAddr + 0x168u);
+                if (mpCount <= 0 || mpAddr < 0x40440000u) {
+                  mpAddr = 0x41B00F00u;
+                  WriteBytes(mpAddr, new byte[160]);
+                  WriteInt32(matgAddr + 0x164u, 1);
+                  WriteUInt32(matgAddr + 0x168u, mpAddr);
+                }
+                WriteInt32(mpAddr + 0x20u, vCount);
+                WriteUInt32(mpAddr + 0x24u, vehScratch);
+              }
+            }
+            EmitLine("ARSENAL_READY");
+          }
+        } else if (cmd == "PREPARE_EQUIP_WEAPON" && parts.Length >= 3) {
+          uint matgAddr = Convert.ToUInt32(parts[1], 16);
+          int targetWeapTagId = Convert.ToInt32(parts[2]);
+          if (gameStateBase == 0) DetectGameStateBase();
+          int unitIdx = gameStateBase != 0 ? ReadInt32(gameStateBase + 0x2F18u + 0x04u) : -1;
+          uint unitPtr = GetObjectDatumPtr(unitIdx);
+          if (unitPtr != 0) {
+            int foundSlot = -1;
+            int foundObjIdx = -1;
+            int freeSlot = -1;
+            for (int s = 0; s < 4; s++) {
+              int wObjIdx = ReadInt32(unitPtr + 0x2ECu + (uint)(s * 4));
+              if (wObjIdx == -1 || wObjIdx == 0) {
+                if (freeSlot == -1) freeSlot = s;
+              } else {
+                uint wPtr = GetObjectDatumPtr(wObjIdx);
+                if (wPtr != 0 && ReadInt32(wPtr + 0x00u) == targetWeapTagId) {
+                  foundSlot = s;
+                  foundObjIdx = wObjIdx;
+                  break;
+                }
+              }
+            }
+            if (foundSlot != -1) {
+              WriteInt16(unitPtr + 0x2E8u, (short)foundSlot);
+              WriteInt16(unitPtr + 0x2E6u, (short)foundSlot);
+              if (foundObjIdx != -1) {
+                WriteInt32(gameStateBase + 0x2F18u + 0x08u, foundObjIdx);
+              }
+              EmitLine("EQUIP_ALREADY_HELD " + foundSlot);
+            } else if (matgAddr >= 0x40440000u) {
+              if (freeSlot == -1) {
+                short curSlot = ReadInt16(unitPtr + 0x2E6u);
+                freeSlot = (curSlot == 3) ? 2 : 3;
+                WriteInt32(unitPtr + 0x2ECu + (uint)(freeSlot * 4), -1);
+              }
+              uint singleWeapScratch = 0x41B00800u;
+              WriteUInt32(singleWeapScratch + 0u, 0x77656170u); // 'weap'
+              WriteUInt32(singleWeapScratch + 4u, 0u);
+              WriteUInt32(singleWeapScratch + 8u, 0u);
+              WriteInt32(singleWeapScratch + 12u, targetWeapTagId);
+              WriteInt32(matgAddr + 0x14Cu, 1);
+              WriteUInt32(matgAddr + 0x150u, singleWeapScratch);
+              EmitLine("EQUIP_SPAWN_NEEDED " + freeSlot);
+            }
+          }
+        } else if (cmd == "SELECT_WEAPON_SLOT" && parts.Length >= 2) {
+          short slot = Convert.ToInt16(parts[1]);
+          if (gameStateBase != 0) {
+            int unitIdx = ReadInt32(gameStateBase + 0x2F18u + 0x04u);
+            uint unitPtr = GetObjectDatumPtr(unitIdx);
+            if (unitPtr != 0 && slot >= 0 && slot < 4) {
+              int wObjIdx = ReadInt32(unitPtr + 0x2ECu + (uint)(slot * 4));
+              WriteInt16(unitPtr + 0x2E8u, slot);
+              WriteInt16(unitPtr + 0x2E6u, slot);
+              if (wObjIdx != -1 && wObjIdx != 0) {
+                WriteInt32(gameStateBase + 0x2F18u + 0x08u, wObjIdx);
+              }
+            }
+          }
+        } else if (cmd == "PREPARE_SPAWN_VEHICLE" && parts.Length >= 3) {
+          uint matgAddr = Convert.ToUInt32(parts[1], 16);
+          int targetVehTagId = Convert.ToInt32(parts[2]);
+          if (matgAddr >= 0x40440000u) {
+            uint singleVehScratch = 0x41B01800u;
+            WriteUInt32(singleVehScratch + 0u, 0x76656869u); // 'vehi'
+            WriteUInt32(singleVehScratch + 4u, 0u);
+            WriteUInt32(singleVehScratch + 8u, 0u);
+            WriteInt32(singleVehScratch + 12u, targetVehTagId);
+            int mpCount = ReadInt32(matgAddr + 0x164u);
+            uint mpAddr = ReadUInt32(matgAddr + 0x168u);
+            if (mpCount <= 0 || mpAddr < 0x40440000u) {
+              mpAddr = 0x41B00F00u;
+              WriteBytes(mpAddr, new byte[160]);
+              WriteInt32(matgAddr + 0x164u, 1);
+              WriteUInt32(matgAddr + 0x168u, mpAddr);
+            }
+            WriteInt32(mpAddr + 0x20u, 1);
+            WriteUInt32(mpAddr + 0x24u, singleVehScratch);
+            EmitLine("VEHICLE_SPAWN_READY");
+          }
+        }
+      } catch {
+        // Ignore malformed command
+      }
+    }
+    CloseHandle(hProc);
+  }
+}
+"@
+[HaloMemBridge]::Run(${pid})
+`;
+    const encoded = Buffer.from(psScript, "utf16le").toString("base64");
+    const proc = (0, import_child_process2.spawn)("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true
+    });
+    this.memBridgeProc = proc;
+    let stdoutBuf = "";
+    proc.stdout?.on("data", (chunk) => {
+      stdoutBuf += chunk.toString("utf8");
+      const lines = stdoutBuf.split(/\r?\n/);
+      stdoutBuf = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith("STATE ")) {
+          try {
+            const parsed = JSON.parse(trimmed.slice(6));
+            const wasSpawned = this.unitSpawned;
+            this.unitSpawned = Boolean(parsed.unitSpawned);
+            const nextWeap = typeof parsed.weaponTagId === "number" && parsed.weaponTagId >= 0 ? parsed.weaponTagId : null;
+            const nextVeh = typeof parsed.vehicleTagId === "number" && parsed.vehicleTagId >= 0 ? parsed.vehicleTagId : null;
+            const nextRect = parsed.rect && parsed.rect.width > 0 && parsed.rect.height > 0 ? {
+              left: Number(parsed.rect.left) || 0,
+              top: Number(parsed.rect.top) || 0,
+              width: Number(parsed.rect.width) || 0,
+              height: Number(parsed.rect.height) || 0
+            } : null;
+            this.heldWeaponTagId = nextWeap;
+            this.drivenVehicleTagId = nextVeh;
+            this.haloWindowRect = nextRect;
+            this.emitStatus();
+            if (!wasSpawned && this.unitSpawned && this.liveHudMode) {
+              this.maybeAutoSpawnLiveHudArsenal();
+            }
+          } catch {
+          }
+        } else if (trimmed === "ARSENAL_READY") {
+          this.sendCommand("cheat_deathless_player 1");
+          this.sendCommand("cheat_infinite_ammo 1");
+          if ((this.liveHudSetup?.holdableWeaponTagIds.length ?? 0) > 0) {
+            this.sendCommand("cheat_all_weapons");
+          }
+          if ((this.liveHudSetup?.vehicleTagIds.length ?? 0) > 0) {
+            this.sendCommand("cheat_all_vehicles");
+          }
+          this.emitLog(
+            "stdout",
+            `[LiveHUD] Spawned ${this.liveHudSetup?.holdableWeaponTagIds.length ?? 0} Spartan-holdable weapons and ${this.liveHudSetup?.vehicleTagIds.length ?? 0} vehicles near player.`
+          );
+        } else if (trimmed.startsWith("EQUIP_SPAWN_NEEDED ")) {
+          const slot = parseInt(trimmed.split(" ")[1] ?? "3", 10);
+          this.sendCommand("cheat_all_weapons");
+          setTimeout(() => {
+            this.sendBridgeLine(`SELECT_WEAPON_SLOT ${slot}`);
+          }, 140);
+        } else if (trimmed === "VEHICLE_SPAWN_READY") {
+          this.sendCommand("cheat_all_vehicles");
+        }
+      }
+    });
+    proc.on("exit", () => {
+      if (this.memBridgeProc === proc) {
+        this.memBridgeProc = null;
+      }
+    });
+  }
+  sendBridgeLine(line) {
+    if (!this.memBridgeProc || !this.memBridgeProc.stdin || this.memBridgeProc.stdin.destroyed) {
+      return false;
+    }
+    try {
+      this.memBridgeProc.stdin.write(line + "\n");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  stopMemoryBridge() {
+    if (this.memBridgeProc) {
+      try {
+        this.memBridgeProc.kill();
+      } catch {
+      }
+      this.memBridgeProc = null;
+    }
+  }
+  maybeAutoSpawnLiveHudArsenal() {
+    if (!this.liveHudMode || this.arsenalSpawnedForCurrentLoad || !this.telnetConnected || !this.unitSpawned || !this.liveHudSetup || this.liveHudSetup.matgVirtualAddress < 1078198272) {
+      return;
+    }
+    this.arsenalSpawnedForCurrentLoad = true;
+    void this.spawnAllArsenalInGame();
+  }
+  writeMemoryPatches(patches) {
+    if (!patches || patches.length === 0) return;
+    for (const p of patches) {
+      if (p.address >= 1078198272 && p.dataBase64) {
+        this.sendBridgeLine(`WRITE ${(p.address >>> 0).toString(16)} ${p.dataBase64}`);
+      }
+    }
+  }
+  blinkHudElement(offsetVirtualAddress, originalX) {
+    if (!offsetVirtualAddress || offsetVirtualAddress < 1078198272) {
+      return { ok: false };
+    }
+    const sent = this.sendBridgeLine(`BLINK ${(offsetVirtualAddress >>> 0).toString(16)} ${Math.round(originalX)}`);
+    return { ok: sent };
+  }
+  equipWeaponInGame(weaponTagId) {
+    if (this.statusState !== "running") {
+      return { ok: false, message: "OpenCE is not currently running." };
+    }
+    const matgHex = ((this.liveHudSetup?.matgVirtualAddress ?? 0) >>> 0).toString(16);
+    const sent = this.sendBridgeLine(`PREPARE_EQUIP_WEAPON ${matgHex} ${weaponTagId}`);
+    return { ok: sent };
+  }
+  spawnVehicleInGame(vehicleTagId) {
+    if (this.statusState !== "running") {
+      return { ok: false, message: "OpenCE is not currently running." };
+    }
+    const matgHex = ((this.liveHudSetup?.matgVirtualAddress ?? 0) >>> 0).toString(16);
+    const sent = this.sendBridgeLine(`PREPARE_SPAWN_VEHICLE ${matgHex} ${vehicleTagId}`);
+    return { ok: sent };
+  }
+  spawnAllArsenalInGame() {
+    if (this.statusState !== "running" || !this.liveHudSetup || this.liveHudSetup.matgVirtualAddress < 1078198272) {
+      return { ok: false, message: "OpenCE Live HUD session is not ready." };
+    }
+    const matgHex = (this.liveHudSetup.matgVirtualAddress >>> 0).toString(16);
+    const weapCsv = this.liveHudSetup.holdableWeaponTagIds.length > 0 ? this.liveHudSetup.holdableWeaponTagIds.join(",") : "NONE";
+    const vehCsv = this.liveHudSetup.vehicleTagIds.length > 0 ? this.liveHudSetup.vehicleTagIds.join(",") : "NONE";
+    const sent = this.sendBridgeLine(`SETUP_ARSENAL ${matgHex} ${weapCsv} ${vehCsv}`);
+    return { ok: sent };
   }
   sendCommand(cmd) {
     if (!this.telnetConnected || !this.telnetSocket) {
@@ -37992,7 +48400,7 @@ map_name custom_maps\\${mapSlot}\r
       this.cleanup();
       return Promise.resolve({ ok: true });
     }
-    return new Promise((resolve5) => {
+    return new Promise((resolve8) => {
       if (this.telnetConnected && this.telnetSocket) {
         try {
           this.telnetSocket.write("quit\r\n");
@@ -38007,7 +48415,7 @@ map_name custom_maps\\${mapSlot}\r
           }
         }
         this.cleanup();
-        resolve5({ ok: true });
+        resolve8({ ok: true });
       }, 600);
     });
   }
@@ -38023,6 +48431,13 @@ map_name custom_maps\\${mapSlot}\r
     }
     this.child = null;
     this.stopDebugWatcher();
+    this.stopMemoryBridge();
+    this.liveHudMode = false;
+    this.arsenalSpawnedForCurrentLoad = false;
+    this.unitSpawned = false;
+    this.heldWeaponTagId = null;
+    this.drivenVehicleTagId = null;
+    this.haloWindowRect = null;
     this.restoreInitBackupIfPresent();
     this.activeOpenCeDir = null;
     this.emitStatus();
@@ -38037,8 +48452,8 @@ process.on("exit", () => {
 });
 
 // electron/save-map-as.ts
-var path8 = __toESM(require("path"));
-var fs6 = __toESM(require("fs"));
+var path11 = __toESM(require("path"));
+var fs9 = __toESM(require("fs"));
 
 // electron/map-file-rules.ts
 function isBackupFilePath(filePath) {
@@ -38051,7 +48466,7 @@ var COMPRESSED_MAP_MESSAGE = "This map is compressed, so it cannot be edited, in
 var BACKUP_FILE_SAVE_MESSAGE = "This map was opened from a backup (.bak) file. Use File > Save As to write it under a new name; Save would overwrite the backup.";
 
 // electron/save-map.ts
-var path7 = __toESM(require("path"));
+var path10 = __toESM(require("path"));
 var SAVE_MAP_CHANNEL = "map:save";
 var hex = (n) => `0x${(n >>> 0).toString(16).padStart(8, "0")}`;
 function logSaved(log, result) {
@@ -38078,7 +48493,7 @@ async function saveMapFlow(deps) {
   if (!open.backedUp && !open.overwriteConfirmed) {
     if (!await deps.confirmOverwriteWithoutBackup(open.filePath)) return cancelled;
     deps.markOverwriteConfirmed();
-    deps.log("warn", `Overwriting ${path7.basename(open.filePath)} without a backup (confirmed).`);
+    deps.log("warn", `Overwriting ${path10.basename(open.filePath)} without a backup (confirmed).`);
   }
   if (!await deps.confirmScenarioName(open.filePath)) return cancelled;
   deps.log("info", `Saving ${open.filePath}`);
@@ -38108,7 +48523,7 @@ async function confirmUnsavedChanges(deps) {
 // electron/save-map-as.ts
 var SAVE_MAP_AS_CHANNEL = "map:saveAs";
 function isSamePath(a, b) {
-  return path8.resolve(a).toLowerCase() === path8.resolve(b).toLowerCase();
+  return path11.resolve(a).toLowerCase() === path11.resolve(b).toLowerCase();
 }
 async function saveMapAsFlow(deps) {
   const openMap = deps.getOpenMap();
@@ -38120,14 +48535,14 @@ async function saveMapAsFlow(deps) {
   }
   const filePath = await deps.showSaveDialog(openMap.filePath.replace(/(\.map)?$/i, "_copy.map"));
   if (!filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-  const resolvedTarget = path8.resolve(filePath);
+  const resolvedTarget = path11.resolve(filePath);
   if (isSamePath(resolvedTarget, openMap.filePath)) {
     const message = "Save As cannot overwrite the open map. Use File > Save, or choose a different file name.";
     deps.log("error", `Save As refused: ${resolvedTarget} is the open map.`);
     await deps.showError("Save As cannot overwrite the open map.", "Use File > Save to overwrite it, or choose a different file name.");
     return { ok: false, code: "REFUSED_SOURCE_PATH", message };
   }
-  const exists = deps.fileExists ?? fs6.existsSync;
+  const exists = deps.fileExists ?? fs9.existsSync;
   if (exists(resolvedTarget) && !await deps.confirmOverwrite(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   if (!await deps.confirmScenarioName(resolvedTarget)) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   deps.log("info", `Saving map as ${resolvedTarget}`);
@@ -38153,8 +48568,8 @@ function registerSaveMapAsIpc(ipc, deps, onResult = () => {
 }
 
 // electron/backup-on-open.ts
-var path9 = __toESM(require("path"));
-var fs7 = __toESM(require("fs"));
+var path12 = __toESM(require("path"));
+var fs10 = __toESM(require("fs"));
 var import_crypto3 = require("crypto");
 function isBackedUp(outcome) {
   return outcome === "created" || outcome === "replaced" || outcome === "kept-existing" || outcome === "up-to-date";
@@ -38167,14 +48582,14 @@ function describeBackupError(err, backupName) {
   return `${backupName} could not be created: ${err instanceof Error ? err.message : String(err)}`;
 }
 async function backupOnOpenFlow(mapPath, deps) {
-  const f = deps.fs ?? fs7;
+  const f = deps.fs ?? fs10;
   if (isBackupFilePath(mapPath)) {
-    deps.log("info", `Opened a backup file (${path9.basename(mapPath)}): no backup prompt, and File > Save is disabled for it - use Save As.`);
+    deps.log("info", `Opened a backup file (${path12.basename(mapPath)}): no backup prompt, and File > Save is disabled for it - use Save As.`);
     return "not-applicable";
   }
   const backupPath = backupPathFor(mapPath);
-  const mapName = path9.basename(mapPath);
-  const backupName = path9.basename(backupPath);
+  const mapName = path12.basename(mapPath);
+  const backupName = path12.basename(backupPath);
   try {
     const exists = f.existsSync(backupPath);
     if (exists && f.statSync(backupPath).size === f.statSync(mapPath).size && f.readFileSync(backupPath).equals(f.readFileSync(mapPath))) {
@@ -38225,12 +48640,12 @@ ${mapName} is still open and unchanged. File > Save will ask before overwriting 
 }
 
 // electron/convert-map.ts
-var path10 = __toESM(require("path"));
-var fs8 = __toESM(require("fs"));
+var path13 = __toESM(require("path"));
+var fs11 = __toESM(require("fs"));
 function defaultConvertOutputPath(sourcePath) {
-  const dir = path10.dirname(sourcePath);
-  const stem = path10.basename(sourcePath).replace(/\.map$/i, "");
-  return path10.join(dir, `${stem}_ce.map`);
+  const dir = path13.dirname(sourcePath);
+  const stem = path13.basename(sourcePath).replace(/\.map$/i, "");
+  return path13.join(dir, `${stem}_ce.map`);
 }
 var REPAIR_IDS = TAG_DATA_REPAIR_IDS;
 function sanitizeRepairChoice(value) {
@@ -38246,7 +48661,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
   if (!await deps.confirmUnsavedChanges()) return cancelled2();
   const filePath = await deps.showSaveDialog(defaultConvertOutputPath(sourcePath));
   if (!filePath) return cancelled2();
-  const target = path10.resolve(filePath);
+  const target = path13.resolve(filePath);
   const refuse = async (code, message) => {
     deps.log("error", `Convert refused: ${message}`);
     await deps.showError("The map was not converted.", message);
@@ -38256,7 +48671,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
   const openMap = deps.getOpenMapPath();
   if (openMap && isSamePath(target, openMap)) return refuse("REFUSED_OPEN_MAP", "The converted map cannot overwrite the map that is open in the app. Choose a different file name.");
   if (isBackupFilePath(target)) return refuse("REFUSED_BACKUP_FILE", "The converted map cannot be written as a .bak file. Choose a .map file name.");
-  const exists = deps.fileExists ?? fs8.existsSync;
+  const exists = deps.fileExists ?? fs11.existsSync;
   if (exists(target) && !await deps.confirmOverwrite(target)) return cancelled2();
   if (!await deps.confirmScenarioName(target)) return cancelled2();
   deps.log("info", `Converting ${sourcePath} to a Custom Edition map: ${target}`);
@@ -38264,7 +48679,7 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
     const result = await deps.runWorkerConvert(sourcePath, target, acknowledgeScripts, repairs, resourcePaths);
     if (result.ok) {
       const hex2 = (n) => `0x${(n >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
-      deps.log("info", `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex2(result.previousCrc32)} -> ${hex2(result.crc32)}. ${path10.basename(sourcePath)} was not changed.`);
+      deps.log("info", `Converted to ${result.outputPath} - map name "${result.scenarioName}", CRC32 ${hex2(result.previousCrc32)} -> ${hex2(result.crc32)}. ${path13.basename(sourcePath)} was not changed.`);
       for (const w of result.warnings) deps.log("warn", w);
       deps.log("info", result.staleChecksumWarning);
     } else {
@@ -38280,8 +48695,8 @@ async function convertMapFlow(deps, acknowledgeScripts, repairs = {}, resourcePa
 }
 
 // electron/batch-extract-fs.ts
-var fs9 = __toESM(require("fs"));
-var path11 = __toESM(require("path"));
+var fs12 = __toESM(require("fs"));
+var path14 = __toESM(require("path"));
 var WINDOWS_RESERVED_NAMES = /* @__PURE__ */ new Set([
   "CON",
   "PRN",
@@ -38307,7 +48722,7 @@ var WINDOWS_RESERVED_NAMES = /* @__PURE__ */ new Set([
   "LPT9"
 ]);
 function sanitizeMapName(mapFileNameOrPath) {
-  const base = path11.basename(mapFileNameOrPath);
+  const base = path14.basename(mapFileNameOrPath);
   const withoutExt = base.replace(/\.bak$/i, "").replace(/\.map$/i, "");
   let sanitized = withoutExt.replace(/[<>:"/\\|?*\x00-\x1F]/g, "_").replace(/[. ]+$/, "").trim();
   if (WINDOWS_RESERVED_NAMES.has(sanitized.toUpperCase())) {
@@ -38316,16 +48731,16 @@ function sanitizeMapName(mapFileNameOrPath) {
   return sanitized || "exported_map";
 }
 function countExistingOcetagsFiles(targetDir) {
-  if (!fs9.existsSync(targetDir)) return 0;
+  if (!fs12.existsSync(targetDir)) return 0;
   let count = 0;
   const queue = [targetDir];
   while (queue.length > 0) {
     const current = queue.pop();
     try {
-      const entries = fs9.readdirSync(current, { withFileTypes: true });
+      const entries = fs12.readdirSync(current, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.name.startsWith(".")) continue;
-        const full = path11.join(current, entry.name);
+        const full = path14.join(current, entry.name);
         if (entry.isDirectory()) {
           queue.push(full);
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".ocetags")) {
@@ -38339,14 +48754,14 @@ function countExistingOcetagsFiles(targetDir) {
 }
 function getDriveFreeSpace(dirPath) {
   try {
-    const stat = fs9.statfsSync(dirPath);
+    const stat = fs12.statfsSync(dirPath);
     return stat.bavail * stat.bsize;
   } catch {
     return null;
   }
 }
 function commitStagedFiles(stagingDir, targetDir) {
-  if (!fs9.existsSync(stagingDir)) return 0;
+  if (!fs12.existsSync(stagingDir)) return 0;
   let count = 0;
   const queue = [stagingDir];
   const filesToMove = [];
@@ -38354,12 +48769,12 @@ function commitStagedFiles(stagingDir, targetDir) {
     const current = queue.pop();
     let entries = [];
     try {
-      entries = fs9.readdirSync(current, { withFileTypes: true });
+      entries = fs12.readdirSync(current, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const entry of entries) {
-      const full = path11.join(current, entry.name);
+      const full = path14.join(current, entry.name);
       if (entry.isDirectory()) {
         queue.push(full);
       } else if (entry.isFile()) {
@@ -38368,28 +48783,28 @@ function commitStagedFiles(stagingDir, targetDir) {
     }
   }
   for (const stagedFile of filesToMove) {
-    const rel = path11.relative(stagingDir, stagedFile);
-    const dest = path11.join(targetDir, rel);
-    fs9.mkdirSync(path11.dirname(dest), { recursive: true });
-    if (fs9.existsSync(dest)) {
+    const rel = path14.relative(stagingDir, stagedFile);
+    const dest = path14.join(targetDir, rel);
+    fs12.mkdirSync(path14.dirname(dest), { recursive: true });
+    if (fs12.existsSync(dest)) {
       try {
-        fs9.unlinkSync(dest);
+        fs12.unlinkSync(dest);
       } catch {
       }
     }
-    fs9.renameSync(stagedFile, dest);
+    fs12.renameSync(stagedFile, dest);
     count++;
   }
   try {
-    fs9.rmSync(stagingDir, { recursive: true, force: true });
+    fs12.rmSync(stagingDir, { recursive: true, force: true });
   } catch {
   }
   return count;
 }
 function discardStagedFiles(stagingDir) {
-  if (fs9.existsSync(stagingDir)) {
+  if (fs12.existsSync(stagingDir)) {
     try {
-      fs9.rmSync(stagingDir, { recursive: true, force: true });
+      fs12.rmSync(stagingDir, { recursive: true, force: true });
     } catch {
     }
   }
@@ -38432,16 +48847,34 @@ function generateBatchReportText(manifest) {
   return lines.join("\n");
 }
 function writeManifestAndReport(targetDir, manifest, reportText) {
-  fs9.mkdirSync(targetDir, { recursive: true });
-  const manifestPath = path11.join(targetDir, "manifest.json");
-  const reportPath = path11.join(targetDir, "batch-extract-report.txt");
-  fs9.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
-  fs9.writeFileSync(reportPath, reportText, "utf-8");
+  fs12.mkdirSync(targetDir, { recursive: true });
+  const manifestPath = path14.join(targetDir, "manifest.json");
+  const reportPath = path14.join(targetDir, "batch-extract-report.txt");
+  fs12.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  fs12.writeFileSync(reportPath, reportText, "utf-8");
   return { manifestPath, reportPath };
 }
 
 // electron/main.ts
 var mainWindow = null;
+var openMapSessions = /* @__PURE__ */ new Map();
+var activeMapSessionId = null;
+var detachedWindows = /* @__PURE__ */ new Map();
+function normalizeSessionId(filePath) {
+  const resolved = path15.resolve(filePath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+function broadcastOpenMapSessions() {
+  const payload = {
+    activeSessionId: activeMapSessionId,
+    sessions: Array.from(openMapSessions.values())
+  };
+  for (const win of import_electron4.BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send("map:sessionsChanged", payload);
+    }
+  }
+}
 var currentMapPath = null;
 var currentMapCompressed = false;
 var currentMapScenarioName = null;
@@ -38459,10 +48892,10 @@ function sendLog(level, message) {
   mainWindow?.webContents.send("app:log", { level, message, timestamp: Date.now() });
 }
 function getAppIconPath() {
-  const icoCandidate = path12.join(__dirname, "../build/icon.ico");
-  const pngCandidate = path12.join(__dirname, "../build/icon.png");
-  if (process.platform === "win32" && fs10.existsSync(icoCandidate)) return icoCandidate;
-  if (fs10.existsSync(pngCandidate)) return pngCandidate;
+  const icoCandidate = path15.join(__dirname, "../build/icon.ico");
+  const pngCandidate = path15.join(__dirname, "../build/icon.png");
+  if (process.platform === "win32" && fs13.existsSync(icoCandidate)) return icoCandidate;
+  if (fs13.existsSync(pngCandidate)) return pngCandidate;
   return void 0;
 }
 function createWindow() {
@@ -38471,36 +48904,49 @@ function createWindow() {
     height: 820,
     minWidth: 960,
     minHeight: 600,
-    backgroundColor: "#15171c",
+    frame: false,
+    autoHideMenuBar: true,
+    backgroundColor: "#0d1117",
     icon: getAppIconPath(),
     webPreferences: {
-      preload: path12.join(__dirname, "preload.js"),
+      preload: path15.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
     }
   });
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.on("maximize", () => {
+    mainWindow?.webContents.send("window:maximizedChanged", true);
+  });
+  mainWindow.on("unmaximize", () => {
+    mainWindow?.webContents.send("window:maximizedChanged", false);
+  });
   if (isDev) {
     mainWindow.loadURL("http://localhost:5173");
   } else {
-    mainWindow.loadFile(path12.join(__dirname, "../dist/index.html"));
+    mainWindow.loadFile(path15.join(__dirname, "../dist/index.html"));
   }
   buildMenu();
   updateTitle();
   let closeConfirmed = false;
   mainWindow.on("close", (event) => {
-    if (closeConfirmed || !currentMapModified) return;
+    const anyModified = currentMapModified || Array.from(openMapSessions.values()).some((s) => s.modified);
+    if (closeConfirmed || !anyModified) return;
     event.preventDefault();
     void confirmUnsavedChanges(unsavedChangesDeps).then((ok) => {
       if (!ok) return;
       closeConfirmed = true;
+      for (const detWin of detachedWindows.values()) {
+        if (!detWin.isDestroyed()) detWin.close();
+      }
       mainWindow?.close();
     });
   });
 }
 function updateTitle() {
   if (!mainWindow) return;
-  const name = currentMapPath ? `${path12.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
+  const name = currentMapPath ? `${path15.basename(currentMapPath)}${currentMapModified ? " *" : ""} - ` : "";
   mainWindow.setTitle(`${name}OpenCE Mantle`);
 }
 function setOpenMapState(map) {
@@ -38508,13 +48954,29 @@ function setOpenMapState(map) {
   currentMapPath = map.filePath;
   currentMapScenarioName = map.header.scenarioName;
   currentMapModified = !!map.modified;
+  const sid = activeMapSessionId ?? normalizeSessionId(map.filePath);
+  activeMapSessionId = sid;
+  openMapSessions.set(sid, {
+    sessionId: sid,
+    filePath: map.filePath,
+    fileName: path15.basename(map.filePath),
+    scenarioName: map.header.scenarioName,
+    modified: !!map.modified,
+    detachedWindowId: detachedWindows.get(sid)?.id ?? null,
+    map
+  });
   buildMenu();
   updateTitle();
   mainWindow?.webContents.send("map:updated", map);
+  const detWin = detachedWindows.get(sid);
+  if (detWin && !detWin.isDestroyed()) {
+    detWin.webContents.send("map:updated", map);
+  }
+  broadcastOpenMapSessions();
 }
 var unsavedChangesDeps = {
   isModified: () => currentMapModified,
-  fileName: () => currentMapPath ? path12.basename(currentMapPath) : "the open map",
+  fileName: () => currentMapPath ? path15.basename(currentMapPath) : "the open map",
   ask: async (fileName) => {
     const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
       type: "warning",
@@ -38531,7 +48993,14 @@ var unsavedChangesDeps = {
   log: sendLog
 };
 async function openMapGuarded(filePath) {
-  if (!await confirmUnsavedChanges(unsavedChangesDeps)) return null;
+  const sid = normalizeSessionId(filePath);
+  const existing = openMapSessions.get(sid);
+  if (existing && existing.modified) {
+    if (activeMapSessionId !== sid) {
+      await switchActiveMapSessionFlow(sid);
+    }
+    if (!await confirmUnsavedChanges(unsavedChangesDeps)) return null;
+  }
   return loadMapAtPath(filePath, { askBackup: true });
 }
 async function askBackup(filePath) {
@@ -38571,8 +49040,9 @@ async function showErrorBox(message, detail) {
 }
 async function loadMapAtPath(filePath, options) {
   sendLog("info", `Opening ${filePath}`);
+  const sid = normalizeSessionId(filePath);
   try {
-    const { promise } = sendWorkerRequest({ type: "inspect", filePath }, sendLog, (stage, percent) => {
+    const { promise } = sendWorkerRequest({ type: "inspect", filePath, sessionId: sid }, sendLog, (stage, percent) => {
       mainWindow?.webContents.send("map:progress", { taskId: "load", stage, percent });
     });
     const result = await promise;
@@ -38585,9 +49055,20 @@ async function loadMapAtPath(filePath, options) {
       currentMapPath = filePath;
       currentMapCompressed = false;
       currentMapScenarioName = result.header.scenarioName;
+      activeMapSessionId = sid;
+      openMapSessions.set(sid, {
+        sessionId: sid,
+        filePath,
+        fileName: path15.basename(filePath),
+        scenarioName: result.header.scenarioName,
+        modified: false,
+        detachedWindowId: detachedWindows.get(sid)?.id ?? null,
+        map: result
+      });
       addRecentMap(filePath);
       buildMenu();
       updateTitle();
+      broadcastOpenMapSessions();
       sendLog("info", `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
       const resolvedRes = resolveResourceMapsForSource(filePath);
       if (resolvedRes.bitmapsPath) {
@@ -38621,9 +49102,92 @@ async function loadMapAtPath(filePath, options) {
     return { status: "error", message };
   }
 }
+async function switchActiveMapSessionFlow(sessionId) {
+  const target = openMapSessions.get(sessionId);
+  if (!target) {
+    return { ok: false, message: `Map session "${sessionId}" is not open.` };
+  }
+  try {
+    const { promise } = sendWorkerRequest({ type: "activateMapSession", sessionId }, sendLog);
+    const res = await promise;
+    if (!res.ok) {
+      return { ok: false, message: res.message };
+    }
+    activeMapSessionId = sessionId;
+    currentOpenMapSummary = res.map;
+    currentMapPath = res.map.filePath;
+    currentMapCompressed = false;
+    currentMapScenarioName = res.map.header.scenarioName;
+    currentMapModified = !!res.map.modified;
+    const updatedSession = {
+      sessionId,
+      filePath: res.map.filePath,
+      fileName: path15.basename(res.map.filePath),
+      scenarioName: res.map.header.scenarioName,
+      modified: !!res.map.modified,
+      detachedWindowId: detachedWindows.get(sessionId)?.id ?? null,
+      map: res.map
+    };
+    openMapSessions.set(sessionId, updatedSession);
+    buildMenu();
+    updateTitle();
+    broadcastOpenMapSessions();
+    return { ok: true, session: updatedSession };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
+async function closeMapSessionFlow(sessionId) {
+  const existing = openMapSessions.get(sessionId);
+  if (existing && existing.modified) {
+    if (activeMapSessionId !== sessionId) {
+      await switchActiveMapSessionFlow(sessionId);
+    }
+    if (!await confirmUnsavedChanges(unsavedChangesDeps)) {
+      return {
+        ok: false,
+        activeSessionId: activeMapSessionId,
+        sessions: Array.from(openMapSessions.values())
+      };
+    }
+  }
+  const detWin = detachedWindows.get(sessionId);
+  if (detWin && !detWin.isDestroyed()) {
+    detachedWindows.delete(sessionId);
+    detWin.close();
+  }
+  openMapSessions.delete(sessionId);
+  try {
+    const { promise } = sendWorkerRequest({ type: "closeMapSession", sessionId }, sendLog);
+    const res = await promise;
+    activeMapSessionId = res.activeSessionId;
+    if (res.map) {
+      currentOpenMapSummary = res.map;
+      currentMapPath = res.map.filePath;
+      currentMapCompressed = false;
+      currentMapScenarioName = res.map.header.scenarioName;
+      currentMapModified = !!res.map.modified;
+    } else {
+      currentOpenMapSummary = null;
+      currentMapPath = null;
+      currentMapCompressed = false;
+      currentMapScenarioName = null;
+      currentMapModified = false;
+    }
+  } catch {
+    activeMapSessionId = null;
+  }
+  buildMenu();
+  updateTitle();
+  broadcastOpenMapSessions();
+  return {
+    ok: true,
+    activeSessionId: activeMapSessionId,
+    sessions: Array.from(openMapSessions.values())
+  };
+}
 async function openMapDialogFlow() {
   if (!mainWindow) return null;
-  if (!await confirmUnsavedChanges(unsavedChangesDeps)) return null;
   const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Open Halo CE Map",
     filters: [
@@ -38633,7 +49197,7 @@ async function openMapDialogFlow() {
     properties: ["openFile"]
   });
   if (canceled || filePaths.length === 0) return null;
-  return loadMapAtPath(filePaths[0], { askBackup: true });
+  return openMapGuarded(filePaths[0]);
 }
 async function openMapFlow() {
   const result = await openMapDialogFlow();
@@ -38711,49 +49275,50 @@ async function extractTagsFlow(request) {
   if (!currentMapPath || currentMapCompressed) {
     return { ok: false, code: "NO_MAP_LOADED", message: "Open and decompress a map before extracting tags." };
   }
+  const format = request.format ?? "blam";
   const settings = getSettings();
-  const defaultDir = settings.lastExtractDir && fs10.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron4.app.getPath("documents");
+  const defaultDir = settings.lastExtractDir && fs13.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron4.app.getPath("documents");
   const safeName = String(request.suggestedFileName || "extracted_tags").replace(/[<>:"/\\|?*]/g, "_") || "extracted_tags";
-  const defaultPath = path12.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
+  const defaultPath = path15.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
   let resolvedTarget;
-  if (request.originalIndices.length > 1) {
+  if (format === "blam" || request.originalIndices.length > 1) {
     const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
-      title: "Choose folder to save extracted tags to...",
+      title: format === "blam" ? "Choose folder to save standard Blam tags (tags\\<path>.<group>) to..." : "Choose folder to save extracted tags to...",
       defaultPath: defaultDir,
       properties: ["openDirectory", "createDirectory"]
     });
     if (canceled || filePaths.length === 0) return { ok: false, code: "CANCELLED", message: "Extraction was cancelled." };
-    resolvedTarget = path12.resolve(filePaths[0]);
+    resolvedTarget = path15.resolve(filePaths[0]);
   } else {
     const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
-      title: "Extract tags to...",
+      title: "Extract tags to (.ocetags)...",
       defaultPath,
       filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }]
     });
     if (canceled || !filePath) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
-    resolvedTarget = path12.resolve(filePath);
+    resolvedTarget = path15.resolve(filePath);
   }
-  const resolvedSourceMap = path12.resolve(currentMapPath);
-  const resolvedAppDir = path12.resolve(import_electron4.app.getAppPath());
+  const resolvedSourceMap = path15.resolve(currentMapPath);
+  const resolvedAppDir = path15.resolve(import_electron4.app.getAppPath());
   if (resolvedTarget === resolvedSourceMap) {
     return { ok: false, code: "REFUSED_SOURCE_PATH", message: "You cannot overwrite the source map file. Choose a different location." };
   }
-  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path12.sep)) {
+  if (resolvedTarget === resolvedAppDir || resolvedTarget.startsWith(resolvedAppDir + path15.sep)) {
     return { ok: false, code: "REFUSED_APP_PATH", message: "You cannot save inside the application install directory. Choose a different location." };
   }
-  if (fs10.existsSync(resolvedTarget)) {
+  if (format === "ocetags" && request.originalIndices.length === 1 && fs13.existsSync(resolvedTarget)) {
     const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
       type: "warning",
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path12.basename(resolvedTarget)}" already exists.`,
+      message: `"${path15.basename(resolvedTarget)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     if (response !== 0) return { ok: false, code: "CANCELLED", message: "Save was cancelled." };
   }
-  setLastExtractDir(path12.dirname(resolvedTarget));
-  sendLog("info", `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
+  setLastExtractDir(format === "blam" || request.originalIndices.length > 1 ? resolvedTarget : path15.dirname(resolvedTarget));
+  sendLog("info", `Extracting ${request.originalIndices.length} tag(s) (${format === "blam" ? "Standard Blam loose tags" : ".ocetags"}) to ${resolvedTarget}`);
   const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
   const resourceMapPaths = {
     ...resolvedSourceRes.resourceMapPaths
@@ -38766,11 +49331,12 @@ async function extractTagsFlow(request) {
       type: "extractTags",
       originalIndices: request.originalIndices,
       outputPath: resolvedTarget,
-      sourceMapName: currentMapScenarioName ?? path12.basename(currentMapPath, ".map"),
+      sourceMapName: currentMapScenarioName ?? path15.basename(currentMapPath, ".map"),
       resourceMapPaths,
       itemName: request.itemName,
       itemNames: request.itemNames,
-      captureGbxmodelRawData: request.captureGbxmodelRawData
+      captureGbxmodelRawData: request.captureGbxmodelRawData,
+      format
     },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "extract", stage, percent })
@@ -38799,23 +49365,23 @@ async function batchExtractPreflightFlow() {
     return null;
   }
   const settings = getSettings();
-  const defaultDir = settings.lastExtractDir && fs10.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron4.app.getPath("documents");
+  const defaultDir = settings.lastExtractDir && fs13.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : import_electron4.app.getPath("documents");
   const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
     title: "Choose parent folder to export map to...",
     defaultPath: defaultDir,
     properties: ["openDirectory", "createDirectory"]
   });
   if (canceled || filePaths.length === 0) return null;
-  const parentDir = path12.resolve(filePaths[0]);
-  const mapName = sanitizeMapName(currentMapScenarioName ?? path12.basename(currentMapPath, ".map"));
-  const targetDir = path12.join(parentDir, mapName);
-  const resolvedSourceMap = path12.resolve(currentMapPath);
-  const resolvedAppDir = path12.resolve(import_electron4.app.getAppPath());
+  const parentDir = path15.resolve(filePaths[0]);
+  const mapName = sanitizeMapName(currentMapScenarioName ?? path15.basename(currentMapPath, ".map"));
+  const targetDir = path15.join(parentDir, mapName);
+  const resolvedSourceMap = path15.resolve(currentMapPath);
+  const resolvedAppDir = path15.resolve(import_electron4.app.getAppPath());
   if (targetDir === resolvedSourceMap) {
     await showErrorBox("Invalid location", "You cannot extract into the source map file location. Choose a different folder.");
     return null;
   }
-  if (targetDir === resolvedAppDir || targetDir.startsWith(resolvedAppDir + path12.sep)) {
+  if (targetDir === resolvedAppDir || targetDir.startsWith(resolvedAppDir + path15.sep)) {
     await showErrorBox("Invalid location", "You cannot save inside the application install directory. Choose a different folder.");
     return null;
   }
@@ -38874,10 +49440,11 @@ async function startBatchExtractFlow(options) {
     const p = settings.resourceMaps[kind];
     if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
-  const sourceMapName = currentMapScenarioName ?? path12.basename(currentMapPath, ".map");
+  const sourceMapName = currentMapScenarioName ?? path15.basename(currentMapPath, ".map");
+  const effectiveFormat = options.extractFormat ?? "blam";
   sendLog(
     "info",
-    `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode}, format: ${options.extractFormat ?? "ocetags"})...`
+    `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode}, format: ${effectiveFormat})...`
   );
   const { requestId, promise } = sendWorkerRequest(
     {
@@ -38885,7 +49452,7 @@ async function startBatchExtractFlow(options) {
       parentDir: options.parentDir,
       sourceMapName,
       mode: options.mode,
-      extractFormat: options.extractFormat,
+      extractFormat: effectiveFormat,
       resourceMapPaths
     },
     sendLog,
@@ -38926,7 +49493,7 @@ async function finalizeBatchExtractFlow(request) {
           toolVersion: "0.1.0",
           containerVersion: OCETAGS_FORMAT_VERSION,
           extractedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          mapFileName: path12.basename(currentMapPath ?? request.summary.mapName),
+          mapFileName: path15.basename(currentMapPath ?? request.summary.mapName),
           scenarioName: currentMapScenarioName ?? request.summary.mapName,
           summary: {
             totalTagsInMap: request.summary.totalTagsInMap,
@@ -38940,7 +49507,7 @@ async function finalizeBatchExtractFlow(request) {
           files: request.summary.tags.filter((t) => t.status === "extracted").map((t) => ({
             path: t.path,
             group: t.group,
-            relativePath: path12.relative(request.targetDir, t.outputPath ?? ""),
+            relativePath: path15.relative(request.targetDir, t.outputPath ?? ""),
             sizeBytes: t.sizeBytes ?? 0,
             tagCount: t.tagCount ?? 1
           })),
@@ -38974,7 +49541,7 @@ var RESOURCE_MAP_FILTER_NAMES = { bitmaps: "bitmaps.map", sounds: "sounds.map", 
 function readResourceMapStatus(kind, filePath) {
   if (!filePath) return { state: "not-configured" };
   try {
-    const buffer = fs10.readFileSync(filePath);
+    const buffer = fs13.readFileSync(filePath);
     const result = validateResourceMapFile(buffer, kind);
     if (!result.ok) return { state: "missing-or-unreadable", path: filePath, error: result.error };
     return { state: "ok", path: filePath, fileSizeBytes: buffer.length, entryCount: result.identity.entryCount };
@@ -39009,20 +49576,20 @@ function getResourceMapStatusesFlow() {
 }
 function openRandomAccessFile(filePath) {
   try {
-    const fd = fs10.openSync(filePath, "r");
-    const size = fs10.fstatSync(fd).size;
-    const label = path12.basename(filePath);
+    const fd = fs13.openSync(filePath, "r");
+    const size = fs13.fstatSync(fd).size;
+    const label = path15.basename(filePath);
     return {
       file: {
         label,
         size,
         read: (offset, length) => {
           const buf = Buffer.alloc(length);
-          fs10.readSync(fd, buf, 0, length, offset);
+          fs13.readSync(fd, buf, 0, length, offset);
           return buf;
         }
       },
-      close: () => fs10.closeSync(fd)
+      close: () => fs13.closeSync(fd)
     };
   } catch {
     return null;
@@ -39063,7 +49630,7 @@ function identifyResourceMapFlow(filePath, expectedVersion, expectedKind) {
     let kind = "bitmaps";
     if (expectedKind) {
       kind = expectedKind;
-    } else if (type === 2 || path12.basename(filePath).toLowerCase().includes("sounds")) {
+    } else if (type === 2 || path15.basename(filePath).toLowerCase().includes("sounds")) {
       kind = "sounds";
     } else {
       kind = "bitmaps";
@@ -39160,9 +49727,9 @@ function getSearchRoots() {
   const cwd = process.cwd();
   return [
     cwd,
-    path12.resolve(cwd, ".."),
-    path12.resolve(__dirname, ".."),
-    path12.resolve(__dirname, "../.."),
+    path15.resolve(cwd, ".."),
+    path15.resolve(__dirname, ".."),
+    path15.resolve(__dirname, "../.."),
     "C:\\Users\\LeviB\\Projects\\OpenCE-Mantle"
   ];
 }
@@ -39172,36 +49739,36 @@ function detectDefaultResourceMapPathsFlow() {
   const searchRoots = getSearchRoots();
   const candidates = {
     halomd: [
-      ...searchRoots.map((r) => path12.join(r, "sample_maps/HaloMD/bitmaps.map")),
-      path12.join(home, "Library/Application Support/HaloMD/GameData/Maps/bitmaps.map"),
-      path12.join(cwd, "bitmaps.map")
+      ...searchRoots.map((r) => path15.join(r, "sample_maps/HaloMD/bitmaps.map")),
+      path15.join(home, "Library/Application Support/HaloMD/GameData/Maps/bitmaps.map"),
+      path15.join(cwd, "bitmaps.map")
     ],
     ce: [
-      ...searchRoots.map((r) => path12.join(r, "sample_maps/custom edition/bitmaps.map")),
+      ...searchRoots.map((r) => path15.join(r, "sample_maps/custom edition/bitmaps.map")),
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE\\custom_maps\\bitmaps.map",
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE - OpenCE\\custom_maps\\bitmaps.map",
       "C:\\Users\\LeviB\\Projects\\OpenCE-MapExp\\build\\windows\\custom_maps\\bitmaps.map",
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\CUSTOM EDITION DEFAULT MAPS\\bitmaps.map",
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\bitmaps.map",
-      path12.join(cwd, "maps/bitmaps.map")
+      path15.join(cwd, "maps/bitmaps.map")
     ],
     pc: [
-      ...searchRoots.map((r) => path12.join(r, "sample_maps/PC/bitmaps.map")),
-      ...searchRoots.map((r) => path12.join(r, "sample_maps/HaloMD/bitmaps.map")),
+      ...searchRoots.map((r) => path15.join(r, "sample_maps/PC/bitmaps.map")),
+      ...searchRoots.map((r) => path15.join(r, "sample_maps/HaloMD/bitmaps.map")),
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\bitmaps.map",
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\bitmaps.map",
       "C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\bitmaps.map",
       "C:\\Program Files\\Microsoft Games\\Halo\\maps\\bitmaps.map"
     ],
     demo: [
-      ...searchRoots.map((r) => path12.join(r, "sample_maps/MacDemo/bitmaps.map")),
-      ...searchRoots.map((r) => path12.join(r, "sample_maps/Base Siege/bitmaps.map")),
+      ...searchRoots.map((r) => path15.join(r, "sample_maps/MacDemo/bitmaps.map")),
+      ...searchRoots.map((r) => path15.join(r, "sample_maps/Base Siege/bitmaps.map")),
       "C:\\Program Files (x86)\\Microsoft Games\\Halo Demo\\maps\\bitmaps.map",
-      path12.join(home, "Applications/Halo Demo/Maps/bitmaps.map")
+      path15.join(home, "Applications/Halo Demo/Maps/bitmaps.map")
     ],
     mcc: [
-      ...searchRoots.map((r) => path12.join(r, "sample_maps/MCC/bitmaps.map")),
+      ...searchRoots.map((r) => path15.join(r, "sample_maps/MCC/bitmaps.map")),
       "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "C:\\Program Files\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
       "D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps\\bitmaps.map",
@@ -39220,7 +49787,7 @@ function detectDefaultResourceMapPathsFlow() {
   for (const ver of Object.keys(candidates)) {
     for (const p of candidates[ver]) {
       try {
-        if (fs10.existsSync(p)) {
+        if (fs13.existsSync(p)) {
           result[ver] = p;
           break;
         }
@@ -39233,8 +49800,68 @@ function detectDefaultResourceMapPathsFlow() {
 async function pickInjectContainerFlow() {
   if (!mainWindow) return null;
   const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
-    title: "Inject tags from...",
-    filters: [{ name: "OpenCE Tag Set", extensions: ["ocetags"] }],
+    title: "Inject tags from Standard Blam Loose Tag or OpenCE Tag Set...",
+    filters: [
+      {
+        name: "Standard Blam Loose Tags & OpenCE Containers",
+        extensions: [
+          "weapon",
+          "biped",
+          "vehicle",
+          "scenery",
+          "equipment",
+          "garbage",
+          "projectile",
+          "device_machine",
+          "device_control",
+          "device_light_fixture",
+          "gbxmodel",
+          "model",
+          "model_animations",
+          "model_collision_geometry",
+          "physics",
+          "bitmap",
+          "sound",
+          "effect",
+          "damage_effect",
+          "light",
+          "light_volume",
+          "contrail",
+          "particle",
+          "particle_system",
+          "shader_model",
+          "shader_environment",
+          "shader_transparent_chicago",
+          "shader_transparent_chicago_extended",
+          "shader_transparent_generic",
+          "shader_transparent_glass",
+          "shader_transparent_meter",
+          "shader_transparent_plasma",
+          "shader_transparent_water",
+          "item_collection",
+          "weapon_hud_interface",
+          "unit_hud_interface",
+          "grenade_hud_interface",
+          "hud_message_text",
+          "unicode_string_list",
+          "string_list",
+          "ui_widget_definition",
+          "ui_widget_collection",
+          "scenario",
+          "scenario_structure_bsp",
+          "sky",
+          "wind",
+          "fog",
+          "actor",
+          "actor_variant",
+          "globals",
+          "ocetags",
+          "meta"
+        ]
+      },
+      { name: "OpenCE Tag Set (*.ocetags)", extensions: ["ocetags"] },
+      { name: "All Files (*.*)", extensions: ["*"] }
+    ],
     properties: ["openFile", "multiSelections"]
   });
   if (canceled || filePaths.length === 0) return null;
@@ -39257,12 +49884,12 @@ async function planInjectFlow(containerPath, mode) {
   const pcBitmaps = settings.versionResourceMaps?.pc?.bitmaps ?? settings.versionResourceMaps?.halomd?.bitmaps ?? defaults.pc ?? defaults.halomd ?? void 0;
   let pcSounds = settings.versionResourceMaps?.pc?.sounds ?? settings.versionResourceMaps?.halomd?.sounds ?? void 0;
   if (!pcSounds && pcBitmaps) {
-    const sib = path12.join(path12.dirname(pcBitmaps), "sounds.map");
-    if (fs10.existsSync(sib)) pcSounds = sib;
+    const sib = path15.join(path15.dirname(pcBitmaps), "sounds.map");
+    if (fs13.existsSync(sib)) pcSounds = sib;
   }
   const fallbackPcResourcePaths = {};
-  if (pcBitmaps && fs10.existsSync(pcBitmaps)) fallbackPcResourcePaths.bitmaps = pcBitmaps;
-  if (pcSounds && fs10.existsSync(pcSounds)) fallbackPcResourcePaths.sounds = pcSounds;
+  if (pcBitmaps && fs13.existsSync(pcBitmaps)) fallbackPcResourcePaths.bitmaps = pcBitmaps;
+  if (pcSounds && fs13.existsSync(pcSounds)) fallbackPcResourcePaths.sounds = pcSounds;
   sendLog("info", `Planning ${mode === "swap" ? "swap" : "add"} injection from ${containerPath}`);
   const { promise } = sendWorkerRequest(
     { type: "planInject", containerPath, mode, resourceMapPaths, fallbackPcResourcePaths },
@@ -39280,7 +49907,7 @@ async function planInjectFlow(containerPath, mode) {
 async function confirmScenarioName(filePath) {
   let warnings;
   try {
-    warnings = scenarioNameFromFileName(path12.basename(filePath)).warnings;
+    warnings = scenarioNameFromFileName(path15.basename(filePath)).warnings;
   } catch (err) {
     await import_electron4.dialog.showMessageBox(mainWindow, { type: "error", message: "This file name cannot be used for a map.", detail: err.message });
     return false;
@@ -39615,7 +50242,7 @@ async function pickExportDirectoryFlow() {
   return { path: res.canceled || !res.filePaths[0] ? null : res.filePaths[0] };
 }
 function read3dMeshSourceAsObjText(filePath) {
-  const raw = fs10.readFileSync(filePath, "utf8");
+  const raw = fs13.readFileSync(filePath, "utf8");
   const low = filePath.toLowerCase();
   if (low.endsWith(".jms")) {
     return convertJmsToObjText(raw).objText;
@@ -39657,7 +50284,7 @@ async function analyzeCollisionObjFlow(filePath, options) {
 }
 async function exportUvTemplateFlow(options) {
   try {
-    if (!options.objFilePath || !fs10.existsSync(options.objFilePath)) {
+    if (!options.objFilePath || !fs13.existsSync(options.objFilePath)) {
       return { ok: false, error: "Select a valid .obj / .jms / .dae model file first." };
     }
     const objText = read3dMeshSourceAsObjText(options.objFilePath);
@@ -39674,8 +50301,8 @@ async function exportUvTemplateFlow(options) {
       return { ok: true, usedAutoUv, previewDataUrl };
     }
     if (!mainWindow) return { ok: false, error: "Application window is not available." };
-    const baseName = path12.basename(options.objFilePath, path12.extname(options.objFilePath));
-    const defaultPath = path12.join(path12.dirname(options.objFilePath), `${baseName}_uv_template.png`);
+    const baseName = path15.basename(options.objFilePath, path15.extname(options.objFilePath));
+    const defaultPath = path15.join(path15.dirname(options.objFilePath), `${baseName}_uv_template.png`);
     const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
       title: "Save UV Template Image (.png)",
       defaultPath,
@@ -39684,7 +50311,7 @@ async function exportUvTemplateFlow(options) {
     if (canceled || !filePath) {
       return { ok: false, error: "Cancelled" };
     }
-    fs10.writeFileSync(filePath, pngBuffer);
+    fs13.writeFileSync(filePath, pngBuffer);
     sendLog("info", `Saved UV wireframe template to ${filePath}`);
     return { ok: true, outputPath: filePath, usedAutoUv, previewDataUrl };
   } catch (err) {
@@ -39694,15 +50321,15 @@ async function exportUvTemplateFlow(options) {
 async function pickSaveOceTagsPathFlow(defaultName) {
   if (!mainWindow) return { path: null };
   const settings = getSettings();
-  const baseDir = settings.lastExtractDir ?? (currentMapPath ? path12.dirname(currentMapPath) : import_electron4.app.getPath("documents"));
+  const baseDir = settings.lastExtractDir ?? (currentMapPath ? path15.dirname(currentMapPath) : import_electron4.app.getPath("documents"));
   const cleanFile = defaultName.endsWith(OCETAGS_EXTENSION) ? defaultName : `${defaultName}${OCETAGS_EXTENSION}`;
   const { canceled, filePath } = await import_electron4.dialog.showSaveDialog(mainWindow, {
     title: "Save Custom Object Tag Set (.ocetags)",
-    defaultPath: path12.join(baseDir, cleanFile),
+    defaultPath: path15.join(baseDir, cleanFile),
     filters: [{ name: "OpenCE Tag Set (*.ocetags)", extensions: ["ocetags"] }]
   });
   if (canceled || !filePath) return { path: null };
-  setLastExtractDir(path12.dirname(filePath));
+  setLastExtractDir(path15.dirname(filePath));
   return { path: filePath };
 }
 async function buildCustomObjectTagFlow(request) {
@@ -39716,7 +50343,7 @@ async function buildCustomObjectTagFlow(request) {
     const p = settings.resourceMaps[kind];
     if (!resourceMapPaths[kind] && p) resourceMapPaths[kind] = p;
   }
-  sendLog("info", `Building custom ${request.tagGroup} tag "${request.tagPath}" from ${path12.basename(request.objFilePath)}...`);
+  sendLog("info", `Building custom ${request.tagGroup} tag "${request.tagPath}" from ${path15.basename(request.objFilePath)}...`);
   const { promise } = sendWorkerRequest(
     { type: "buildCustomObjectTag", request, resourceMapPaths },
     sendLog,
@@ -39979,9 +50606,9 @@ function detectSourceMapEdition(filePath) {
   const fpLower = (filePath || "").toLowerCase();
   let buf = Buffer.alloc(2048);
   try {
-    const fd = fs10.openSync(filePath, "r");
-    fs10.readSync(fd, buf, 0, 2048, 0);
-    fs10.closeSync(fd);
+    const fd = fs13.openSync(filePath, "r");
+    fs13.readSync(fd, buf, 0, 2048, 0);
+    fs13.closeSync(fd);
   } catch {
     return "ce";
   }
@@ -40008,9 +50635,9 @@ var EDITION_DISPLAY_NAMES = {
   xbox: "Halo Xbox Retail (v5)"
 };
 function isResourceMapCompatibleWithEdition(filePath, edition, kind) {
-  if (!filePath || !fs10.existsSync(filePath)) return false;
+  if (!filePath || !fs13.existsSync(filePath)) return false;
   try {
-    const stat = fs10.statSync(filePath);
+    const stat = fs13.statSync(filePath);
     if (kind === "bitmaps") {
       if (edition === "ce" && stat.size > 240 * 1024 * 1024) return false;
       if ((edition === "pc" || edition === "halomd") && stat.size < 240 * 1024 * 1024) return false;
@@ -40050,13 +50677,13 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
       soundsPath = settings.resourceMaps.sounds;
     }
   }
-  const donorDir = path12.dirname(sourceFilePath);
+  const donorDir = path15.dirname(sourceFilePath);
   if (!bitmapsPath) {
-    const localBmp = path12.join(donorDir, "bitmaps.map");
+    const localBmp = path15.join(donorDir, "bitmaps.map");
     if (isResourceMapCompatibleWithEdition(localBmp, edition, "bitmaps")) bitmapsPath = localBmp;
   }
   if (!soundsPath) {
-    const localSnd = path12.join(donorDir, "sounds.map");
+    const localSnd = path15.join(donorDir, "sounds.map");
     if (isResourceMapCompatibleWithEdition(localSnd, edition, "sounds")) soundsPath = localSnd;
   }
   if (!bitmapsPath && isResourceMapCompatibleWithEdition(defaults[edition], edition, "bitmaps")) {
@@ -40066,12 +50693,12 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
     bitmapsPath = defaults.halomd;
   }
   if (!soundsPath && bitmapsPath) {
-    const siblingSnd = path12.join(path12.dirname(bitmapsPath), "sounds.map");
+    const siblingSnd = path15.join(path15.dirname(bitmapsPath), "sounds.map");
     if (isResourceMapCompatibleWithEdition(siblingSnd, edition, "sounds")) soundsPath = siblingSnd;
   }
   if (!soundsPath && edition === "pc") {
     const pcSoundsCandidates = [
-      ...getSearchRoots().map((r) => path12.join(r, "sample_maps/PC/sounds.map")),
+      ...getSearchRoots().map((r) => path15.join(r, "sample_maps/PC/sounds.map")),
       "C:\\Users\\LeviB\\Projects\\OpenCE-Forge\\FORGE CODE\\GAME MAPS\\PC MAPS\\sounds.map",
       "C:\\Users\\LeviB\\Desktop\\Halo CE Related\\Halo CE\\MAPS\\sounds.map"
     ];
@@ -40084,7 +50711,7 @@ function resolveResourceMapsForSource(sourceFilePath, options) {
   }
   if (edition === "mcc" && !soundsPath) {
     const ceSounds = settings.versionResourceMaps?.ce?.sounds || settings.resourceMaps.sounds;
-    if (ceSounds && fs10.existsSync(ceSounds)) {
+    if (ceSounds && fs13.existsSync(ceSounds)) {
       soundsPath = ceSounds;
     }
   }
@@ -40150,7 +50777,7 @@ var saveMapDeps = {
       defaultId: 1,
       cancelId: 1,
       noLink: true,
-      message: `Overwrite ${path12.basename(filePath)} without a backup?`,
+      message: `Overwrite ${path15.basename(filePath)} without a backup?`,
       detail: "You skipped the backup copy when you opened this map, so the current file cannot be restored afterwards. Use File > Save As to keep it."
     });
     return response === 0;
@@ -40188,7 +50815,7 @@ async function discardChangesFlow() {
     defaultId: 1,
     cancelId: 1,
     noLink: true,
-    message: `Discard all unsaved changes to ${path12.basename(currentMapPath)}?`,
+    message: `Discard all unsaved changes to ${path15.basename(currentMapPath)}?`,
     detail: "The map is reopened from the file on disk. Injected tags that were not saved are lost."
   });
   if (response !== 0) return null;
@@ -40217,7 +50844,7 @@ var saveMapAsDeps = {
       buttons: ["Overwrite", "Cancel"],
       defaultId: 1,
       cancelId: 1,
-      message: `"${path12.basename(filePath)}" already exists.`,
+      message: `"${path15.basename(filePath)}" already exists.`,
       detail: "Do you want to overwrite it?"
     });
     return response === 0;
@@ -40342,9 +50969,9 @@ async function verifyEmbeddedDataFlow() {
 }
 function getAppDisplayVersion() {
   try {
-    const pkgPath = path12.join(__dirname, "../package.json");
-    if (fs10.existsSync(pkgPath)) {
-      const pkg = JSON.parse(fs10.readFileSync(pkgPath, "utf8"));
+    const pkgPath = path15.join(__dirname, "../package.json");
+    if (fs13.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs13.readFileSync(pkgPath, "utf8"));
       if (typeof pkg.displayVersion === "string" && pkg.displayVersion.trim()) {
         return pkg.displayVersion.trim();
       }
@@ -40358,11 +50985,11 @@ function getAppDisplayVersion() {
 }
 function showAboutDialog() {
   if (!mainWindow) return;
-  const pngIcon = path12.join(__dirname, "../build/icon.png");
+  const pngIcon = path15.join(__dirname, "../build/icon.png");
   import_electron4.dialog.showMessageBox(mainWindow, {
     type: "info",
     title: "About",
-    icon: fs10.existsSync(pngIcon) ? pngIcon : void 0,
+    icon: fs13.existsSync(pngIcon) ? pngIcon : void 0,
     message: `OpenCE Mantle v${getAppDisplayVersion()}`,
     detail: "A free, non-commercial GUI tool for modding Halo: Custom Edition (PC, version 609) maps.\n\nFormat references (GPL, not bundled): Invader, Reclaimer, Refinery, Mozzarilla, supyr_struct.\nCompression reference: Chimera.\nTarget runtime: OpenCE (OpenCommunityEdition/OpenCE).\n\nNo Bungie/Microsoft assets are bundled; this tool only operates on files you supply."
   });
@@ -40374,6 +51001,7 @@ function buildMenu() {
       label: "File",
       submenu: [
         { label: "Open Map...", accelerator: "CmdOrCtrl+O", click: () => openMapFlow() },
+        { label: "Open Standard Blam tags/ Workspace...", click: () => mainWindow?.webContents.send("menu:action", "open-loose-tags-workspace") },
         { id: "save", label: "Save", accelerator: "CmdOrCtrl+S", enabled: canSaveMap(), click: () => void runSaveMap() },
         { id: "save-as", label: "Save As...", accelerator: "CmdOrCtrl+Shift+S", enabled: canSaveMapAs(), click: () => void runSaveMapAs() },
         {
@@ -40410,6 +51038,9 @@ function buildMenu() {
         { label: "Live HUD Editing & Weapon Tag Editor...", click: () => mainWindow?.webContents.send("menu:action", "live-hud-editor") },
         { label: "Inject / Replace HUD Bitmap...", click: () => mainWindow?.webContents.send("menu:action", "hud-bitmap-injector") },
         { label: "UI.map Menu (DeLa) & String (ustr) Studio...", click: () => mainWindow?.webContents.send("menu:action", "ui-map-studio") },
+        { label: "Content Explorer & Dependency Auto-Fix...", click: () => mainWindow?.webContents.send("menu:action", "content-explorer") },
+        { label: "Visual tool.exe Command Runner...", click: () => mainWindow?.webContents.send("menu:action", "tool-command-runner") },
+        { label: "Bitmap & 3D Model Library Browser...", click: () => mainWindow?.webContents.send("menu:action", "asset-library-browser") },
         { type: "separator" },
         {
           label: "Identify Resource Maps",
@@ -40445,6 +51076,7 @@ function buildMenu() {
     }
   ];
   import_electron4.Menu.setApplicationMenu(import_electron4.Menu.buildFromTemplate(template));
+  mainWindow?.setMenuBarVisibility(false);
 }
 import_electron4.app.whenReady().then(() => {
   startWorker(sendLog);
@@ -40883,11 +51515,11 @@ import_electron4.app.whenReady().then(() => {
     }
   );
   const resolveCustomTexturesDirectory = () => {
-    const baseDir = process.env.PORTABLE_EXECUTABLE_DIR ? process.env.PORTABLE_EXECUTABLE_DIR : import_electron4.app.isPackaged ? path12.dirname(process.execPath) : process.cwd();
-    const texturesDir = path12.join(baseDir, "textures");
-    fs10.mkdirSync(texturesDir, { recursive: true });
+    const baseDir = process.env.PORTABLE_EXECUTABLE_DIR ? process.env.PORTABLE_EXECUTABLE_DIR : import_electron4.app.isPackaged ? path15.dirname(process.execPath) : process.cwd();
+    const texturesDir = path15.join(baseDir, "textures");
+    fs13.mkdirSync(texturesDir, { recursive: true });
     try {
-      const existing = fs10.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+      const existing = fs13.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
       if (existing.length === 0) {
         const presets = [
           {
@@ -40953,7 +51585,7 @@ import_electron4.app.whenReady().then(() => {
             }
           }
           const png = encodeRgbaToPng(rgba, 64, 64);
-          fs10.writeFileSync(path12.join(texturesDir, p.name), png);
+          fs13.writeFileSync(path15.join(texturesDir, p.name), png);
         }
       }
     } catch {
@@ -40964,13 +51596,13 @@ import_electron4.app.whenReady().then(() => {
     const texturesDir = resolveCustomTexturesDirectory();
     const textures = [];
     try {
-      const files = fs10.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
+      const files = fs13.readdirSync(texturesDir).filter((f) => /\.(png|jpe?g|webp)$/i.test(f));
       for (const file of files) {
-        const fullPath = path12.join(texturesDir, file);
-        const ext = path12.extname(file).toLowerCase();
+        const fullPath = path15.join(texturesDir, file);
+        const ext = path15.extname(file).toLowerCase();
         const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".webp" ? "image/webp" : "image/png";
-        const buf = fs10.readFileSync(fullPath);
-        const cleanName = path12.basename(file, ext).replace(/[_-]+/g, " ");
+        const buf = fs13.readFileSync(fullPath);
+        const cleanName = path15.basename(file, ext).replace(/[_-]+/g, " ");
         textures.push({
           name: cleanName,
           filePath: fullPath,
@@ -41183,9 +51815,9 @@ import_electron4.app.whenReady().then(() => {
       return { ok: false, cancelled: true, message: "Cancelled." };
     }
     const filePath = pick.filePaths[0];
-    const fileName = path12.basename(filePath);
+    const fileName = path15.basename(filePath);
     try {
-      const text = fs10.readFileSync(filePath, "utf8");
+      const text = fs13.readFileSync(filePath, "utf8");
       if (filePath.toLowerCase().endsWith(".wrl") || text.trimStart().startsWith("#VRML")) {
         const wrl = parseHaloWrl(text);
         sendLog(
@@ -41324,9 +51956,9 @@ import_electron4.app.whenReady().then(() => {
         return { ok: false, cancelled: true, message: "Cancelled." };
       }
       const filePath = pick.filePaths[0];
-      const fileName = path12.basename(filePath);
-      const inferredAnimName = animName?.trim() || path12.basename(filePath, path12.extname(filePath));
-      const jmaText = fs10.readFileSync(filePath, "utf8");
+      const fileName = path15.basename(filePath);
+      const inferredAnimName = animName?.trim() || path15.basename(filePath, path15.extname(filePath));
+      const jmaText = fs13.readFileSync(filePath, "utf8");
       const { promise } = sendWorkerRequest(
         {
           type: "compileJmaAnimation",
@@ -41367,8 +51999,8 @@ import_electron4.app.whenReady().then(() => {
         return { ok: false, cancelled: true, message: "Cancelled." };
       }
       const filePath = pick.filePaths[0];
-      const fileName = path12.basename(filePath);
-      const jmsText = fs10.readFileSync(filePath, "utf8");
+      const fileName = path15.basename(filePath);
+      const jmsText = fs13.readFileSync(filePath, "utf8");
       const { promise } = sendWorkerRequest(
         {
           type: "compileJmsPhysics",
@@ -41420,7 +52052,7 @@ import_electron4.app.whenReady().then(() => {
       if (save.canceled || !save.filePath) {
         return { ok: false, cancelled: true, message: "Save cancelled." };
       }
-      fs10.writeFileSync(save.filePath, res.sourceText, "utf8");
+      fs13.writeFileSync(save.filePath, res.sourceText, "utf8");
       sendLog("info", `Decompiled "${res.tagPath}" -> ${save.filePath} (${res.summary}).`);
       return {
         ok: true,
@@ -41453,8 +52085,8 @@ import_electron4.app.whenReady().then(() => {
           return { ok: false, cancelled: true, message: "Cancelled." };
         }
         const fp = pick.filePaths[0];
-        fileName = path12.basename(fp);
-        const rawBuf = fs10.readFileSync(fp);
+        fileName = path15.basename(fp);
+        const rawBuf = fs13.readFileSync(fp);
         if (rawBuf.length >= 2 && rawBuf[0] === 255 && rawBuf[1] === 254) {
           finalContent = rawBuf.subarray(2).toString("utf16le");
         } else {
@@ -41591,9 +52223,14 @@ import_electron4.app.whenReady().then(() => {
       sendLog
     );
     const res = await promise;
-    if (res.ok && res.map) {
-      setOpenMapState(res.map);
-      mainWindow?.webContents.send("map:updated", res.map);
+    if (res.ok) {
+      if (res.memoryPatches) {
+        tagTestRunner.writeMemoryPatches(res.memoryPatches);
+      }
+      if (res.map) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send("map:updated", res.map);
+      }
     }
     return res;
   });
@@ -41606,11 +52243,28 @@ import_electron4.app.whenReady().then(() => {
       sendLog
     );
     const res = await promise;
-    if (res.ok && res.map) {
-      setOpenMapState(res.map);
-      mainWindow?.webContents.send("map:updated", res.map);
+    if (res.ok) {
+      if (res.memoryPatches) {
+        tagTestRunner.writeMemoryPatches(res.memoryPatches);
+      }
+      if (res.map) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send("map:updated", res.map);
+      }
     }
     return res;
+  });
+  import_electron4.ipcMain.handle("hud:blinkElement", async (_evt, offsetVirtualAddress, originalX) => {
+    return tagTestRunner.blinkHudElement(offsetVirtualAddress, originalX);
+  });
+  import_electron4.ipcMain.handle("hud:equipWeapon", async (_evt, weaponTagId) => {
+    return tagTestRunner.equipWeaponInGame(weaponTagId);
+  });
+  import_electron4.ipcMain.handle("hud:spawnVehicle", async (_evt, vehicleTagId) => {
+    return tagTestRunner.spawnVehicleInGame(vehicleTagId);
+  });
+  import_electron4.ipcMain.handle("hud:spawnAllArsenal", async () => {
+    return tagTestRunner.spawnAllArsenalInGame();
   });
   import_electron4.ipcMain.handle("hud:injectElementBitmap", async (_evt, request) => {
     if (!currentMapPath || currentMapCompressed) {
@@ -41676,6 +52330,506 @@ import_electron4.app.whenReady().then(() => {
       sendLog("info", `Saved ${res.entryCount} Unicode string(s) into ustr tag #${ustrTagIndex}.`);
     }
     return res;
+  });
+  import_electron4.ipcMain.handle("baboon:inspectContentExplorer", async (_evt, tagIndex) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "inspectContentExplorer", tagIndex },
+      sendLog
+    );
+    return promise;
+  });
+  import_electron4.ipcMain.handle("baboon:autoFixTagDependencies", async (_evt, tagIndices) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "autoFixTagDependencies", tagIndices },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send("map:updated", res.map);
+      sendLog("info", `Auto-fixed ${res.report.fixedCount} broken tag reference(s) (${res.report.ambiguousCount} ambiguous, ${res.report.unresolvedCount} unresolved).`);
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("baboon:refactorMoveFolderInMap", async (_evt, oldPrefix, newPrefix) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "refactorMoveFolderInMap", oldPrefix, newPrefix },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send("map:updated", res.map);
+      sendLog("info", `Refactored folder prefix "${oldPrefix}" -> "${newPrefix}" (${res.report.movedTags.length} tag(s) updated).`);
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("baboon:reorganizeReflexiveBlock", async (_evt, request) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "reorganizeReflexiveBlock", request },
+      sendLog
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send("map:updated", res.map);
+      sendLog("info", `Committed staged block organizer changes to "${request.reflexivePath}" (${res.newCount} elements).`);
+    }
+    return res;
+  });
+  import_electron4.ipcMain.handle("baboon:exportReflexiveTsv", async (_evt, tagIndex, reflexivePath) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "exportReflexiveTsv", tagIndex, reflexivePath },
+      sendLog
+    );
+    return promise;
+  });
+  import_electron4.ipcMain.handle(
+    "baboon:importReflexiveTsv",
+    async (_evt, tagIndex, reflexivePath, tsvText) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      const { promise } = sendWorkerRequest(
+        { type: "importReflexiveTsv", tagIndex, reflexivePath, tsvText },
+        sendLog
+      );
+      const res = await promise;
+      if (res.ok && res.map) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send("map:updated", res.map);
+        sendLog("info", `Applied TSV spreadsheet paste to "${reflexivePath}" (${res.updatedCells} cells updated across ${res.rowCount} rows).`);
+      }
+      return res;
+    }
+  );
+  import_electron4.ipcMain.handle("baboon:evaluateFunctionCurve", async (_evt, params, sampleCount) => {
+    return evaluateBlamFunctionCurve(params, sampleCount);
+  });
+  import_electron4.ipcMain.handle("baboon:analyzeHudMessageSafety", async (_evt, tagIndex) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "analyzeHudMessageSafety", tagIndex },
+      sendLog
+    );
+    return promise;
+  });
+  import_electron4.ipcMain.handle("baboon:exportStringsCsv", async (_evt, ustrTagIndex) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: "Open an uncompressed map first." };
+    }
+    const { promise } = sendWorkerRequest(
+      { type: "exportStringsCsv", ustrTagIndex },
+      sendLog
+    );
+    return promise;
+  });
+  import_electron4.ipcMain.handle(
+    "baboon:previewStringsCsvImport",
+    async (_evt, ustrTagIndex, csvText, mode) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: "Open an uncompressed map first." };
+      }
+      const { promise } = sendWorkerRequest(
+        { type: "previewStringsCsvImport", ustrTagIndex, csvText, mode },
+        sendLog
+      );
+      return promise;
+    }
+  );
+  const toUiLooseWorkspaceSnapshot = (raw) => {
+    const entryKeys = new Set(raw.entries.map((e) => e.key));
+    return {
+      tagsRootDir: raw.tagsDir,
+      totalFiles: raw.entries.length,
+      brokenDependencyCount: raw.brokenDependencies.length,
+      unreferencedTagCount: raw.unreferencedTagKeys.length,
+      entries: raw.entries.map((e) => {
+        const refs = e.dependencies.map((d) => ({
+          fieldPath: d.fieldPath,
+          group: d.group,
+          path: d.path
+        }));
+        const brokenReferences = e.dependencies.filter((d) => !entryKeys.has(d.targetKey)).map((d) => ({
+          fieldPath: d.fieldPath,
+          group: d.group,
+          path: d.path
+        }));
+        return {
+          key: e.key,
+          relativePath: e.tagPath,
+          groupName: e.group,
+          groupFourCC: e.groupFourCC,
+          absolutePath: e.filePath,
+          fileSize: e.size,
+          mtimeMs: e.mtimeMs,
+          headerFormat: e.headerFormat,
+          references: refs,
+          referencedByCount: raw.dependentsByTargetKey[e.key]?.length ?? 0,
+          brokenReferences
+        };
+      })
+    };
+  };
+  import_electron4.ipcMain.handle("baboon:openLooseTagsWorkspace", async (_evt, tagsRootDir) => {
+    try {
+      let targetDir = tagsRootDir;
+      if (!targetDir) {
+        if (!mainWindow) return { ok: false, message: "Main window unavailable." };
+        const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
+          title: "Select Standard Blam tags/ Folder Workspace...",
+          properties: ["openDirectory"]
+        });
+        if (pick.canceled || !pick.filePaths[0]) {
+          return { ok: false, cancelled: true, message: "Cancelled." };
+        }
+        targetDir = pick.filePaths[0];
+      }
+      const rawIndex = scanLooseTagsWorkspace(targetDir);
+      const snapshot = toUiLooseWorkspaceSnapshot(rawIndex);
+      sendLog(
+        "info",
+        `Indexed Loose Blam tags/ Workspace "${snapshot.tagsRootDir}": ${snapshot.totalFiles} tags (${snapshot.brokenDependencyCount} broken refs, ${snapshot.unreferencedTagCount} unreferenced).`
+      );
+      return { ok: true, snapshot };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  import_electron4.ipcMain.handle(
+    "baboon:readLooseTagFields",
+    async (_evt, absolutePath, relativePath) => {
+      try {
+        const buf = fs13.readFileSync(absolutePath);
+        const rel = relativePath ?? path15.basename(absolutePath, path15.extname(absolutePath));
+        const fields = readLooseBlamTagFields(buf, rel);
+        return { ok: true, fields, groupName: fields.group };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  import_electron4.ipcMain.handle(
+    "baboon:writeLooseTagField",
+    async (_evt, absolutePath, relativePath, fieldPath, newValue) => {
+      try {
+        const buf = fs13.readFileSync(absolutePath);
+        const updated = writeLooseBlamTagFieldValue(buf, relativePath, fieldPath, newValue);
+        fs13.writeFileSync(absolutePath, updated.buffer);
+        sendLog("info", `Saved loose Blam tag field "${fieldPath}" in ${relativePath}.${updated.fields.group}`);
+        return { ok: true, fields: updated.fields };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  import_electron4.ipcMain.handle("baboon:fixLooseWorkspaceDependencies", async (_evt, tagsRootDir) => {
+    try {
+      const rawReport = fixBrokenTagDependenciesInWorkspace(tagsRootDir);
+      const report = {
+        ...rawReport,
+        fixedCount: rawReport.fixed.length,
+        ambiguousCount: rawReport.ambiguous.length,
+        unresolvedCount: rawReport.notFound.length
+      };
+      const snapshot = toUiLooseWorkspaceSnapshot(scanLooseTagsWorkspace(tagsRootDir));
+      sendLog("info", `Repaired ${report.fixedCount} broken dependency reference(s) across loose tags/ workspace.`);
+      return { ok: true, report, snapshot };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  import_electron4.ipcMain.handle(
+    "baboon:refactorMoveLooseTag",
+    async (_evt, tagsRootDir, oldRelativePath, newRelativePath, groupName) => {
+      try {
+        const rawReport = refactorRenameOrMoveLooseTagOnDisk(
+          tagsRootDir,
+          oldRelativePath,
+          groupName,
+          newRelativePath
+        );
+        const report = {
+          ...rawReport,
+          updatedReferenceSlots: rawReport.rewrittenReferencingFiles.length
+        };
+        const snapshot = toUiLooseWorkspaceSnapshot(scanLooseTagsWorkspace(tagsRootDir));
+        sendLog(
+          "info",
+          `Moved loose Blam tag "${oldRelativePath}.${groupName}" -> "${newRelativePath}.${groupName}" and updated ${report.updatedReferenceSlots} referencing tag file(s).`
+        );
+        return { ok: true, report, snapshot };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  import_electron4.ipcMain.handle("baboon:inspectGitTagsWorkspace", async (_evt, tagsRootDir) => {
+    try {
+      let isGitRepo = false;
+      let branch = "";
+      const statusEntries = [];
+      const recentCommits = [];
+      try {
+        branch = (0, import_child_process3.execFileSync)("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+          cwd: tagsRootDir,
+          encoding: "utf8",
+          timeout: 4e3
+        }).trim();
+        isGitRepo = true;
+      } catch {
+        return { ok: true, isGitRepo: false, branch: "", statusEntries: [], recentCommits: [] };
+      }
+      const porcelain = (0, import_child_process3.execFileSync)("git", ["status", "--porcelain", "."], {
+        cwd: tagsRootDir,
+        encoding: "utf8",
+        timeout: 5e3
+      });
+      for (const line of porcelain.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const status = line.slice(0, 2).trim();
+        const fileRel = line.slice(3).trim().replace(/^"|"$/g, "");
+        const abs = path15.resolve(tagsRootDir, fileRel);
+        const ext = path15.extname(fileRel).replace(/^\./, "").toLowerCase();
+        const relWithoutExt = fileRel.slice(0, fileRel.length - path15.extname(fileRel).length).replace(/\//g, "\\");
+        statusEntries.push({
+          status,
+          relativePath: relWithoutExt,
+          groupName: ext,
+          absolutePath: abs
+        });
+      }
+      try {
+        const logOut = (0, import_child_process3.execFileSync)(
+          "git",
+          ["log", "-n", "20", "--pretty=format:%H|%h|%an|%ad|%s", "--date=short", "."],
+          { cwd: tagsRootDir, encoding: "utf8", timeout: 5e3 }
+        );
+        for (const line of logOut.split(/\r?\n/)) {
+          if (!line.trim()) continue;
+          const [hash, shortHash, author, date, ...subjParts] = line.split("|");
+          recentCommits.push({
+            hash: hash ?? "",
+            shortHash: shortHash ?? "",
+            author: author ?? "",
+            date: date ?? "",
+            subject: subjParts.join("|")
+          });
+        }
+      } catch {
+      }
+      return { ok: true, isGitRepo, branch, statusEntries, recentCommits };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  import_electron4.ipcMain.handle(
+    "baboon:diffGitLooseTag",
+    async (_evt, tagsRootDir, absolutePath, gitRef = "HEAD") => {
+      try {
+        const repoRoot = (0, import_child_process3.execFileSync)("git", ["rev-parse", "--show-toplevel"], {
+          cwd: tagsRootDir,
+          encoding: "utf8",
+          timeout: 4e3
+        }).trim();
+        const relToRepo = path15.relative(repoRoot, absolutePath).replace(/\\/g, "/");
+        const oldBuf = (0, import_child_process3.execFileSync)("git", ["show", `${gitRef}:${relToRepo}`], {
+          cwd: repoRoot,
+          maxBuffer: 64 * 1024 * 1024,
+          timeout: 5e3
+        });
+        const newBuf = fs13.readFileSync(absolutePath);
+        const groupName = path15.extname(absolutePath).replace(/^\./, "").toLowerCase();
+        const relTagPath = path15.relative(tagsRootDir, absolutePath).replace(/\.[^.]+$/, "").replace(/\//g, "\\");
+        const rows = compareBlamLooseTagBuffers(oldBuf, newBuf, relTagPath);
+        return {
+          ok: true,
+          relativePath: relTagPath,
+          groupName,
+          changedFieldsCount: rows.length,
+          fields: rows.map((r) => ({
+            fieldPath: r.property,
+            status: r.status,
+            leftValue: r.before,
+            rightValue: r.after
+          }))
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  import_electron4.ipcMain.handle("baboon:queryHaloScriptCatalog", async (_evt, query, engineFilter) => {
+    return queryHaloScriptDocs(query, engineFilter).map((doc) => ({
+      ...doc,
+      usage: doc.signature
+    }));
+  });
+  import_electron4.ipcMain.handle("baboon:getToolCommands", async (_evt, engineFilter) => {
+    return getToolCommandCatalog(engineFilter).map((cmd) => ({
+      ...cmd,
+      verb: cmd.name,
+      args: (cmd.args ?? []).map((a) => ({
+        ...a,
+        options: a.values
+      }))
+    }));
+  });
+  import_electron4.ipcMain.handle(
+    "baboon:runToolExeCommand",
+    async (_evt, options) => {
+      try {
+        const effectiveMode = options.mode ?? "native";
+        let resolvedWorkDir = options.workingDir || getSettings().openCeDirectory || process.cwd();
+        if (path15.basename(resolvedWorkDir).toLowerCase() === "tags") {
+          resolvedWorkDir = path15.dirname(resolvedWorkDir);
+        }
+        if (effectiveMode === "native") {
+          const cleanArgs = options.args.filter((a) => a.trim().length > 0);
+          sendLog(
+            "info",
+            `Running Built-In Native Mantle Tool Compiler: tool ${options.verb} ${cleanArgs.join(" ")} (cwd: ${resolvedWorkDir})`
+          );
+          const nativeRes = await runNativeToolCommand({
+            workingDir: resolvedWorkDir,
+            command: options.verb,
+            args: cleanArgs
+          });
+          if (nativeRes.ok) {
+            sendLog("info", nativeRes.stdout);
+          } else {
+            sendLog("warn", nativeRes.stderr);
+          }
+          return {
+            ok: nativeRes.ok,
+            exitCode: nativeRes.exitCode,
+            stdout: nativeRes.stdout,
+            stderr: nativeRes.stderr,
+            writtenTagPaths: nativeRes.writtenTagPaths,
+            writtenMapPath: nativeRes.writtenMapPath,
+            wrlErrors: nativeRes.wrlErrors,
+            wrlPath: nativeRes.wrlPath,
+            executionEngine: "native",
+            message: nativeRes.ok ? void 0 : nativeRes.stderr
+          };
+        }
+        let toolExe = options.toolExePath;
+        if (!toolExe || !fs13.existsSync(toolExe)) {
+          const candidates = [
+            path15.join(resolvedWorkDir, "tool.exe"),
+            path15.join(resolvedWorkDir, "tool_pro.exe"),
+            getSettings().openCeDirectory ? path15.join(getSettings().openCeDirectory, "tool.exe") : ""
+          ].filter((p) => p && fs13.existsSync(p));
+          toolExe = candidates[0];
+        }
+        if (!toolExe || !fs13.existsSync(toolExe)) {
+          if (!mainWindow) return { ok: false, message: "tool.exe not found." };
+          const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
+            title: "Locate Halo Editing Kit tool.exe...",
+            filters: [{ name: "Executable (*.exe)", extensions: ["exe"] }],
+            properties: ["openFile"]
+          });
+          if (pick.canceled || !pick.filePaths[0]) {
+            return { ok: false, message: "Cancelled locating tool.exe." };
+          }
+          toolExe = pick.filePaths[0];
+        }
+        const fullArgs = [options.verb, ...options.args.filter((a) => a.trim().length > 0)];
+        sendLog("info", `Running external tool.exe: "${toolExe}" ${fullArgs.join(" ")}`);
+        return await new Promise((resolve8) => {
+          const child = (0, import_child_process3.spawn)(toolExe, fullArgs, {
+            cwd: resolvedWorkDir || path15.dirname(toolExe),
+            windowsHide: true
+          });
+          let stdout = "";
+          let stderr = "";
+          child.stdout.on("data", (chunk) => {
+            stdout += chunk.toString();
+          });
+          child.stderr.on("data", (chunk) => {
+            stderr += chunk.toString();
+          });
+          child.on("error", (err) => {
+            resolve8({ ok: false, exitCode: null, stdout, stderr, message: err.message, executionEngine: "external_exe" });
+          });
+          child.on("close", (code) => {
+            let debugTxtTail;
+            const debugTxtPath = path15.join(resolvedWorkDir || path15.dirname(toolExe), "debug.txt");
+            if (fs13.existsSync(debugTxtPath)) {
+              try {
+                const raw = fs13.readFileSync(debugTxtPath, "utf8");
+                debugTxtTail = raw.slice(-4096);
+              } catch {
+              }
+            }
+            resolve8({
+              ok: code === 0,
+              exitCode: code,
+              stdout,
+              stderr,
+              debugTxtTail,
+              executionEngine: "external_exe"
+            });
+          });
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          message: err instanceof Error ? err.message : String(err)
+        };
+      }
+    }
+  );
+  import_electron4.ipcMain.handle("baboon:dropTagToExternalWindow", async (_evt, absoluteTagPath) => {
+    try {
+      if (!fs13.existsSync(absoluteTagPath)) {
+        return { ok: false, message: `Tag file does not exist on disk: ${absoluteTagPath}` };
+      }
+      const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$sc = New-Object System.Collections.Specialized.StringCollection
+$sc.Add('${absoluteTagPath.replace(/'/g, "''")}')
+[System.Windows.Forms.Clipboard]::SetFileDropList($sc)
+$proc = Get-Process | Where-Object { $_.ProcessName -match 'sapien|guerilla|mek|mozzarilla|baboon' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if ($proc) {
+  $sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);'
+  $t = Add-Type -MemberDefinition $sig -Name Win32Fg -Namespace OpenCEMantle -PassThru
+  $t::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+  Write-Output $proc.MainWindowTitle
+} else {
+  Write-Output "CLIPBOARD_ONLY"
+}
+`;
+      const out = (0, import_child_process3.execFileSync)("powershell.exe", ["-NoProfile", "-STA", "-Command", psScript], {
+        encoding: "utf8",
+        timeout: 5e3
+      }).trim();
+      const targetWindowTitle = out === "CLIPBOARD_ONLY" ? "Clipboard FileDropList (Sapien/Guerilla ready for Ctrl+V)" : out;
+      sendLog("info", `Prepared CF_HDROP file drop for "${path15.basename(absoluteTagPath)}" -> ${targetWindowTitle}`);
+      return { ok: true, targetWindowTitle };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
   });
   import_electron4.ipcMain.handle("app:checkForUpdates", async () => {
     const curVer = getAppDisplayVersion();
@@ -41748,7 +52902,11 @@ import_electron4.app.whenReady().then(() => {
       const allowedHosts = /* @__PURE__ */ new Set([
         "github.com",
         "objects.githubusercontent.com",
-        "release-assets.githubusercontent.com"
+        "release-assets.githubusercontent.com",
+        "discord.com",
+        "discord.gg",
+        "halostats.cc",
+        "www.halostats.cc"
       ]);
       if (!allowedHosts.has(parsed.hostname)) {
         return { ok: false, message: `Host ${parsed.hostname} is not in the allowed release domain list.` };
@@ -41758,6 +52916,140 @@ import_electron4.app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, message: err.message };
     }
+  });
+  import_electron4.ipcMain.handle("window:minimize", (evt) => {
+    const win = import_electron4.BrowserWindow.fromWebContents(evt.sender) ?? mainWindow;
+    win?.minimize();
+  });
+  import_electron4.ipcMain.handle("window:toggleMaximize", (evt) => {
+    const win = import_electron4.BrowserWindow.fromWebContents(evt.sender) ?? mainWindow;
+    if (!win) return false;
+    if (win.isMaximized()) {
+      win.unmaximize();
+    } else {
+      win.maximize();
+    }
+    return win.isMaximized();
+  });
+  import_electron4.ipcMain.handle("window:close", (evt) => {
+    const win = import_electron4.BrowserWindow.fromWebContents(evt.sender) ?? mainWindow;
+    win?.close();
+  });
+  import_electron4.ipcMain.handle("window:isMaximized", (evt) => {
+    const win = import_electron4.BrowserWindow.fromWebContents(evt.sender) ?? mainWindow;
+    return win?.isMaximized() ?? false;
+  });
+  import_electron4.ipcMain.handle("settings:getTheme", () => {
+    return getSettings().theme ?? "dark";
+  });
+  import_electron4.ipcMain.handle("settings:setTheme", (_evt, theme) => {
+    setAppTheme(theme);
+    for (const win of import_electron4.BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send("settings:themeChanged", theme);
+      }
+    }
+    return { ok: true, theme };
+  });
+  import_electron4.ipcMain.handle("recentMaps:getCards", () => {
+    return getRecentMapCards();
+  });
+  import_electron4.ipcMain.handle("recentMaps:togglePin", (_evt, filePath) => {
+    return togglePinRecentMap(filePath);
+  });
+  import_electron4.ipcMain.handle("recentMaps:remove", (_evt, filePath) => {
+    return removeRecentMapEntry(filePath);
+  });
+  import_electron4.ipcMain.handle("recentMaps:revealInExplorer", (_evt, filePath) => {
+    if (filePath && fs13.existsSync(filePath)) {
+      import_electron4.shell.showItemInFolder(path15.resolve(filePath));
+    }
+  });
+  import_electron4.ipcMain.handle("map:listOpenSessions", () => {
+    return {
+      activeSessionId: activeMapSessionId,
+      sessions: Array.from(openMapSessions.values())
+    };
+  });
+  import_electron4.ipcMain.handle("map:switchActiveSession", (_evt, sessionId) => {
+    return switchActiveMapSessionFlow(sessionId);
+  });
+  import_electron4.ipcMain.handle("map:closeSession", (_evt, sessionId) => {
+    return closeMapSessionFlow(sessionId);
+  });
+  import_electron4.ipcMain.handle(
+    "window:detachMapTab",
+    async (_evt, sessionId, coords) => {
+      const session = openMapSessions.get(sessionId);
+      if (!session) return { ok: false };
+      const existingWin = detachedWindows.get(sessionId);
+      if (existingWin && !existingWin.isDestroyed()) {
+        existingWin.focus();
+        return { ok: true, windowId: existingWin.id };
+      }
+      const detWin = new import_electron4.BrowserWindow({
+        width: 1200,
+        height: 800,
+        minWidth: 860,
+        minHeight: 540,
+        x: typeof coords?.screenX === "number" ? Math.max(0, Math.round(coords.screenX - 240)) : void 0,
+        y: typeof coords?.screenY === "number" ? Math.max(0, Math.round(coords.screenY - 24)) : void 0,
+        frame: false,
+        autoHideMenuBar: true,
+        backgroundColor: "#0d1117",
+        icon: getAppIconPath(),
+        title: `${session.fileName} - OpenCE Mantle (Detached Window)`,
+        webPreferences: {
+          preload: path15.join(__dirname, "preload.js"),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: false
+        }
+      });
+      detWin.setMenuBarVisibility(false);
+      detWin.on("maximize", () => {
+        if (!detWin.isDestroyed()) detWin.webContents.send("window:maximizedChanged", true);
+      });
+      detWin.on("unmaximize", () => {
+        if (!detWin.isDestroyed()) detWin.webContents.send("window:maximizedChanged", false);
+      });
+      detachedWindows.set(sessionId, detWin);
+      session.detachedWindowId = detWin.id;
+      openMapSessions.set(sessionId, session);
+      broadcastOpenMapSessions();
+      detWin.on("closed", () => {
+        detachedWindows.delete(sessionId);
+        const cur = openMapSessions.get(sessionId);
+        if (cur) {
+          cur.detachedWindowId = null;
+          openMapSessions.set(sessionId, cur);
+        }
+        broadcastOpenMapSessions();
+      });
+      if (isDev) {
+        await detWin.loadURL(`http://localhost:5173/?detachedSessionId=${encodeURIComponent(sessionId)}`);
+      } else {
+        await detWin.loadFile(path15.join(__dirname, "../dist/index.html"), {
+          query: { detachedSessionId: sessionId }
+        });
+      }
+      return { ok: true, windowId: detWin.id };
+    }
+  );
+  import_electron4.ipcMain.handle("window:redockMapTab", async (_evt, sessionId) => {
+    const detWin = detachedWindows.get(sessionId);
+    if (detWin && !detWin.isDestroyed()) {
+      detWin.close();
+    }
+    detachedWindows.delete(sessionId);
+    const cur = openMapSessions.get(sessionId);
+    if (cur) {
+      cur.detachedWindowId = null;
+      openMapSessions.set(sessionId, cur);
+    }
+    await switchActiveMapSessionFlow(sessionId);
+    mainWindow?.focus();
+    return { ok: true };
   });
   try {
     tagTestRunner.restoreInitBackupIfPresent();
@@ -41775,7 +53067,7 @@ import_electron4.app.on("window-all-closed", () => {
   if (process.platform !== "darwin") import_electron4.app.quit();
 });
 import_electron4.app.on("open-file", (_event, filePath) => {
-  if (fs10.existsSync(filePath)) {
+  if (fs13.existsSync(filePath)) {
     openMapGuarded(filePath).then((r) => r && mainWindow?.webContents.send("map:loaded", r));
   }
 });

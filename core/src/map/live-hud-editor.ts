@@ -73,12 +73,30 @@ export interface LiveHudElementItem {
   defaultColorArgb: number;
   /** Field paths for writeTagFieldValue */
   offsetFieldPath: string;
+  /** Virtual memory address (0x40440000-based) of the Point2DInt anchor offset field in halo.exe RAM */
+  offsetVirtualAddress: number;
   scaleXFieldPath: string;
   scaleYFieldPath: string;
   visibilityFieldPath?: string;
   visibilityMode?: 'map_type_15' | 'crosshair_bit7' | 'overlay_bit1' | 'scaling_hide';
   bitmapFieldPath?: string;
   sequenceFieldPath?: string;
+}
+
+export interface LiveMemoryPatch {
+  /** Virtual address in halo.exe tag cache (0x40440000-based) */
+  address: number;
+  /** Base64-encoded bytes to write via WriteProcessMemory */
+  dataBase64: string;
+}
+
+export interface LiveHudSessionSetupInfo {
+  /** Virtual address of the `globals` ('matg') tag root struct in halo.exe RAM (0 if not found) */
+  matgVirtualAddress: number;
+  /** All Spartan-holdable weapon tagIds in the open map */
+  holdableWeaponTagIds: number[];
+  /** All unique vehicle ('vehi') tagIds in the open map */
+  vehicleTagIds: number[];
 }
 
 export interface LiveHudLevel {
@@ -207,6 +225,17 @@ function getPoint2DVal(fields: TagFieldDescriptor[], name: string): [number, num
   return [0, 0];
 }
 
+function getFieldVirtualAddress(
+  fields: TagFieldDescriptor[],
+  name: string,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+): number {
+  const f = findField(fields, name);
+  if (!f || f.offset < header.tagDataOffset) return 0;
+  return (tagIndex.baseMemoryAddress + (f.offset - header.tagDataOffset)) >>> 0;
+}
+
 function getRect2DVal(fields: TagFieldDescriptor[], name: string): [number, number, number, number] {
   const f = findField(fields, name);
   if (f && Array.isArray(f.value) && f.value.length >= 4) {
@@ -306,6 +335,7 @@ export function parseWeaponHudLevel(
       sequenceIndex: seqIdx === 0xffff ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: `static elements[${elemIdx}].anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, 'anchor offset', header, tagIndex),
       scaleXFieldPath: `static elements[${elemIdx}].width scale`,
       scaleYFieldPath: `static elements[${elemIdx}].height scale`,
       visibilityFieldPath: `static elements[${elemIdx}].allowed view type`,
@@ -356,6 +386,7 @@ export function parseWeaponHudLevel(
       sequenceIndex: seqIdx === 0xffff ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: `meter elements[${elemIdx}].anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, 'anchor offset', header, tagIndex),
       scaleXFieldPath: `meter elements[${elemIdx}].width scale`,
       scaleYFieldPath: `meter elements[${elemIdx}].height scale`,
       visibilityFieldPath: `meter elements[${elemIdx}].allowed view type`,
@@ -401,6 +432,7 @@ export function parseWeaponHudLevel(
       sequenceIndex: 0,
       defaultColorArgb: color,
       offsetFieldPath: `number elements[${elemIdx}].anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, 'anchor offset', header, tagIndex),
       scaleXFieldPath: `number elements[${elemIdx}].width scale`,
       scaleYFieldPath: `number elements[${elemIdx}].height scale`,
       visibilityFieldPath: `number elements[${elemIdx}].allowed view type`,
@@ -458,6 +490,7 @@ export function parseWeaponHudLevel(
         sequenceIndex: seqIdx === 0xffff ? 0 : seqIdx,
         defaultColorArgb: color,
         offsetFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].anchor offset`,
+        offsetVirtualAddress: getFieldVirtualAddress(item.fields, 'anchor offset', header, tagIndex),
         scaleXFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].width scale`,
         scaleYFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].height scale`,
         visibilityFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].flags`,
@@ -518,6 +551,7 @@ export function parseWeaponHudLevel(
         sequenceIndex: seqIdx === 0xffff ? 0 : seqIdx,
         defaultColorArgb: color,
         offsetFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].anchor offset`,
+        offsetVirtualAddress: getFieldVirtualAddress(item.fields, 'anchor offset', header, tagIndex),
         scaleXFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].width scale`,
         scaleYFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].height scale`,
         visibilityFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].flags`,
@@ -698,6 +732,7 @@ export function parseUnitHudLevel(
       sequenceIndex: seqIdx === 0xffff ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: spec.offsetField,
+      offsetVirtualAddress: getFieldVirtualAddress(decoded.fields, spec.offsetField, header, tagIndex),
       scaleXFieldPath: spec.scaleXField,
       scaleYFieldPath: spec.scaleYField,
       visibilityMode: 'scaling_hide',
@@ -741,6 +776,7 @@ export function parseUnitHudLevel(
       sequenceIndex: seqIdx === 0xffff ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: `overlays[${elemIdx}].anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, 'anchor offset', header, tagIndex),
       scaleXFieldPath: `overlays[${elemIdx}].width scale`,
       scaleYFieldPath: `overlays[${elemIdx}].height scale`,
       visibilityMode: 'scaling_hide',
@@ -784,6 +820,7 @@ export function parseUnitHudLevel(
       sequenceIndex: seqIdx === 0xffff ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: `meters[${elemIdx}].meter anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, 'meter anchor offset', header, tagIndex),
       scaleXFieldPath: `meters[${elemIdx}].meter width scale`,
       scaleYFieldPath: `meters[${elemIdx}].meter height scale`,
       visibilityMode: 'scaling_hide',
@@ -864,6 +901,7 @@ export function parseGlobalHudLevel(
       sequenceIndex: gSeq === 0xffff ? 0 : gSeq,
       defaultColorArgb: gColor,
       offsetFieldPath: 'anchor offset',
+      offsetVirtualAddress: getFieldVirtualAddress(decoded.fields, 'anchor offset', header, tagIndex),
       scaleXFieldPath: 'width scale',
       scaleYFieldPath: 'height scale',
       visibilityMode: 'scaling_hide',
@@ -901,6 +939,7 @@ export function parseGlobalHudLevel(
       sequenceIndex: 0,
       defaultColorArgb: 0xff4cc9f0,
       offsetFieldPath: 'anchor offset',
+      offsetVirtualAddress: getFieldVirtualAddress(decoded.fields, 'anchor offset', header, tagIndex),
       scaleXFieldPath: 'width scale',
       scaleYFieldPath: 'height scale',
       bitmapFieldPath: 'waypoint arrows bitmap',
@@ -1594,7 +1633,132 @@ function resolveWeaponHudChainIndices(
 }
 
 /**
- * Inspects the open map buffer and returns a complete catalog of Weapons, Vehicles,
+ * Determines which `weapon` ('weap') tags in the open map can actually be held on foot by the Spartan
+ * (excluding vehicle-mounted weapons like `warthog gun`, `scorpion gun`, `ghost gun`, `banshee gun`,
+ * `c_gun_turret`, `wraith mortar`, and any weapon whose animation `label` is not supported by the Spartan).
+ */
+export function collectSpartanHoldableWeaponIndices(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+): Set<number> {
+  const vehicleWeaponIndices = new Set<number>();
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== 'vehicle' || entry.isExternal) continue;
+    try {
+      const vehDecoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const vehWeapons = findField(vehDecoded.fields, 'weapons')?.children ?? [];
+      for (const vw of vehWeapons) {
+        const wDep = getDepTarget(vw.fields, 'weapon', tagIndex);
+        if (wDep.tagIndex !== null) {
+          vehicleWeaponIndices.add(wDep.tagIndex);
+        }
+      }
+    } catch {
+      // ignore unreadable vehicle
+    }
+  }
+
+  // Standard Halo CE Spartan on-foot weapon animation labels + any custom labels on the map's player biped antr
+  const allowedLabels = new Set<string>([
+    'ar',
+    'hp',
+    'pr',
+    'pp',
+    'rl',
+    'sr',
+    'sg',
+    'ne',
+    'ft',
+    'fc',
+    'flag',
+    'ball',
+    'br',
+    'smg',
+    'cs',
+    'gl',
+    'sp',
+  ]);
+
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== 'biped' || entry.isExternal) continue;
+    const normPath = entry.path.replace(/\//g, '\\').toLowerCase();
+    if (!normPath.includes('cyborg') && !normPath.includes('spartan') && !normPath.includes('masterchief')) {
+      continue;
+    }
+    try {
+      const bipedDecoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const antrDep = getDepTarget(bipedDecoded.fields, 'animation graph', tagIndex);
+      if (antrDep.tagIndex === null) continue;
+      const antrDecoded = readTagFieldValues(buffer, header, tagIndex, antrDep.tagIndex);
+      const units = findField(antrDecoded.fields, 'units')?.children ?? [];
+      for (const seat of units) {
+        const seatLabelField = findField(seat.fields, 'label');
+        const seatLabel = typeof seatLabelField?.value === 'string' ? seatLabelField.value.trim().toLowerCase() : '';
+        // Skip vehicle seats (w-gunner, g-driver, b-driver, s-driver, c-driver, turret, etc.)
+        if (
+          seatLabel &&
+          seatLabel !== 'stand' &&
+          seatLabel !== 'alert' &&
+          seatLabel !== 'crouch' &&
+          seatLabel !== 'flee' &&
+          seatLabel !== 'flaming'
+        ) {
+          continue;
+        }
+        const seatWeapons = findField(seat.fields, 'weapons')?.children ?? [];
+        for (const sw of seatWeapons) {
+          const weaponTypes = findField(sw.fields, 'weapon types')?.children ?? [];
+          for (const wt of weaponTypes) {
+            const wtLabelField = findField(wt.fields, 'label');
+            const wtLabel = typeof wtLabelField?.value === 'string' ? wtLabelField.value.trim().toLowerCase() : '';
+            if (wtLabel && wtLabel !== 'gun' && wtLabel !== 'unarmed') {
+              allowedLabels.add(wtLabel);
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore unreadable biped/antr
+    }
+  }
+
+  const nonHoldableNamePattern =
+    /(\bwarthog\b|\bscorpion\b|\bghost[\s_-]*gun\b|\bbanshee\b|\bwraith\b|\bturret\b|\bpelican\b|\bdropship\b|\bphantom\b|\bscarab\b|\bmounted\b|\bunarmed\b|\benergy[\s_-]*blade[\s_-]*useless\b)/i;
+
+  const holdable = new Set<number>();
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== 'weapon' || entry.isExternal) continue;
+    if (vehicleWeaponIndices.has(entry.index)) continue;
+
+    const normPath = entry.path.replace(/\//g, '\\').toLowerCase();
+    if (normPath.startsWith('vehicles\\') || nonHoldableNamePattern.test(normPath)) {
+      continue;
+    }
+
+    try {
+      const decoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const labelField = findField(decoded.fields, 'label');
+      const weapLabel = typeof labelField?.value === 'string' ? labelField.value.trim().toLowerCase() : '';
+      if (!weapLabel || weapLabel === 'gun' || !allowedLabels.has(weapLabel)) {
+        continue;
+      }
+      const fpModelDep = getDepTarget(decoded.fields, 'first person model', tagIndex);
+      const hudDep = getDepTarget(decoded.fields, 'hud interface', tagIndex);
+      if (fpModelDep.tagIndex === null && hudDep.tagIndex === null) {
+        continue;
+      }
+      holdable.add(entry.index);
+    } catch {
+      // ignore unreadable weapon
+    }
+  }
+
+  return holdable;
+}
+
+/**
+ * Inspects the open map buffer and returns a complete catalog of Spartan-holdable Weapons, Vehicles,
  * Unit HUDs, Global HUDs, UI Widgets (`DeLa`), and Unicode String Lists (`ustr`).
  */
 export function inspectMapHudAndUiTargets(
@@ -1602,6 +1766,8 @@ export function inspectMapHudAndUiTargets(
   header: CacheFileHeader,
   tagIndex: TagIndex,
 ): LiveHudCatalog {
+  const holdableWeaponIndices = collectSpartanHoldableWeaponIndices(buffer, header, tagIndex);
+
   // First pass: map wphiTagIndex -> list of weapon paths that use it
   const wphiSharers = new Map<number, string[]>();
   const weaponRawChains = new Map<number, { fields: TagFieldDescriptor[]; chain: number[] }>();
@@ -1615,20 +1781,23 @@ export function inspectMapHudAndUiTargets(
         ? resolveWeaponHudChainIndices(buffer, header, tagIndex, hudDep.tagIndex)
         : [];
       weaponRawChains.set(entry.index, { fields: decoded.fields, chain });
-      for (const wphiIdx of chain) {
-        const list = wphiSharers.get(wphiIdx) ?? [];
-        if (!list.includes(entry.path)) list.push(entry.path);
-        wphiSharers.set(wphiIdx, list);
+      if (holdableWeaponIndices.has(entry.index)) {
+        for (const wphiIdx of chain) {
+          const list = wphiSharers.get(wphiIdx) ?? [];
+          if (!list.includes(entry.path)) list.push(entry.path);
+          wphiSharers.set(wphiIdx, list);
+        }
       }
     } catch {
       // Skip unreadable weapon
     }
   }
 
-  // Build weapons list
+  // Build Spartan-holdable weapons list
   const weapons: LiveWeaponEntry[] = [];
   for (const entry of tagIndex.entries) {
     if (entry.primaryClassName !== 'weapon' || entry.isExternal) continue;
+    if (!holdableWeaponIndices.has(entry.index)) continue;
     const raw = weaponRawChains.get(entry.index);
     if (!raw) continue;
 
@@ -1673,9 +1842,12 @@ export function inspectMapHudAndUiTargets(
       if (vehWeapons.length > 0) {
         const weapDep = getDepTarget(vehWeapons[0].fields, 'weapon', tagIndex);
         if (weapDep.tagIndex !== null) {
-          const foundWeap = weapons.find((w) => w.tagIndex === weapDep.tagIndex);
-          if (foundWeap) {
-            weaponHudChain.push(...foundWeap.hudChain);
+          const rawVehWeap = weaponRawChains.get(weapDep.tagIndex);
+          if (rawVehWeap) {
+            rawVehWeap.chain.forEach((wphiIdx, lvl) => {
+              const p = parseWeaponHudLevel(buffer, header, tagIndex, wphiIdx, lvl, []);
+              if (p) weaponHudChain.push(p);
+            });
           } else {
             const weapDecoded = readTagFieldValues(buffer, header, tagIndex, weapDep.tagIndex);
             const hudDep = getDepTarget(weapDecoded.fields, 'hud interface', tagIndex);
@@ -1790,6 +1962,197 @@ export interface ApplyLiveHudEditRequest {
 }
 
 /**
+ * Diffs a snapshot of the tag data region before & after an edit and produces compact
+ * `WriteProcessMemory` patches (`0x40440000`-based) for live in-game updates in `halo.exe`.
+ */
+export function computeTagDataMemoryPatches(
+  beforeTagData: Buffer,
+  afterBuffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+): LiveMemoryPatch[] {
+  const tagStart = header.tagDataOffset;
+  const tagLen = Math.min(beforeTagData.length, Math.max(0, afterBuffer.length - tagStart));
+  if (tagLen <= 0) return [];
+
+  const patches: LiveMemoryPatch[] = [];
+  let i = 0;
+  while (i < tagLen) {
+    if (beforeTagData[i] === afterBuffer[tagStart + i]) {
+      i++;
+      continue;
+    }
+    const runStart = i;
+    let runEnd = i + 1;
+    while (runEnd < tagLen) {
+      if (beforeTagData[runEnd] !== afterBuffer[tagStart + runEnd]) {
+        runEnd++;
+      } else {
+        // Coalesce small gaps up to 16 bytes so a Point2DInt or Bounds write is a single patch
+        let gap = 1;
+        while (gap <= 16 && runEnd + gap < tagLen && beforeTagData[runEnd + gap] === afterBuffer[tagStart + runEnd + gap]) {
+          gap++;
+        }
+        if (gap <= 16 && runEnd + gap < tagLen) {
+          runEnd += gap + 1;
+        } else {
+          break;
+        }
+      }
+    }
+    const slice = afterBuffer.subarray(tagStart + runStart, tagStart + runEnd);
+    patches.push({
+      address: (tagIndex.baseMemoryAddress + runStart) >>> 0,
+      dataBase64: Buffer.from(slice).toString('base64'),
+    });
+    i = runEnd;
+  }
+  return patches;
+}
+
+/**
+ * Prepares a staged `.map` buffer in-place for an in-game Live HUD & Weapon Tag Editing session:
+ * - Sets `_weapon_doesnt_count_toward_maximum_bit` (`flags |= (1 << 4)`) on all Spartan-holdable weapons
+ *   so the player can carry 4 weapons simultaneously and cycle them with `Tab`.
+ * - Ensures every Spartan-holdable weapon has full initial & reserved magazine ammo.
+ * - Populates existing `weapons` (`initial weapons`) slots on the player biped (`cyborg_mp` / `cyborg`).
+ * - Populates existing `weapon list` and `multiplayer information[0].vehicles` slots in `globals` (`matg`),
+ *   and returns `{ matgVirtualAddress, holdableWeaponTagIds, vehicleTagIds }` so the live memory bridge
+ *   can write the full `TagReference` arrays into `halo.exe` RAM (`0x41B00000` / `0x41B01000`) and
+ *   execute `cheat_all_weapons` and `cheat_all_vehicles` on spawn!
+ */
+export function prepareMapBufferForLiveHudSession(
+  buffer: Buffer,
+  header: CacheFileHeader,
+  tagIndex: TagIndex,
+): LiveHudSessionSetupInfo {
+  const holdableIndices = collectSpartanHoldableWeaponIndices(buffer, header, tagIndex);
+  const holdableWeaponTagIds: number[] = [];
+
+  for (const weapIdx of holdableIndices) {
+    const entry = tagIndex.entries[weapIdx];
+    if (!entry || entry.isExternal) continue;
+    holdableWeaponTagIds.push(entry.tagId);
+
+    try {
+      const decoded = readTagFieldValues(buffer, header, tagIndex, weapIdx);
+      // 1. Set _weapon_doesnt_count_toward_maximum_bit (bit 4) on weapon flags so Spartan holds 4 weapons
+      const flagsField = findField(decoded.fields, 'weapon flags');
+      if (flagsField && flagsField.offset >= header.tagDataOffset && flagsField.offset + 4 <= buffer.length) {
+        const curFlags = buffer.readUInt32LE(flagsField.offset);
+        buffer.writeUInt32LE((curFlags | (1 << 4)) >>> 0, flagsField.offset);
+      }
+
+      // 2. Ensure magazines have generous initial & reserved ammo
+      const mags = findField(decoded.fields, 'magazines')?.children ?? [];
+      for (const mag of mags) {
+        const loadedMax = Math.max(1, getNumberVal(mag.fields, 'rounds loaded maximum', 30));
+        const desiredAmmo = Math.min(999, Math.max(loadedMax * 4, 120));
+        const initField = findField(mag.fields, 'rounds total initial');
+        const maxField = findField(mag.fields, 'rounds reserved maximum');
+        if (initField && initField.offset >= header.tagDataOffset && initField.offset + 2 <= buffer.length) {
+          const curInit = buffer.readInt16LE(initField.offset);
+          if (curInit < loadedMax) {
+            buffer.writeInt16LE(desiredAmmo, initField.offset);
+          }
+        }
+        if (maxField && maxField.offset >= header.tagDataOffset && maxField.offset + 2 <= buffer.length) {
+          const curMax = buffer.readInt16LE(maxField.offset);
+          if (curMax < loadedMax) {
+            buffer.writeInt16LE(desiredAmmo, maxField.offset);
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Collect all unique vehicle ('vehi') tags in the map, prioritizing vehicles with HUDs/weapons first
+  const vehWithHud: number[] = [];
+  const vehOther: number[] = [];
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== 'vehicle' || entry.isExternal) continue;
+    const norm = entry.path.replace(/\//g, '\\').toLowerCase();
+    // Skip non-interactive cinematic dropships/props if they have no seats/HUDs
+    let hasHudOrWeapon = false;
+    try {
+      const d = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const uHuds = findField(d.fields, 'new unit hud interface')?.children ?? [];
+      const vWeaps = findField(d.fields, 'weapons')?.children ?? [];
+      const seats = findField(d.fields, 'seats')?.children ?? [];
+      if (uHuds.length > 0 || vWeaps.length > 0 || seats.length > 0) {
+        hasHudOrWeapon = true;
+      }
+    } catch {
+      // ignore
+    }
+    if (norm.includes('pelican') || norm.includes('dropship') || norm.includes('lifepod')) {
+      continue;
+    }
+    if (hasHudOrWeapon) {
+      vehWithHud.push(entry.tagId);
+    } else {
+      vehOther.push(entry.tagId);
+    }
+  }
+  const vehicleTagIds = [...vehWithHud, ...vehOther];
+
+  // Populate existing initial_weapons slots on Spartan biped tags in-place
+  if (holdableWeaponTagIds.length > 0) {
+    for (const entry of tagIndex.entries) {
+      if (entry.primaryClassName !== 'biped' || entry.isExternal) continue;
+      const norm = entry.path.replace(/\//g, '\\').toLowerCase();
+      if (!norm.includes('cyborg') && !norm.includes('spartan') && !norm.includes('masterchief')) continue;
+      try {
+        const d = readTagFieldValues(buffer, header, tagIndex, entry.index);
+        const bipedWeaps = findField(d.fields, 'weapons')?.children ?? [];
+        for (let i = 0; i < bipedWeaps.length && i < holdableWeaponTagIds.length; i++) {
+          writeTagFieldValue(buffer, header, tagIndex, entry.index, `weapons[${i}].weapon`, holdableWeaponTagIds[i]);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  // Locate `globals` ('matg') tag and populate any existing weapon_list / vehicles slots in-place
+  let matgVirtualAddress = 0;
+  const matgEntry = tagIndex.entries.find((e) => e.primaryClassName === 'globals' && !e.isExternal);
+  if (matgEntry) {
+    matgVirtualAddress = matgEntry.tagDataPointerOrResourceIndex >>> 0;
+    try {
+      const matgDecoded = readTagFieldValues(buffer, header, tagIndex, matgEntry.index);
+      const weapList = findField(matgDecoded.fields, 'weapon list')?.children ?? [];
+      for (let i = 0; i < weapList.length && i < holdableWeaponTagIds.length; i++) {
+        writeTagFieldValue(buffer, header, tagIndex, matgEntry.index, `weapon list[${i}].weapon`, holdableWeaponTagIds[i]);
+      }
+      const mpInfo = findField(matgDecoded.fields, 'multiplayer information')?.children ?? [];
+      if (mpInfo.length > 0) {
+        const mpVehicles = findField(mpInfo[0].fields, 'vehicles')?.children ?? [];
+        for (let i = 0; i < mpVehicles.length && i < vehicleTagIds.length; i++) {
+          const vField = findField(mpVehicles[i].fields, 'vehicle');
+          if (vField && vField.offset >= header.tagDataOffset && vField.offset + 16 <= buffer.length) {
+            buffer.writeUInt32LE(0x76656869, vField.offset); // 'vehi'
+            buffer.writeUInt32LE(0, vField.offset + 4);
+            buffer.writeUInt32LE(0, vField.offset + 8);
+            buffer.writeInt32LE(vehicleTagIds[i], vField.offset + 12);
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    matgVirtualAddress,
+    holdableWeaponTagIds,
+    vehicleTagIds,
+  };
+}
+
+/**
  * Applies a live HUD placement, scale, visibility, or anchor edit directly to the open map buffer.
  * If `scope === 'this_one'` and the `wphi` tag is shared by multiple weapons, automatically forks a
  * dedicated copy of the `wphi` tag for `ownerWeaponTagIndex`.
@@ -1799,7 +2162,16 @@ export function applyLiveHudEdit(
   header: CacheFileHeader,
   tagIndex: TagIndex,
   req: ApplyLiveHudEditRequest,
-): { buffer: Buffer; header: CacheFileHeader; tagIndex: TagIndex; effectiveHudTagIndex: number } {
+): {
+  buffer: Buffer;
+  header: CacheFileHeader;
+  tagIndex: TagIndex;
+  effectiveHudTagIndex: number;
+  memoryPatches: LiveMemoryPatch[];
+} {
+  const beforeTagData = Buffer.from(
+    buffer.subarray(header.tagDataOffset, Math.min(buffer.length, header.tagDataOffset + header.tagDataSize)),
+  );
   let curBuf = buffer;
   let curHeader = header;
   let curTagIndex = tagIndex;
@@ -1849,7 +2221,14 @@ export function applyLiveHudEdit(
   if (req.editType === 'anchor' && typeof req.anchorIndex === 'number') {
     const clamped = Math.max(0, Math.min(4, Math.round(req.anchorIndex)));
     writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, 'anchor', clamped);
-    return { buffer: curBuf, header: curHeader, tagIndex: curTagIndex, effectiveHudTagIndex: targetHudIndex };
+    const memoryPatches = computeTagDataMemoryPatches(beforeTagData, curBuf, curHeader, curTagIndex);
+    return {
+      buffer: curBuf,
+      header: curHeader,
+      tagIndex: curTagIndex,
+      effectiveHudTagIndex: targetHudIndex,
+      memoryPatches,
+    };
   }
 
   if (req.offsetFieldPath && typeof req.x === 'number' && typeof req.y === 'number') {
@@ -1897,7 +2276,14 @@ export function applyLiveHudEdit(
     }
   }
 
-  return { buffer: curBuf, header: curHeader, tagIndex: curTagIndex, effectiveHudTagIndex: targetHudIndex };
+  const memoryPatches = computeTagDataMemoryPatches(beforeTagData, curBuf, curHeader, curTagIndex);
+  return {
+    buffer: curBuf,
+    header: curHeader,
+    tagIndex: curTagIndex,
+    effectiveHudTagIndex: targetHudIndex,
+    memoryPatches,
+  };
 }
 
 export interface ApplyLiveWeaponStatEditRequest {
@@ -1916,7 +2302,10 @@ export function applyLiveWeaponStatEdit(
   header: CacheFileHeader,
   tagIndex: TagIndex,
   req: ApplyLiveWeaponStatEditRequest,
-): { ok: true; writtenValue: unknown } {
+): { ok: true; writtenValue: unknown; memoryPatches: LiveMemoryPatch[] } {
+  const beforeTagData = Buffer.from(
+    buffer.subarray(header.tagDataOffset, Math.min(buffer.length, header.tagDataOffset + header.tagDataSize)),
+  );
   let rawVal = Number(req.value);
   if (req.conversion === 'rad_to_deg') {
     rawVal = (rawVal * Math.PI) / 180;
@@ -1944,11 +2333,13 @@ export function applyLiveWeaponStatEdit(
     }
     currentBounds[req.boundsIndex] = rawVal;
     writeTagFieldValue(buffer, header, tagIndex, req.targetTagIndex, req.fieldPath, currentBounds);
-    return { ok: true, writtenValue: currentBounds };
+    const memoryPatches = computeTagDataMemoryPatches(beforeTagData, buffer, header, tagIndex);
+    return { ok: true, writtenValue: currentBounds, memoryPatches };
   }
 
   writeTagFieldValue(buffer, header, tagIndex, req.targetTagIndex, req.fieldPath, rawVal);
-  return { ok: true, writtenValue: rawVal };
+  const memoryPatches = computeTagDataMemoryPatches(beforeTagData, buffer, header, tagIndex);
+  return { ok: true, writtenValue: rawVal, memoryPatches };
 }
 
 export interface GuidedHudBitmapInjectRequest {

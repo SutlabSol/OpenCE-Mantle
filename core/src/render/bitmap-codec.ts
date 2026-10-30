@@ -921,7 +921,7 @@ export function replaceBitmapImageData(
     }
 
     // Insert pixel payload at modelDataFileOffset (raw data partition) so tagDataSize only grows by tagCopy.length (~156 bytes)!
-    const insertAt = tagIndex.modelDataFileOffset;
+    const insertAt = header.engine === 5 ? header.tagDataOffset : tagIndex.modelDataFileOffset;
     if (insertAt > 0 && insertAt <= header.tagDataOffset) {
       const pixelShift = (newPixels.length + 3) & ~3;
       const newTagDataOffset = header.tagDataOffset + pixelShift;
@@ -969,12 +969,14 @@ export function replaceBitmapImageData(
       outBuffer.writeUInt32LE(totalNewLength, 0x08);
       outBuffer.writeUInt32LE(newTagDataOffset, 0x10);
       outBuffer.writeUInt32LE(newTagDataSize, 0x14);
-      outBuffer.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 0x14);
+      if (header.engine !== 5) {
+        outBuffer.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 0x14);
+        tagIndex.modelDataFileOffset = newModelDataFileOffset;
+      }
 
       header.decompressedFileSize = totalNewLength;
       header.tagDataOffset = newTagDataOffset;
       header.tagDataSize = newTagDataSize;
-      tagIndex.modelDataFileOffset = newModelDataFileOffset;
 
       return outBuffer;
     }
@@ -1022,7 +1024,7 @@ export function replaceBitmapImageData(
     Buffer.from(newPixels).copy(outBuffer, pixelsStartInMap);
 
     // Rebase tag table entry in map
-    const tagArrayOffset = header.tagDataOffset + 0x28;
+    const tagArrayOffset = header.tagDataOffset + (header.engine === 5 ? 0x24 : 0x28);
     const entryOffset = tagArrayOffset + entryIdx * 32;
     outBuffer.writeUInt32LE(tagVirtualAddress, entryOffset + 0x14);
     outBuffer.writeUInt32LE(0, entryOffset + 0x18); // isExternal = false
@@ -1074,7 +1076,7 @@ export function replaceBitmapImageData(
     // Check if the map uses the standard [raw data][model data][tag data] layout:
     // If so, insert the new pixel bytes at `modelDataFileOffset` (end of raw-data region)
     // so `tagDataSize` is never inflated with raw pixel bytes and future tag injections succeed.
-    const insertAt = tagIndex.modelDataFileOffset;
+    const insertAt = header.engine === 5 ? header.tagDataOffset : tagIndex.modelDataFileOffset;
     if (insertAt > 0 && insertAt <= header.tagDataOffset) {
       const shift = (newPixels.length + 3) & ~3;
       const newBuf = Buffer.alloc(mapBuffer.length + shift, 0);
@@ -1084,13 +1086,18 @@ export function replaceBitmapImageData(
 
       const newTagDataOffset = header.tagDataOffset + shift;
       const newModelDataFileOffset = insertAt + shift;
+      const newTagDataSize = newBuf.length - newTagDataOffset;
       newBuf.writeUInt32LE(newBuf.length, 0x08); // fileLength
       newBuf.writeUInt32LE(newTagDataOffset, 0x10); // tagDataOffset
-      newBuf.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 0x14); // modelDataFileOffset
+      newBuf.writeUInt32LE(newTagDataSize, 0x14); // tagDataSize
+      if (header.engine !== 5) {
+        newBuf.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 0x14); // modelDataFileOffset
+        tagIndex.modelDataFileOffset = newModelDataFileOffset;
+      }
 
       header.decompressedFileSize = newBuf.length;
       header.tagDataOffset = newTagDataOffset;
-      tagIndex.modelDataFileOffset = newModelDataFileOffset;
+      header.tagDataSize = newTagDataSize;
 
       outputBuffer = newBuf;
       targetOffset = insertAt;

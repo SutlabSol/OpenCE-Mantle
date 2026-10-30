@@ -661,9 +661,8 @@ export function convertObjectTagClassInMap(
                 outBuf.writeUInt32LE(newRegsPtr, newModelAt + 200);
 
                 outBuf = Buffer.concat([outBuf, pad1, clonedRegs, clonedPerms]);
-                const delta = pad1.length + clonedRegs.length + clonedPerms.length;
                 outBuf.writeUInt32LE(outBuf.length >>> 0, 0x08);
-                outBuf.writeUInt32LE((curHeader.tagDataSize + delta) >>> 0, 0x14);
+                outBuf.writeUInt32LE((outBuf.length - curHeader.tagDataOffset) >>> 0, 0x14);
                 curHeader = parseCacheFileHeader(outBuf);
                 curTagIndex = parseTagIndex(outBuf, curHeader);
 
@@ -753,9 +752,8 @@ export function convertObjectTagClassInMap(
             outBuf.writeUInt32LE(newNodesPtr, newCollAt + 656);
 
             outBuf = Buffer.concat([outBuf, pad2, newCollNodes]);
-            const delta2 = pad2.length + newCollNodes.length;
             outBuf.writeUInt32LE(outBuf.length >>> 0, 0x08);
-            outBuf.writeUInt32LE((curHeader.tagDataSize + delta2) >>> 0, 0x14);
+            outBuf.writeUInt32LE((outBuf.length - curHeader.tagDataOffset) >>> 0, 0x14);
             curHeader = parseCacheFileHeader(outBuf);
             curTagIndex = parseTagIndex(outBuf, curHeader);
           }
@@ -827,11 +825,9 @@ export function convertObjectTagClassInMap(
   newStructBuf.writeUInt32LE(0, 368);
   newStructBuf.writeUInt32LE(0, 372);
 
-  const prevSize = outBuf.length;
   outBuf = Buffer.concat([outBuf, pad, newStructBuf]);
-  const addedBytes = outBuf.length - prevSize;
   outBuf.writeUInt32LE(outBuf.length >>> 0, 0x08);
-  outBuf.writeUInt32LE((curHeader.tagDataSize + addedBytes) >>> 0, 0x14);
+  outBuf.writeUInt32LE((outBuf.length - curHeader.tagDataOffset) >>> 0, 0x14);
 
   // Update the TagIndex entry's primary/secondary/tertiary FourCCs and data pointer
   const tagHeaderSize = curHeader.engine === 5 ? 0x24 : TAG_DATA_HEADER_PC_SIZE;
@@ -945,11 +941,10 @@ export function deepCloneReflexiveAtOffset(
   const newPtr = (tagIndex.baseMemoryAddress + (alignedStart - header.tagDataOffset)) >>> 0;
 
   let out: Buffer = Buffer.concat([buf, pad, clonedSlice]);
-  const delta = pad.length + clonedSlice.length;
   out.writeUInt32LE(newPtr, refHeaderAbsOffset + 4);
   out.writeUInt32LE(0, refHeaderAbsOffset + 8);
   out.writeUInt32LE(out.length >>> 0, 0x08);
-  out.writeUInt32LE((header.tagDataSize + delta) >>> 0, 0x14);
+  out.writeUInt32LE((out.length - header.tagDataOffset) >>> 0, 0x14);
 
   let curHeader = parseCacheFileHeader(out);
   let curTagIndex = parseTagIndex(out, curHeader);

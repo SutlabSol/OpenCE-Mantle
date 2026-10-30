@@ -12,11 +12,404 @@
 
 import { parseCacheFileHeader } from './header';
 import { parseTagIndex, type TagIndexEntry } from './tag-index';
-import { readTagFieldValues, type TagFieldDescriptor } from './tag-field-editor';
+import { readTagFieldValues, type TagFieldDescriptor, type TagReflexiveElement } from './tag-field-editor';
 import type { OceContainer } from './container';
 
 export type DifferenceStatus = 'added' | 'removed' | 'changed' | 'unknown';
 export type MapDifferenceCategory = string;
+
+export interface ReflexiveAlignmentResult {
+  matchedPairs: Array<{ oldIdx: number; newIdx: number; identity?: string; moved: boolean }>;
+  addedIndices: number[];
+  removedIndices: number[];
+  strategy: 'identity' | 'content';
+}
+
+const IDENTITY_FIELD_CANDIDATES = [
+  'name',
+  'label',
+  'permutation name',
+  'marker name',
+  'node name',
+  'script name',
+  'region name',
+  'camera point name',
+  'object name',
+  'shader',
+  'item collection',
+  'weapon',
+  'vehicle',
+  'biped',
+  'equipment',
+  'scenery',
+  'sound',
+  'bitmap',
+  'damage effect',
+  'projectile',
+];
+
+function extractElementIdentity(elem: TagReflexiveElement): string | null {
+  for (const candidate of IDENTITY_FIELD_CANDIDATES) {
+    const f = elem.fields.find((field) => field.name.toLowerCase() === candidate);
+    if (!f) continue;
+    if (f.kind === 'string' && typeof f.value === 'string' && f.value.trim()) {
+      return f.value.trim();
+    }
+    if (f.kind === 'dependency' && f.dependencyTarget && f.dependencyTarget.path) {
+      return `${f.dependencyTarget.group}:${normalizeComparePath(f.dependencyTarget.path)}`;
+    }
+  }
+  for (const f of elem.fields) {
+    if (f.kind === 'string' && typeof f.value === 'string' && f.value.trim()) {
+      return f.value.trim();
+    }
+  }
+  for (const f of elem.fields) {
+    if (f.kind === 'dependency' && f.dependencyTarget && f.dependencyTarget.path) {
+      return `${f.dependencyTarget.group}:${normalizeComparePath(f.dependencyTarget.path)}`;
+    }
+  }
+  return null;
+}
+
+function computeElementFingerprints(elem: TagReflexiveElement): { shallow: string; deep: string } {
+  const shallowParts: string[] = [];
+  const deepParts: string[] = [];
+  for (const f of elem.fields) {
+    if (f.kind === 'reflexive') {
+      const childDeep = (f.children ?? []).map((c) => computeElementFingerprints(c).deep).join(';');
+      deepParts.push(`${f.name}=[${childDeep}]`);
+    } else {
+      const val = formatFieldDisplay(f);
+      shallowParts.push(`${f.name}=${val}`);
+      deepParts.push(`${f.name}=${val}`);
+    }
+  }
+  return {
+    shallow: shallowParts.join('|'),
+    deep: deepParts.join('|'),
+  };
+}
+
+function computeLisKeepIndices(seq: number[]): Set<number> {
+  if (seq.length === 0) return new Set();
+  const tails: number[] = [];
+  const tailIdx: number[] = [];
+  const prev = new Array<number>(seq.length).fill(-1);
+
+  for (let i = 0; i < seq.length; i++) {
+    const val = seq[i]!;
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (tails[mid]! < val) lo = mid + 1;
+      else hi = mid;
+    }
+    tails[lo] = val;
+    tailIdx[lo] = i;
+    if (lo > 0) prev[i] = tailIdx[lo - 1]!;
+  }
+
+  const keep = new Set<number>();
+  let cur = tailIdx[tails.length - 1] ?? -1;
+  while (cur >= 0) {
+    keep.add(cur);
+    cur = prev[cur]!;
+  }
+  return keep;
+}
+
+function lcsIndexPairs(leftKeys: string[], rightKeys: string[]): Array<[number, number]> {
+  const m = leftKeys.length;
+  const n = rightKeys.length;
+  if (m === 0 || n === 0) return [];
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (leftKeys[i] === rightKeys[j]) {
+        dp[i]![j] = 1 + dp[i + 1]![j + 1]!;
+      } else {
+        dp[i]![j] = Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!);
+      }
+    }
+  }
+  const pairs: Array<[number, number]> = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (leftKeys[i] === rightKeys[j]) {
+      pairs.push([i, j]);
+      i++;
+      j++;
+    } else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Baboon 3-tier semantic reflexive block alignment:
+ * 1. `alignByIdentity`: when every element on both sides has a unique non-empty primary name/dependency identity,
+ *    pairs elements by identity and detects reordered elements via Patience-sort Longest Increasing Subsequence (LIS).
+ * 2. `alignByContent`: falls back to dynamic-programming LCS over recursive deep fingerprints, refines contiguous
+ *    gaps with shallow fingerprints, and pairs 1-to-1 modified slots while isolating true insertions/deletions.
+ */
+export function alignReflexiveElements(
+  leftChildren: TagReflexiveElement[],
+  rightChildren: TagReflexiveElement[],
+): ReflexiveAlignmentResult {
+  const leftIds = leftChildren.map(extractElementIdentity);
+  const rightIds = rightChildren.map(extractElementIdentity);
+  const allLeftValid = leftChildren.length > 0 && leftIds.every((id): id is string => !!id);
+  const allRightValid = rightChildren.length > 0 && rightIds.every((id): id is string => !!id);
+  const uniqueLeft = new Set(leftIds).size === leftIds.length;
+  const uniqueRight = new Set(rightIds).size === rightIds.length;
+
+  if (allLeftValid && allRightValid && uniqueLeft && uniqueRight) {
+    const rightById = new Map<string, number>();
+    rightIds.forEach((id, idx) => rightById.set(id!, idx));
+
+    const rawPairs: Array<{ oldIdx: number; newIdx: number; identity: string }> = [];
+    const matchedOld = new Set<number>();
+    const matchedNew = new Set<number>();
+
+    for (let oldIdx = 0; oldIdx < leftChildren.length; oldIdx++) {
+      const id = leftIds[oldIdx]!;
+      const newIdx = rightById.get(id);
+      if (newIdx !== undefined) {
+        rawPairs.push({ oldIdx, newIdx, identity: id });
+        matchedOld.add(oldIdx);
+        matchedNew.add(newIdx);
+      }
+    }
+
+    const lisSet = computeLisKeepIndices(rawPairs.map((p) => p.newIdx));
+    const matchedPairs: ReflexiveAlignmentResult['matchedPairs'] = rawPairs.map((p, idx) => ({
+      oldIdx: p.oldIdx,
+      newIdx: p.newIdx,
+      identity: p.identity,
+      moved: !lisSet.has(idx),
+    }));
+
+    const unmatchedOld = leftChildren.map((_, i) => i).filter((i) => !matchedOld.has(i));
+    const unmatchedNew = rightChildren.map((_, i) => i).filter((i) => !matchedNew.has(i));
+
+    // If equal number of unmatched old and new slots remain (e.g. a renamed element), pair them 1-to-1
+    if (unmatchedOld.length > 0 && unmatchedOld.length === unmatchedNew.length) {
+      for (let k = 0; k < unmatchedOld.length; k++) {
+        matchedPairs.push({
+          oldIdx: unmatchedOld[k]!,
+          newIdx: unmatchedNew[k]!,
+          identity: `${leftIds[unmatchedOld[k]!]} -> ${rightIds[unmatchedNew[k]!]}`,
+          moved: false,
+        });
+      }
+      matchedPairs.sort((a, b) => a.oldIdx - b.oldIdx);
+      return {
+        matchedPairs,
+        addedIndices: [],
+        removedIndices: [],
+        strategy: 'identity',
+      };
+    }
+
+    return {
+      matchedPairs,
+      addedIndices: unmatchedNew,
+      removedIndices: unmatchedOld,
+      strategy: 'identity',
+    };
+  }
+
+  // Tier 2: Content fingerprint LCS alignment (deep + shallow gap refinement)
+  const leftFp = leftChildren.map(computeElementFingerprints);
+  const rightFp = rightChildren.map(computeElementFingerprints);
+  const deepPairs = lcsIndexPairs(
+    leftFp.map((f) => f.deep),
+    rightFp.map((f) => f.deep),
+  );
+
+  const matchedPairs: ReflexiveAlignmentResult['matchedPairs'] = [];
+  const removedIndices: number[] = [];
+  const addedIndices: number[] = [];
+
+  const anchors: Array<[number, number]> = [...deepPairs, [leftChildren.length, rightChildren.length]];
+  let prevOld = 0;
+  let prevNew = 0;
+
+  for (const [anchorOld, anchorNew] of anchors) {
+    const gapOldLen = anchorOld - prevOld;
+    const gapNewLen = anchorNew - prevNew;
+
+    if (gapOldLen > 0 && gapNewLen > 0) {
+      const gapOldShallow = leftFp.slice(prevOld, anchorOld).map((f) => f.shallow);
+      const gapNewShallow = rightFp.slice(prevNew, anchorNew).map((f) => f.shallow);
+      const shallowSubPairs = lcsIndexPairs(gapOldShallow, gapNewShallow);
+
+      if (shallowSubPairs.length > 0) {
+        const subAnchors: Array<[number, number]> = [...shallowSubPairs, [gapOldLen, gapNewLen]];
+        let subPrevO = 0;
+        let subPrevN = 0;
+        for (const [so, sn] of subAnchors) {
+          const remO = so - subPrevO;
+          const remN = sn - subPrevN;
+          const pairCount = Math.min(remO, remN);
+          for (let k = 0; k < pairCount; k++) {
+            const oi = prevOld + subPrevO + k;
+            const ni = prevNew + subPrevN + k;
+            matchedPairs.push({
+              oldIdx: oi,
+              newIdx: ni,
+              identity: leftIds[oi] ?? rightIds[ni] ?? undefined,
+              moved: false,
+            });
+          }
+          for (let k = pairCount; k < remO; k++) removedIndices.push(prevOld + subPrevO + k);
+          for (let k = pairCount; k < remN; k++) addedIndices.push(prevNew + subPrevN + k);
+          if (so < gapOldLen && sn < gapNewLen) {
+            const oi = prevOld + so;
+            const ni = prevNew + sn;
+            matchedPairs.push({
+              oldIdx: oi,
+              newIdx: ni,
+              identity: leftIds[oi] ?? rightIds[ni] ?? undefined,
+              moved: false,
+            });
+          }
+          subPrevO = so + 1;
+          subPrevN = sn + 1;
+        }
+      } else {
+        const pairCount = Math.min(gapOldLen, gapNewLen);
+        for (let k = 0; k < pairCount; k++) {
+          const oi = prevOld + k;
+          const ni = prevNew + k;
+          matchedPairs.push({
+            oldIdx: oi,
+            newIdx: ni,
+            identity: leftIds[oi] ?? rightIds[ni] ?? undefined,
+            moved: false,
+          });
+        }
+        for (let k = pairCount; k < gapOldLen; k++) removedIndices.push(prevOld + k);
+        for (let k = pairCount; k < gapNewLen; k++) addedIndices.push(prevNew + k);
+      }
+    } else if (gapOldLen > 0) {
+      for (let k = 0; k < gapOldLen; k++) removedIndices.push(prevOld + k);
+    } else if (gapNewLen > 0) {
+      for (let k = 0; k < gapNewLen; k++) addedIndices.push(prevNew + k);
+    }
+
+    if (anchorOld < leftChildren.length && anchorNew < rightChildren.length) {
+      matchedPairs.push({
+        oldIdx: anchorOld,
+        newIdx: anchorNew,
+        identity: leftIds[anchorOld] ?? rightIds[anchorNew] ?? undefined,
+        moved: false,
+      });
+    }
+    prevOld = anchorOld + 1;
+    prevNew = anchorNew + 1;
+  }
+
+  return {
+    matchedPairs,
+    addedIndices,
+    removedIndices,
+    strategy: 'content',
+  };
+}
+
+export function compareTagFieldListsSemantically(
+  leftFields: TagFieldDescriptor[],
+  rightFields: TagFieldDescriptor[],
+  pushRow: (
+    property: string,
+    before: string,
+    after: string,
+    status?: DifferenceStatus,
+    detail?: string,
+  ) => void,
+  prefix = '',
+  depth = 0,
+): void {
+  if (depth > 3) return;
+  const rightByName = new Map(rightFields.map((f) => [f.name, f]));
+
+  for (const lf of leftFields) {
+    const rf = rightByName.get(lf.name);
+    if (!rf) continue;
+    const propPath = prefix ? `${prefix}.${lf.name}` : lf.name;
+
+    if (lf.kind === 'reflexive' && Array.isArray(lf.children) && Array.isArray(rf.children)) {
+      if (lf.children.length !== rf.children.length) {
+        pushRow(
+          propPath,
+          formatFieldDisplay(lf),
+          formatFieldDisplay(rf),
+          'changed',
+          `Reflexive block count changed (${lf.children.length} -> ${rf.children.length})`,
+        );
+      }
+      if (lf.children.length <= 64 && rf.children.length <= 64 && (lf.children.length > 0 || rf.children.length > 0)) {
+        const alignment = alignReflexiveElements(lf.children, rf.children);
+        for (const remIdx of alignment.removedIndices) {
+          const remChild = lf.children[remIdx];
+          const label = remChild ? extractElementIdentity(remChild) ?? `#${remIdx}` : `#${remIdx}`;
+          pushRow(
+            `${propPath}[-${remIdx}:${label}]`,
+            label,
+            'Removed',
+            'removed',
+            `Removed element ${remIdx} (${label})`,
+          );
+        }
+        for (const addIdx of alignment.addedIndices) {
+          const addChild = rf.children[addIdx];
+          const label = addChild ? extractElementIdentity(addChild) ?? `#${addIdx}` : `#${addIdx}`;
+          pushRow(
+            `${propPath}[+${addIdx}:${label}]`,
+            'Not present',
+            label,
+            'added',
+            `Added element at index ${addIdx} (${label})`,
+          );
+        }
+        for (const pair of alignment.matchedPairs) {
+          const lChild = lf.children[pair.oldIdx];
+          const rChild = rf.children[pair.newIdx];
+          if (!lChild || !rChild) continue;
+          const idSuffix = pair.identity ? `:${pair.identity}` : '';
+          const idxLabel =
+            pair.oldIdx === pair.newIdx
+              ? `${propPath}[${pair.oldIdx}${idSuffix}]`
+              : `${propPath}[${pair.oldIdx}->${pair.newIdx}${idSuffix}]`;
+          if (pair.moved) {
+            pushRow(
+              idxLabel,
+              `Index #${pair.oldIdx}`,
+              `Index #${pair.newIdx}`,
+              'changed',
+              `Reordered element${pair.identity ? ` "${pair.identity}"` : ''}`,
+            );
+          }
+          compareTagFieldListsSemantically(lChild.fields, rChild.fields, pushRow, idxLabel, depth + 1);
+        }
+      }
+      continue;
+    }
+
+    const lv = formatFieldDisplay(lf);
+    const rv = formatFieldDisplay(rf);
+    if (lv !== rv) {
+      pushRow(propPath, lv, rv, 'changed');
+    }
+  }
+}
 
 export interface MapDifferenceRow {
   id: string;
@@ -291,60 +684,23 @@ export function compareMaps(
       try {
         const leftFields = readTagFieldValues(leftBuffer, leftHeader, leftIndex, leftEntry.index);
         const rightFields = readTagFieldValues(rightBuffer, rightHeader, rightIndex, rightEntry.index);
-        const rightByName = new Map(rightFields.fields.map((f) => [f.name, f]));
-
-        for (const lf of leftFields.fields) {
-          const rf = rightByName.get(lf.name);
-          if (!rf) continue;
-          const lv = formatFieldDisplay(lf);
-          const rv = formatFieldDisplay(rf);
-          if (lv !== rv) {
+        compareTagFieldListsSemantically(
+          leftFields.fields,
+          rightFields.fields,
+          (property, before, after, status = 'changed', detail) => {
             pushRow(
               category,
               subject,
-              lf.name,
-              lv,
-              rv,
-              'changed',
-              undefined,
+              property,
+              before,
+              after,
+              status,
+              detail,
               leftEntry.index,
               rightEntry.index,
             );
-          } else if (
-            lf.kind === 'reflexive' &&
-            Array.isArray(lf.children) &&
-            Array.isArray(rf.children) &&
-            lf.children.length === rf.children.length &&
-            lf.children.length <= 64
-          ) {
-            // Compare first-level reflexive elements when counts match
-            for (let idx = 0; idx < lf.children.length; idx++) {
-              const lChild = lf.children[idx];
-              const rChild = rf.children[idx];
-              if (!lChild || !rChild) continue;
-              const rChildMap = new Map(rChild.fields.map((cf) => [cf.name, cf]));
-              for (const lcf of lChild.fields) {
-                const rcf = rChildMap.get(lcf.name);
-                if (!rcf) continue;
-                const lcv = formatFieldDisplay(lcf);
-                const rcv = formatFieldDisplay(rcf);
-                if (lcv !== rcv) {
-                  pushRow(
-                    category,
-                    subject,
-                    `${lf.name}[${idx}].${lcf.name}`,
-                    lcv,
-                    rcv,
-                    'changed',
-                    undefined,
-                    leftEntry.index,
-                    rightEntry.index,
-                  );
-                }
-              }
-            }
-          }
-        }
+          },
+        );
       } catch {
         // Ignore unwalkable or custom-protected tags during bulk comparison
       }

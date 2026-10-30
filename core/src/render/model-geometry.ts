@@ -323,13 +323,31 @@ export function extractModelRenderGeometry(
         }
       }
 
-      // Unstrip, then drop degenerate triangles (equal-vertex-index triples).
+      // Unstrip, drop degenerate triangles, and orient triangle winding to match stored outward vertex normals
+      // so dynamic lighting on vehicles/weapons/equipment never flips normals into dark shadow.
       const raw = decodeTriangleStrip(buffer, partStripOffset, vertexCount, triangleCount);
       const indices: number[] = [];
       for (let t = 0; t + 2 < raw.length; t += 3) {
         const v0 = raw[t], v1 = raw[t + 1], v2 = raw[t + 2];
         if (v0 === v1 || v1 === v2 || v0 === v2) continue;
-        indices.push(v0, v1, v2);
+        const o0 = v0 * 8, o1 = v1 * 8, o2 = v2 * 8;
+        const e1x = vertices[o1] - vertices[o0];
+        const e1y = vertices[o1 + 1] - vertices[o0 + 1];
+        const e1z = vertices[o1 + 2] - vertices[o0 + 2];
+        const e2x = vertices[o2] - vertices[o0];
+        const e2y = vertices[o2 + 1] - vertices[o0 + 1];
+        const e2z = vertices[o2 + 2] - vertices[o0 + 2];
+        const fnx = e1y * e2z - e1z * e2y;
+        const fny = e1z * e2x - e1x * e2z;
+        const fnz = e1x * e2y - e1y * e2x;
+        const vnx = vertices[o0 + 3] + vertices[o1 + 3] + vertices[o2 + 3];
+        const vny = vertices[o0 + 4] + vertices[o1 + 4] + vertices[o2 + 4];
+        const vnz = vertices[o0 + 5] + vertices[o1 + 5] + vertices[o2 + 5];
+        if (fnx * vnx + fny * vny + fnz * vnz < 0) {
+          indices.push(v0, v2, v1);
+        } else {
+          indices.push(v0, v1, v2);
+        }
       }
 
       submeshes.push({

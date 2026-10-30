@@ -69,13 +69,13 @@ export interface TagDataLayout {
   entries: readonly Pick<TagIndexEntry, 'index' | 'path' | 'primaryClassName' | 'isExternal'>[];
 }
 
-/** The layout of an already-parsed Custom Edition map (its tag array always follows the tag data header - `parseTagIndex` requires it). */
+/** The layout of an already-parsed Custom Edition, MCC CEA, PC Retail, or Xbox map (its tag array always follows the tag data header - `parseTagIndex` requires it). */
 export function tagDataLayoutOf(header: CacheFileHeader, tagIndex: TagIndex): TagDataLayout {
   return {
     tagDataOffset: header.tagDataOffset,
     tagDataSize: header.tagDataSize,
     baseMemoryAddress: tagIndex.baseMemoryAddress,
-    tagArrayFileOffset: header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE,
+    tagArrayFileOffset: header.tagDataOffset + (header.engine === 5 ? 0x24 : TAG_DATA_HEADER_PC_SIZE),
     entries: tagIndex.entries,
   };
 }
@@ -161,6 +161,14 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout, op
   /** A non-null reference whose path pointer is outside the tag data: stale (tolerated) or unwalkable. */
   const stalePath = (pathPointer: number) => options.tolerate?.staleReferencePaths === true && !inTagData(pathPointer, 1);
 
+  const isXboxLayout = layout.tagArrayFileOffset === tagDataOffset + 0x24;
+  if (isXboxLayout && tagDataOffset + 0x24 <= buffer.length) {
+    const vPartsPtr = buffer.readUInt32LE(tagDataOffset + 0x14);
+    if (vPartsPtr !== 0 && inTagData(vPartsPtr, 4)) addSite('dataBlock', tagDataOffset + 0x14, -1);
+    const iPartsPtr = buffer.readUInt32LE(tagDataOffset + 0x1c);
+    if (iPartsPtr !== 0 && inTagData(iPartsPtr, 4)) addSite('dataBlock', tagDataOffset + 0x1c, -1);
+  }
+
   for (const e of layout.entries) {
     const group = e.primaryClassName ?? '(unknown)';
     const fail = (reason: string): never => {
@@ -240,6 +248,21 @@ export function collectTagDataPointers(buffer: Buffer, layout: TagDataLayout, op
         } else if (field.def.type === 'Pointer') {
           const raw = buffer.readUInt32LE(fieldAt);
           if (raw !== 0 && raw !== 0xffffffff && inTagData(raw, 1)) fail(`${fieldWhere} is a runtime pointer into the tag data, which this build doesn't know how to move`);
+        }
+      }
+      if (isXboxLayout && structName === 'ModelGeometryPart') {
+        const triOff1 = buffer.readUInt32LE(at + 76);
+        if (triOff1 !== 0 && inTagData(triOff1, 2)) addSite('dataBlock', at + 76, e.index);
+        const triOff2 = buffer.readUInt32LE(at + 80);
+        if (triOff2 !== 0 && inTagData(triOff2, 2)) addSite('dataBlock', at + 80, e.index);
+        const vertIndPtr = buffer.readUInt32LE(at + 100);
+        if (vertIndPtr !== 0 && inTagData(vertIndPtr, 12)) {
+          addSite('dataBlock', at + 100, e.index);
+          const indAt = fileOf(vertIndPtr);
+          const vertBufPtr = buffer.readUInt32LE(indAt + 4);
+          if (vertBufPtr !== 0 && inTagData(vertBufPtr, 32)) {
+            addSite('dataBlock', indAt + 4, e.index);
+          }
         }
       }
     };

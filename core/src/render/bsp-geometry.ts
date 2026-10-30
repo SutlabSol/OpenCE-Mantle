@@ -230,7 +230,8 @@ export function extractBspRenderMesh(
     const lmOffset = lightmapsOffset + lmIdx * lmStructSize;
     const decodedLm = decodeStruct(buffer, lmOffset, 'ScenarioStructureBSPLightmap');
     const bitmapField = decodedLm.get('bitmap') as { kind: 'basic'; value: number } | undefined;
-    const lightmapBitmapIndex = bitmapField?.value ?? -1;
+    const rawBitmapIdx = bitmapField?.value ?? -1;
+    const lightmapBitmapIndex = rawBitmapIdx === 0xffff || rawBitmapIdx < 0 ? -1 : rawBitmapIdx;
 
     const materialsReflexive = decodedLm.get('materials');
     if (!materialsReflexive || materialsReflexive.kind !== 'reflexive' || materialsReflexive.value.count === 0) {
@@ -358,7 +359,7 @@ export function extractBspRenderMesh(
       // Read lightmap UVs
       const lightmapUvs = new Float32Array(vertexCount * 2);
       if (isXboxCompressedBsp) {
-        if (lmVertOffset > 0 && lmVertexCount >= vertexCount) {
+        if (lightmapBitmapIndex >= 0 && lmVertOffset > 0 && lmVertexCount >= vertexCount) {
           for (let v = 0; v < vertexCount; v++) {
             const lmvOff = lmVertOffset + v * 8;
             const lu = buffer.readInt16LE(lmvOff + 4) / 32767.0;
@@ -367,7 +368,12 @@ export function extractBspRenderMesh(
             lightmapUvs[v * 2 + 1] = lv;
           }
         }
-      } else {
+      } else if (
+        lightmapBitmapIndex >= 0 &&
+        lmVertexCount >= vertexCount &&
+        lmVertOffset > 0 &&
+        lmVertOffset + vertexCount * 20 <= buffer.length
+      ) {
         for (let v = 0; v < vertexCount; v++) {
           const lmvOff = lmVertOffset + v * 20;
           const lu = buffer.readFloatLE(lmvOff + 12);
@@ -896,7 +902,19 @@ export function updateBspVerticesInMap(
 
       const modifiedCollVerts = new Set<number>();
 
-      if (cVertCount > 0 && cVertPtr > 0) {
+      // Deduplicate moved render vertices by original position so seam duplicates don't skew IDW weights
+      const uniqueMoved: Array<{ oldX: number; oldY: number; oldZ: number; newX: number; newY: number; newZ: number }> = [];
+      const seenMovedKeys = new Set<string>();
+      for (let m = 0; m < movedPositions.length; m++) {
+        const mp = movedPositions[m]!;
+        const k = `${Math.round(mp.oldX * 200)},${Math.round(mp.oldY * 200)},${Math.round(mp.oldZ * 200)}`;
+        if (!seenMovedKeys.has(k)) {
+          seenMovedKeys.add(k);
+          uniqueMoved.push(mp);
+        }
+      }
+
+      if (cVertCount > 0 && cVertPtr > 0 && uniqueMoved.length > 0) {
         const cVertBase = toOff(cVertPtr);
         for (let cv = 0; cv < cVertCount; cv++) {
           const cvOff = cVertBase + cv * 16;
@@ -904,10 +922,10 @@ export function updateBspVerticesInMap(
           const cx = buffer.readFloatLE(cvOff + 0);
           const cy = buffer.readFloatLE(cvOff + 4);
           const cz = buffer.readFloatLE(cvOff + 8);
-          let bestDistSq = 0.25; // 0.5 world units direct match radius
-          let bestMp: { newX: number; newY: number; newZ: number } | null = null;
-          for (let m = 0; m < movedPositions.length; m++) {
-            const mp = movedPositions[m]!;
+          let bestDistSq = 0.0025; // 0.05 world units exact 1:1 vertex match radius (never collapse nearby distinct vertices!)
+          let bestMp: { oldX: number; oldY: number; oldZ: number; newX: number; newY: number; newZ: number } | null = null;
+          for (let m = 0; m < uniqueMoved.length; m++) {
+            const mp = uniqueMoved[m]!;
             const dx = cx - mp.oldX;
             const dy = cy - mp.oldY;
             const dz = cz - mp.oldZ;
@@ -918,28 +936,31 @@ export function updateBspVerticesInMap(
             }
           }
           if (bestMp) {
-            buffer.writeFloatLE(bestMp.newX, cvOff + 0);
-            buffer.writeFloatLE(bestMp.newY, cvOff + 4);
-            buffer.writeFloatLE(bestMp.newZ, cvOff + 8);
+            const nx = cx + (bestMp.newX - bestMp.oldX);
+            const ny = cy + (bestMp.newY - bestMp.oldY);
+            const nz = cz + (bestMp.newZ - bestMp.oldZ);
+            buffer.writeFloatLE(nx, cvOff + 0);
+            buffer.writeFloatLE(ny, cvOff + 4);
+            buffer.writeFloatLE(nz, cvOff + 8);
             modifiedCollVerts.add(cv);
             updatedCollisionVertices++;
           } else {
-            // Smooth IDW fallback for nearby CollisionBSP vertices (within 2.0 world units of sculpted vertices)
-            // that aren't 1:1 coincident with lightmap vertices
+            // Smooth IDW displacement fallback for nearby CollisionBSP vertices (within 1.25 world units)
+            // that are subdivided differently from lightmap vertices
             let wSum = 0;
             let dXSum = 0;
             let dYSum = 0;
             let dZSum = 0;
-            for (let m = 0; m < movedPositions.length; m++) {
-              const mp = movedPositions[m]!;
+            for (let m = 0; m < uniqueMoved.length; m++) {
+              const mp = uniqueMoved[m]!;
               const dx = cx - mp.oldX;
               const dy = cy - mp.oldY;
               const dz = cz - mp.oldZ;
               const dSq = dx * dx + dy * dy + dz * dz;
-              if (dSq < 4.0) {
+              if (dSq < 1.5625) {
                 const dist = Math.sqrt(dSq);
-                const falloff = 1.0 - dist / 2.0;
-                const w = (falloff * falloff) / (dSq + 0.01);
+                const falloff = 1.0 - dist / 1.25;
+                const w = (falloff * falloff) / (dSq + 0.005);
                 wSum += w;
                 dXSum += (mp.newX - mp.oldX) * w;
                 dYSum += (mp.newY - mp.oldY) * w;
@@ -1040,7 +1061,7 @@ export function updateBspVerticesInMap(
 
           const modifiedPlanes = new Set<number>();
 
-          // Pass 1: Planar groups with > 3 unique vertices — refit plane to modified surfaces and keep coplanar vertices aligned
+          // Pass 1: Planar groups with > 3 unique vertices — refit plane when local, or translate pd when shared across 3D BSP nodes
           for (const pIdx of affectedPlanes) {
             const sList = allPlaneSurfaces.get(pIdx) ?? [];
             if (sList.length > 12) continue;
@@ -1051,7 +1072,9 @@ export function updateBspVerticesInMap(
             if (uniqueVerts.size <= 3) continue;
 
             const modSurfs = sList.filter((s) => (surfaceLoops.get(s) ?? []).some((v) => modifiedCollVerts.has(v)));
+            if (sList.length > 2 && modSurfs.length < sList.length) continue;
             const fitSurfs = modSurfs.length > 0 ? modSurfs : sList;
+            const nodeUses = plane3dNodeUseCount.get(pIdx) ?? 0;
 
             const pOff = cPlaneBase + pIdx * 16;
             const oldA = buffer.readFloatLE(pOff + 0);
@@ -1083,33 +1106,36 @@ export function updateBspVerticesInMap(
               if (nx * oldA + ny * oldB + nz * oldC < 0) {
                 nx = -nx; ny = -ny; nz = -nz;
               }
-              if (nx * oldA + ny * oldB + nz * oldC >= 0.08) {
-                cx /= cnt; cy /= cnt; cz /= cnt;
+              const dot = nx * oldA + ny * oldB + nz * oldC;
+              cx /= cnt; cy /= cnt; cz /= cnt;
+              if (nodeUses <= 2 && dot >= 0.5) {
                 pa = nx; pb = ny; pc = nz;
-                pd = pa * cx + pb * cy + pc * cz;
-                buffer.writeFloatLE(pa, pOff + 0);
-                buffer.writeFloatLE(pb, pOff + 4);
-                buffer.writeFloatLE(pc, pOff + 8);
-                buffer.writeFloatLE(pd, pOff + 12);
-                modifiedPlanes.add(pIdx);
-                if (sList.length <= 2) {
-                  for (const vIdx of uniqueVerts) {
-                    const vOff = cVertBase + vIdx * 16;
-                    const vx = buffer.readFloatLE(vOff + 0);
-                    const vy = buffer.readFloatLE(vOff + 4);
-                    const vz = buffer.readFloatLE(vOff + 8);
-                    const dist = pa * vx + pb * vy + pc * vz - pd;
-                    buffer.writeFloatLE(vx - pa * dist, vOff + 0);
-                    buffer.writeFloatLE(vy - pb * dist, vOff + 4);
-                    buffer.writeFloatLE(vz - pc * dist, vOff + 8);
-                  }
+              } else if (dot >= 0.88) {
+                pa = nx; pb = ny; pc = nz;
+              }
+              pd = pa * cx + pb * cy + pc * cz;
+              buffer.writeFloatLE(pa, pOff + 0);
+              buffer.writeFloatLE(pb, pOff + 4);
+              buffer.writeFloatLE(pc, pOff + 8);
+              buffer.writeFloatLE(pd, pOff + 12);
+              modifiedPlanes.add(pIdx);
+              if (sList.length <= 2) {
+                for (const vIdx of uniqueVerts) {
+                  const vOff = cVertBase + vIdx * 16;
+                  const vx = buffer.readFloatLE(vOff + 0);
+                  const vy = buffer.readFloatLE(vOff + 4);
+                  const vz = buffer.readFloatLE(vOff + 8);
+                  const dist = pa * vx + pb * vy + pc * vz - pd;
+                  buffer.writeFloatLE(vx - pa * dist, vOff + 0);
+                  buffer.writeFloatLE(vy - pb * dist, vOff + 4);
+                  buffer.writeFloatLE(vz - pc * dist, vOff + 8);
                 }
               }
             }
           }
 
-          // Pass 2: 3-vertex single-surface triangles (96.7% of all CollisionBSP planes!) —
-          // ALWAYS compute exact plane through the 3 finalized vertices regardless of how many 3D BSP nodes split along this plane!
+          // Pass 2: 3-vertex single-surface triangles — compute plane through the 3 vertices,
+          // clamping normal rotation on multi-node 3D partition planes so distant BSP branches never tear
           for (const pIdx of affectedPlanes) {
             const sList = allPlaneSurfaces.get(pIdx) ?? [];
             if (sList.length !== 1) continue;
@@ -1140,11 +1166,20 @@ export function updateBspVerticesInMap(
               if (nx * oldA + ny * oldB + nz * oldC < 0) {
                 nx = -nx; ny = -ny; nz = -nz;
               }
-              if (nx * oldA + ny * oldB + nz * oldC >= 0.05) {
+              const dot = nx * oldA + ny * oldB + nz * oldC;
+              const nodeUses = plane3dNodeUseCount.get(pIdx) ?? 0;
+              const cx = (x0 + x1 + x2) / 3;
+              const cy = (y0 + y1 + y2) / 3;
+              const cz = (z0 + z1 + z2) / 3;
+              if ((nodeUses <= 2 && dot >= 0.35) || dot >= 0.85) {
                 const pd = nx * x0 + ny * y0 + nz * z0;
                 buffer.writeFloatLE(nx, pOff + 0);
                 buffer.writeFloatLE(ny, pOff + 4);
                 buffer.writeFloatLE(nz, pOff + 8);
+                buffer.writeFloatLE(pd, pOff + 12);
+                modifiedPlanes.add(pIdx);
+              } else {
+                const pd = oldA * cx + oldB * cy + oldC * cz;
                 buffer.writeFloatLE(pd, pOff + 12);
                 modifiedPlanes.add(pIdx);
               }

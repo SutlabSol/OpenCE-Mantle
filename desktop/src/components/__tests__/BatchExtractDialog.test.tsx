@@ -129,6 +129,7 @@ describe('BatchExtractDialog', () => {
     expect(startBatchExtractMock).toHaveBeenCalledWith({
       parentDir: 'C:\\Exports',
       mode: 'skip',
+      extractFormat: 'blam',
     });
 
     await waitFor(() => {
@@ -184,6 +185,7 @@ describe('BatchExtractDialog', () => {
     expect(startBatchExtractMock).toHaveBeenCalledWith({
       parentDir: 'C:\\Exports',
       mode: 'replace',
+      extractFormat: 'blam',
     });
   });
 

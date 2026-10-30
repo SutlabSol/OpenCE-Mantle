@@ -87,3 +87,32 @@ export function ensureXboxMapDecompressed(buffer: Buffer): Buffer {
     return buffer;
   }
 }
+
+/**
+ * Compresses a decompressed Xbox (`engine === 5`) cache file back into the standard
+ * 2048-byte-aligned zlib-compressed Xbox `.map` format.
+ */
+export function compressXboxMap(buffer: Buffer): Buffer {
+  const header = parseCacheFileHeader(buffer);
+  if (header.engine !== CacheFileEngine.XBOX) {
+    throw new UnsupportedMapVersionError(header.engine);
+  }
+  const decompressed = ensureXboxMapDecompressed(buffer);
+  const alignedDecompressedSize = Math.ceil(decompressed.length / CACHE_FILE_HEADER_SIZE) * CACHE_FILE_HEADER_SIZE;
+  const paddedDecompressed =
+    alignedDecompressedSize > decompressed.length
+      ? Buffer.concat([decompressed, Buffer.alloc(alignedDecompressedSize - decompressed.length, 0xca)])
+      : decompressed;
+
+  const deflatedBody = zlib.deflateSync(paddedDecompressed.subarray(CACHE_FILE_HEADER_SIZE));
+  const unpaddedOutSize = CACHE_FILE_HEADER_SIZE + deflatedBody.length;
+  const alignedOutSize = Math.ceil(unpaddedOutSize / CACHE_FILE_HEADER_SIZE) * CACHE_FILE_HEADER_SIZE;
+  const compressedPadding = alignedOutSize - unpaddedOutSize;
+
+  const out = Buffer.alloc(alignedOutSize, 0);
+  paddedDecompressed.copy(out, 0, 0, CACHE_FILE_HEADER_SIZE);
+  out.writeUInt32LE(alignedDecompressedSize >>> 0, 0x08);
+  out.writeUInt32LE(compressedPadding >>> 0, 0x0c);
+  deflatedBody.copy(out, CACHE_FILE_HEADER_SIZE);
+  return out;
+}

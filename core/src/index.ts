@@ -62,3 +62,9 @@ export * from './map/hs-generators';
 export * from './map/map-compare';
 export * from './render/world-bsp-generator';
 export * from './map/live-hud-editor';
+export * from './map/baboon-features';
+export * from './map/native-tool-compiler';
+export * from './render/bsp-wireframe-thumbnail';
+
+
+

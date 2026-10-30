@@ -72,9 +72,9 @@ export default function Toolbar({
           disabled={!canExtract}
           onClick={onOpenUiMapStudio}
           style={{
-            background: canExtract ? '#001933' : 'transparent',
-            color: canExtract ? '#93c5fd' : 'var(--text-dim)',
-            border: canExtract ? '1px solid #1d4ed8' : '1px solid var(--border)',
+            background: canExtract ? 'var(--selection-bg)' : 'transparent',
+            color: canExtract ? 'var(--accent-cyan)' : 'var(--text-dim)',
+            border: canExtract ? '1px solid var(--border-active)' : '1px solid var(--border)',
             borderRadius: 3,
             padding: '5px 11px',
             fontSize: 12,
@@ -84,6 +84,7 @@ export default function Toolbar({
             display: 'flex',
             alignItems: 'center',
             gap: 5,
+            flexShrink: 0,
           }}
           title="Open UI.map & Menu Widget Studio (640×480 DeLa Canvas & Unicode String Table Editor)"
         >
@@ -99,9 +100,9 @@ export default function Toolbar({
           disabled={!canInject}
           onClick={onOpenHudBitmapInjector}
           style={{
-            background: canInject ? '#002244' : 'transparent',
-            color: canInject ? '#60a5fa' : 'var(--text-dim)',
-            border: canInject ? '1px solid #2896ff' : '1px solid var(--border)',
+            background: canInject ? 'var(--selection-bg)' : 'transparent',
+            color: canInject ? 'var(--accent-cyan)' : 'var(--text-dim)',
+            border: canInject ? '1px solid var(--border-active)' : '1px solid var(--border)',
             borderRadius: 3,
             padding: '5px 12px',
             fontSize: 12,
@@ -111,6 +112,7 @@ export default function Toolbar({
             display: 'flex',
             alignItems: 'center',
             gap: 6,
+            flexShrink: 0,
           }}
           title="Guided HUD Bitmap Injector: Pick Weapon HUD, Vehicle HUD, or Player HUD and safely embed a replacement PNG into the open map"
         >
@@ -126,9 +128,9 @@ export default function Toolbar({
           disabled={!canExtract}
           onClick={onOpenLiveHudEditor}
           style={{
-            background: canExtract ? '#002244' : 'transparent',
-            color: canExtract ? '#ffffff' : 'var(--text-dim)',
-            border: canExtract ? '1.5px solid #2299ff' : '1px solid var(--border)',
+            background: canExtract ? 'var(--selection-bg)' : 'transparent',
+            color: canExtract ? 'var(--text-primary)' : 'var(--text-dim)',
+            border: canExtract ? '1.5px solid var(--border-active)' : '1px solid var(--border)',
             borderRadius: 3,
             padding: '5px 14px',
             fontSize: 12,
@@ -138,11 +140,11 @@ export default function Toolbar({
             display: 'flex',
             alignItems: 'center',
             gap: 6,
-            boxShadow: canExtract ? '0 0 8px rgba(34, 153, 255, 0.28)' : 'none',
+            flexShrink: 0,
           }}
           title="Launch Halo CE Default Style Live HUD & Weapon Tag Editor ('|' menu toggle, interactive HUD element capture & scale, live OpenCE sync)"
         >
-          <span style={{ color: '#2896ff' }}>🎯</span>
+          <span style={{ color: 'var(--accent-cyan)' }}>🎯</span>
           <span>Live HUD Editing</span>
         </button>
       )}

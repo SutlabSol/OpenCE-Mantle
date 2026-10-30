@@ -58,6 +58,10 @@ export interface ShaderRenderMetadata {
   bumpMapScale?: number;
   uScale?: number;
   vScale?: number;
+  decalRadius?: number;
+  decalBlendFunction?: number;
+  decalIntensity?: number;
+  decalTint?: [number, number, number];
 }
 
 export interface DecodedRgbaTexture {
@@ -273,11 +277,159 @@ export function resolveShaderRenderMetadata(
         twoSided: true,
       };
     }
+
+    if (shaderClass === 'decal' || entry.primaryClassFourCC === 0x64656361) {
+      const decoded = decodeStruct(buffer, shaderOffset, 'Decal');
+      const radiusBounds = decoded.get('radius')?.value as [number, number] | undefined;
+      const rMin = radiusBounds ? Number(radiusBounds[0]) || 0 : 0;
+      const rMax = radiusBounds ? Number(radiusBounds[1]) || 0 : 0;
+      let decalRadius = rMax > 0 ? (rMin > 0 ? (rMin + rMax) * 0.5 : rMax) : rMin > 0 ? rMin : 0.65;
+      if (!Number.isFinite(decalRadius) || decalRadius <= 0.02) decalRadius = 0.65;
+      decalRadius = Math.max(0.15, Math.min(8.0, decalRadius));
+
+      const intensityBounds = decoded.get('intensity')?.value as [number, number] | undefined;
+      const iMin = intensityBounds ? Number(intensityBounds[0]) || 0 : 0;
+      const iMax = intensityBounds ? Number(intensityBounds[1]) || 0 : 0;
+      const decalIntensity = iMax > 0 ? iMax : iMin > 0 ? iMin : 1.0;
+
+      const blendFunc = (decoded.get('framebuffer blend function')?.value as number) ?? 0;
+      const colLow = decoded.get('color lower bounds')?.value as [number, number, number] | undefined;
+      const colHigh = decoded.get('color upper bounds')?.value as [number, number, number] | undefined;
+      let decalTint: [number, number, number] = [1, 1, 1];
+      if (colLow && colHigh) {
+        const avgR = (colLow[0] + colHigh[0]) * 0.5;
+        const avgG = (colLow[1] + colHigh[1]) * 0.5;
+        const avgB = (colLow[2] + colHigh[2]) * 0.5;
+        if (avgR > 0.02 || avgG > 0.02 || avgB > 0.02) {
+          decalTint = [
+            Math.min(1, Math.max(0.1, avgR)),
+            Math.min(1, Math.max(0.1, avgG)),
+            Math.min(1, Math.max(0.1, avgB)),
+          ];
+        }
+      }
+
+      return {
+        shaderClass: 'decal',
+        alphaBlended: true,
+        twoSided: true,
+        decalRadius,
+        decalBlendFunction: blendFunc,
+        decalIntensity: Math.max(0.25, Math.min(1.0, decalIntensity)),
+        decalTint,
+      };
+    }
   } catch {
     // Non-fatal fallback
   }
 
   return { shaderClass };
+}
+
+/**
+ * Converts a decoded `decal` (`deca`) bitmap plate into standard alpha-blended RGBA pixels
+ * by honoring Halo CE's decal framebuffer blend function (multiply, double-multiply, add, alpha-blend)
+ * and tint bounds so decal square borders are 100% transparent.
+ */
+export function applyDecalBlendToRgba(
+  rgbaData: Uint8Array,
+  width: number,
+  height: number,
+  meta: ShaderRenderMetadata,
+): void {
+  if (width <= 0 || height <= 0 || rgbaData.length < width * height * 4) return;
+  const blendFunc = meta.decalBlendFunction ?? 0;
+  const intensity = meta.decalIntensity ?? 1.0;
+  const [tintR, tintG, tintB] = meta.decalTint ?? [1, 1, 1];
+
+  // Sample the 4 corner pixels to detect whether the bitmap already has an alpha cutout or a solid key background
+  const cornerCoords: [number, number][] = [
+    [0, 0],
+    [width - 1, 0],
+    [0, height - 1],
+    [width - 1, height - 1],
+  ];
+  let bgR = 0, bgG = 0, bgB = 0, bgA = 0;
+  for (const [cx, cy] of cornerCoords) {
+    const idx = (cy * width + cx) * 4;
+    bgR += rgbaData[idx + 0];
+    bgG += rgbaData[idx + 1];
+    bgB += rgbaData[idx + 2];
+    bgA += rgbaData[idx + 3];
+  }
+  bgR /= 4;
+  bgG /= 4;
+  bgB /= 4;
+  bgA /= 4;
+
+  const hasCornerTransparency = bgA < 40;
+
+  for (let y = 0; y < height; y++) {
+    const ny = height > 1 ? (y / (height - 1)) * 2 - 1 : 0;
+    for (let x = 0; x < width; x++) {
+      const nx = width > 1 ? (x / (width - 1)) * 2 - 1 : 0;
+      const idx = (y * width + x) * 4;
+      const r = rgbaData[idx + 0];
+      const g = rgbaData[idx + 1];
+      const b = rgbaData[idx + 2];
+      const a = rgbaData[idx + 3];
+
+      let outR = Math.round(r * tintR);
+      let outG = Math.round(g * tintG);
+      let outB = Math.round(b * tintB);
+      let outA = a;
+
+      if (blendFunc === 1 || blendFunc === 5) {
+        // Multiply / Component-Min: white (255,255,255) is transparent, dark pixels darken the surface
+        const lum = (r * 0.299 + g * 0.587 + b * 0.114) / 255.0;
+        const darkness = Math.max(0, Math.min(1, (1.0 - lum) * 1.35));
+        outA = Math.round(darkness * a * intensity);
+      } else if (blendFunc === 2) {
+        // Double-Multiply (2 * src * dst): mid-gray (~128,128,128) is transparent
+        if (!hasCornerTransparency) {
+          const dev = Math.max(Math.abs(r - bgR), Math.abs(g - bgG), Math.abs(b - bgB)) / 128.0;
+          const strength = Math.max(0, Math.min(1, dev * 1.65));
+          outA = Math.round(strength * a * intensity);
+        } else {
+          outA = Math.round(a * intensity);
+        }
+      } else if (blendFunc === 3 || blendFunc === 6 || blendFunc === 7) {
+        // Add / Max / Alpha-Multiply-Add: black (0,0,0) is transparent
+        const bright = Math.max(r, g, b) / 255.0;
+        outA = Math.round(Math.min(1, bright * 1.25) * a * intensity);
+      } else {
+        // Alpha-Blend (0) or Subtract (4): if bitmap format lacked an alpha channel (bgA > 235), key out the border color
+        if (!hasCornerTransparency && bgA > 235) {
+          if (bgR > 230 && bgG > 230 && bgB > 230) {
+            const lum = (r + g + b) / (3 * 255.0);
+            outA = Math.round(Math.max(0, Math.min(1, (1.0 - lum) * 1.35)) * 255 * intensity);
+          } else if (bgR < 25 && bgG < 25 && bgB < 25) {
+            const bright = Math.max(r, g, b) / 255.0;
+            outA = Math.round(Math.min(1, bright * 1.35) * 255 * intensity);
+          } else {
+            const dev = Math.max(Math.abs(r - bgR), Math.abs(g - bgG), Math.abs(b - bgB)) / 128.0;
+            outA = Math.round(Math.max(0, Math.min(1, dev * 1.6)) * 255 * intensity);
+          }
+        } else {
+          outA = Math.round(a * intensity);
+        }
+      }
+
+      // Soft border feather at the outermost 5% of the quad if corners were originally opaque
+      if (!hasCornerTransparency) {
+        const edgeDist = Math.max(Math.abs(nx), Math.abs(ny));
+        if (edgeDist > 0.9) {
+          const fade = Math.max(0, (1.0 - edgeDist) / 0.1);
+          outA = Math.round(outA * fade);
+        }
+      }
+
+      rgbaData[idx + 0] = Math.max(0, Math.min(255, outR));
+      rgbaData[idx + 1] = Math.max(0, Math.min(255, outG));
+      rgbaData[idx + 2] = Math.max(0, Math.min(255, outB));
+      rgbaData[idx + 3] = Math.max(0, Math.min(255, outA));
+    }
+  }
 }
 
 /**
@@ -289,6 +441,7 @@ export function resolveShaderBaseBitmapTagId(
   header: CacheFileHeader,
   tagIndex: TagIndex,
   shaderTagId: number,
+  _depth = 0,
 ): number | null {
   const entry = tagIndex.entries.find((e) => e.tagId === shaderTagId);
   if (!entry || entry.isExternal) return null;
@@ -312,6 +465,16 @@ export function resolveShaderBaseBitmapTagId(
             return tagId;
           }
         }
+      }
+    }
+  }
+
+  // For compound `decal` (`deca`) tags whose bitmap lives on `next decal in chain` (+0x08..+0x17)
+  if ((entry.primaryClassName === 'decal' || entry.primaryClassFourCC === 0x64656361) && _depth < 4) {
+    if (shaderOffset + 0x18 <= buffer.length) {
+      const nextDecalTagId = buffer.readUInt32LE(shaderOffset + 0x08 + 0x0c);
+      if (nextDecalTagId !== 0xffffffff && nextDecalTagId !== shaderTagId) {
+        return resolveShaderBaseBitmapTagId(buffer, header, tagIndex, nextDecalTagId, _depth + 1);
       }
     }
   }

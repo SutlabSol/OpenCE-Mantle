@@ -26,7 +26,7 @@ function formatBytes(bytes: number): string {
 export default function BatchExtractDialog({ open, onClose, preflight }: Props) {
   const [step, setStep] = useState<Step>('preflight');
   const [mode, setMode] = useState<BatchExtractMode>('skip');
-  const [extractFormat, setExtractFormat] = useState<BatchExtractFormat>('ocetags');
+  const [extractFormat, setExtractFormat] = useState<BatchExtractFormat>('blam');
   const [progressText, setProgressText] = useState('Preparing extraction...');
   const [percent, setPercent] = useState(0);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -243,13 +243,26 @@ export default function BatchExtractDialog({ open, onClose, preflight }: Props) 
                     <input
                       type="radio"
                       name="batchExtractFormat"
+                      value="blam"
+                      data-testid="batch-format-blam"
+                      checked={extractFormat === 'blam'}
+                      onChange={() => setExtractFormat('blam')}
+                    />
+                    <span>
+                      <strong>Standard Blam Loose Tags (tags/&lt;path&gt;.&lt;group&gt; — Default)</strong> — uniform 64-byte &apos;blam&apos; loose tag tree compatible with Sapien, Guerilla, tool.exe, Invader, MEK, and Baboon.
+                    </span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="batchExtractFormat"
                       value="ocetags"
                       data-testid="batch-format-ocetags"
                       checked={extractFormat === 'ocetags'}
                       onChange={() => setExtractFormat('ocetags')}
                     />
                     <span>
-                      <strong>.ocetags Tag Containers (tags/)</strong> — portable self-contained tag closures ready for cross-map injection.
+                      <strong>.ocetags Tag Containers (Secondary Choice)</strong> — portable self-contained tag closures ready for cross-map injection.
                     </span>
                   </label>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>

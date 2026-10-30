@@ -78,9 +78,23 @@ export function ceStructureBspRegions(buffer: Buffer, header: CacheFileHeader, t
   return regions;
 }
 
-/** The CRC regions of an uncompressed Custom Edition (609) or Xbox (5) map, found through the schema (scenario "structure bsps"). */
+/** The CRC regions of an uncompressed Custom Edition (609), Retail (7), MCC (13), or Xbox (5) map, found through the schema (scenario "structure bsps"). */
 export function ceCrcRegions(buffer: Buffer, header: CacheFileHeader, tagIndex: TagIndex): CrcRegion[] {
-  const regions = ceStructureBspRegions(buffer, header, tagIndex);
+  const bspRegions = ceStructureBspRegions(buffer, header, tagIndex);
+  const regions: CrcRegion[] = [];
+  if (header.engine === 13) {
+    for (let i = 0; i < bspRegions.length; i++) {
+      const prevEnd = i === 0 ? 2048 : bspRegions[i - 1].offset + bspRegions[i - 1].size;
+      const end = bspRegions[i].offset + bspRegions[i].size;
+      regions.push({
+        offset: prevEnd,
+        size: Math.max(0, end - prevEnd),
+        label: bspRegions[i].label,
+      });
+    }
+  } else {
+    regions.push(...bspRegions);
+  }
   if (header.engine !== 5 && tagIndex.modelDataSize > 0) {
     regions.push({ offset: tagIndex.modelDataFileOffset, size: tagIndex.modelDataSize, label: 'model data' });
   }

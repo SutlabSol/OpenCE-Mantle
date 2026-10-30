@@ -29,13 +29,6 @@ type MenuPage =
   | { kind: 'weapon_stats_root' }
   | { kind: 'weapon_stats_cat'; category: LiveWeaponStatField['category']; label: string };
 
-interface DecodedSpriteCacheEntry {
-  image: HTMLImageElement;
-  width: number;
-  height: number;
-  sprites: Array<{ left: number; right: number; top: number; bottom: number; regX: number; regY: number }>;
-}
-
 interface LiveHudEditorDialogProps {
   open: boolean;
   onClose: () => void;
@@ -51,52 +44,29 @@ interface LiveHudEditorDialogProps {
   onLaunchTagTest?: () => void;
 }
 
-function argbToCss(argb: number, alphaOverride?: number): string {
-  const a = alphaOverride !== undefined ? alphaOverride : Math.max(0.35, ((argb >>> 24) & 0xff) / 255);
-  const r = (argb >>> 16) & 0xff;
-  const g = (argb >>> 8) & 0xff;
-  const b = argb & 0xff;
-  if (r === 0 && g === 0 && b === 0) {
-    return `rgba(76, 201, 240, ${a})`;
-  }
-  return `rgba(${r}, ${g}, ${b}, ${a})`;
-}
-
-function computeAnchorOrigin(
-  anchorIndex: number,
-  canvasW: number,
-  canvasH: number,
-): { ax: number; ay: number } {
-  switch (anchorIndex) {
-    case 0: // TOP LEFT
-      return { ax: 36, ay: 32 };
-    case 1: // TOP RIGHT
-      return { ax: canvasW - 36, ay: 32 };
-    case 2: // BOTTOM LEFT
-      return { ax: 36, ay: canvasH - 32 };
-    case 3: // BOTTOM RIGHT
-      return { ax: canvasW - 36, ay: canvasH - 32 };
-    case 4: // CENTRE
-    default:
-      return { ax: canvasW / 2, ay: canvasH / 2 };
-  }
-}
-
 export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
   open,
   onClose,
   onMapUpdated,
   onOpenBitmapInjector,
   onOpenUiMapStudio,
-  tagTestStatus,
-  onLaunchTagTest,
 }) => {
   const [catalog, setCatalog] = useState<LiveHudCatalog | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusToast, setStatusToast] = useState<string | null>(null);
 
-  // Target selection: weapon, vehicle, unitHud, or globalHud
+  // Live OpenCE / Faber process status from TagTestRunner + HaloMemBridge
+  const [liveStatus, setLiveStatus] = useState<TagTestStatus>({
+    state: 'stopped',
+    telnetConnected: false,
+  });
+  const [autoSyncInGame, setAutoSyncInGame] = useState(true);
+  const autoLaunchedRef = useRef(false);
+  const lastSyncedWeaponTagIdRef = useRef<number | null>(null);
+  const lastSyncedVehicleTagIdRef = useRef<number | null>(null);
+
+  // Target selection: weapon (Spartan-holdable only), vehicle, unitHud, or globalHud
   const [targetType, setTargetType] = useState<'weapon' | 'vehicle' | 'unit' | 'global'>('weapon');
   const [selectedTargetIdx, setSelectedTargetIdx] = useState<number>(0);
 
@@ -111,31 +81,12 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
   // Interactive Capture Mode (matching tag_editor.c hud_capturing)
   const [captureElementId, setCaptureElementId] = useState<string | null>(null);
   const [captureScalingMode, setCaptureScalingMode] = useState(false);
-  const [blinkUntil, setBlinkUntil] = useState<number>(0);
-  const [blinkTick, setBlinkTick] = useState<number>(0);
 
   // Snapshot of initial element & stat values for Backspace / "Reset HUD" / "Reset weapon"
   const initialElementSnapshots = useRef<
     Map<string, { x: number; y: number; scaleX: number; scaleY: number; hidden: boolean; anchorIndex: number }>
   >(new Map());
   const initialStatSnapshots = useRef<Map<string, number>>(new Map());
-
-  // Canvas & decoded bitmap sprite cache
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [aspectMode, setAspectMode] = useState<'4:3' | '16:9'>('4:3');
-  const [showUnitOverlayOnWeapon, setShowUnitOverlayOnWeapon] = useState(true);
-  const [autoHotReload, setAutoHotReload] = useState(false);
-  const spriteCacheRef = useRef<Map<number, DecodedSpriteCacheEntry>>(new Map());
-  const [spriteCacheVersion, setSpriteCacheVersion] = useState(0);
-
-  // Dragging state on canvas
-  const dragStateRef = useRef<{
-    element: LiveHudElementItem;
-    startClientX: number;
-    startClientY: number;
-    origX: number;
-    origY: number;
-  } | null>(null);
 
   const loadCatalog = useCallback(async (preserveSnapshots = false) => {
     if (!window.opence.inspectLiveHudCatalog) return;
@@ -193,28 +144,70 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
     }
   }, []);
 
+  // Subscribe to TagTestRunner status & auto-launch Live HUD session in OpenCE / Faber on open
   useEffect(() => {
-    if (open) {
-      spriteCacheRef.current.clear();
-      void loadCatalog(false);
-      setPageStack([{ kind: 'root' }]);
-      setSelectedRow(0);
-      setCaptureElementId(null);
-      setMenuVisible(true);
+    if (!open) {
+      autoLaunchedRef.current = false;
+      return;
     }
+    void loadCatalog(false);
+    setPageStack([{ kind: 'root' }]);
+    setSelectedRow(0);
+    setCaptureElementId(null);
+    setMenuVisible(true);
+
+    let unsub: (() => void) | undefined;
+    if (window.opence.onTagTestStatusChange) {
+      unsub = window.opence.onTagTestStatusChange((st) => {
+        setLiveStatus(st);
+      });
+    }
+    void window.opence.tagTestGetStatus().then((st) => {
+      setLiveStatus(st);
+      if (!autoLaunchedRef.current) {
+        autoLaunchedRef.current = true;
+        if (st.state === 'stopped' || st.state === 'error' || (st.state === 'running' && !st.liveHudMode)) {
+          void window.opence.tagTestLaunch({ windowed: true, liveHudMode: true });
+        }
+      }
+    });
+
+    return () => {
+      unsub?.();
+    };
   }, [open, loadCatalog]);
 
-  // Blink timer during 1.2s after entering Capture Mode
+  // Auto-sync active target when the Spartan switches weapons (Tab) or enters/exits a vehicle in halo.exe
   useEffect(() => {
-    if (!open || Date.now() >= blinkUntil) return;
-    const timer = window.setInterval(() => {
-      setBlinkTick((t) => t + 1);
-      if (Date.now() >= blinkUntil) {
-        window.clearInterval(timer);
+    if (!open || !catalog || !autoSyncInGame) return;
+
+    const vehTagId = liveStatus.drivenVehicleTagId ?? null;
+    if (vehTagId !== null && vehTagId !== lastSyncedVehicleTagIdRef.current) {
+      lastSyncedVehicleTagIdRef.current = vehTagId;
+      const vIdx = catalog.vehicles.findIndex((v) => v.tagId === vehTagId);
+      if (vIdx >= 0) {
+        setTargetType('vehicle');
+        setSelectedTargetIdx(vIdx);
+        setPageStack([{ kind: 'root' }]);
+        setSelectedRow(0);
+        setCaptureElementId(null);
+        return;
       }
-    }, 180);
-    return () => window.clearInterval(timer);
-  }, [open, blinkUntil]);
+    } else if (vehTagId === null) {
+      lastSyncedVehicleTagIdRef.current = null;
+    }
+
+    const weapTagId = liveStatus.heldWeaponTagId ?? null;
+    if (vehTagId === null && weapTagId !== null && weapTagId !== lastSyncedWeaponTagIdRef.current) {
+      lastSyncedWeaponTagIdRef.current = weapTagId;
+      const wIdx = catalog.weapons.findIndex((w) => w.tagId === weapTagId);
+      if (wIdx >= 0) {
+        setTargetType('weapon');
+        setSelectedTargetIdx(wIdx);
+        setCaptureElementId(null);
+      }
+    }
+  }, [open, catalog, autoSyncInGame, liveStatus.heldWeaponTagId, liveStatus.drivenVehicleTagId]);
 
   // Active target resolution
   const activeWeapon = useMemo(() => {
@@ -249,122 +242,6 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
     return [];
   }, [catalog, targetType, activeWeapon, activeVehicle, selectedTargetIdx]);
 
-  // Decode referenced bitmaps for all visible HUD elements into HTMLImageElements
-  useEffect(() => {
-    if (!open || !catalog) return;
-    const levelsToDecode = [...activeHudChain];
-    if (showUnitOverlayOnWeapon && catalog.unitHuds[0] && targetType === 'weapon') {
-      levelsToDecode.push(catalog.unitHuds[0]);
-    }
-    if (showUnitOverlayOnWeapon && catalog.globalHuds[0] && targetType === 'weapon') {
-      levelsToDecode.push(catalog.globalHuds[0]);
-    }
-
-    const neededBitmIndices = new Set<number>();
-    for (const lvl of levelsToDecode) {
-      for (const el of lvl.elements) {
-        if (el.bitmapTagIndex !== null && !spriteCacheRef.current.has(el.bitmapTagIndex)) {
-          neededBitmIndices.add(el.bitmapTagIndex);
-        }
-      }
-    }
-    if (neededBitmIndices.size === 0) return;
-
-    let cancelled = false;
-    (async () => {
-      for (const bitmIdx of neededBitmIndices) {
-        if (cancelled) break;
-        try {
-          const [infoRes, rgbaRes] = await Promise.all([
-            window.opence.getBitmapInfo(bitmIdx),
-            window.opence.getBitmapRgba(bitmIdx, 0),
-          ]);
-          if (cancelled || !rgbaRes.ok || !rgbaRes.dataUrl) continue;
-
-          const baseImg = new Image();
-          baseImg.src = rgbaRes.dataUrl;
-          await new Promise<void>((resolve) => {
-            baseImg.onload = () => resolve();
-            baseImg.onerror = () => resolve();
-          });
-
-          const w = rgbaRes.width ?? baseImg.width ?? 64;
-          const h = rgbaRes.height ?? baseImg.height ?? 64;
-          const offCanvas = document.createElement('canvas');
-          offCanvas.width = w;
-          offCanvas.height = h;
-          const ctx = offCanvas.getContext('2d');
-          if (!ctx) continue;
-
-          ctx.drawImage(baseImg, 0, 0);
-          const imgData = ctx.getImageData(0, 0, w, h);
-          const src = imgData.data;
-          let anyAlpha = false;
-          for (let i = 3; i < src.length; i += 4) {
-            if (src[i] > 8) {
-              anyAlpha = true;
-              break;
-            }
-          }
-          if (!anyAlpha) {
-            for (let i = 0; i < src.length; i += 4) {
-              src[i + 3] = Math.max(src[i], src[i + 1], src[i + 2]);
-            }
-            ctx.putImageData(imgData, 0, 0);
-          }
-
-          const sprites: DecodedSpriteCacheEntry['sprites'] = [];
-          if (infoRes.ok && infoRes.summary) {
-            const seqs = (infoRes.summary as unknown as {
-              sequences?: Array<{
-                sprites?: Array<{
-                  left: number;
-                  right: number;
-                  top: number;
-                  bottom: number;
-                  registrationPoint?: [number, number];
-                }>;
-              }>;
-            }).sequences ?? [];
-            for (const seq of seqs) {
-              if (seq.sprites && seq.sprites.length > 0) {
-                const sp = seq.sprites[0];
-                sprites.push({
-                  left: sp.left,
-                  right: sp.right,
-                  top: sp.top,
-                  bottom: sp.bottom,
-                  regX: sp.registrationPoint?.[0] ?? 0,
-                  regY: sp.registrationPoint?.[1] ?? 0,
-                });
-              }
-            }
-          }
-
-          const img = new Image();
-          img.src = offCanvas.toDataURL('image/png');
-          await new Promise<void>((resolve) => {
-            img.onload = () => resolve();
-            img.onerror = () => resolve();
-          });
-          spriteCacheRef.current.set(bitmIdx, {
-            image: img,
-            width: w,
-            height: h,
-            sprites,
-          });
-          if (!cancelled) setSpriteCacheVersion((v) => v + 1);
-        } catch {
-          // ignore decode error
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [open, catalog, activeHudChain, showUnitOverlayOnWeapon, targetType]);
-
   // Currently captured HUD element (if in Capture Mode)
   const capturedElement: { level: LiveHudLevel; element: LiveHudElementItem } | null = useMemo(() => {
     if (!captureElementId) return null;
@@ -375,7 +252,7 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
     return null;
   }, [captureElementId, activeHudChain]);
 
-  // Helper to commit a live HUD edit
+  // Helper to commit a live HUD edit (patches 0x40440000 in halo.exe RAM + updates open .map buffer)
   const commitHudEdit = useCallback(
     async (
       level: LiveHudLevel,
@@ -414,22 +291,18 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
       if (res.ok) {
         setCatalog(res.catalog);
         onMapUpdated?.(res.map);
-        if (autoHotReload && tagTestStatus?.state === 'running') {
-          void window.opence.tagTestHotReload();
-        }
       } else {
         setStatusToast(`Edit failed: ${res.message}`);
       }
     },
-    [targetType, activeWeapon, editScope, onMapUpdated, autoHotReload, tagTestStatus],
+    [targetType, activeWeapon, editScope, onMapUpdated],
   );
 
-  // Helper to commit a live weapon stat edit
+  // Helper to commit a live weapon stat edit (patches 0x40440000 in halo.exe RAM + updates open .map buffer)
   const commitStatEdit = useCallback(
     async (field: LiveWeaponStatField, newValue: number) => {
       if (!window.opence.applyLiveWeaponStatEdit) return;
       const clamped = Math.max(field.min, Math.min(field.max, Number(newValue.toFixed(4))));
-      // Optimistically update local catalog state for instant 60fps spinner feedback
       setCatalog((prev) => {
         if (!prev) return prev;
         return {
@@ -453,12 +326,24 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
       });
       if (res.ok) {
         onMapUpdated?.(res.map);
-        if (autoHotReload && tagTestStatus?.state === 'running') {
-          void window.opence.tagTestHotReload();
+      }
+    },
+    [onMapUpdated],
+  );
+
+  // Helper to switch weapon index and immediately equip it in the Spartan's hands in halo.exe
+  const selectAndEquipTargetIndex = useCallback(
+    (nextIdx: number) => {
+      setSelectedTargetIdx(nextIdx);
+      if (targetType === 'weapon' && catalog?.weapons[nextIdx]) {
+        const w = catalog.weapons[nextIdx];
+        lastSyncedWeaponTagIdRef.current = w.tagId;
+        if (liveStatus.state === 'running' && window.opence.equipLiveHudWeapon) {
+          void window.opence.equipLiveHudWeapon(w.tagId);
         }
       }
     },
-    [onMapUpdated, autoHotReload, tagTestStatus],
+    [targetType, catalog, liveStatus.state],
   );
 
   // Build rows for the current Halo CE menu page
@@ -477,10 +362,13 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
 
   const targetList = useMemo(() => {
     if (!catalog) return [];
-    if (targetType === 'weapon') return catalog.weapons.map((w) => ({ label: w.displayName, path: w.path, tagIndex: w.tagIndex }));
-    if (targetType === 'vehicle') return catalog.vehicles.map((v) => ({ label: v.displayName, path: v.path, tagIndex: v.tagIndex }));
-    if (targetType === 'unit') return catalog.unitHuds.map((u) => ({ label: u.title, path: u.hudTagPath, tagIndex: u.hudTagIndex }));
-    return catalog.globalHuds.map((g) => ({ label: g.title, path: g.hudTagPath, tagIndex: g.hudTagIndex }));
+    if (targetType === 'weapon')
+      return catalog.weapons.map((w) => ({ label: w.displayName, path: w.path, tagIndex: w.tagIndex, tagId: w.tagId }));
+    if (targetType === 'vehicle')
+      return catalog.vehicles.map((v) => ({ label: v.displayName, path: v.path, tagIndex: v.tagIndex, tagId: v.tagId }));
+    if (targetType === 'unit')
+      return catalog.unitHuds.map((u) => ({ label: u.title, path: u.hudTagPath, tagIndex: u.hudTagIndex, tagId: u.hudTagId }));
+    return catalog.globalHuds.map((g) => ({ label: g.title, path: g.hudTagPath, tagIndex: g.hudTagIndex, tagId: g.hudTagId }));
   }, [catalog, targetType]);
 
   const currentTargetName = targetList[selectedTargetIdx]?.label ?? 'None';
@@ -495,12 +383,12 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
           label: 'Category',
           valueText:
             targetType === 'weapon'
-              ? 'WEAPONS'
+              ? `HOLDABLE WEAPONS (${catalog.weapons.length})`
               : targetType === 'vehicle'
-                ? 'VEHICLES'
+                ? `VEHICLES (${catalog.vehicles.length})`
                 : targetType === 'unit'
-                  ? 'UNIT HUDS'
-                  : 'GLOBAL HUD',
+                  ? `UNIT HUDS (${catalog.unitHuds.length})`
+                  : `GLOBAL HUD (${catalog.globalHuds.length})`,
           onLeft: () => {
             const order: Array<typeof targetType> = ['weapon', 'vehicle', 'unit', 'global'];
             const next = order[(order.indexOf(targetType) + order.length - 1) % order.length];
@@ -516,15 +404,26 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         },
         {
           id: 'active_item',
-          label: 'Active Target',
+          label: targetType === 'weapon' ? 'Held Weapon' : targetType === 'vehicle' ? 'Vehicle' : 'Active HUD',
           valueText: currentTargetName,
+          onEnter: () => {
+            if (targetType === 'weapon' && activeWeapon && window.opence.equipLiveHudWeapon) {
+              void window.opence.equipLiveHudWeapon(activeWeapon.tagId);
+              setStatusToast(`Equipped ${activeWeapon.displayName} in Spartan's hands in-game.`);
+            } else if (targetType === 'vehicle' && activeVehicle && window.opence.spawnLiveHudVehicle) {
+              void window.opence.spawnLiveHudVehicle(activeVehicle.tagId);
+              setStatusToast(`Spawned ${activeVehicle.displayName} near Spartan in-game.`);
+            }
+          },
           onLeft: () => {
             if (targetList.length === 0) return;
-            setSelectedTargetIdx((i) => (i + targetList.length - 1) % targetList.length);
+            const nextIdx = (selectedTargetIdx + targetList.length - 1) % targetList.length;
+            selectAndEquipTargetIndex(nextIdx);
           },
           onRight: () => {
             if (targetList.length === 0) return;
-            setSelectedTargetIdx((i) => (i + 1) % targetList.length);
+            const nextIdx = (selectedTargetIdx + 1) % targetList.length;
+            selectAndEquipTargetIndex(nextIdx);
           },
         },
       ];
@@ -553,7 +452,43 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
             setSelectedRow(0);
           },
         });
+        rows.push({
+          id: 'equip_this_weapon',
+          label: `Equip ${activeWeapon.displayName} In-Game`,
+          onEnter: () => {
+            if (window.opence.equipLiveHudWeapon) {
+              void window.opence.equipLiveHudWeapon(activeWeapon.tagId);
+              setStatusToast(`Equipped ${activeWeapon.displayName} in Spartan's hands!`);
+            }
+          },
+        });
       }
+
+      if (targetType === 'vehicle' && activeVehicle) {
+        rows.push({
+          id: 'spawn_this_vehicle',
+          label: `Spawn ${activeVehicle.displayName} Near Spartan`,
+          onEnter: () => {
+            if (window.opence.spawnLiveHudVehicle) {
+              void window.opence.spawnLiveHudVehicle(activeVehicle.tagId);
+              setStatusToast(`Spawned ${activeVehicle.displayName} near Spartan!`);
+            }
+          },
+        });
+      }
+
+      rows.push({
+        id: 'spawn_all_arsenal',
+        label: 'Spawn All Holdable Weapons & Vehicles',
+        onEnter: () => {
+          if (window.opence.spawnAllLiveHudArsenal) {
+            void window.opence.spawnAllLiveHudArsenal();
+            setStatusToast(
+              `Spawned all ${catalog.weapons.length} holdable weapons & ${catalog.vehicles.length} vehicles around Spartan!`,
+            );
+          }
+        },
+      });
 
       rows.push({
         id: 'inject_hud_bitmap',
@@ -587,7 +522,6 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
       if (!level) return [];
       const rows: HaloMenuRow[] = [];
 
-      // If there is a parent HUD level (e.g. Parent HUD 1..N in wphi chain, or weapon HUD on vehicle)
       if (currentPage.levelIndex + 1 < activeHudChain.length) {
         const nextLvl = activeHudChain[currentPage.levelIndex + 1];
         rows.push({
@@ -601,7 +535,6 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         });
       }
 
-      // If this wphi is shared by multiple weapons, show Ultimate Edition's "Edits apply to: THIS ONE / ALL"
       if (level.sharedByPaths.length > 0 && level.level === 0 && targetType === 'weapon') {
         rows.push({
           id: 'hud_scope',
@@ -612,7 +545,6 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         });
       }
 
-      // Anchor row
       rows.push({
         id: 'hud_anchor',
         label: 'Anchor',
@@ -627,7 +559,6 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         },
       });
 
-      // Individual HUD element rows (Static, Meter, Number, Crosshair, Overlay)
       for (const el of level.elements) {
         rows.push({
           id: el.id,
@@ -637,7 +568,9 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
           onEnter: () => {
             setCaptureElementId(el.id);
             setCaptureScalingMode(false);
-            setBlinkUntil(Date.now() + 1200);
+            if (el.offsetVirtualAddress && window.opence.blinkLiveHudElement) {
+              void window.opence.blinkLiveHudElement(el.offsetVirtualAddress, el.x);
+            }
           },
           onLeft: () => {
             void commitHudEdit(level, {
@@ -656,7 +589,6 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         });
       }
 
-      // Reset HUD row
       rows.push({
         id: 'reset_hud',
         label: 'Reset HUD',
@@ -682,7 +614,7 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
           if (firstSnap) {
             await commitHudEdit(level, { editType: 'anchor', anchorIndex: firstSnap.anchorIndex });
           }
-          setStatusToast(`Reset ${level.title} to initial snapshot.`);
+          setStatusToast(`Reset ${level.title} in-game & in map buffer.`);
         },
       });
 
@@ -716,7 +648,7 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
               await commitStatEdit(st, orig);
             }
           }
-          setStatusToast(`Reset ${activeWeapon.displayName} stats to initial values.`);
+          setStatusToast(`Reset ${activeWeapon.displayName} stats in-game & in map buffer.`);
         },
       });
       return rows;
@@ -753,29 +685,28 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
     selectedTargetIdx,
     activeHudChain,
     activeWeapon,
+    activeVehicle,
     editScope,
     commitHudEdit,
     commitStatEdit,
+    selectAndEquipTargetIndex,
     onOpenBitmapInjector,
     onOpenUiMapStudio,
   ]);
 
-  // Clamp selectedRow when menuRows changes
   useEffect(() => {
     if (selectedRow >= menuRows.length && menuRows.length > 0) {
       setSelectedRow(menuRows.length - 1);
     }
   }, [menuRows.length, selectedRow]);
 
-  // Keyboard navigation matching Ultimate Edition's tag_editor.c!
+  // Keyboard navigation matching Halo CE's tag_editor.c!
   useEffect(() => {
     if (!open) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if typing in an input
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-      // '|' or '\' key toggles the Halo CE menu overlay open/closed
       if (e.key === '|' || e.key === '\\') {
         e.preventDefault();
         if (captureElementId) {
@@ -786,7 +717,6 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         return;
       }
 
-      // If in Capture Mode (moving or scaling a HUD element with unobstructed 4 corners)
       if (capturedElement) {
         const { level, element } = capturedElement;
         const fastMult = e.shiftKey || e.repeat ? 4 : 1;
@@ -895,258 +825,28 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
     onClose,
   ]);
 
-  // Render the interactive Halo CE 640x480 / 854x480 HUD canvas
-  const canvasWidth = aspectMode === '16:9' ? 854 : 640;
-  const canvasHeight = 480;
-
-  // Store screen bounding boxes for mouse click / drag hit-testing
-  const renderedRectsRef = useRef<
-    Array<{
-      level: LiveHudLevel;
-      element: LiveHudElementItem;
-      x: number;
-      y: number;
-      w: number;
-      h: number;
-    }>
-  >([]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-
-    // 1. Simulated Halo CE Blood Gulch / Canyon environment backdrop so bright cyan/blue HUD elements pop clearly
-    const skyGrad = ctx.createLinearGradient(0, 0, 0, canvasHeight * 0.56);
-    skyGrad.addColorStop(0, '#0b1829');
-    skyGrad.addColorStop(0.6, '#1c3552');
-    skyGrad.addColorStop(1, '#365875');
-    ctx.fillStyle = skyGrad;
-    ctx.fillRect(0, 0, canvasWidth, canvasHeight * 0.56);
-
-    const groundGrad = ctx.createLinearGradient(0, canvasHeight * 0.56, 0, canvasHeight);
-    groundGrad.addColorStop(0, '#3a3228');
-    groundGrad.addColorStop(0.4, '#2a2620');
-    groundGrad.addColorStop(1, '#14120f');
-    ctx.fillStyle = groundGrad;
-    ctx.fillRect(0, canvasHeight * 0.56, canvasWidth, canvasHeight * 0.44);
-
-    // Subtle 4:3 safe-area guides & center crosshair guide lines
-    ctx.strokeStyle = 'rgba(40, 150, 255, 0.14)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(canvasWidth / 2, 0);
-    ctx.lineTo(canvasWidth / 2, canvasHeight);
-    ctx.moveTo(0, canvasHeight / 2);
-    ctx.lineTo(canvasWidth, canvasHeight / 2);
-    ctx.stroke();
-
-    if (aspectMode === '16:9') {
-      const margin = (canvasWidth - 640) / 2;
-      ctx.setLineDash([4, 4]);
-      ctx.strokeStyle = 'rgba(40, 150, 255, 0.22)';
-      ctx.strokeRect(margin, 0, 640, canvasHeight);
-      ctx.setLineDash([]);
-    }
-
-    const hitRects: typeof renderedRectsRef.current = [];
-    const hoveredRowElId = !captureElementId && menuVisible ? menuRows[selectedRow]?.elementRef?.element.id : null;
-    const isBlinking = Date.now() < blinkUntil && blinkTick % 2 === 1;
-
-    const drawHudLevel = (lvl: LiveHudLevel, isBackgroundLayer = false) => {
-      for (const el of lvl.elements) {
-        if (el.hidden) continue;
-        if (captureElementId === el.id && isBlinking) continue; // Blink off frame!
-
-        // Crosshairs are always centered in Halo CE
-        const anchorToUse = el.kind === 'crosshair' ? 4 : lvl.anchorIndex;
-        const { ax, ay } = computeAnchorOrigin(anchorToUse, canvasWidth, canvasHeight);
-        const drawX = ax + el.x;
-        const drawY = ay + el.y;
-
-        const cached = el.bitmapTagIndex !== null ? spriteCacheRef.current.get(el.bitmapTagIndex) : undefined;
-        let w = Math.max(24, 64 * Math.abs(el.scaleX || 1));
-        let h = Math.max(18, 32 * Math.abs(el.scaleY || 1));
-
-        ctx.save();
-        ctx.globalAlpha = isBackgroundLayer ? 0.55 : 0.92;
-
-        if (el.kind === 'number') {
-          w = 46 * Math.abs(el.scaleX || 1);
-          h = 22 * Math.abs(el.scaleY || 1);
-          ctx.fillStyle = 'rgba(0, 17, 34, 0.65)';
-          ctx.strokeStyle = argbToCss(el.defaultColorArgb, 0.85);
-          ctx.lineWidth = 1.5;
-          ctx.fillRect(drawX - w / 2, drawY - h / 2, w, h);
-          ctx.strokeRect(drawX - w / 2, drawY - h / 2, w, h);
-          ctx.fillStyle = '#bfe6ff';
-          ctx.font = `bold ${Math.max(11, Math.round(14 * (el.scaleY || 1)))}px "Segoe UI", monospace`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText('60', drawX, drawY);
-        } else if (cached) {
-          const sp = cached.sprites[el.sequenceIndex] ?? cached.sprites[0];
-          if (sp && sp.right > sp.left && sp.bottom > sp.top) {
-            const sx = Math.floor(sp.left * cached.width);
-            const sy = Math.floor(sp.top * cached.height);
-            const sw = Math.max(1, Math.floor((sp.right - sp.left) * cached.width));
-            const sh = Math.max(1, Math.floor((sp.bottom - sp.top) * cached.height));
-            w = Math.max(16, sw * Math.abs(el.scaleX || 1));
-            h = Math.max(16, sh * Math.abs(el.scaleY || 1));
-            ctx.drawImage(cached.image, sx, sy, sw, sh, drawX - w / 2, drawY - h / 2, w, h);
-          } else {
-            w = Math.max(20, Math.min(220, cached.width) * Math.abs(el.scaleX || 1));
-            h = Math.max(16, Math.min(140, cached.height) * Math.abs(el.scaleY || 1));
-            ctx.drawImage(cached.image, drawX - w / 2, drawY - h / 2, w, h);
-          }
-        } else {
-          // Stylized Halo wireframe HUD box when bitmap is external/undecoded
-          ctx.fillStyle = 'rgba(0, 34, 68, 0.55)';
-          ctx.strokeStyle = argbToCss(el.defaultColorArgb, 0.85);
-          ctx.lineWidth = 1.5;
-          ctx.fillRect(drawX - w / 2, drawY - h / 2, w, h);
-          ctx.strokeRect(drawX - w / 2, drawY - h / 2, w, h);
-          ctx.fillStyle = '#7dd3fc';
-          ctx.font = '10px "Segoe UI", sans-serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(el.bitmapLeaf || el.label.slice(0, 14), drawX, drawY);
-        }
-
-        const isSelectedOrCaptured = captureElementId === el.id || hoveredRowElId === el.id;
-        if (isSelectedOrCaptured) {
-          ctx.strokeStyle = captureElementId === el.id ? '#ffffff' : '#2299ff';
-          ctx.lineWidth = 2;
-          ctx.strokeRect(drawX - w / 2 - 3, drawY - h / 2 - 3, w + 6, h + 6);
-
-          // Draw corner ticks
-          ctx.fillStyle = '#2896ff';
-          ctx.fillRect(drawX - w / 2 - 5, drawY - h / 2 - 5, 6, 6);
-          ctx.fillRect(drawX + w / 2 - 1, drawY - h / 2 - 5, 6, 6);
-          ctx.fillRect(drawX - w / 2 - 5, drawY + h / 2 - 1, 6, 6);
-          ctx.fillRect(drawX + w / 2 - 1, drawY + h / 2 - 1, 6, 6);
-        }
-
-        ctx.restore();
-
-        if (!isBackgroundLayer) {
-          hitRects.push({
-            level: lvl,
-            element: el,
-            x: drawX - w / 2,
-            y: drawY - h / 2,
-            w,
-            h,
-          });
-        }
-      }
-    };
-
-    // Draw background Unit HUD & Global HUD layers if previewing a weapon
-    if (showUnitOverlayOnWeapon && targetType === 'weapon' && catalog) {
-      if (catalog.unitHuds[0]) drawHudLevel(catalog.unitHuds[0], true);
-      if (catalog.globalHuds[0]) drawHudLevel(catalog.globalHuds[0], true);
-    }
-
-    // Draw active HUD chain (parent levels first, then child level on top)
-    for (let i = activeHudChain.length - 1; i >= 0; i--) {
-      drawHudLevel(activeHudChain[i], false);
-    }
-
-    renderedRectsRef.current = hitRects;
-  }, [
-    canvasWidth,
-    canvasHeight,
-    aspectMode,
-    activeHudChain,
-    catalog,
-    targetType,
-    showUnitOverlayOnWeapon,
-    spriteCacheVersion,
-    captureElementId,
-    menuVisible,
-    menuRows,
-    selectedRow,
-    blinkUntil,
-    blinkTick,
-  ]);
-
-  // Canvas mouse down / drag to move HUD elements directly
-  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvasWidth / rect.width;
-    const scaleY = canvasHeight / rect.height;
-    const cx = (e.clientX - rect.left) * scaleX;
-    const cy = (e.clientY - rect.top) * scaleY;
-
-    // Hit-test topmost element first
-    for (let i = renderedRectsRef.current.length - 1; i >= 0; i--) {
-      const hit = renderedRectsRef.current[i];
-      if (cx >= hit.x - 4 && cx <= hit.x + hit.w + 4 && cy >= hit.y - 4 && cy <= hit.y + hit.h + 4) {
-        setCaptureElementId(hit.element.id);
-        setCaptureScalingMode(false);
-        dragStateRef.current = {
-          element: hit.element,
-          startClientX: e.clientX,
-          startClientY: e.clientY,
-          origX: hit.element.x,
-          origY: hit.element.y,
-        };
-        return;
-      }
-    }
-  };
-
-  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const drag = dragStateRef.current;
-    const canvas = canvasRef.current;
-    if (!drag || !canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvasWidth / rect.width;
-    const scaleY = canvasHeight / rect.height;
-    const dx = Math.round((e.clientX - drag.startClientX) * scaleX);
-    const dy = Math.round((e.clientY - drag.startClientY) * scaleY);
-
-    const lvl = activeHudChain.find((l) => l.hudTagIndex === drag.element.hudTagIndex);
-    if (lvl) {
-      void commitHudEdit(lvl, {
-        editType: 'element',
-        element: drag.element,
-        x: drag.origX + dx,
-        y: drag.origY + dy,
-      });
-    }
-  };
-
-  const handleCanvasMouseUp = () => {
-    dragStateRef.current = null;
-  };
-
   if (!open) return null;
 
-  // Breadcrumb title for the Halo CE menu header
   const headerTitle = (() => {
-    if (currentPage.kind === 'root') return `${currentTargetName} — Live Editor`;
+    if (currentPage.kind === 'root') return `${currentTargetName} — In-Game Live Editor`;
     if (currentPage.kind === 'hud_level') {
       const lvl = activeHudChain[currentPage.levelIndex];
       return `${currentTargetName} > ${lvl?.title ?? 'HUD'}`;
     }
     if (currentPage.kind === 'weapon_stats_root') return `${currentTargetName} > Weapon stats`;
     if (currentPage.kind === 'weapon_stats_cat') return `${currentTargetName} > ${currentPage.label}`;
-    return 'Live HUD Editor';
+    return 'In-Game Live HUD Editor';
   })();
+
+  const isRunning = liveStatus.state === 'running';
+  const isLaunching = liveStatus.state === 'launching';
 
   return (
     <div
       style={{
         position: 'fixed',
         inset: 0,
-        backgroundColor: 'rgba(2, 6, 14, 0.88)',
+        backgroundColor: 'rgba(2, 6, 14, 0.84)',
         zIndex: 9500,
         display: 'flex',
         flexDirection: 'column',
@@ -1177,40 +877,32 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
               textTransform: 'uppercase',
             }}
           >
-            🎯 Halo CE Live HUD & Weapon Tag Editor
+            🎯 In-Game Live HUD & Weapon Tag Editor
           </span>
           <span
             style={{
               fontSize: 11,
               padding: '2px 8px',
               borderRadius: 4,
-              backgroundColor: 'rgba(40, 150, 255, 0.16)',
-              border: '1px solid rgba(40, 150, 255, 0.45)',
-              color: '#93c5fd',
+              backgroundColor: isRunning
+                ? 'rgba(34, 197, 94, 0.18)'
+                : isLaunching
+                  ? 'rgba(234, 179, 8, 0.18)'
+                  : 'rgba(239, 68, 68, 0.18)',
+              border: `1px solid ${isRunning ? '#22c55e' : isLaunching ? '#eab308' : '#ef4444'}`,
+              color: isRunning ? '#86efac' : isLaunching ? '#fde047' : '#fca5a5',
+              fontWeight: 700,
             }}
           >
-            Press <strong>|</strong> (Pipe / Backslash) to Toggle Menu Overlay
+            {isRunning
+              ? `🟢 LIVE IN-GAME (PID ${liveStatus.pid ?? 'active'} · 0x40440000 60FPS Memory Bridge)`
+              : isLaunching
+                ? '⏳ Launching OpenCE / Faber Live HUD Session...'
+                : '⚪ OpenCE Stopped'}
           </span>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {/* Aspect Ratio Switcher */}
-          <button
-            onClick={() => setAspectMode((m) => (m === '4:3' ? '16:9' : '4:3'))}
-            style={{
-              padding: '4px 10px',
-              fontSize: 11,
-              fontWeight: 600,
-              borderRadius: 5,
-              border: '1px solid #2896ff',
-              backgroundColor: '#002244',
-              color: '#ffffff',
-              cursor: 'pointer',
-            }}
-          >
-            Aspect: {aspectMode} ({canvasWidth}×{canvasHeight})
-          </button>
-
           <label
             style={{
               display: 'flex',
@@ -1220,14 +912,36 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
               color: '#93c5fd',
               cursor: 'pointer',
             }}
+            title="Automatically switch the active HUD target when you switch weapons (Tab) or enter a vehicle (E) in-game"
           >
             <input
               type="checkbox"
-              checked={showUnitOverlayOnWeapon}
-              onChange={(e) => setShowUnitOverlayOnWeapon(e.target.checked)}
+              checked={autoSyncInGame}
+              onChange={(e) => setAutoSyncInGame(e.target.checked)}
             />
-            Show Shield / Motion Tracker Backdrop
+            Sync to Held Weapon / Vehicle In-Game
           </label>
+
+          {isRunning && (
+            <button
+              onClick={() => {
+                void window.opence.spawnAllLiveHudArsenal?.();
+                setStatusToast('Spawned all Spartan-holdable weapons & vehicles around player in-game!');
+              }}
+              style={{
+                padding: '4px 10px',
+                fontSize: 11,
+                fontWeight: 700,
+                borderRadius: 5,
+                border: '1px solid #2896ff',
+                backgroundColor: '#002244',
+                color: '#ffffff',
+                cursor: 'pointer',
+              }}
+            >
+              🎁 Spawn All Weapons & Vehicles
+            </button>
+          )}
 
           <button
             onClick={() =>
@@ -1251,50 +965,28 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
             🖼️ Inject HUD Bitmap...
           </button>
 
-          {onLaunchTagTest && (
-            <button
-              onClick={() => {
-                if (tagTestStatus?.state === 'running') {
-                  void window.opence.tagTestHotReload();
-                  setStatusToast('Hot-reloaded HUD & weapon edits into running OpenCE session!');
-                } else {
-                  onLaunchTagTest();
-                }
-              }}
-              style={{
-                padding: '4px 12px',
-                fontSize: 11,
-                fontWeight: 700,
-                borderRadius: 5,
-                border: '1px solid #22c55e',
-                backgroundColor: tagTestStatus?.state === 'running' ? '#14532d' : '#052e16',
-                color: '#86efac',
-                cursor: 'pointer',
-              }}
-            >
-              {tagTestStatus?.state === 'running' ? '⚡ Hot-Reload in OpenCE' : '▶ Launch Dev-Mode OpenCE'}
-            </button>
-          )}
-
-          {tagTestStatus?.state === 'running' && (
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 4,
-                fontSize: 11,
-                color: '#86efac',
-                cursor: 'pointer',
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={autoHotReload}
-                onChange={(e) => setAutoHotReload(e.target.checked)}
-              />
-              Auto-Sync
-            </label>
-          )}
+          <button
+            onClick={() => {
+              if (isRunning) {
+                void window.opence.tagTestHotReload();
+                setStatusToast('Hot-reloaded staged map in OpenCE!');
+              } else {
+                void window.opence.tagTestLaunch({ windowed: true, liveHudMode: true });
+              }
+            }}
+            style={{
+              padding: '4px 12px',
+              fontSize: 11,
+              fontWeight: 700,
+              borderRadius: 5,
+              border: '1px solid #22c55e',
+              backgroundColor: isRunning ? '#14532d' : '#052e16',
+              color: '#86efac',
+              cursor: 'pointer',
+            }}
+          >
+            {isRunning ? '⚡ Hot-Reload Map' : '▶ Launch In-Game HUD Session'}
+          </button>
 
           <button
             onClick={onClose}
@@ -1314,20 +1006,17 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         </div>
       </div>
 
-      {/* Main Viewport Container */}
+      {/* Main Workspace: Authentic Halo CE Left 34% Overlay Menu + Live In-Game Telemetry & Arsenal Deck */}
       <div
         style={{
           flex: 1,
           position: 'relative',
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
           overflow: 'hidden',
-          backgroundColor: '#050b14',
         }}
       >
         {loading && (
-          <div style={{ color: '#2896ff', fontSize: 16, fontWeight: 700 }}>
+          <div style={{ margin: 'auto', color: '#2896ff', fontSize: 16, fontWeight: 700 }}>
             Loading open map HUD & weapon catalog...
           </div>
         )}
@@ -1335,6 +1024,7 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         {error && (
           <div
             style={{
+              margin: 'auto',
               padding: 20,
               backgroundColor: '#001122',
               border: '2px solid #ef4444',
@@ -1347,34 +1037,8 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
         )}
 
         {!loading && !error && catalog && (
-          <div
-            style={{
-              position: 'relative',
-              width: 'min(94vw, calc((100vh - 76px) * ' + (canvasWidth / canvasHeight).toFixed(3) + '))',
-              aspectRatio: `${canvasWidth} / ${canvasHeight}`,
-              boxShadow: '0 0 40px rgba(0, 0, 0, 0.85), 0 0 0 2px #002244',
-              borderRadius: 6,
-              overflow: 'hidden',
-            }}
-          >
-            {/* Interactive Halo HUD Canvas */}
-            <canvas
-              ref={canvasRef}
-              width={canvasWidth}
-              height={canvasHeight}
-              onMouseDown={handleCanvasMouseDown}
-              onMouseMove={handleCanvasMouseMove}
-              onMouseUp={handleCanvasMouseUp}
-              onMouseLeave={handleCanvasMouseUp}
-              style={{
-                width: '100%',
-                height: '100%',
-                display: 'block',
-                cursor: captureElementId ? 'move' : 'crosshair',
-              }}
-            />
-
-            {/* AUTHENTIC HALO CE LEFT 30% MENU PANEL (Hidden during Capture Mode so all 4 corners are unobstructed!) */}
+          <>
+            {/* AUTHENTIC HALO CE LEFT MENU PANEL (Hidden during Capture Mode) */}
             {menuVisible && !capturedElement && (
               <div
                 onContextMenu={(e) => {
@@ -1385,17 +1049,15 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
                   }
                 }}
                 style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  bottom: 0,
-                  width: '34%',
-                  minWidth: 270,
-                  maxWidth: 380,
-                  backgroundColor: 'rgba(0, 0, 0, 0.40)',
+                  width: 420,
+                  minWidth: 340,
+                  maxWidth: '42%',
+                  height: '100%',
+                  backgroundColor: 'rgba(0, 8, 20, 0.92)',
+                  borderRight: '2px solid #2896ff',
                   display: 'flex',
                   flexDirection: 'column',
-                  padding: '14px 12px',
+                  padding: '14px 14px',
                   boxSizing: 'border-box',
                 }}
               >
@@ -1471,12 +1133,12 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'space-between',
-                          minHeight: 30,
-                          padding: '4px 10px',
+                          minHeight: 32,
+                          padding: '5px 12px',
                           borderRadius: 8,
                           backgroundColor: isSelected
-                            ? 'rgba(0, 34, 68, 0.90)'
-                            : 'rgba(0, 17, 34, 0.72)',
+                            ? 'rgba(0, 34, 68, 0.95)'
+                            : 'rgba(0, 17, 34, 0.76)',
                           border: isSelected ? '2px solid #2299ff' : '2px solid transparent',
                           color: isSelected ? '#ffffff' : '#2896ff',
                           fontSize: 12,
@@ -1516,7 +1178,7 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
                                 onClick={() => row.onLeft?.(1)}
                                 style={{
                                   color: '#2896ff',
-                                  padding: '0 3px',
+                                  padding: '0 4px',
                                   cursor: 'pointer',
                                   fontWeight: 900,
                                 }}
@@ -1527,7 +1189,7 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
                             <span
                               onClick={() => row.onEnter?.()}
                               style={{
-                                minWidth: 56,
+                                minWidth: 64,
                                 textAlign: 'center',
                                 color: row.valueText === 'HIDDEN' ? '#f87171' : '#ffffff',
                               }}
@@ -1539,7 +1201,7 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
                                 onClick={() => row.onRight?.(1)}
                                 style={{
                                   color: '#2896ff',
-                                  padding: '0 3px',
+                                  padding: '0 4px',
                                   cursor: 'pointer',
                                   fontWeight: 900,
                                 }}
@@ -1565,46 +1227,240 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
                     lineHeight: 1.45,
                   }}
                 >
-                  <div>↑↓ Select   ◄► Adjust / Hide   (Enter) Open / Move</div>
-                  <div>(Esc/Right-Click) Back   (|) Hide Menu</div>
+                  <div>↑↓ Select   ◄► Adjust / Hide   (Enter) Blink & Move In-Game</div>
+                  <div>(Esc/Right-Click) Back   (|) Toggle Menu</div>
                 </div>
               </div>
             )}
 
-            {/* CAPTURE MODE 2-LINE BOTTOM BAR (When an element is captured for unobstructed Move / Scale) */}
+            {/* RIGHT PANEL: Live In-Game Arsenal Switcher & Direct Memory Bridge Status */}
+            <div
+              style={{
+                flex: 1,
+                padding: 20,
+                overflowY: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 16,
+              }}
+            >
+              {/* Live In-Game Status Card */}
+              <div
+                style={{
+                  backgroundColor: 'rgba(0, 17, 34, 0.88)',
+                  border: '1px solid #2896ff',
+                  borderRadius: 10,
+                  padding: 16,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 10,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ color: '#ffffff', fontWeight: 700, fontSize: 15 }}>
+                    True In-Game HUD & Weapon Tag Editing (`0x40440000` Live RAM Bridge)
+                  </div>
+                  <div style={{ color: '#93c5fd', fontSize: 12 }}>
+                    Map: <strong>{catalog.mapName}</strong> · {catalog.weapons.length} Holdable Weapons ·{' '}
+                    {catalog.vehicles.length} Vehicles
+                  </div>
+                </div>
+                <div style={{ color: '#cbd5e1', fontSize: 12, lineHeight: 1.55 }}>
+                  Every edit you make in the <strong>Halo CE Tag Editor menu</strong> on the left patches the running{' '}
+                  <code>halo.exe</code> / <code>OpenCE - Faber.exe</code> tag cache at <code>0x40440000</code> in real
+                  time (&lt;1 ms) and simultaneously updates your open map buffer in Mantle. On spawn, your Spartan is
+                  unlocked to carry <strong>4 weapons at once</strong> (cycle with <code>Tab</code>), and every
+                  Spartan-holdable weapon and vehicle tag in the map is spawned right around you.
+                </div>
+              </div>
+
+              {/* Quick Holdable Weapons Switcher (Click to Equip in Spartan's Hands In-Game) */}
+              <div
+                style={{
+                  backgroundColor: 'rgba(0, 17, 34, 0.82)',
+                  border: '1px solid rgba(40, 150, 255, 0.45)',
+                  borderRadius: 10,
+                  padding: 14,
+                }}
+              >
+                <div
+                  style={{
+                    color: '#2896ff',
+                    fontWeight: 700,
+                    fontSize: 12,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    marginBottom: 10,
+                  }}
+                >
+                  🔫 Spartan-Holdable Weapons in Map (Click any weapon to equip it in-game & edit its HUD / Stats)
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {catalog.weapons.map((w, idx) => {
+                    const isCurrentTarget = targetType === 'weapon' && selectedTargetIdx === idx;
+                    const isHeldInGame = liveStatus.heldWeaponTagId === w.tagId;
+                    return (
+                      <button
+                        key={w.tagId}
+                        onClick={() => {
+                          setTargetType('weapon');
+                          selectAndEquipTargetIndex(idx);
+                        }}
+                        style={{
+                          padding: '6px 12px',
+                          borderRadius: 7,
+                          border: isCurrentTarget
+                            ? '2px solid #2299ff'
+                            : isHeldInGame
+                              ? '1px solid #22c55e'
+                              : '1px solid #1e3a5f',
+                          backgroundColor: isCurrentTarget
+                            ? 'rgba(0, 34, 68, 0.95)'
+                            : 'rgba(0, 12, 26, 0.85)',
+                          color: isCurrentTarget ? '#ffffff' : '#93c5fd',
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                        }}
+                      >
+                        {isHeldInGame && <span title="Currently held in-game">🟢</span>}
+                        <span>{w.displayName}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Quick Vehicles Switcher (Click to Spawn & Edit Vehicle HUD) */}
+              {catalog.vehicles.length > 0 && (
+                <div
+                  style={{
+                    backgroundColor: 'rgba(0, 17, 34, 0.82)',
+                    border: '1px solid rgba(40, 150, 255, 0.45)',
+                    borderRadius: 10,
+                    padding: 14,
+                  }}
+                >
+                  <div
+                    style={{
+                      color: '#2896ff',
+                      fontWeight: 700,
+                      fontSize: 12,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      marginBottom: 10,
+                    }}
+                  >
+                    🚙 Vehicle Tags in Map (All spawned near player on load — Click to select HUD or spawn fresh copy)
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                    {catalog.vehicles.map((v, idx) => {
+                      const isCurrentTarget = targetType === 'vehicle' && selectedTargetIdx === idx;
+                      const isDrivenInGame = liveStatus.drivenVehicleTagId === v.tagId;
+                      return (
+                        <div
+                          key={v.tagId}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            borderRadius: 7,
+                            overflow: 'hidden',
+                            border: isCurrentTarget
+                              ? '2px solid #2299ff'
+                              : isDrivenInGame
+                                ? '1px solid #22c55e'
+                                : '1px solid #1e3a5f',
+                            backgroundColor: isCurrentTarget
+                              ? 'rgba(0, 34, 68, 0.95)'
+                              : 'rgba(0, 12, 26, 0.85)',
+                          }}
+                        >
+                          <button
+                            onClick={() => {
+                              setTargetType('vehicle');
+                              setSelectedTargetIdx(idx);
+                            }}
+                            style={{
+                              padding: '6px 10px',
+                              border: 'none',
+                              background: 'transparent',
+                              color: isCurrentTarget ? '#ffffff' : '#93c5fd',
+                              fontSize: 12,
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            {isDrivenInGame ? '🟢 ' : ''}
+                            {v.displayName}
+                          </button>
+                          {isRunning && (
+                            <button
+                              onClick={() => {
+                                setTargetType('vehicle');
+                                setSelectedTargetIdx(idx);
+                                void window.opence.spawnLiveHudVehicle?.(v.tagId);
+                                setStatusToast(`Spawned ${v.displayName} near Spartan in-game!`);
+                              }}
+                              title={`Spawn ${v.displayName} in front of Spartan`}
+                              style={{
+                                padding: '6px 8px',
+                                border: 'none',
+                                borderLeft: '1px solid #1e3a5f',
+                                backgroundColor: 'rgba(40, 150, 255, 0.16)',
+                                color: '#38bdf8',
+                                fontSize: 11,
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              + Spawn
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* CAPTURE MODE 2-LINE BOTTOM BAR (When an element is captured for Move / Scale in halo.exe) */}
             {capturedElement && (
               <div
                 style={{
                   position: 'absolute',
                   left: '50%',
-                  bottom: 14,
+                  bottom: 18,
                   transform: 'translateX(-50%)',
-                  backgroundColor: 'rgba(0, 17, 34, 0.88)',
+                  backgroundColor: 'rgba(0, 17, 34, 0.94)',
                   border: '2px solid #2299ff',
                   borderRadius: 8,
-                  padding: '8px 20px',
-                  minWidth: 460,
+                  padding: '10px 24px',
+                  minWidth: 480,
                   textAlign: 'center',
-                  boxShadow: '0 6px 24px rgba(0, 0, 0, 0.75)',
+                  boxShadow: '0 6px 24px rgba(0, 0, 0, 0.85)',
                 }}
               >
                 <div
                   style={{
                     color: '#ffffff',
-                    fontSize: 13,
+                    fontSize: 14,
                     fontWeight: 700,
                     letterSpacing: '0.04em',
-                    marginBottom: 3,
+                    marginBottom: 4,
                   }}
                 >
                   {capturedElement.element.label.toUpperCase()} &nbsp;&nbsp; X {capturedElement.element.x} &nbsp;&nbsp; Y{' '}
                   {capturedElement.element.y} &nbsp;&nbsp; SCALE {capturedElement.element.scaleX.toFixed(2)} x{' '}
                   {capturedElement.element.scaleY.toFixed(2)}
                 </div>
-                <div style={{ color: '#2896ff', fontSize: 11, fontWeight: 600 }}>
+                <div style={{ color: '#2896ff', fontSize: 12, fontWeight: 600 }}>
                   {captureScalingMode
-                    ? 'Arrows / D-pad: Scale (↑↓ Uniform, ◄► Width)   (Enter/A) Move   (Backspace) Reset   (Esc/B) Done'
-                    : 'Arrows / Mouse Drag: Move   (Enter/A) Scale   (Backspace) Reset   (Esc/B) Done'}
+                    ? 'Arrows / D-pad: Scale In-Game (↑↓ Uniform, ◄► Width)   (Enter) Move   (Backspace) Reset   (Esc) Done'
+                    : 'Arrows / D-pad: Move In-Game (Hold Shift for 4× speed)   (Enter) Scale   (Backspace) Reset   (Esc) Done'}
                 </div>
               </div>
             )}
@@ -1615,9 +1471,9 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
                 onClick={() => setStatusToast(null)}
                 style={{
                   position: 'absolute',
-                  top: 12,
-                  right: 12,
-                  backgroundColor: 'rgba(0, 34, 68, 0.92)',
+                  top: 14,
+                  right: 16,
+                  backgroundColor: 'rgba(0, 34, 68, 0.94)',
                   border: '1px solid #2896ff',
                   color: '#ffffff',
                   padding: '6px 12px',
@@ -1629,7 +1485,7 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
                 {statusToast}
               </div>
             )}
-          </div>
+          </>
         )}
       </div>
     </div>

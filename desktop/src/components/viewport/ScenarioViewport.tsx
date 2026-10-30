@@ -338,9 +338,15 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
   const [showDiagPanel, setShowDiagPanel] = useState<boolean>(false);
   const wrlOverlayGroupRef = useRef<THREE.Group | null>(null);
 
-  // Option 1 (Milestone 18.2): 3D Collision Hitbox (`coll`) Wireframe Overlay
+  // Option 1 (Milestone 18.2): 3D Collision Hitbox (`coll`) Wireframe Overlay & Coupled Scale
   const [showCollHitboxOverlay, setShowCollHitboxOverlay] = useState<boolean>(false);
   const collOverlayGroupRef = useRef<THREE.Group | null>(null);
+  const [coupledScaleFactor, setCoupledScaleFactor] = useState<number>(1.5);
+  const [coupledScaleBusy, setCoupledScaleBusy] = useState<boolean>(false);
+  const [collRefreshTick, setCollRefreshTick] = useState<number>(0);
+  const [modelRefreshTick, setModelRefreshTick] = useState<number>(0);
+  const [appliedObjectScales, setAppliedObjectScales] = useState<Record<number, number>>({});
+  const fallbackWhiteTexRef = useRef<THREE.DataTexture | null>(null);
 
   // Item 3 (Milestone 18.2): 3D BSP Cluster Portals, Fog Planes & Weather Polyhedra Overlay
   const [showBspDiagOverlay, setShowBspDiagOverlay] = useState<boolean>(false);
@@ -397,6 +403,19 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     if (!selectedObjectId || !scenarioData) return null;
     return scenarioData.objects.find((o) => o.id === selectedObjectId) || null;
   }, [selectedObjectId, scenarioData]);
+
+  const selectedScaleTagId = useMemo(() => {
+    if (!selectedPlacement) return 0xffffffff;
+    if (!['vehicle', 'scenery', 'weapon', 'equipment', 'biped', 'machine', 'encounter'].includes(selectedPlacement.kind)) {
+      return 0xffffffff;
+    }
+    return selectedPlacement.resolvedItemTagId !== undefined && selectedPlacement.resolvedItemTagId !== 0xffffffff
+      ? selectedPlacement.resolvedItemTagId
+      : selectedPlacement.objectTagId;
+  }, [selectedPlacement]);
+  const canCoupledScale = selectedScaleTagId !== undefined && selectedScaleTagId !== 0xffffffff && selectedScaleTagId !== 0;
+  const currentAppliedScale = canCoupledScale ? (appliedObjectScales[selectedScaleTagId] ?? 1.0) : 1.0;
+  const isCoupledScaleActive = canCoupledScale && Math.abs(currentAppliedScale - 1.0) > 0.001;
 
   // Synchronize 3D viewport object selection with the main Tag Browser & Properties/Swapper/References Palette
   useEffect(() => {
@@ -1341,11 +1360,29 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     return promise;
   }, []);
 
-  // Applies Sapien-grade shader features (diffuse map, tiled primary/secondary detail map blending,
-  // baked radiosity lightmap modulation, alpha-testing for grates/foliage, and transparency for glass/shields/water)
+  // Applies Sapien-grade & Halo CE in-game shader features (diffuse map, tiled primary/secondary detail map blending,
+  // baked radiosity lightmap modulation on explicit uv1 coordinates, alpha-testing for grates/foliage,
+  // unflipped vertex normals on dynamic models, and a single shared WebGLProgram cache key for butter-smooth FPS)
   const applySapienShaderToMaterial = useCallback(
-    async (solidMat: THREE.MeshStandardMaterial, shaderTagId: number, isBsp = false) => {
-      const tex = await loadTexture(shaderTagId, 0);
+    async (
+      solidMat: THREE.MeshStandardMaterial,
+      shaderTagId: number,
+      isBsp = false,
+      lightmapInfo?: { tagId: number; imageIndex: number },
+    ) => {
+      if (!fallbackWhiteTexRef.current) {
+        const white = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+        white.needsUpdate = true;
+        fallbackWhiteTexRef.current = white;
+      }
+      const whiteTex = fallbackWhiteTexRef.current;
+
+      const [tex, lmTex] = await Promise.all([
+        loadTexture(shaderTagId, 0),
+        lightmapInfo && lightmapInfo.tagId !== 0xffffffff && lightmapInfo.imageIndex >= 0
+          ? loadTexture(lightmapInfo.tagId, lightmapInfo.imageIndex, { clamp: true })
+          : Promise.resolve(null),
+      ]);
       if (!tex || !solidMat) return;
 
       const shaderMeta = tex.userData?.shaderMeta as
@@ -1374,6 +1411,10 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
 
       solidMat.map = baseTex;
       solidMat.color.setHex(0xffffff);
+      if (!isBsp) {
+        solidMat.roughness = 0.52;
+        solidMat.metalness = 0.08;
+      }
 
       if (shaderMeta?.alphaTested) {
         solidMat.alphaTest = 0.45;
@@ -1399,69 +1440,111 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
 
       const hasDetail = !!pDetailTex;
       const hasSecondary = !!(pDetailTex && sDetailTex);
+      const hasLightmap = !!lmTex;
       const pScale = shaderMeta?.primaryDetailScale || 1.0;
       const sScale = shaderMeta?.secondaryDetailScale || 1.0;
       const detailFunc = shaderMeta?.detailFunction ?? 0;
       const forceOpaqueAlpha = !shaderMeta?.alphaTested && !shaderMeta?.alphaBlended ? 1.0 : 0.0;
 
-      if (hasDetail || isBsp) {
-        solidMat.customProgramCacheKey = () =>
-          `sapien_${hasDetail ? 1 : 0}_${hasSecondary ? 1 : 0}_${detailFunc}_${forceOpaqueAlpha}_${isBsp ? 1 : 0}`;
-        solidMat.onBeforeCompile = (shader) => {
-          shader.uniforms.uPrimaryDetailMap = { value: pDetailTex };
-          shader.uniforms.uSecondaryDetailMap = { value: sDetailTex };
-          shader.uniforms.uHasPrimaryDetail = { value: hasDetail ? 1.0 : 0.0 };
-          shader.uniforms.uHasSecondaryDetail = { value: hasSecondary ? 1.0 : 0.0 };
-          shader.uniforms.uPrimaryDetailScale = { value: pScale };
-          shader.uniforms.uSecondaryDetailScale = { value: sScale };
-          shader.uniforms.uDetailFunction = { value: detailFunc };
-          shader.uniforms.uForceOpaqueAlpha = { value: forceOpaqueAlpha };
+      // Single shared WebGL shader program cache key across the entire map so Three.js compiles 1 program instead of 400+
+      solidMat.customProgramCacheKey = () => 'sapien_halo_v2';
+      solidMat.onBeforeCompile = (shader) => {
+        shader.uniforms.uPrimaryDetailMap = { value: pDetailTex || whiteTex };
+        shader.uniforms.uSecondaryDetailMap = { value: sDetailTex || whiteTex };
+        shader.uniforms.uHaloLightMap = { value: lmTex || whiteTex };
+        shader.uniforms.uHasPrimaryDetail = { value: hasDetail ? 1.0 : 0.0 };
+        shader.uniforms.uHasSecondaryDetail = { value: hasSecondary ? 1.0 : 0.0 };
+        shader.uniforms.uHasHaloLightMap = { value: hasLightmap ? 1.0 : 0.0 };
+        shader.uniforms.uPrimaryDetailScale = { value: pScale };
+        shader.uniforms.uSecondaryDetailScale = { value: sScale };
+        shader.uniforms.uDetailFunction = { value: detailFunc };
+        shader.uniforms.uForceOpaqueAlpha = { value: forceOpaqueAlpha };
+        shader.uniforms.uIsDynamicObject = { value: isBsp ? 0.0 : 1.0 };
 
-          shader.fragmentShader =
+        shader.vertexShader =
+          `
+          #ifndef USE_UV1
+          attribute vec2 uv1;
+          #endif
+          varying vec2 vHaloLightmapUv;
+          ` +
+          shader.vertexShader.replace(
+            '#include <uv_vertex>',
             `
-            uniform sampler2D uPrimaryDetailMap;
-            uniform sampler2D uSecondaryDetailMap;
-            uniform float uHasPrimaryDetail;
-            uniform float uHasSecondaryDetail;
-            uniform float uPrimaryDetailScale;
-            uniform float uSecondaryDetailScale;
-            uniform float uDetailFunction;
-            uniform float uForceOpaqueAlpha;
-            ` + shader.fragmentShader;
+            #include <uv_vertex>
+            vHaloLightmapUv = uv1;
+            `,
+          );
 
-          shader.fragmentShader = shader.fragmentShader.replace(
+        shader.fragmentShader =
+          `
+          uniform sampler2D uPrimaryDetailMap;
+          uniform sampler2D uSecondaryDetailMap;
+          uniform sampler2D uHaloLightMap;
+          uniform float uHasPrimaryDetail;
+          uniform float uHasSecondaryDetail;
+          uniform float uHasHaloLightMap;
+          uniform float uPrimaryDetailScale;
+          uniform float uSecondaryDetailScale;
+          uniform float uDetailFunction;
+          uniform float uForceOpaqueAlpha;
+          uniform float uIsDynamicObject;
+          varying vec2 vHaloLightmapUv;
+          ` + shader.fragmentShader;
+
+        shader.fragmentShader = shader.fragmentShader
+          .replace(
+            '#include <normal_fragment_begin>',
+            `
+            #include <normal_fragment_begin>
+            if ( uIsDynamicObject > 0.5 ) {
+              normal = normalize( vNormal );
+            }
+            `,
+          )
+          .replace(
             '#include <map_fragment>',
             `
             #ifdef USE_MAP
               vec4 sampledDiffuseColor = texture2D( map, vMapUv );
+              if ( uForceOpaqueAlpha > 0.5 ) {
+                sampledDiffuseColor.a = 1.0;
+              }
               diffuseColor *= sampledDiffuseColor;
               if ( uHasPrimaryDetail > 0.5 ) {
                 vec3 det1 = texture2D( uPrimaryDetailMap, vMapUv * uPrimaryDetailScale ).rgb;
                 vec3 detRgb = det1;
                 if ( uHasSecondaryDetail > 0.5 ) {
                   vec3 det2 = texture2D( uSecondaryDetailMap, vMapUv * uSecondaryDetailScale ).rgb;
-                  detRgb = mix( det1, det2, sampledDiffuseColor.a );
+                  detRgb = mix( det1, det2, texture2D( map, vMapUv ).a );
                 }
                 if ( uDetailFunction < 0.5 ) {
-                  diffuseColor.rgb *= clamp( detRgb * 2.0, 0.25, 1.85 );
+                  diffuseColor.rgb *= clamp( detRgb * 2.0, 0.35, 1.75 );
                 } else if ( uDetailFunction < 1.5 ) {
                   diffuseColor.rgb *= detRgb;
                 } else {
-                  diffuseColor.rgb = clamp( diffuseColor.rgb + ( detRgb - 0.5 ) * 1.4, 0.0, 2.0 );
+                  diffuseColor.rgb = clamp( diffuseColor.rgb + ( detRgb - 0.5 ) * 1.2, 0.0, 2.0 );
                 }
               }
               if ( uForceOpaqueAlpha > 0.5 ) {
                 diffuseColor.a = 1.0;
               }
             #endif
-            #ifdef USE_LIGHTMAP
-              vec3 bakedLm = clamp( texture2D( lightMap, vLightMapUv ).rgb * 1.75, 0.28, 1.55 );
-              diffuseColor.rgb *= bakedLm;
-            #endif
+            `,
+          )
+          .replace(
+            'vec3 totalDiffuse = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;',
+            `
+            vec3 totalDiffuse = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse;
+            if ( uHasHaloLightMap > 0.5 ) {
+              vec3 bakedLm = texture2D( uHaloLightMap, vHaloLightmapUv ).rgb;
+              totalDiffuse = diffuseColor.rgb * clamp( bakedLm * 1.55 + 0.08, 0.36, 1.38 );
+            } else if ( uIsDynamicObject > 0.5 ) {
+              totalDiffuse = max( totalDiffuse * 0.88 + diffuseColor.rgb * 0.34, diffuseColor.rgb * 0.68 );
+            }
             `,
           );
-        };
-      }
+      };
 
       solidMat.needsUpdate = true;
     },
@@ -1966,36 +2049,10 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
               return;
             }
 
-            // Compute bounding box, visual preview scale, and vertical zLift for weapons/equipment
-            // so tiny item models (like ammo packs, grenades, and pistols which are 0.025–0.15u in Halo world units)
-            // render clearly above the pickup ring in the 3D Viewport without altering map tag data.
-            let zLift = 0;
-            let viewScale = 1.0;
-            if (obj.kind === 'weapon' || obj.kind === 'equipment') {
-              let minX = Infinity, maxX = -Infinity;
-              let minY = Infinity, maxY = -Infinity;
-              let minZ = Infinity, maxZ = -Infinity;
-              for (const submesh of modelGeom.submeshes) {
-                for (let vi = 0; vi < submesh.vertexCount; vi++) {
-                  const vx = submesh.vertices[vi * 8 + 0];
-                  const vy = submesh.vertices[vi * 8 + 1];
-                  const vz = submesh.vertices[vi * 8 + 2];
-                  if (vx < minX) minX = vx;
-                  if (vx > maxX) maxX = vx;
-                  if (vy < minY) minY = vy;
-                  if (vy > maxY) maxY = vy;
-                  if (vz < minZ) minZ = vz;
-                  if (vz > maxZ) maxZ = vz;
-                }
-              }
-              const maxDim = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
-              if (Number.isFinite(maxDim) && maxDim > 0 && maxDim < 0.65) {
-                viewScale = Math.min(3.5, Math.max(1.0, 0.65 / maxDim));
-              }
-              if (Number.isFinite(minZ)) {
-                zLift = Math.max(0.03, -minZ * viewScale + 0.03);
-              }
-            }
+            // Keep true 1:1 Halo world scale so weapons/equipment and their green `coll` hitbox wireframe
+            // remain 100% aligned when using Coupled Scale (the glowing pickup ring below marks small items).
+            const zLift = 0;
+            const viewScale = 1.0;
 
             const defaultColor =
               obj.kind === 'vehicle'
@@ -2083,6 +2140,95 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
 
           objGroup.add(bipedMarker);
           targetLayer.add(objGroup);
+        } else if (obj.kind === 'decal') {
+          // Render Scenario Decal (`deca`) as a surface-aligned textured quad instead of a purple box
+          const alignDecalGroupToSurface = (targetGroup: THREE.Group) => {
+            const bspTargets = submeshMeshesRef.current.filter((m) => !m.isSkyPortal && m.mesh.visible).map((m) => m.mesh);
+            if (bspTargets.length === 0) return;
+            const wx = obj.position[0];
+            const wy = obj.position[2];
+            const wz = -obj.position[1];
+            const origin3 = new THREE.Vector3(wx, wy, wz);
+            const dirs = [
+              new THREE.Vector3(0, -1, 0),
+              new THREE.Vector3(0, 1, 0),
+              new THREE.Vector3(1, 0, 0),
+              new THREE.Vector3(-1, 0, 0),
+              new THREE.Vector3(0, 0, 1),
+              new THREE.Vector3(0, 0, -1),
+            ];
+            const rc = new THREE.Raycaster();
+            rc.near = 0.0;
+            rc.far = 1.8;
+            let bestHit: THREE.Intersection | null = null;
+            let bestError = Infinity;
+            for (const dir of dirs) {
+              const start = origin3.clone().addScaledVector(dir, -0.45);
+              rc.set(start, dir);
+              const hits = rc.intersectObjects(bspTargets, false);
+              if (hits.length > 0) {
+                const err = hits[0].point.distanceTo(origin3);
+                if (err < bestError) {
+                  bestError = err;
+                  bestHit = hits[0];
+                }
+              }
+            }
+            if (bestHit && bestHit.face) {
+              const hn = bestHit.face.normal.clone().normalize();
+              const hp = new THREE.Vector3(bestHit.point.x, -bestHit.point.z, bestHit.point.y);
+              const toOrigin = new THREE.Vector3(obj.position[0] - hp.x, obj.position[1] - hp.y, obj.position[2] - hp.z);
+              if (hn.dot(toOrigin) < -0.05) {
+                hn.negate();
+              }
+              targetGroup.position.set(hp.x + hn.x * 0.02, hp.y + hn.y * 0.02, hp.z + hn.z * 0.02);
+              const upZ = new THREE.Vector3(0, 0, 1);
+              const alignQuat = new THREE.Quaternion().setFromUnitVectors(upZ, hn);
+              const spinQuat = new THREE.Quaternion().setFromAxisAngle(upZ, obj.rotation[0] || 0);
+              targetGroup.quaternion.copy(alignQuat).multiply(spinQuat);
+            }
+          };
+
+          alignDecalGroupToSurface(objGroup);
+
+          const decalGeom = new THREE.PlaneGeometry(1.0, 1.0);
+          decalGeom.translate(0, 0, 0.015);
+          const decalMat = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.0,
+            depthWrite: false,
+            alphaTest: 0.02,
+            side: THREE.DoubleSide,
+            polygonOffset: true,
+            polygonOffsetFactor: -4,
+            polygonOffsetUnits: -4,
+          });
+          const decalMesh = new THREE.Mesh(decalGeom, decalMat);
+          decalMesh.scale.set(1.2, 1.2, 1.0);
+          decalMesh.userData = { id: obj.id, isDecal: true };
+          objGroup.add(decalMesh);
+          targetLayer.add(objGroup);
+
+          if (obj.objectTagId && obj.objectTagId !== 0xffffffff) {
+            loadTexture(obj.objectTagId, 0, { clamp: true }).then((tex) => {
+              if (!tex) return;
+              const meta = tex.userData?.shaderMeta as
+                | {
+                    decalRadius?: number;
+                    decalIntensity?: number;
+                    decalTint?: [number, number, number];
+                  }
+                | undefined;
+              const radius = meta?.decalRadius && meta.decalRadius > 0.05 ? meta.decalRadius : 0.65;
+              const diameter = Math.max(0.25, Math.min(8.0, radius * 2.0));
+              decalMesh.scale.set(diameter, diameter, 1.0);
+              decalMat.map = tex;
+              decalMat.opacity = Math.min(0.95, Math.max(0.35, meta?.decalIntensity ?? 0.92));
+              decalMat.needsUpdate = true;
+              alignDecalGroupToSurface(objGroup);
+            });
+          }
         } else {
           const dims =
             obj.kind === 'vehicle'
@@ -2112,12 +2258,12 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     [loadModelGeometry, loadTexture, renderMode],
   );
 
-  // Re-populate scenario objects when scenarioData changes
+  // Re-populate scenario objects when scenarioData or modelRefreshTick changes
   useEffect(() => {
     if (scenarioData && layerGroupsRef.current) {
       populateScenarioObjects(scenarioData, layerGroupsRef.current);
     }
-  }, [scenarioData, populateScenarioObjects]);
+  }, [scenarioData, populateScenarioObjects, modelRefreshTick]);
 
   // Synchronize layer visibility toggles
   useEffect(() => {
@@ -2391,26 +2537,18 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           submeshMeshesRef.current.push({ mesh, lines, solidMat, bspIndex: idx, isSkyPortal });
 
           if (!isSkyPortal && submesh.shaderTagId) {
-            void applySapienShaderToMaterial(solidMat, submesh.shaderTagId, true);
-          }
-
-          if (
-            !isSkyPortal &&
-            meshData.lightmapsBitmapTagId &&
-            meshData.lightmapsBitmapTagId !== 0xffffffff &&
-            submesh.lightmapBitmapIndex >= 0
-          ) {
-            loadTexture(meshData.lightmapsBitmapTagId, submesh.lightmapBitmapIndex, { clamp: true }).then((lmTex) => {
-              if (lmTex && solidMat) {
-                solidMat.lightMap = lmTex;
-                solidMat.lightMapIntensity = 0.45;
-                solidMat.needsUpdate = true;
-              }
-            });
+            const lightmapInfo =
+              meshData.lightmapsBitmapTagId &&
+              meshData.lightmapsBitmapTagId !== 0xffffffff &&
+              submesh.lightmapBitmapIndex >= 0
+                ? { tagId: meshData.lightmapsBitmapTagId, imageIndex: submesh.lightmapBitmapIndex }
+                : undefined;
+            void applySapienShaderToMaterial(solidMat, submesh.shaderTagId, true, lightmapInfo);
           }
         }
 
         bspGroup.add(childGroup);
+        bspGroup.updateMatrixWorld(true);
         bspChildGroupsRef.current.set(idx, childGroup);
       }
     }
@@ -2419,7 +2557,7 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     for (const [idx, group] of bspChildGroupsRef.current.entries()) {
       group.visible = visibleBspIndices.includes(idx);
     }
-  }, [visibleBspIndices, bspMeshes, renderMode, loadTexture]);
+  }, [visibleBspIndices, bspMeshes, renderMode, applySapienShaderToMaterial]);
 
   useEffect(() => {
     syncBspMeshes();
@@ -2695,7 +2833,50 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     return () => {
       cancelled = true;
     };
-  }, [showCollHitboxOverlay, selectedPlacement]);
+  }, [showCollHitboxOverlay, selectedPlacement, collRefreshTick]);
+
+  // Coupled Scale: scales both the selected object's GBXModel (mod2) and Collision Model (coll) together
+  const handleCoupledScaleSelectedObject = useCallback(async () => {
+    if (!selectedPlacement || !canCoupledScale || !window.opence.scaleCoupledPhysics || coupledScaleBusy) return;
+
+    const desiredScale = Math.max(0.1, Math.min(10, Number(coupledScaleFactor) || 1.5));
+    // If already scaled to desiredScale, clicking the active button toggles it back to 1.0x
+    const nextScale =
+      isCoupledScaleActive && Math.abs(desiredScale - currentAppliedScale) < 0.001 ? 1.0 : desiredScale;
+    const relativeFactor = nextScale / currentAppliedScale;
+    if (Math.abs(relativeFactor - 1.0) < 0.001) return;
+
+    setCoupledScaleBusy(true);
+    try {
+      const res = await window.opence.scaleCoupledPhysics(selectedScaleTagId, relativeFactor);
+      if (res && res.ok) {
+        setAppliedObjectScales((prev) => ({
+          ...prev,
+          [selectedScaleTagId]: nextScale,
+        }));
+        modelCacheRef.current.clear();
+        setShowCollHitboxOverlay(true);
+        setCollRefreshTick((t) => t + 1);
+        setModelRefreshTick((t) => t + 1);
+        const scenRes = await window.opence.getScenarioObjects?.();
+        if (scenRes && scenRes.ok) {
+          setScenarioData(scenRes.summary);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to apply coupled scale:', err);
+    } finally {
+      setCoupledScaleBusy(false);
+    }
+  }, [
+    selectedPlacement,
+    canCoupledScale,
+    selectedScaleTagId,
+    coupledScaleFactor,
+    coupledScaleBusy,
+    isCoupledScaleActive,
+    currentAppliedScale,
+  ]);
 
   // Item 3 (Milestone 18.2): Render 3D BSP Cluster Portals, Fog Planes & Weather Polyhedra Overlays
   useEffect(() => {
@@ -3279,7 +3460,8 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
               ];
               const hits = raycaster.intersectObjects(interactiveRoots, true);
               if (hits.length > 0) {
-                let curr: THREE.Object3D | null = hits[0].object;
+                const preferredHit = hits.find((h) => !h.object.userData?.isDecal) ?? hits[0];
+                let curr: THREE.Object3D | null = preferredHit.object;
                 while (curr && (!curr.userData || !curr.userData.id)) {
                   curr = curr.parent;
                 }
@@ -4240,6 +4422,71 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
           >
             {showCollHitboxOverlay ? '🛡 Hitbox (coll): ON' : '🛡 Hitbox (coll)'}
           </button>
+
+          {/* Coupled Scale (scales both 3D GBXModel and 3D Collision Hitbox together) */}
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              background: 'var(--bg-panel)',
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              padding: '1px 4px',
+            }}
+            title="Scale both the selected object's 3D GBXModel (mod2) and 3D Collision Hitbox (coll) together so they stay 100% aligned"
+          >
+            <input
+              data-testid="viewport-coupled-scale-input"
+              type="number"
+              step="0.1"
+              min="0.1"
+              max="10"
+              value={coupledScaleFactor}
+              onChange={(e) => setCoupledScaleFactor(Math.max(0.1, Math.min(10, parseFloat(e.target.value) || 1.0)))}
+              style={{
+                width: 44,
+                background: 'var(--bg-main)',
+                color: 'var(--accent-cyan)',
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                padding: '2px 4px',
+                fontSize: 11,
+                fontFamily: 'var(--mono-font)',
+                textAlign: 'center',
+              }}
+            />
+            <button
+              data-testid="viewport-coupled-scale-btn"
+              onClick={handleCoupledScaleSelectedObject}
+              disabled={!canCoupledScale || coupledScaleBusy}
+              style={{
+                background: isCoupledScaleActive ? 'rgba(16, 185, 129, 0.2)' : 'var(--bg-panel)',
+                color: isCoupledScaleActive ? '#34d399' : canCoupledScale ? 'var(--text-primary)' : 'var(--text-dim)',
+                border: `1px solid ${isCoupledScaleActive ? '#10b981' : 'var(--border)'}`,
+                borderRadius: 3,
+                padding: '3px 8px',
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: canCoupledScale && !coupledScaleBusy ? 'pointer' : 'not-allowed',
+                opacity: canCoupledScale ? 1 : 0.5,
+                whiteSpace: 'nowrap',
+              }}
+              title={
+                !canCoupledScale
+                  ? 'Select a 3D vehicle, weapon, equipment, scenery, biped, or machine in the viewport to scale its 3D model and collision hitbox together'
+                  : isCoupledScaleActive
+                    ? `Coupled scale is active (${currentAppliedScale.toFixed(2).replace(/\.?0+$/, '')}x). Click to reset to 1.0x or enter a new factor.`
+                    : 'Apply Coupled Scale to both the 3D GBXModel (mod2) and Collision Hitbox (coll)'
+              }
+            >
+              {coupledScaleBusy
+                ? 'Scaling...'
+                : isCoupledScaleActive
+                  ? `⚖️ Coupled Scale: ${currentAppliedScale.toFixed(2).replace(/\.?0+$/, '')}x`
+                  : '⚖️ Coupled Scale'}
+            </button>
+          </div>
 
           {/* Item 3 (Milestone 18.2): Toggle 3D BSP Cluster Portals, Fog Planes & Weather Polyhedra Overlay */}
           <button

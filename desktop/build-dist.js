@@ -149,22 +149,26 @@ async function main() {
     console.log('Artifact:', artifact);
   }
 
-  // Also sync resources/app.asar into %LOCALAPPDATA%\Programs\opence-desktop if an NSIS install exists
-  const unpackedResources = path.join(__dirname, 'release', 'win-unpacked', 'resources');
-  const installedCandidates = [
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'opence-desktop'),
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'OpenCE Mantle'),
-  ];
-  for (const instDir of installedCandidates) {
-    const instRes = path.join(instDir, 'resources');
-    if (fs.existsSync(instRes) && fs.existsSync(unpackedResources)) {
-      try {
-        fs.cpSync(unpackedResources, instRes, { recursive: true, force: true });
-        console.log(`Synced latest app bundle into installed directory: ${instRes}`);
-      } catch (err) {
-        console.warn(`Could not sync to ${instRes} (app may be running):`, err.message || err);
+  // Only sync resources/app.asar into %LOCALAPPDATA%\Programs\opence-desktop when --sync-installed is explicitly passed
+  if (process.argv.includes('--sync-installed')) {
+    const unpackedResources = path.join(__dirname, 'release', 'win-unpacked', 'resources');
+    const installedCandidates = [
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'opence-desktop'),
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'OpenCE Mantle'),
+    ];
+    for (const instDir of installedCandidates) {
+      const instRes = path.join(instDir, 'resources');
+      if (fs.existsSync(instRes) && fs.existsSync(unpackedResources)) {
+        try {
+          fs.cpSync(unpackedResources, instRes, { recursive: true, force: true });
+          console.log(`Synced latest app bundle into installed directory: ${instRes}`);
+        } catch (err) {
+          console.warn(`Could not sync to ${instRes} (app may be running):`, err.message || err);
+        }
       }
     }
+  } else {
+    console.log('Skipping sync to installed directory (preserving installed build for auto-update testing).');
   }
 
   const portableExe = path.join(__dirname, 'release', `OpenCE Mantle ${displayVersion}.exe`);

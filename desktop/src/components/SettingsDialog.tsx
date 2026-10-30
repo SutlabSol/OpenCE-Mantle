@@ -6,10 +6,14 @@ import type {
   BitmapIdentificationResult,
   UpdateCheckResult,
   UpdateDownloadProgressEvent,
+  AppThemeId,
 } from '../../electron/shared-types';
+import { MANTLE_THEME_PRESETS } from './ThemeSelectorModal';
 
 interface Props {
   onClose: () => void;
+  currentTheme?: AppThemeId;
+  onOpenThemeModal?: () => void;
 }
 
 type SettingsTab = 'general' | 'ce' | 'pc' | 'halomd' | 'demo' | 'mcc';
@@ -67,7 +71,7 @@ const TABS: TabDef[] = [
   },
 ];
 
-export default function SettingsDialog({ onClose }: Props) {
+export default function SettingsDialog({ onClose, currentTheme = 'dark', onOpenThemeModal }: Props) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
   const [openCeConfig, setOpenCeConfig] = useState<{ directory: string | null; executable: string | null; exists: boolean } | null>(null);
   const [versionSettings, setVersionSettings] = useState<Partial<Record<HaloBitmapVersion, VersionResourceMaps>>>({});
@@ -277,7 +281,7 @@ export default function SettingsDialog({ onClose }: Props) {
             display: 'flex',
             gap: 2,
             padding: '4px 12px 0 12px',
-            background: '#141820',
+            background: 'var(--bg-control)',
             borderBottom: '1px solid var(--border)',
             overflowX: 'auto',
           }}
@@ -314,6 +318,32 @@ export default function SettingsDialog({ onClose }: Props) {
         <div style={{ padding: 18, overflowY: 'auto', flex: 1 }}>
           {activeTab === 'general' ? (
             <div>
+              {/* Workspace Appearance & Theme */}
+              <div style={{ marginBottom: 20, paddingBottom: 16, borderBottom: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                      Workspace Appearance &amp; Blueprint Theme
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+                      Active Theme:{' '}
+                      <strong style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--mono-font)' }}>
+                        {MANTLE_THEME_PRESETS.find((t) => t.id === currentTheme)?.title ?? currentTheme}
+                      </strong>
+                    </div>
+                  </div>
+                  {onOpenThemeModal && (
+                    <button
+                      data-testid="settings-open-theme-selector"
+                      onClick={onOpenThemeModal}
+                      style={actionBtnStyle()}
+                    >
+                      ★ Change Theme...
+                    </button>
+                  )}
+                </div>
+              </div>
+
               {/* OpenCE Installation Directory */}
               <div style={{ marginBottom: 20, paddingBottom: 16, borderBottom: '1px solid var(--border)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>

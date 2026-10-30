@@ -50,6 +50,7 @@ import {
   decodeBitmapTagImage,
   resolveShaderBaseBitmapTagId,
   resolveShaderRenderMetadata,
+  applyDecalBlendToRgba,
   BITM_FOURCC,
   extractScenarioPlacements,
   extractModelRenderGeometry,
@@ -138,9 +139,24 @@ import {
   applyLiveHudEdit,
   applyLiveWeaponStatEdit,
   injectHudElementBitmap,
+  prepareMapBufferForLiveHudSession,
+  type LiveHudSessionSetupInfo,
   inspectUiWidgetCanvas,
   updateUiWidgetPlacement,
   saveUnicodeStringListTable,
+  extractTagsToBlamFilesFromMap,
+  serializeOceContainerToBlamTagFiles,
+  serializeContainerTagToHekLooseBuffer,
+  buildContainerFromLegacyTags,
+  inspectContentExplorerNodeInMap,
+  fixBrokenTagDependenciesInMap,
+  refactorRenameOrMoveFolderInMap,
+  reorganizeReflexiveBlockInMap,
+  exportReflexiveBlockToTsv,
+  applyTsvToReflexiveBlockInMap,
+  analyzeHudMessageTextSafety,
+  exportUnicodeStringsToCsv,
+  previewUnicodeStringsCsvImport,
 } from '../../core/src/index';
 import { deployMccModPackage } from './mcc-deploy';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
@@ -239,6 +255,8 @@ export function __setMapFsForTest(ops: Partial<typeof realMapFs> | null): void {
 }
 
 let currentMap: LoadedMap | null = null;
+let activeSessionId: string | null = null;
+const loadedMapSessions = new Map<string, LoadedMap>();
 let currentInject: { container: OceContainer; plan: InjectionPlan } | null = null;
 const modelGeometryCache = new Map<string, ModelRenderGeometry>();
 const cancelledRequests = new Set<string>();
@@ -271,6 +289,59 @@ function openResourceReadOnly(file: string): { file: RandomAccessFile; close: ()
       },
     },
     close: () => fs.closeSync(fd),
+  };
+}
+
+const MCC_MAPS_CANDIDATES = [
+  'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps',
+  'C:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps',
+  'D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps',
+];
+
+const SOUNDS_FALLBACK_CANDIDATES = [
+  'C:\\Users\\LeviB\\Projects\\OpenCE-Mantle\\sample_maps\\PC\\sounds.map',
+  'C:\\Users\\LeviB\\Projects\\OpenCE-Mantle\\sample_maps\\custom edition\\sounds.map',
+  'C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\sounds.map',
+  'C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\sounds.map',
+  'D:\\custom_maps\\sounds.map',
+];
+
+function resolveMapResourcePaths(
+  mapFilePath: string | undefined,
+  mapEngine: number | undefined,
+  configured?: Partial<Record<ResourceKind, string | undefined>>,
+): Partial<Record<ResourceKind, string | undefined>> {
+  const mapDir = mapFilePath ? path.dirname(mapFilePath) : '';
+  const isMcc = mapEngine === CacheFileEngine.MCC_CEA;
+  const resolveOne = (kind: 'bitmaps' | 'sounds', cfgPath?: string): string | undefined => {
+    const filename = `${kind}.map`;
+    const localSibling = mapDir ? path.join(mapDir, filename) : '';
+    if (isMcc && kind === 'bitmaps') {
+      if (cfgPath && fs.existsSync(cfgPath)) {
+        const lower = cfgPath.toLowerCase();
+        const sameDir = mapDir && path.dirname(path.resolve(cfgPath)).toLowerCase() === path.resolve(mapDir).toLowerCase();
+        if (sameDir || lower.includes('master chief collection') || lower.includes('halo1')) {
+          return cfgPath;
+        }
+      }
+      if (localSibling && fs.existsSync(localSibling)) return localSibling;
+      for (const mccDir of MCC_MAPS_CANDIDATES) {
+        const candidate = path.join(mccDir, filename);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
+    if (cfgPath && fs.existsSync(cfgPath)) return cfgPath;
+    if (localSibling && fs.existsSync(localSibling)) return localSibling;
+    if (isMcc && kind === 'sounds') {
+      for (const sndCandidate of SOUNDS_FALLBACK_CANDIDATES) {
+        if (fs.existsSync(sndCandidate)) return sndCandidate;
+      }
+    }
+    return cfgPath;
+  };
+  return {
+    bitmaps: resolveOne('bitmaps', configured?.bitmaps),
+    sounds: resolveOne('sounds', configured?.sounds),
   };
 }
 
@@ -406,12 +477,16 @@ export function summarizeOpenMap(map: LoadedMap): OpenMapSummary {
 /** Parses `buffer` as the new held map, or throws (the held map is then left as it was). */
 function reparse(filePath: string, buffer: Buffer, modified: boolean, diskStat: LoadedMap['diskStat']): LoadedMap {
   modelGeometryCache.clear();
-  const inspected = inspectCustomEditionMap(buffer);
+  const decompressed = ensureXboxMapDecompressed(buffer);
+  const inspected = inspectCustomEditionMap(decompressed);
   if (inspected.status !== 'ok') throw new Error(`The result could not be read back as a Custom Edition map (${inspected.status}).`);
-  return { filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified, diskStat };
+  return { filePath, buffer: decompressed, header: inspected.header, tagIndex: inspected.tagIndex, modified, diskStat };
 }
 
-export async function runInspect(task: { requestId: string; filePath: string }) {
+export async function runInspect(task: { requestId: string; filePath: string; sessionId?: string }) {
+  if (activeSessionId && currentMap) {
+    loadedMapSessions.set(activeSessionId, currentMap);
+  }
   progress(task.requestId, 'Reading file', 10);
   const buffer = ensureXboxMapDecompressed(fs.readFileSync(task.filePath));
   const diskStat = diskStatOf(task.filePath);
@@ -438,6 +513,9 @@ export async function runInspect(task: { requestId: string; filePath: string }) 
   let payload: LoadMapResult;
   if (inspected.status === 'ok') {
     currentMap = { filePath: task.filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified: false, diskStat };
+    const sid = task.sessionId ?? task.filePath;
+    activeSessionId = sid;
+    loadedMapSessions.set(sid, currentMap);
     payload = summarizeOpenMap(currentMap);
   } else if (inspected.status === 'compressed') {
     // Nothing of a compressed map is held: it can't be edited, injected into or saved until decompressed.
@@ -449,6 +527,41 @@ export async function runInspect(task: { requestId: string; filePath: string }) 
   }
   progress(task.requestId, 'Done', 100);
   sendResult(task.requestId, payload);
+}
+
+export function runActivateMapSession(task: { requestId: string; sessionId: string }) {
+  if (activeSessionId && currentMap) {
+    loadedMapSessions.set(activeSessionId, currentMap);
+  }
+  const target = loadedMapSessions.get(task.sessionId) ?? null;
+  if (!target) {
+    return sendResult(task.requestId, { ok: false, message: `Map session "${task.sessionId}" not found in worker.` });
+  }
+  activeSessionId = task.sessionId;
+  currentMap = target;
+  currentInject = null;
+  modelGeometryCache.clear();
+  sendResult(task.requestId, { ok: true, map: summarizeOpenMap(target) });
+}
+
+export function runCloseMapSession(task: { requestId: string; sessionId: string }) {
+  if (activeSessionId && currentMap && activeSessionId !== task.sessionId) {
+    loadedMapSessions.set(activeSessionId, currentMap);
+  }
+  loadedMapSessions.delete(task.sessionId);
+  if (activeSessionId === task.sessionId) {
+    const remainingKeys = Array.from(loadedMapSessions.keys());
+    const nextSid = remainingKeys.length > 0 ? remainingKeys[remainingKeys.length - 1] : null;
+    activeSessionId = nextSid;
+    currentMap = nextSid ? (loadedMapSessions.get(nextSid) ?? null) : null;
+    currentInject = null;
+    modelGeometryCache.clear();
+  }
+  sendResult(task.requestId, {
+    ok: true,
+    activeSessionId,
+    map: currentMap ? summarizeOpenMap(currentMap) : null,
+  });
 }
 
 async function runCompression(task: { requestId: string; type: 'compress' | 'decompress'; filePath: string; outputPath: string }) {
@@ -515,6 +628,7 @@ export function runExtractTags(task: {
   originalIndices: number[];
   outputPath: string;
   sourceMapName: string;
+  format?: 'blam' | 'ocetags';
   resourceMapPaths?: Partial<Record<ResourceMapKind, string>>;
   itemName?: string;
   itemNames?: Record<number, string>;
@@ -524,11 +638,121 @@ export function runExtractTags(task: {
   const cancelCtl = makeCancelController(task.requestId);
   const tempPath = `${task.outputPath}.tmp-${randomUUID()}`;
   const pendingTemps: string[] = [];
-  const resources = openConversionResources({
-    bitmaps: task.resourceMapPaths?.bitmaps,
-    sounds: task.resourceMapPaths?.sounds,
-  });
+  const resources = openConversionResources(
+    resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+      bitmaps: task.resourceMapPaths?.bitmaps,
+      sounds: task.resourceMapPaths?.sounds,
+    }),
+  );
   try {
+    const isOceTagsTarget =
+      task.format === 'ocetags' ||
+      (!task.format && task.outputPath.toLowerCase().endsWith('.ocetags'));
+
+    if (!isOceTagsTarget && task.format === 'blam') {
+      progress(task.requestId, 'Extracting standard Blam loose tags', 15);
+      const blamRes = extractTagsToBlamFilesFromMap(
+        currentMap.buffer,
+        task.originalIndices,
+        {
+          includeDependencies: true,
+          prefixTagsDir: false,
+          captureGbxmodelRawData: task.captureGbxmodelRawData ?? true,
+          resourceFiles: resources.files,
+        },
+      );
+      if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
+
+      const writtenFiles: string[] = [];
+      let totalBytes = 0;
+      const isDirTarget =
+        (fs.existsSync(task.outputPath) && fs.statSync(task.outputPath).isDirectory()) ||
+        task.originalIndices.length > 1 ||
+        !path.extname(task.outputPath);
+
+      if (isDirTarget) {
+        const baseNameLower = path.basename(task.outputPath).toLowerCase();
+        const tagsRoot = baseNameLower === 'tags' ? task.outputPath : path.join(task.outputPath, 'tags');
+        for (let i = 0; i < blamRes.tagFiles.length; i++) {
+          if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
+          const tf = blamRes.tagFiles[i]!;
+          const destFile = path.join(tagsRoot, ...tf.relativePath.split(/[\\/]+/));
+          fs.mkdirSync(path.dirname(destFile), { recursive: true });
+          const tmp = `${destFile}.tmp-${randomUUID()}`;
+          pendingTemps.push(tmp);
+          fs.writeFileSync(tmp, tf.bytes);
+          fs.renameSync(tmp, destFile);
+          pendingTemps.pop();
+          writtenFiles.push(destFile);
+          totalBytes += tf.bytes.length;
+        }
+        progress(task.requestId, 'Done', 100);
+        sendResult(task.requestId, {
+          ok: true,
+          outputPath: tagsRoot,
+          tagCount: blamRes.tagFiles.length,
+          fileSizeBytes: totalBytes,
+          carriedOverWarnings: blamRes.container.warnings.map(toWarningInfo),
+          outputFiles: writtenFiles,
+          format: 'blam',
+        } satisfies ExtractTagsResult);
+        return;
+      }
+
+      // Single file target (e.g. user saved `pistol.weapon` to a specific path):
+      // Write the primary root tag to `task.outputPath` and write all dependency tags into the surrounding `tags/` root
+      const rootOrigIdx = task.originalIndices[0]!;
+      const rootEntry = currentMap.tagIndex.entries[rootOrigIdx];
+      const rootFile =
+        blamRes.tagFiles.find(
+          (tf) =>
+            rootEntry &&
+            tf.group === rootEntry.primaryClassName &&
+            tf.tagPath.toLowerCase() === rootEntry.path.toLowerCase(),
+        ) ?? blamRes.tagFiles[0];
+
+      if (rootFile) {
+        fs.mkdirSync(path.dirname(task.outputPath), { recursive: true });
+        fs.writeFileSync(tempPath, rootFile.bytes);
+        fs.renameSync(tempPath, task.outputPath);
+        writtenFiles.push(task.outputPath);
+        totalBytes += rootFile.bytes.length;
+      }
+
+      const outLower = task.outputPath.toLowerCase();
+      const tagsMarker = `${path.sep}tags${path.sep}`;
+      const tagsIdx = outLower.lastIndexOf(tagsMarker);
+      const tagsRootDir =
+        tagsIdx >= 0
+          ? task.outputPath.slice(0, tagsIdx + 5)
+          : path.join(path.dirname(task.outputPath), 'tags');
+
+      for (const tf of blamRes.tagFiles) {
+        if (tf === rootFile) continue;
+        const depDest = path.join(tagsRootDir, ...tf.relativePath.split(/[\\/]+/));
+        fs.mkdirSync(path.dirname(depDest), { recursive: true });
+        const tmp = `${depDest}.tmp-${randomUUID()}`;
+        pendingTemps.push(tmp);
+        fs.writeFileSync(tmp, tf.bytes);
+        fs.renameSync(tmp, depDest);
+        pendingTemps.pop();
+        writtenFiles.push(depDest);
+        totalBytes += tf.bytes.length;
+      }
+
+      progress(task.requestId, 'Done', 100);
+      sendResult(task.requestId, {
+        ok: true,
+        outputPath: task.outputPath,
+        tagCount: blamRes.tagFiles.length,
+        fileSizeBytes: totalBytes,
+        carriedOverWarnings: blamRes.container.warnings.map(toWarningInfo),
+        outputFiles: writtenFiles,
+        format: 'blam',
+      } satisfies ExtractTagsResult);
+      return;
+    }
+
     if (task.originalIndices.length === 1) {
       progress(task.requestId, 'Walking dependencies', 5);
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
@@ -627,7 +851,7 @@ export function runBatchExtract(task: {
   parentDir: string;
   sourceMapName: string;
   mode: BatchExtractMode;
-  extractFormat?: 'ocetags' | 'data_source';
+  extractFormat?: 'blam' | 'ocetags' | 'data_source';
   resourceMapPaths: Partial<Record<ResourceMapKind, string>>;
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
@@ -650,10 +874,12 @@ export function runBatchExtract(task: {
   let skippedCount = 0;
   let failedCount = 0;
   let totalBytesWritten = 0;
-  const batchResources = openConversionResources({
-    bitmaps: task.resourceMapPaths?.bitmaps,
-    sounds: task.resourceMapPaths?.sounds,
-  });
+  const batchResources = openConversionResources(
+    resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+      bitmaps: task.resourceMapPaths?.bitmaps,
+      sounds: task.resourceMapPaths?.sounds,
+    }),
+  );
 
   try {
     fs.mkdirSync(targetDir, { recursive: true });
@@ -733,7 +959,11 @@ export function runBatchExtract(task: {
         continue;
       }
 
-      const { fullRelativePath } = sanitizeTagRelativePath(entry.path, group);
+      const { fullRelativePath } = sanitizeTagRelativePath(
+        entry.path,
+        group,
+        task.extractFormat === 'blam' ? 'blam' : 'ocetags',
+      );
       const finalDest = path.join(targetDir, fullRelativePath);
       candidates.push({
         index: entry.index,
@@ -872,6 +1102,43 @@ export function runBatchExtract(task: {
 
         if (cancelledRequests.has(task.requestId)) {
           throw new OperationCancelledError();
+        }
+
+        if (task.extractFormat === 'blam') {
+          const containerBuf = serializeContainer(set, task.sourceMapName, resourceMapIdentities);
+          const container = deserializeContainer(containerBuf);
+          hydrateExternalRawDataInContainer(container, batchResources.files);
+          const rootTag =
+            container.tags.find(
+              (t) =>
+                t.path.replace(/\//g, '\\').toLowerCase() ===
+                  candidate.entry.path.replace(/\//g, '\\').toLowerCase() &&
+                t.group === candidate.group,
+            ) ?? container.tags[0];
+          const blamBuf = serializeContainerTagToHekLooseBuffer(rootTag);
+          const stagedDest = path.join(stagingDir, candidate.fullRelativePath);
+          fs.mkdirSync(path.dirname(stagedDest), { recursive: true });
+          fs.writeFileSync(stagedDest, blamBuf);
+
+          extractedCount++;
+          totalBytesWritten += blamBuf.length;
+          manifestFiles.push({
+            path: candidate.entry.path,
+            group: candidate.group,
+            relativePath: candidate.fullRelativePath,
+            sizeBytes: blamBuf.length,
+            tagCount: 1,
+          });
+          reports.push({
+            path: candidate.entry.path,
+            group: candidate.group,
+            status: 'extracted',
+            outputPath: candidate.finalDest,
+            sizeBytes: blamBuf.length,
+            tagCount: 1,
+            warnings: set.warnings.map(toWarningInfo),
+          });
+          continue;
         }
 
         const buf = serializeContainer(set, task.sourceMapName, resourceMapIdentities);
@@ -1025,9 +1292,24 @@ export function runPlanInject(task: {
 }) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open to inject into.');
   try {
-    progress(task.requestId, 'Reading container file', 10);
-    const containerBuffer = fs.readFileSync(task.containerPath);
-    const container = deserializeContainer(containerBuffer);
+    progress(task.requestId, 'Reading tag or container file', 10);
+    let container: OceContainer;
+    const isDir = fs.existsSync(task.containerPath) && fs.statSync(task.containerPath).isDirectory();
+    if (isDir) {
+      const legacyRes = buildContainerFromLegacyTags([task.containerPath]);
+      container = legacyRes.container;
+    } else {
+      const containerBuffer = fs.readFileSync(task.containerPath);
+      const isOcetags =
+        task.containerPath.toLowerCase().endsWith('.ocetags') ||
+        (containerBuffer.length >= 4 && containerBuffer.readUInt32LE(0) === 0x5445434f); // 'OCET'
+      if (isOcetags) {
+        container = deserializeContainer(containerBuffer);
+      } else {
+        const legacyRes = buildContainerFromLegacyTags([task.containerPath]);
+        container = legacyRes.container;
+      }
+    }
 
     // Automatically reclaim any orphaned 380,076-byte script syntax blocks in the target map before planning injection
     if (currentMap.header.engine === 609) {
@@ -1221,7 +1503,13 @@ export function runSaveMapAs(task: { requestId: string; outputPath: string }) {
 }
 
 /** Stages the current in-memory map to targetPath (e.g. custom_maps/_opence_tag_test.map) without altering the open map state. */
-export function runStageTagTestMap(task: { requestId: string; targetPath: string; bitmapsPath?: string; soundsPath?: string }) {
+export function runStageTagTestMap(task: {
+  requestId: string;
+  targetPath: string;
+  bitmapsPath?: string;
+  soundsPath?: string;
+  liveHudMode?: boolean;
+}) {
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
     progress(task.requestId, 'Staging map for OpenCE Tag Test', 25);
@@ -1272,10 +1560,14 @@ export function runStageTagTestMap(task: { requestId: string; targetPath: string
           }
         }
       }
-      const resources = openConversionResources({ bitmaps: bitmapsPath, sounds: soundsPath });
+      const resolvedResources = resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+        bitmaps: bitmapsPath,
+        sounds: soundsPath,
+      });
+      const resources = openConversionResources(resolvedResources);
       try {
         const layout = classifyMapLayout(bufferCopy);
-        const convert = layout.kind === 'demo' ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+        const convert = layout.kind === 'demo' || layout.kind === 'mcc' ? convertDemoToCustomEdition : convertRetailToCustomEdition;
         const converted = convert(bufferCopy, {
           acknowledgeScripts: true,
           repairs: {
@@ -1306,6 +1598,17 @@ export function runStageTagTestMap(task: { requestId: string; targetPath: string
       repairCorruptedModelPartStrips(bufferCopy, currentMap.header, currentMap.tagIndex);
     }
 
+    let liveHudSetup: LiveHudSessionSetupInfo | undefined;
+    if (task.liveHudMode) {
+      try {
+        const stagedHeader = parseCacheFileHeader(bufferCopy);
+        const stagedTagIndex = parseTagIndex(bufferCopy, stagedHeader);
+        liveHudSetup = prepareMapBufferForLiveHudSession(bufferCopy, stagedHeader, stagedTagIndex);
+      } catch {
+        // Non-fatal if setup cannot parse
+      }
+    }
+
     progress(task.requestId, 'Writing staged map', 60);
     const finalized = writeFinalizedMap(bufferCopy, target, 'Staging for OpenCE Tag Test');
     progress(task.requestId, 'Done', 100);
@@ -1315,6 +1618,7 @@ export function runStageTagTestMap(task: { requestId: string; targetPath: string
       crc32: finalized.crc32,
       scenarioName: finalized.scenarioName,
       mapType: currentMap.header.mapType,
+      liveHudSetup,
     });
   } catch (err) {
     sendWriteError(task.requestId, err);
@@ -1325,12 +1629,19 @@ const samePath = (a: string, b: string) => path.resolve(a).toLowerCase() === pat
 
 /** Convert to Custom Edition, step 1: the read-only pre-flight report. Doesn't touch the held map. */
 export function runConvertPreflight(task: { requestId: string; filePath: string; bitmapsPath?: string; soundsPath?: string }) {
-  const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
+  let resources: ReturnType<typeof openConversionResources> | null = null;
   try {
     progress(task.requestId, 'Reading file', 10);
     const buffer = fs.readFileSync(task.filePath);
+    const layout = classifyMapLayout(buffer);
+    resources = openConversionResources(
+      resolveMapResourcePaths(task.filePath, layout.kind === 'mcc' ? CacheFileEngine.MCC_CEA : undefined, {
+        bitmaps: task.bitmapsPath,
+        sounds: task.soundsPath,
+      }),
+    );
     progress(task.requestId, 'Checking the map', 40);
-    const report = classifyMapLayout(buffer).kind === 'demo'
+    const report = layout.kind === 'demo' || layout.kind === 'mcc'
       ? preflightDemoConversion(buffer, resources.files)
       : preflightRetailConversion(buffer, resources.files);
     progress(task.requestId, 'Done', 100);
@@ -1338,7 +1649,7 @@ export function runConvertPreflight(task: { requestId: string; filePath: string;
   } catch (err) {
     handleTaskError(task.requestId, err);
   } finally {
-    resources.close();
+    resources?.close();
   }
 }
 
@@ -1352,13 +1663,20 @@ export function runConvertMap(task: { requestId: string; sourcePath: string; out
   if (samePath(task.sourcePath, task.outputPath)) return sendError(task.requestId, 'REFUSED_SOURCE_PATH', 'The converted map cannot overwrite the map it was converted from. Choose a different file name or folder.');
   if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, 'REFUSED_OPEN_MAP', 'The converted map cannot overwrite the map that is open in the app. Choose a different file name.');
   if (isBackupFilePath(task.outputPath)) return sendError(task.requestId, 'REFUSED_BACKUP_FILE', 'The converted map cannot be written as a .bak file. Choose a .map file name.');
-  const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
+  let resources: ReturnType<typeof openConversionResources> | null = null;
   try {
     progress(task.requestId, 'Reading file', 10);
     const source = fs.readFileSync(task.sourcePath);
+    const layout = classifyMapLayout(source);
+    resources = openConversionResources(
+      resolveMapResourcePaths(task.sourcePath, layout.kind === 'mcc' ? CacheFileEngine.MCC_CEA : undefined, {
+        bitmaps: task.bitmapsPath,
+        sounds: task.soundsPath,
+      }),
+    );
     progress(task.requestId, 'Converting the header', 40);
     let copyPercent = -1;
-    const convert = classifyMapLayout(source).kind === 'demo' ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+    const convert = layout.kind === 'demo' || layout.kind === 'mcc' ? convertDemoToCustomEdition : convertRetailToCustomEdition;
     const converted = convert(source, {
       acknowledgeScripts: task.acknowledgeScripts,
       repairs: task.repairs ?? {},
@@ -1392,7 +1710,7 @@ export function runConvertMap(task: { requestId: string; sourcePath: string; out
     if (err instanceof ConversionRefusedError) return sendError(task.requestId, err.code, err.message);
     sendWriteError(task.requestId, err);
   } finally {
-    resources.close();
+    resources?.close();
   }
 }
 
@@ -1554,6 +1872,7 @@ export function runSetDependencySlot(task: { requestId: string; tagIndex: number
 let cachedBitmapsMap: { filePath: string; mtimeMs: number; buffer: Buffer } | null = null;
 function getBitmapsBuffer(bitmapsPath?: string): Buffer | undefined {
   const isCeMap = currentMap?.header?.engine === 609;
+  const isMccMap = currentMap?.header?.engine === CacheFileEngine.MCC_CEA;
   const isCompatibleBitmaps = (p: string): boolean => {
     try {
       if (!fs.existsSync(p)) return false;
@@ -1564,12 +1883,14 @@ function getBitmapsBuffer(bitmapsPath?: string): Buffer | undefined {
       return false;
     }
   };
-  let resolved = bitmapsPath && isCompatibleBitmaps(bitmapsPath) ? bitmapsPath : undefined;
+  const preResolved = resolveMapResourcePaths(currentMap?.filePath, currentMap?.header?.engine, { bitmaps: bitmapsPath }).bitmaps;
+  let resolved = preResolved && isCompatibleBitmaps(preResolved) ? preResolved : undefined;
   if (!resolved && currentMap?.filePath) {
     const mapDir = path.dirname(currentMap.filePath);
     const parentDir = path.dirname(mapDir);
     const candidates = [
       path.join(mapDir, 'bitmaps.map'),
+      ...(isMccMap ? MCC_MAPS_CANDIDATES.map((d) => path.join(d, 'bitmaps.map')) : []),
       path.join(mapDir, 'custom edition', 'bitmaps.map'),
       path.join(parentDir, 'custom edition', 'bitmaps.map'),
       path.join(parentDir, 'bitmaps.map'),
@@ -1671,6 +1992,9 @@ export function runGetBitmapTexture(task: { requestId: string; bitmapTagId: numb
     const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
     const texture = decodeBitmapTagImage(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId, task.imageIndex ?? 0, externalBitmaps);
     if (shaderMeta) {
+      if (shaderMeta.shaderClass === 'decal') {
+        applyDecalBlendToRgba(texture.rgbaData, texture.width, texture.height, shaderMeta);
+      }
       texture.shaderMeta = shaderMeta;
     }
     sendResult(task.requestId, { ok: true, texture } satisfies GetBitmapTextureResult);
@@ -2499,10 +2823,12 @@ export function runBuildCustomObjectTag(task: {
   if (needsInject && !currentMap) {
     return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open to inject into.');
   }
-  const resources = openConversionResources({
-    bitmaps: task.resourceMapPaths?.bitmaps,
-    sounds: task.resourceMapPaths?.sounds,
-  });
+  const resources = openConversionResources(
+    resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+      bitmaps: task.resourceMapPaths?.bitmaps,
+      sounds: task.resourceMapPaths?.sounds,
+    }),
+  );
   try {
     progress(task.requestId, 'Reading 3D mesh (.obj / .jms / .dae)...', 10);
     const readMeshAsObj = (filePath: string): string => {
@@ -3503,6 +3829,7 @@ function runScaleCoupledPhysics(task: Extract<WorkerRequest, { type: 'scaleCoupl
       task.objectTagId,
       task.scaleFactor,
     );
+    modelGeometryCache.clear();
     currentMap.modified = true;
     sendResult(task.requestId, {
       ok: true,
@@ -3555,6 +3882,7 @@ function runApplyLiveHudEdit(task: Extract<WorkerRequest, { type: 'applyLiveHudE
       effectiveHudTagIndex: res.effectiveHudTagIndex,
       catalog,
       map: summarizeOpenMap(currentMap),
+      memoryPatches: res.memoryPatches,
     });
   } catch (err) {
     sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
@@ -3577,6 +3905,7 @@ function runApplyLiveWeaponStatEdit(task: Extract<WorkerRequest, { type: 'applyL
       ok: true,
       writtenValue: res.writtenValue,
       map: summarizeOpenMap(currentMap),
+      memoryPatches: res.memoryPatches,
     });
   } catch (err) {
     sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
@@ -3699,6 +4028,222 @@ function runSaveUnicodeStringTable(task: Extract<WorkerRequest, { type: 'saveUni
   }
 }
 
+function runInspectContentExplorer(task: Extract<WorkerRequest, { type: 'inspectContentExplorer' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const raw = inspectContentExplorerNodeInMap(currentMap.buffer, task.tagIndex);
+    const result = {
+      ...raw,
+      tagPath: raw.path,
+      tagGroup: raw.group,
+      referencedByParents: raw.referencedBy.map((p) => ({
+        tagIndex: p.tagIndex ?? 0,
+        tagPath: p.path,
+        tagGroup: p.group,
+        fieldPath: p.fieldPath,
+      })),
+      referencesChildren: raw.references.map((c) => ({
+        fieldPath: c.fieldPath,
+        targetTagIndex: c.tagIndex,
+        targetPath: c.path,
+        targetGroup: c.group,
+        isBroken: c.isBroken,
+      })),
+    };
+    sendResult(task.requestId, { ok: true, result });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runAutoFixTagDependencies(task: Extract<WorkerRequest, { type: 'autoFixTagDependencies' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const rawReport = fixBrokenTagDependenciesInMap(currentMap.buffer, task.tagIndices?.[0]);
+    if (rawReport.fixed.length > 0) {
+      currentMap.modified = true;
+    }
+    const report = {
+      ...rawReport,
+      fixedCount: rawReport.fixed.length,
+      ambiguousCount: rawReport.ambiguous.length,
+      unresolvedCount: rawReport.notFound.length,
+    };
+    sendResult(task.requestId, {
+      ok: true,
+      report,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runRefactorMoveFolderInMap(task: Extract<WorkerRequest, { type: 'refactorMoveFolderInMap' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = refactorRenameOrMoveFolderInMap(currentMap.buffer, task.oldPrefix, task.newPrefix);
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      report: {
+        renamedCount: res.renamedTags.length,
+        renamedTags: res.renamedTags,
+        movedTags: res.renamedTags,
+      },
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runReorganizeReflexiveBlock(task: Extract<WorkerRequest, { type: 'reorganizeReflexiveBlock' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const plan = task.request.desiredOrder.map((d) => ({
+      sourceIndex: d.sourceIndex,
+      newName: d.renameTo,
+    }));
+    const res = reorganizeReflexiveBlockInMap(
+      currentMap.buffer,
+      task.request.tagIndex,
+      task.request.reflexivePath,
+      plan,
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    const fields = readTagFieldValues(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request.tagIndex,
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      newCount: res.newCount,
+      fields,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runExportReflexiveTsv(task: Extract<WorkerRequest, { type: 'exportReflexiveTsv' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const fields = readTagFieldValues(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.tagIndex,
+    );
+    const res = exportReflexiveBlockToTsv(fields, task.reflexivePath);
+    sendResult(task.requestId, { ok: true, tsvText: res.tsv, ...res });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runImportReflexiveTsv(task: Extract<WorkerRequest, { type: 'importReflexiveTsv' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const res = applyTsvToReflexiveBlockInMap(
+      currentMap.buffer,
+      task.tagIndex,
+      task.reflexivePath,
+      task.tsvText,
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    if (res.updatedCells > 0) {
+      currentMap.modified = true;
+    }
+    const fields = readTagFieldValues(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.tagIndex,
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      updatedRows: res.updatedRows,
+      updatedCells: res.updatedCells,
+      fields,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runAnalyzeHudMessageSafety(task: Extract<WorkerRequest, { type: 'analyzeHudMessageSafety' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const report = analyzeHudMessageTextSafety(currentMap.buffer, task.tagIndex);
+    sendResult(task.requestId, { ok: true, report });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runExportStringsCsv(task: Extract<WorkerRequest, { type: 'exportStringsCsv' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const strList = readUnicodeStringList(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.ustrTagIndex,
+    );
+    const csvText = exportUnicodeStringsToCsv(strList.strings);
+    sendResult(task.requestId, { ok: true, csvText, rowCount: strList.strings.length });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function runPreviewStringsCsvImport(task: Extract<WorkerRequest, { type: 'previewStringsCsvImport' }>): void {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
+  }
+  try {
+    const strList = readUnicodeStringList(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.ustrTagIndex,
+    );
+    const preview = previewUnicodeStringsCsvImport(strList.strings, task.csvText, task.mode);
+    sendResult(task.requestId, { ok: true, preview });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -3706,6 +4251,8 @@ parentPort?.on('message', async (task: WorkerRequest) => {
       return;
     }
     if (task.type === 'inspect') await runInspect(task);
+    else if (task.type === 'activateMapSession') runActivateMapSession(task);
+    else if (task.type === 'closeMapSession') runCloseMapSession(task);
     else if (task.type === 'compress' || task.type === 'decompress') await runCompression(task);
     else if (task.type === 'getDependencies') runGetDependencies(task);
     else if (task.type === 'extractTags') runExtractTags(task);
@@ -3788,6 +4335,18 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'inspectUiWidgetCanvas') runInspectUiWidgetCanvas(task);
     else if (task.type === 'updateUiWidgetPlacement') runUpdateUiWidgetPlacement(task);
     else if (task.type === 'saveUnicodeStringTable') runSaveUnicodeStringTable(task);
+    else if (task.type === 'inspectContentExplorer') runInspectContentExplorer(task);
+    else if (task.type === 'autoFixTagDependencies') runAutoFixTagDependencies(task);
+    else if (task.type === 'refactorMoveFolderInMap') runRefactorMoveFolderInMap(task);
+    else if (task.type === 'reorganizeReflexiveBlock') runReorganizeReflexiveBlock(task);
+    else if (task.type === 'exportReflexiveTsv') runExportReflexiveTsv(task);
+    else if (task.type === 'importReflexiveTsv') runImportReflexiveTsv(task);
+    else if (task.type === 'analyzeHudMessageSafety') runAnalyzeHudMessageSafety(task);
+    else if (task.type === 'exportStringsCsv') runExportStringsCsv(task);
+    else if (task.type === 'previewStringsCsvImport') runPreviewStringsCsvImport(task);
+    if (activeSessionId && currentMap) {
+      loadedMapSessions.set(activeSessionId, currentMap);
+    }
   } catch (err) {
     handleTaskError((task as { requestId: string }).requestId, err);
   }

@@ -2636,7 +2636,7 @@ export function injectProceduralWorldIntoMapBsp(
   // Build 6 AABB boundary planes wrapping `worldMesh.bounds` so:
   // - Any point OUTSIDE the procedural mesh's bounding box goes directly to `oldRootNode = 6` (the existing map BSP!)
   // - Any point INSIDE the procedural mesh's bounding box goes to `procNodeShift = 6 + oldN3dCount` (the procedural collision BSP!)
-  const pad = 0.5;
+  const pad = 3.5;
   const [wMinX, wMinY, wMinZ] = [
     worldMesh.bounds.min[0] - pad,
     worldMesh.bounds.min[1] - pad,
@@ -2645,7 +2645,7 @@ export function injectProceduralWorldIntoMapBsp(
   const [wMaxX, wMaxY, wMaxZ] = [
     worldMesh.bounds.max[0] + pad,
     worldMesh.bounds.max[1] + pad,
-    worldMesh.bounds.max[2] + pad,
+    worldMesh.bounds.max[2] + 5.0,
   ];
   const boxPlanes: [number, number, number, number][] = [
     [1, 0, 0, wMaxX],  // front (> wMaxX) -> old BSP, back (<= wMaxX) -> node 1

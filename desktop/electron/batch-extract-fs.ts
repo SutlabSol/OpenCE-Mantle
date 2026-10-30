@@ -36,24 +36,29 @@ function sanitizeSegment(segment: string): string {
 
 /**
  * Converts a Halo CE tag path and group into a relative directory and filename.
- * E.g. "weapons\\assault rifle\\assault rifle", "weapon"
- * -> relativeDir: "weapons\\assault rifle"
- * -> fileName: "assault rifle.weapon.ocetags"
- * -> fullRelativePath: "weapons\\assault rifle\\assault rifle.weapon.ocetags"
+ * Defaults to standard Blam loose tag format (`tags\<relativeDir>\<leaf>.<group>`),
+ * or `.ocetags` container format (`<relativeDir>\<leaf>.<group>.ocetags`) when `format === 'ocetags'`.
  */
 export function sanitizeTagRelativePath(
   tagPath: string,
   group: string,
+  format: 'blam' | 'ocetags' = 'ocetags',
 ): { relativeDir: string; fileName: string; fullRelativePath: string } {
   const normalized = tagPath.replace(/[\/\\]+/g, '\\').replace(/^\\+|\\+$/g, '');
   const rawSegments = normalized.split('\\').filter((s) => s.length > 0);
   const rawLeaf = rawSegments.length > 0 ? rawSegments.pop()! : 'tag';
   const leafSanitized = sanitizeSegment(rawLeaf);
   const groupSanitized = sanitizeSegment(group || 'tag');
-  const fileName = `${leafSanitized}.${groupSanitized}.ocetags`;
+  const fileName =
+    format === 'blam'
+      ? `${leafSanitized}.${groupSanitized}`
+      : `${leafSanitized}.${groupSanitized}.ocetags`;
 
   const dirSegments = rawSegments.map(sanitizeSegment);
-  const relativeDir = dirSegments.join(path.sep);
+  const relativeDir =
+    format === 'blam'
+      ? path.join('tags', ...dirSegments)
+      : dirSegments.join(path.sep);
   const fullRelativePath = relativeDir ? path.join(relativeDir, fileName) : fileName;
 
   return { relativeDir, fileName, fullRelativePath };

@@ -34,7 +34,27 @@ import type {
   GuidedHudBitmapInjectRequest,
   UiWidgetCanvasNode,
   UpdateUiWidgetPlacementRequest,
+  LiveMemoryPatch,
+  LiveHudSessionSetupInfo,
 } from '../../core/src/map/live-hud-editor';
+import type {
+  LooseTagsWorkspaceIndex,
+  LooseWorkspaceTagEntry,
+  LooseTagDependencyRef,
+  BrokenLooseTagDependency,
+  ContentExplorerNodeResult,
+  ContentExplorerRelationItem,
+  AutoFixDependenciesReport,
+  BlockOrganizerPlanItem,
+  BlamFunctionCurveParams,
+  BlamFunctionCurveEvaluation,
+  HudMessageSafetyReport,
+  HaloStringMarkupToken,
+  StringsCsvImportPreview,
+  HaloScriptDocEntry,
+  ToolCommandSchema,
+  ToolCommandArgSchema,
+} from '../../core/src/map/baboon-features';
 
 export type {
   TagFieldDescriptor,
@@ -86,6 +106,24 @@ export type {
   GuidedHudBitmapInjectRequest,
   UiWidgetCanvasNode,
   UpdateUiWidgetPlacementRequest,
+  LiveMemoryPatch,
+  LiveHudSessionSetupInfo,
+  LooseTagsWorkspaceIndex,
+  LooseWorkspaceTagEntry,
+  LooseTagDependencyRef,
+  BrokenLooseTagDependency,
+  ContentExplorerNodeResult,
+  ContentExplorerRelationItem,
+  AutoFixDependenciesReport,
+  BlockOrganizerPlanItem,
+  BlamFunctionCurveParams,
+  BlamFunctionCurveEvaluation,
+  HudMessageSafetyReport,
+  HaloStringMarkupToken,
+  StringsCsvImportPreview,
+  HaloScriptDocEntry,
+  ToolCommandSchema,
+  ToolCommandArgSchema,
 };
 
 export interface MapHeaderSummary {
@@ -192,6 +230,8 @@ export interface ExtractTagsRequest {
   originalIndices: number[];
   /** Base file name (no extension) suggested for the native Save As dialog. */
   suggestedFileName: string;
+  /** Output tag format: 'blam' (default standard 64-byte 'blam' loose tags) or 'ocetags' (secondary OpenCE container). */
+  format?: 'blam' | 'ocetags';
   /** Custom item name for OpenCE Forge export (e.g. "Gauss Sniper"). */
   itemName?: string;
   /** Optional map of originalIndex -> custom item name when extracting multiple items. */
@@ -201,14 +241,14 @@ export interface ExtractTagsRequest {
 }
 
 export type ExtractTagsResult =
-  | { ok: true; outputPath: string; tagCount: number; fileSizeBytes: number; carriedOverWarnings: DependencyWarningInfo[]; outputFiles?: string[] }
+  | { ok: true; outputPath: string; tagCount: number; fileSizeBytes: number; carriedOverWarnings: DependencyWarningInfo[]; outputFiles?: string[]; format?: 'blam' | 'ocetags' }
   | { ok: false; code: 'CANCELLED'; message: string }
   | { ok: false; code: string; message: string };
 
 /* ------------------------------- Roadmap Item C: Whole Map Batch Extract ------------------------------- */
 
 export type BatchExtractMode = 'skip' | 'replace';
-export type BatchExtractFormat = 'ocetags' | 'data_source';
+export type BatchExtractFormat = 'blam' | 'ocetags' | 'data_source';
 
 export interface BatchExtractManifestFileEntry {
   path: string;
@@ -307,6 +347,40 @@ export interface VersionResourceMaps {
   loc?: string | null;
 }
 
+export type AppThemeId = 'dark' | 'light' | 'forerunner' | 'classic-ce' | 'covenant' | 'unsc';
+
+export interface BspTopDownWireframeData {
+  aspect: number;
+  totalVertices: number;
+  totalTriangles: number;
+  bspCount: number;
+  segments: Array<[number, number, number, number, number, number, number]>;
+}
+
+export interface RecentMapCardEntry {
+  filePath: string;
+  fileName: string;
+  scenarioName: string;
+  engine: number;
+  mapEdition: string;
+  mapType: number;
+  tagCount: number;
+  fileSizeBytes: number;
+  lastOpenedAt: number;
+  pinned?: boolean;
+  wireframe: BspTopDownWireframeData | null;
+}
+
+export interface OpenMapTabSession {
+  sessionId: string;
+  filePath: string;
+  fileName: string;
+  scenarioName: string;
+  modified: boolean;
+  detachedWindowId?: number | null;
+  map: Extract<LoadMapResult, { status: 'ok' }>;
+}
+
 export interface AppSettings {
   lastExtractDir: string | null;
   resourceMaps: { bitmaps: string | null; sounds: string | null; loc: string | null };
@@ -319,6 +393,8 @@ export interface AppSettings {
   autoDownloadUpdates?: boolean;
   /** Version string the user clicked "Skip This Version" on, if any. */
   skippedUpdateVersion?: string | null;
+  /** Selected UI & Blueprint theme (default: 'dark'). */
+  theme?: AppThemeId;
 }
 
 export interface UpdateReleaseAsset {
@@ -596,7 +672,9 @@ export interface Export3dResult {
 }
 
 export type WorkerRequest =
-  | { type: 'inspect'; requestId: string; filePath: string }
+  | { type: 'inspect'; requestId: string; filePath: string; sessionId?: string }
+  | { type: 'activateMapSession'; requestId: string; sessionId: string }
+  | { type: 'closeMapSession'; requestId: string; sessionId: string }
   | { type: 'compress' | 'decompress'; requestId: string; filePath: string; outputPath: string }
   | { type: 'getDependencies'; requestId: string; originalIndices: number[] }
   | {
@@ -605,6 +683,7 @@ export type WorkerRequest =
       originalIndices: number[];
       outputPath: string;
       sourceMapName: string;
+      format?: 'blam' | 'ocetags';
       resourceMapPaths?: Partial<Record<ResourceMapKind, string>>;
       itemName?: string;
       itemNames?: Record<number, string>;
@@ -682,7 +761,7 @@ export type WorkerRequest =
   | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number; sourceBspIndices?: number[] }
   | { type: 'getSourceBspMesh'; requestId: string; sourceFilePath: string; bspIndex?: number }
   | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions; resourceMapPaths?: Partial<Record<ResourceMapKind, string | undefined>> }
-  | { type: 'stageTagTestMap'; requestId: string; targetPath: string; bitmapsPath?: string; soundsPath?: string }
+  | { type: 'stageTagTestMap'; requestId: string; targetPath: string; bitmapsPath?: string; soundsPath?: string; liveHudMode?: boolean }
   | { type: 'getBitmapInfo'; requestId: string; tagIndex: number; bitmapsPath?: string }
   | { type: 'getBitmapRgba'; requestId: string; tagIndex: number; imageIndex: number; bitmapsPath?: string }
   | { type: 'exportBitmap'; requestId: string; tagIndex: number; imageIndex: number; format: 'png' | 'dds'; outputPath: string; bitmapsPath?: string }
@@ -895,6 +974,59 @@ export type WorkerRequest =
       ustrTagIndex: number;
       strings: string[];
     }
+  | {
+      type: 'inspectContentExplorer';
+      requestId: string;
+      tagIndex: number;
+    }
+  | {
+      type: 'autoFixTagDependencies';
+      requestId: string;
+      tagIndex?: number;
+    }
+  | {
+      type: 'refactorMoveFolderInMap';
+      requestId: string;
+      oldFolderPrefix: string;
+      newFolderPrefix: string;
+    }
+  | {
+      type: 'reorganizeReflexiveBlock';
+      requestId: string;
+      tagIndex: number;
+      reflexiveFieldPath: string;
+      plan: BlockOrganizerPlanItem[];
+    }
+  | {
+      type: 'exportReflexiveTsv';
+      requestId: string;
+      tagIndex: number;
+      reflexiveFieldPath: string;
+    }
+  | {
+      type: 'importReflexiveTsv';
+      requestId: string;
+      tagIndex: number;
+      reflexiveFieldPath: string;
+      tsvText: string;
+    }
+  | {
+      type: 'analyzeHudMessageSafety';
+      requestId: string;
+      tagIndex: number;
+    }
+  | {
+      type: 'exportStringsCsv';
+      requestId: string;
+      tagIndex: number;
+    }
+  | {
+      type: 'previewStringsCsvImport';
+      requestId: string;
+      tagIndex: number;
+      csvText: string;
+      mode: 'amend' | 'replace';
+    }
   | { type: 'cancel'; requestId: string };
 
 export interface DeprotectInspectionSummary {
@@ -1095,11 +1227,16 @@ export interface TagTestStatus {
   telnetConnected: boolean;
   error?: string;
   mapName?: string;
+  liveHudMode?: boolean;
+  heldWeaponTagId?: number | null;
+  drivenVehicleTagId?: number | null;
+  haloWindowRect?: { left: number; top: number; width: number; height: number } | null;
 }
 
 export interface TagTestLaunchOptions {
   windowed?: boolean;
   resolution?: string;
+  liveHudMode?: boolean;
 }
 
 export interface TagTestLogEntry {
@@ -1116,6 +1253,7 @@ export interface StageTagTestMapResult {
   crc32: number;
   scenarioName: string;
   mapType?: number;
+  liveHudSetup?: LiveHudSessionSetupInfo;
 }
 
 /* --------------------------------------------- API --------------------------------------------- */
@@ -1699,16 +1837,24 @@ export interface OpenceApi {
   applyLiveHudEdit?(
     request: ApplyLiveHudEditRequest,
   ): Promise<
-    | { ok: true; effectiveHudTagIndex: number; catalog: LiveHudCatalog; map: OpenMapSummary }
+    | { ok: true; effectiveHudTagIndex: number; catalog: LiveHudCatalog; map: OpenMapSummary; memoryPatches?: LiveMemoryPatch[] }
     | { ok: false; message: string }
   >;
   /** v0.6.8: Apply a live weapon/trigger/magazine/projectile/damage stat edit in-place. */
   applyLiveWeaponStatEdit?(
     request: ApplyLiveWeaponStatEditRequest,
   ): Promise<
-    | { ok: true; writtenValue: unknown; map: OpenMapSummary }
+    | { ok: true; writtenValue: unknown; map: OpenMapSummary; memoryPatches?: LiveMemoryPatch[] }
     | { ok: false; message: string }
   >;
+  /** Blink a HUD element in-game by temporarily offsetting its anchor X by +4000 in halo.exe RAM for 1.2s. */
+  blinkLiveHudElement?(offsetVirtualAddress: number, originalX: number): Promise<{ ok: boolean }>;
+  /** Immediately equip a Spartan-holdable weapon into Player 0's hands in halo.exe. */
+  equipLiveHudWeapon?(weaponTagId: number): Promise<{ ok: boolean; message?: string }>;
+  /** Spawn a specific vehicle tag near Player 0 in halo.exe. */
+  spawnLiveHudVehicle?(vehicleTagId: number): Promise<{ ok: boolean; message?: string }>;
+  /** Re-spawn all Spartan-holdable weapons and all vehicle tags around Player 0 in halo.exe. */
+  spawnAllLiveHudArsenal?(): Promise<{ ok: boolean; message?: string }>;
   /** v0.6.8: Guided HUD Bitmap Injector — embeds/replaces a HUD element's bitmap in the open map buffer (never modifying bitmaps.map). */
   injectHudElementBitmap?(
     request: GuidedHudBitmapInjectRequest,
@@ -1748,6 +1894,176 @@ export interface OpenceApi {
     | { ok: true; entryCount: number; map: OpenMapSummary }
     | { ok: false; message: string }
   >;
+  /** Baboon Feature 1: Inspect Content Explorer (Referenced by Parents / References Children + Reference Jump). */
+  inspectContentExplorer?(
+    tagIndex: number,
+  ): Promise<{ ok: true; node: ContentExplorerNodeResult } | { ok: false; message: string }>;
+  /** Baboon Feature 2: Auto-fix broken TagDependency references by unique (group, leaf_name) matching. */
+  autoFixTagDependencies?(
+    tagIndex?: number,
+  ): Promise<{ ok: true; report: AutoFixDependenciesReport; map: OpenMapSummary } | { ok: false; message: string }>;
+  /** Baboon Feature 3: Rename or move an entire folder prefix of tags in the open map. */
+  refactorMoveFolderInMap?(
+    oldFolderPrefix: string,
+    newFolderPrefix: string,
+  ): Promise<
+    | {
+        ok: true;
+        renamedTags: Array<{ tagIndex: number; group: string; oldPath: string; newPath: string }>;
+        map: OpenMapSummary;
+      }
+    | { ok: false; message: string }
+  >;
+  /** Baboon Feature 4: Staged Reflexive Block Organizer (reorder, duplicate, insert, delete, rename). */
+  reorganizeReflexiveBlock?(
+    tagIndex: number,
+    reflexiveFieldPath: string,
+    plan: BlockOrganizerPlanItem[],
+  ): Promise<
+    | { ok: true; oldCount: number; newCount: number; map: OpenMapSummary }
+    | { ok: false; message: string }
+  >;
+  /** Baboon Feature 5: Export a reflexive block to spreadsheet TSV. */
+  exportReflexiveTsv?(
+    tagIndex: number,
+    reflexiveFieldPath: string,
+  ): Promise<
+    | { ok: true; tsv: string; rowCount: number; columnNames: string[] }
+    | { ok: false; message: string }
+  >;
+  /** Baboon Feature 6: Import spreadsheet TSV rows into a reflexive block. */
+  importReflexiveTsv?(
+    tagIndex: number,
+    reflexiveFieldPath: string,
+    tsvText: string,
+  ): Promise<
+    | { ok: true; updatedRows: number; updatedCells: number; map: OpenMapSummary }
+    | { ok: false; message: string }
+  >;
+  /** Baboon Feature 7: Evaluate a Blam Function Curve (Periodic, Transition, Linear, Spline) & color stops. */
+  evaluateFunctionCurve?(
+    params: BlamFunctionCurveParams,
+    sampleCount?: number,
+  ): Promise<{ ok: true; evaluation: BlamFunctionCurveEvaluation } | { ok: false; message: string }>;
+  /** Baboon Feature 8: Analyze HUD Message Text (hmt) Global vs Mission fixed-index safety. */
+  analyzeHudMessageSafety?(
+    tagIndex: number,
+  ): Promise<{ ok: true; report: HudMessageSafetyReport } | { ok: false; message: string }>;
+  /** Baboon Feature 9: Export Unicode String List (ustr) to RFC-4180 CSV. */
+  exportStringsCsv?(
+    tagIndex: number,
+  ): Promise<{ ok: true; csv: string } | { ok: false; message: string }>;
+  /** Baboon Feature 10: Preview CSV Amend / Replace import into a Unicode String List (ustr). */
+  previewStringsCsvImport?(
+    tagIndex: number,
+    csvText: string,
+    mode: 'amend' | 'replace',
+  ): Promise<{ ok: true; preview: StringsCsvImportPreview } | { ok: false; message: string }>;
+  /** Baboon Feature 11: Open & scan a standard Blam loose `tags/` directory workspace. */
+  openLooseTagsWorkspace?(
+    tagsDir?: string,
+  ): Promise<{ ok: true; workspace: LooseTagsWorkspaceIndex } | { ok: false; cancelled?: boolean; message: string }>;
+  /** Baboon Feature 12: Read decoded fields of a 64-byte `'blam'` loose tag file on disk. */
+  readLooseTagFields?(
+    filePath: string,
+    tagPath: string,
+    group?: string,
+  ): Promise<{ ok: true; fields: TagFieldsResult } | { ok: false; message: string }>;
+  /** Baboon Feature 13: Update a field in a 64-byte `'blam'` loose tag file on disk in-place. */
+  writeLooseTagField?(
+    filePath: string,
+    tagPath: string,
+    fieldPath: string,
+    newValue: unknown,
+    group?: string,
+  ): Promise<{ ok: true; fields: TagFieldsResult } | { ok: false; message: string }>;
+  /** Baboon Feature 14: Auto-fix broken TagDependency paths across a `tags/` workspace on disk. */
+  fixLooseWorkspaceDependencies?(
+    tagsDir: string,
+    targetRelativePath?: string,
+  ): Promise<{ ok: true; report: AutoFixDependenciesReport; workspace: LooseTagsWorkspaceIndex } | { ok: false; message: string }>;
+  /** Baboon Feature 15: Move/rename a loose 64-byte `'blam'` tag file on disk and rewrite all referencing tags. */
+  refactorMoveLooseTag?(
+    tagsDir: string,
+    oldTagPath: string,
+    group: string,
+    newTagPath: string,
+  ): Promise<
+    | {
+        ok: true;
+        oldFilePath: string;
+        newFilePath: string;
+        rewrittenReferencingFiles: string[];
+        workspace: LooseTagsWorkspaceIndex;
+      }
+    | { ok: false; message: string }
+  >;
+  /** Baboon Feature 16: Git Review for a `tags/` workspace (git status, branch, recent commits, semantic diff). */
+  inspectGitTagsWorkspace?(
+    tagsDir: string,
+  ): Promise<
+    | {
+        ok: true;
+        isGitRepo: boolean;
+        branch: string;
+        modifiedFiles: Array<{ relativePath: string; status: string }>;
+        recentCommits: Array<{ hash: string; date: string; message: string }>;
+      }
+    | { ok: false; message: string }
+  >;
+  diffGitLooseTag?(
+    tagsDir: string,
+    relativePath: string,
+    commitRef?: string,
+  ): Promise<{ ok: true; rows: MapDifferenceRow[] } | { ok: false; message: string }>;
+  /** Baboon Feature 17: Multi-engine HaloScript function & global reference catalog. */
+  queryHaloScriptCatalog?(
+    query?: string,
+    engineFilter?: string,
+  ): Promise<{ ok: true; entries: HaloScriptDocEntry[] }>;
+  /** Baboon Feature 18: Visual `tool.exe` Command Catalog & Runner. */
+  getToolCommands?(
+    game?: 'haloce' | 'haloce_mcc' | 'halo2_mcc' | 'halo3_mcc' | 'halo3odst_mcc' | 'haloreach_mcc',
+  ): Promise<{ ok: true; commands: ToolCommandSchema[] }>;
+  runToolExeCommand?(options: {
+    toolExePath?: string;
+    workingDir?: string;
+    commandName: string;
+    args: string[];
+  }): Promise<{ ok: boolean; stdout: string; stderr: string; exitCode: number; commandLine: string }>;
+  /** Baboon Feature 19: Win32 `WM_DROPFILES` drag-and-drop delivery to running Sapien / Guerilla windows. */
+  dropTagToExternalWindow?(
+    filePath: string,
+    targetWindowTitle?: string,
+  ): Promise<{ ok: boolean; targetWindow?: string; message?: string }>;
+
+  /* --- v0.6.9 Workspace Launcher, Frameless Window Controls, Themes, Multi-Map Tabs & Multi-Monitor Tear-Off --- */
+  windowMinimize?(): Promise<void>;
+  windowToggleMaximize?(): Promise<boolean>;
+  windowClose?(): Promise<void>;
+  windowIsMaximized?(): Promise<boolean>;
+  onWindowMaximizedChange?(cb: (isMaximized: boolean) => void): () => void;
+
+  getTheme?(): Promise<AppThemeId>;
+  setTheme?(theme: AppThemeId): Promise<{ ok: true; theme: AppThemeId }>;
+  onThemeChanged?(cb: (theme: AppThemeId) => void): () => void;
+
+  getRecentMapCards?(): Promise<RecentMapCardEntry[]>;
+  togglePinRecentMap?(filePath: string): Promise<RecentMapCardEntry[]>;
+  removeRecentMap?(filePath: string): Promise<RecentMapCardEntry[]>;
+  revealInExplorer?(filePath: string): Promise<void>;
+
+  listOpenMapSessions?(): Promise<{ activeSessionId: string | null; sessions: OpenMapTabSession[] }>;
+  switchActiveMapSession?(sessionId: string): Promise<{ ok: boolean; session?: OpenMapTabSession; message?: string }>;
+  closeMapSession?(sessionId: string): Promise<{ ok: boolean; activeSessionId: string | null; sessions: OpenMapTabSession[] }>;
+  detachMapTabToWindow?(
+    sessionId: string,
+    coords?: { screenX?: number; screenY?: number },
+  ): Promise<{ ok: boolean; windowId?: number }>;
+  redockMapTabToMainWindow?(sessionId: string): Promise<{ ok: boolean }>;
+  onOpenMapSessionsChanged?(
+    cb: (payload: { activeSessionId: string | null; sessions: OpenMapTabSession[] }) => void,
+  ): () => void;
 }
 
 declare global {

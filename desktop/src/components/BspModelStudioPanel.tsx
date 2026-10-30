@@ -661,6 +661,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
   } | null>(null);
   const lastGeneratedWorldMeshRef = useRef<GeneratedWorldMesh | null>(null);
   const [coupledScaleFactor, setCoupledScaleFactor] = useState<number>(1.25);
+  const [appliedStudioScales, setAppliedStudioScales] = useState<Record<number, number>>({});
 
   const rebuildCoLocatedClusters = useCallback((subs: SubmeshWorkingState[]) => {
     const invTol = 1 / 0.002; // 2mm spatial tolerance for welded seam vertices
@@ -702,14 +703,62 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
     [allTags],
   );
 
-  // Shader tags in map for shader swapping
-  const shaderTags = useMemo(
-    () =>
-      allTags
-        .filter((t) => t.primaryClassName.startsWith('shader'))
-        .sort((a, b) => a.path.localeCompare(b.path)),
-    [allTags],
-  );
+  // Track shaders actually used on the current Structure BSP so BSP & World Builder dropdowns aren't cluttered with HUD/weapon/effect shaders
+  const [bspUsedShaderIds, setBspUsedShaderIds] = useState<number[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await window.opence.getBspRenderMesh(selectedBspIndex);
+        if (cancelled || !res.ok || !res.mesh) return;
+        const usedIds = Array.from(
+          new Set(
+            res.mesh.submeshes
+              .map((s) => s.shaderTagId)
+              .filter((id): id is number => typeof id === 'number' && id !== -1 && id !== 0xffffffff),
+          ),
+        );
+        setBspUsedShaderIds(usedIds);
+      } catch {
+        // non-fatal
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedBspIndex, allTags.length]);
+
+  // Shader tags in map for shader swapping — in BSP & World Builder modes, show ONLY shaders used on the BSP + major terrain/structural environment shaders (dirt, grass, rock, concrete, steel, forerunner)
+  const shaderTags = useMemo(() => {
+    const allShaders = allTags.filter((t) => t.primaryClassName.startsWith('shader'));
+    if (studioMode === 'model') {
+      return [...allShaders].sort((a, b) => a.path.localeCompare(b.path));
+    }
+    const usedSet = new Set(bspUsedShaderIds);
+    const majorBspShaderRegex =
+      /dirt|grass|rock|cliff|ground|sand|snow|mud|gravel|concrete|steel|metal|floor|wall|forerunner|panel|bridge|road|sidewalk|asphalt|brick|stone|trim|beam|light|glass|water|ice/i;
+    const filtered = allShaders.filter((t) => {
+      if (usedSet.has(t.tagId)) return true;
+      const lower = t.path.toLowerCase();
+      if (/^(weapons|characters|ui|hud|effects|powerups|vehicles)\\/i.test(lower)) return false;
+      if (/sky|portal|invisible|nodraw|blank|weather|fog|cloud|decal|blood|teleporter|shield|flare|contrail|particle|reticle/i.test(lower)) {
+        return false;
+      }
+      return (
+        (t.primaryClassName === 'shader_environment' || lower.startsWith('levels\\')) &&
+        majorBspShaderRegex.test(lower)
+      );
+    });
+    const list = filtered.length > 0 ? filtered : allShaders.filter((t) => t.primaryClassName === 'shader_environment');
+    const finalShaders = list.length > 0 ? list : allShaders;
+    return [...finalShaders].sort((a, b) => {
+      const aUsed = usedSet.has(a.tagId) ? 0 : 1;
+      const bUsed = usedSet.has(b.tagId) ? 0 : 1;
+      if (aUsed !== bUsed) return aUsed - bUsed;
+      return a.path.localeCompare(b.path);
+    });
+  }, [allTags, studioMode, bspUsedShaderIds]);
 
   // Ensure targetShaderTagId always defaults to a valid shader tag ID so "Assign" works immediately
   useEffect(() => {
@@ -1431,7 +1480,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
   }, [wireframeOverlay]);
 
   // Load BSP, Model, or Floating Parametric Object Geometry into the Studio (protected by loadGenRef so overlapping async loads never leave ghost meshes!)
-  const loadActiveTarget = useCallback(async () => {
+  const loadActiveTarget = useCallback(async (options?: { preserveCamera?: boolean; preserveStatus?: boolean }) => {
     const meshGroup = meshGroupRef.current;
     const wireGroup = wireframeGroupRef.current;
     if (!meshGroup || !wireGroup) return;
@@ -1439,13 +1488,15 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
     const myGen = ++loadGenRef.current;
     const currentTags = allTagsRef.current;
     setLoading(true);
-    setStatusMessage(
-      studioMode === 'bsp'
-        ? `Loading Structure BSP #${selectedBspIndex} for live sculpting & painting...`
-        : studioMode === 'create'
-          ? 'Preparing 3D Floating Object & Parametric Creator workspace...'
-          : 'Loading 3D Asset Model geometry into studio...',
-    );
+    if (!options?.preserveStatus) {
+      setStatusMessage(
+        studioMode === 'bsp'
+          ? `Loading Structure BSP #${selectedBspIndex} for live sculpting & painting...`
+          : studioMode === 'create'
+            ? 'Preparing 3D Floating Object & Parametric Creator workspace...'
+            : 'Loading 3D Asset Model geometry into studio...',
+      );
+    }
 
     try {
       let rawSubmeshes: Array<{
@@ -1780,58 +1831,62 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
         const center = overallBox.getCenter(new THREE.Vector3());
         const size = overallBox.getSize(new THREE.Vector3());
         modelBoundsRef.current = { center: center.clone(), size: size.clone() };
-        const maxDim = Math.max(size.x, size.y, size.z, 1);
-        controlsRef.current.target.copy(center);
-        if (studioMode === 'bsp') {
-          cameraRef.current.position.set(
-            center.x + maxDim * 0.35,
-            center.y + maxDim * 0.35,
-            center.z + Math.min(maxDim * 0.25, 35),
-          );
-          if (pendingPlaceObjectRef.current) {
-            const pendingObj = pendingPlaceObjectRef.current;
-            pendingPlaceObjectRef.current = null;
-            // Raycast downward from above BSP center to land right on the visible terrain floor
-            let dropPoint: [number, number, number] = [
-              Number(center.x.toFixed(3)),
-              Number(center.y.toFixed(3)),
-              Number(center.z.toFixed(3)),
-            ];
-            const downRay = new THREE.Raycaster(
-              new THREE.Vector3(center.x, center.y, overallBox.max.z + 20),
-              new THREE.Vector3(0, 0, -1),
+        if (!options?.preserveCamera) {
+          const maxDim = Math.max(size.x, size.y, size.z, 1);
+          controlsRef.current.target.copy(center);
+          if (studioMode === 'bsp') {
+            cameraRef.current.position.set(
+              center.x + maxDim * 0.35,
+              center.y + maxDim * 0.35,
+              center.z + Math.min(maxDim * 0.25, 35),
             );
-            const floorHits = downRay.intersectObjects(meshGroup.children, false);
-            if (floorHits.length > 0 && floorHits[0]) {
-              dropPoint = [
-                Number(floorHits[0].point.x.toFixed(3)),
-                Number(floorHits[0].point.y.toFixed(3)),
-                Number(floorHits[0].point.z.toFixed(3)),
+            if (pendingPlaceObjectRef.current) {
+              const pendingObj = pendingPlaceObjectRef.current;
+              pendingPlaceObjectRef.current = null;
+              // Raycast downward from above BSP center to land right on the visible terrain floor
+              let dropPoint: [number, number, number] = [
+                Number(center.x.toFixed(3)),
+                Number(center.y.toFixed(3)),
+                Number(center.z.toFixed(3)),
               ];
+              const downRay = new THREE.Raycaster(
+                new THREE.Vector3(center.x, center.y, overallBox.max.z + 20),
+                new THREE.Vector3(0, 0, -1),
+              );
+              const floorHits = downRay.intersectObjects(meshGroup.children, false);
+              if (floorHits.length > 0 && floorHits[0]) {
+                dropPoint = [
+                  Number(floorHits[0].point.x.toFixed(3)),
+                  Number(floorHits[0].point.y.toFixed(3)),
+                  Number(floorHits[0].point.z.toFixed(3)),
+                ];
+              }
+              controlsRef.current.target.set(dropPoint[0], dropPoint[1], dropPoint[2]);
+              cameraRef.current.position.set(dropPoint[0] + 14, dropPoint[1] - 14, dropPoint[2] + 10);
+              controlsRef.current.update();
+              setTimeout(() => {
+                handleAddObjectToBspAtPoint(pendingObj, dropPoint);
+              }, 30);
             }
-            controlsRef.current.target.set(dropPoint[0], dropPoint[1], dropPoint[2]);
-            cameraRef.current.position.set(dropPoint[0] + 14, dropPoint[1] - 14, dropPoint[2] + 10);
-            controlsRef.current.update();
-            setTimeout(() => {
-              handleAddObjectToBspAtPoint(pendingObj, dropPoint);
-            }, 30);
+          } else {
+            cameraRef.current.position.set(
+              center.x + maxDim * 1.35,
+              center.y + maxDim * 1.1,
+              center.z + maxDim * 0.65,
+            );
           }
-        } else {
-          cameraRef.current.position.set(
-            center.x + maxDim * 1.35,
-            center.y + maxDim * 1.1,
-            center.z + maxDim * 0.65,
-          );
+          controlsRef.current.update();
         }
-        controlsRef.current.update();
       }
       updateSymmetryPlanesVisuals();
 
-      const totalVerts = summaries.reduce((acc, s) => acc + s.vertexCount, 0);
-      const totalTris = summaries.reduce((acc, s) => acc + s.triangleCount, 0);
-      setStatusMessage(
-        `Loaded ${summaries.length} surface(s) (${totalVerts.toLocaleString()} vertices, ${totalTris.toLocaleString()} triangles, ${coLocatedClustersRef.current.length.toLocaleString()} welded seam clusters).`,
-      );
+      if (!options?.preserveStatus) {
+        const totalVerts = summaries.reduce((acc, s) => acc + s.vertexCount, 0);
+        const totalTris = summaries.reduce((acc, s) => acc + s.triangleCount, 0);
+        setStatusMessage(
+          `Loaded ${summaries.length} surface(s) (${totalVerts.toLocaleString()} vertices, ${totalTris.toLocaleString()} triangles, ${coLocatedClustersRef.current.length.toLocaleString()} welded seam clusters).`,
+        );
+      }
     } catch (err) {
       if (myGen === loadGenRef.current) {
         setStatusMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -4274,28 +4329,41 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
   };
 
   // Coupled Dimensional Physics Resizer (scales gbxmodel + collision_geometry + physics s^1/s^3/s^5/s^-5 + vehicle suspension depths)
+  const currentStudioAppliedScale = appliedStudioScales[selectedAssetTagIndex] ?? 1.0;
+  const isStudioCoupledScaleActive = Math.abs(currentStudioAppliedScale - 1.0) > 0.001;
+
   const handleCoupledScaleAssetPhysics = async () => {
     const assetTag = allTags.find((t) => t.index === selectedAssetTagIndex);
     if (!assetTag || !window.opence.scaleCoupledPhysics) {
       setStatusMessage('Select a Vehicle, Scenery, Weapon, Equipment, or Biped tag first.');
       return;
     }
+    const desiredScale = Math.max(0.1, Math.min(10, Number(coupledScaleFactor) || 1.25));
+    const nextScale =
+      isStudioCoupledScaleActive && Math.abs(desiredScale - currentStudioAppliedScale) < 0.001 ? 1.0 : desiredScale;
+    const relativeFactor = nextScale / currentStudioAppliedScale;
+    if (Math.abs(relativeFactor - 1.0) < 0.001) return;
+
     setApplying(true);
     setStatusMessage(
-      `Scaling 3D GBXModel, Collision BSP, Physics Mass/Inertia (s¹, s³, s⁵, s⁻⁵) & Suspension Depths by ${coupledScaleFactor}x...`,
+      `Scaling 3D GBXModel, Collision BSP, Physics Mass/Inertia (s¹, s³, s⁵, s⁻⁵) & Suspension Depths to ${nextScale}x...`,
     );
     try {
-      const res = await window.opence.scaleCoupledPhysics(assetTag.tagId, coupledScaleFactor);
+      const res = await window.opence.scaleCoupledPhysics(assetTag.tagId, relativeFactor);
       if (!res.ok) {
         setStatusMessage(`Coupled scale failed: ${res.message}`);
         setApplying(false);
         return;
       }
+      setAppliedStudioScales((prev) => ({
+        ...prev,
+        [selectedAssetTagIndex]: nextScale,
+      }));
       window.dispatchEvent(new CustomEvent('opence:scenario-updated'));
-      await loadActiveTarget();
+      await loadActiveTarget({ preserveCamera: true, preserveStatus: true });
       const s = res.summary;
       setStatusMessage(
-        `Scaled "${s.objectPath}" (${s.scaleFactor}x): ${s.scaledGbxmodelVertices} model verts, ${s.scaledCollisionVertices} coll verts, ${s.scaledPhysicsMassPoints} mass pts${s.newPhysicsMass ? ` (Mass=${s.newPhysicsMass.toFixed(1)}kg)` : ''}, ${s.scaledVehicleSuspensions} suspensions!`,
+        `Scaled "${s.objectPath}" (${nextScale}x): ${s.scaledGbxmodelVertices} model verts, ${s.scaledCollisionVertices} coll verts, ${s.scaledPhysicsMassPoints} mass pts${s.newPhysicsMass ? ` (Mass=${s.newPhysicsMass.toFixed(1)}kg)` : ''}, ${s.scaledVehicleSuspensions} suspensions!`,
       );
     } catch (err) {
       setStatusMessage(`Coupled scale error: ${err instanceof Error ? err.message : String(err)}`);
@@ -4721,6 +4789,27 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
             >
               <Plus size={12} /> World, Tunnel, Bridge &amp; BSP Builder
             </button>
+            <button
+              type="button"
+              data-testid="studio-open-world-merger-btn"
+              onClick={() => window.dispatchEvent(new CustomEvent('opence:open-world-merger'))}
+              title="Open Multi-Map World Merger & Structure BSP Swapper to stitch multiple Halo CE maps into one playable world"
+              style={{
+                padding: '4px 10px',
+                fontSize: 11,
+                fontWeight: 700,
+                borderRadius: 4,
+                cursor: 'pointer',
+                border: '1px solid #38bdf8',
+                background: '#0f2942',
+                color: '#7dd3fc',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              🌍 Multi-Map World Merger
+            </button>
           </div>
 
           {studioMode === 'bsp' ? (
@@ -4923,6 +5012,56 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
             />
             <span>Wireframe</span>
           </label>
+          {studioMode === 'model' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <input
+                type="number"
+                data-testid="studio-toolbar-coupled-scale-input"
+                min={0.1}
+                max={10}
+                step={0.1}
+                value={coupledScaleFactor}
+                onChange={(e) => setCoupledScaleFactor(Math.max(0.1, Math.min(10, Number(e.target.value) || 1)))}
+                title="Scale factor s for Coupled Model + Collision (coll) + Physics (phys) scaling"
+                style={{
+                  width: 48,
+                  padding: '3px 4px',
+                  fontSize: 11,
+                  background: '#0d131d',
+                  color: '#86efac',
+                  border: '1px solid #22c55e',
+                  borderRadius: 4,
+                  textAlign: 'center',
+                }}
+              />
+              <button
+                type="button"
+                data-testid="studio-toolbar-coupled-scale-btn"
+                disabled={applying}
+                onClick={() => void handleCoupledScaleAssetPhysics()}
+                title={
+                  isStudioCoupledScaleActive
+                    ? `Coupled Scale is active (${currentStudioAppliedScale.toFixed(2).replace(/\.?0+$/, '')}x). Click to reset to 1.0x or enter a new factor.`
+                    : 'Coupled Scale: Uniformly scale GBXModel + Collision (coll) Hitbox + Physics (phys) Mass Spheres & Inertia Tensor together'
+                }
+                style={{
+                  padding: '4px 8px',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: isStudioCoupledScaleActive ? '#14532d' : '#1e293b',
+                  color: isStudioCoupledScaleActive ? '#86efac' : '#cbd5e1',
+                  border: `1px solid ${isStudioCoupledScaleActive ? '#22c55e' : '#334155'}`,
+                  borderRadius: 4,
+                  cursor: applying ? 'wait' : 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {isStudioCoupledScaleActive
+                  ? `⚖️ Coupled Scale: ${currentStudioAppliedScale.toFixed(2).replace(/\.?0+$/, '')}x`
+                  : '⚖️ Coupled Scale'}
+              </button>
+            </div>
+          )}
           <button
             type="button"
             onClick={handleResetGeometry}
@@ -6007,16 +6146,42 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
         <div
           data-testid="studio-asset-outliner"
           style={{
-            width: 325,
+            width: 360,
+            flexShrink: 0,
+            boxSizing: 'border-box',
             background: '#111823',
             borderLeft: '1px solid #223046',
             padding: 10,
             overflowY: 'auto',
+            overflowX: 'hidden',
             display: 'flex',
             flexDirection: 'column',
             gap: 10,
           }}
         >
+          <style>{`
+            [data-testid="studio-asset-outliner"] * {
+              box-sizing: border-box;
+              min-width: 0;
+            }
+            [data-testid="studio-asset-outliner"] input[type="number"],
+            [data-testid="studio-asset-outliner"] input[type="text"],
+            [data-testid="studio-asset-outliner"] select {
+              width: 100%;
+              max-width: 100%;
+              min-width: 0;
+              box-sizing: border-box;
+            }
+            [data-testid="studio-asset-outliner"] input[type="range"] {
+              max-width: 100%;
+              min-width: 0;
+            }
+            [data-testid="studio-asset-outliner"] button {
+              max-width: 100%;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+          `}</style>
           {/* Scene Outliner Hierarchy Tree */}
           <div
             style={{
@@ -6520,10 +6685,29 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
                 gap: 8,
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                 <span style={{ fontWeight: 700, fontSize: 11, color: '#86efac', textTransform: 'uppercase' }}>
                   QuickForge World, Tunnel &amp; Bridge Builder
                 </span>
+                <button
+                  type="button"
+                  onClick={() => window.dispatchEvent(new CustomEvent('opence:open-world-merger'))}
+                  title="Open Multi-Map World Merger to combine multiple Halo CE maps"
+                  style={{
+                    padding: '2px 7px',
+                    fontSize: 9.5,
+                    fontWeight: 700,
+                    background: '#0f2942',
+                    color: '#7dd3fc',
+                    border: '1px solid #38bdf8',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    flexShrink: 0,
+                  }}
+                >
+                  🌍 Multi-Map Merger
+                </button>
               </div>
 
               {/* 4 Sub-Mode Generator Tabs */}

@@ -186,10 +186,66 @@ var api = {
   inspectLiveHudCatalog: () => import_electron.ipcRenderer.invoke("hud:inspectCatalog"),
   applyLiveHudEdit: (request) => import_electron.ipcRenderer.invoke("hud:applyEdit", request),
   applyLiveWeaponStatEdit: (request) => import_electron.ipcRenderer.invoke("hud:applyWeaponStatEdit", request),
+  blinkLiveHudElement: (offsetVirtualAddress, originalX) => import_electron.ipcRenderer.invoke("hud:blinkElement", offsetVirtualAddress, originalX),
+  equipLiveHudWeapon: (weaponTagId) => import_electron.ipcRenderer.invoke("hud:equipWeapon", weaponTagId),
+  spawnLiveHudVehicle: (vehicleTagId) => import_electron.ipcRenderer.invoke("hud:spawnVehicle", vehicleTagId),
+  spawnAllLiveHudArsenal: () => import_electron.ipcRenderer.invoke("hud:spawnAllArsenal"),
   injectHudElementBitmap: (request) => import_electron.ipcRenderer.invoke("hud:injectElementBitmap", request),
   inspectUiWidgetCanvas: (widgetTagIndex) => import_electron.ipcRenderer.invoke("ui:inspectWidgetCanvas", widgetTagIndex),
   updateUiWidgetPlacement: (request) => import_electron.ipcRenderer.invoke("ui:updateWidgetPlacement", request),
-  saveUnicodeStringTable: (ustrTagIndex, strings) => import_electron.ipcRenderer.invoke("ui:saveUnicodeStringTable", ustrTagIndex, strings)
+  saveUnicodeStringTable: (ustrTagIndex, strings) => import_electron.ipcRenderer.invoke("ui:saveUnicodeStringTable", ustrTagIndex, strings),
+  inspectContentExplorer: (tagIndex) => import_electron.ipcRenderer.invoke("baboon:inspectContentExplorer", tagIndex),
+  autoFixTagDependencies: (tagIndices) => import_electron.ipcRenderer.invoke("baboon:autoFixTagDependencies", tagIndices),
+  refactorMoveFolderInMap: (oldPrefix, newPrefix) => import_electron.ipcRenderer.invoke("baboon:refactorMoveFolderInMap", oldPrefix, newPrefix),
+  reorganizeReflexiveBlock: (request) => import_electron.ipcRenderer.invoke("baboon:reorganizeReflexiveBlock", request),
+  exportReflexiveTsv: (tagIndex, reflexivePath) => import_electron.ipcRenderer.invoke("baboon:exportReflexiveTsv", tagIndex, reflexivePath),
+  importReflexiveTsv: (tagIndex, reflexivePath, tsvText) => import_electron.ipcRenderer.invoke("baboon:importReflexiveTsv", tagIndex, reflexivePath, tsvText),
+  evaluateFunctionCurve: (params, sampleCount) => import_electron.ipcRenderer.invoke("baboon:evaluateFunctionCurve", params, sampleCount),
+  analyzeHudMessageSafety: (tagIndex) => import_electron.ipcRenderer.invoke("baboon:analyzeHudMessageSafety", tagIndex),
+  exportStringsCsv: (ustrTagIndex) => import_electron.ipcRenderer.invoke("baboon:exportStringsCsv", ustrTagIndex),
+  previewStringsCsvImport: (ustrTagIndex, csvText, mode) => import_electron.ipcRenderer.invoke("baboon:previewStringsCsvImport", ustrTagIndex, csvText, mode),
+  openLooseTagsWorkspace: (tagsRootDir) => import_electron.ipcRenderer.invoke("baboon:openLooseTagsWorkspace", tagsRootDir),
+  readLooseTagFields: (absolutePath, relativePath) => import_electron.ipcRenderer.invoke("baboon:readLooseTagFields", absolutePath, relativePath),
+  writeLooseTagField: (absolutePath, relativePath, fieldPath, newValue) => import_electron.ipcRenderer.invoke("baboon:writeLooseTagField", absolutePath, relativePath, fieldPath, newValue),
+  fixLooseWorkspaceDependencies: (tagsRootDir) => import_electron.ipcRenderer.invoke("baboon:fixLooseWorkspaceDependencies", tagsRootDir),
+  refactorMoveLooseTag: (tagsRootDir, oldRelativePath, newRelativePath, groupName) => import_electron.ipcRenderer.invoke("baboon:refactorMoveLooseTag", tagsRootDir, oldRelativePath, newRelativePath, groupName),
+  inspectGitTagsWorkspace: (tagsRootDir) => import_electron.ipcRenderer.invoke("baboon:inspectGitTagsWorkspace", tagsRootDir),
+  diffGitLooseTag: (tagsRootDir, absolutePath, gitRef) => import_electron.ipcRenderer.invoke("baboon:diffGitLooseTag", tagsRootDir, absolutePath, gitRef),
+  queryHaloScriptCatalog: (query, engineFilter) => import_electron.ipcRenderer.invoke("baboon:queryHaloScriptCatalog", query, engineFilter),
+  getToolCommands: (engineFilter) => import_electron.ipcRenderer.invoke("baboon:getToolCommands", engineFilter),
+  runToolExeCommand: (options) => import_electron.ipcRenderer.invoke("baboon:runToolExeCommand", options),
+  dropTagToExternalWindow: (absoluteTagPath) => import_electron.ipcRenderer.invoke("baboon:dropTagToExternalWindow", absoluteTagPath),
+  // v0.6.9 Workspace Launcher, Frameless Window Controls, Themes, Multi-Map Tabs & Multi-Monitor Tear-Off
+  windowMinimize: () => import_electron.ipcRenderer.invoke("window:minimize"),
+  windowToggleMaximize: () => import_electron.ipcRenderer.invoke("window:toggleMaximize"),
+  windowClose: () => import_electron.ipcRenderer.invoke("window:close"),
+  windowIsMaximized: () => import_electron.ipcRenderer.invoke("window:isMaximized"),
+  onWindowMaximizedChange: (cb) => {
+    const listener = (_, isMaximized) => cb(isMaximized);
+    import_electron.ipcRenderer.on("window:maximizedChanged", listener);
+    return () => import_electron.ipcRenderer.removeListener("window:maximizedChanged", listener);
+  },
+  getTheme: () => import_electron.ipcRenderer.invoke("settings:getTheme"),
+  setTheme: (theme) => import_electron.ipcRenderer.invoke("settings:setTheme", theme),
+  onThemeChanged: (cb) => {
+    const listener = (_, theme) => cb(theme);
+    import_electron.ipcRenderer.on("settings:themeChanged", listener);
+    return () => import_electron.ipcRenderer.removeListener("settings:themeChanged", listener);
+  },
+  getRecentMapCards: () => import_electron.ipcRenderer.invoke("recentMaps:getCards"),
+  togglePinRecentMap: (filePath) => import_electron.ipcRenderer.invoke("recentMaps:togglePin", filePath),
+  removeRecentMap: (filePath) => import_electron.ipcRenderer.invoke("recentMaps:remove", filePath),
+  revealInExplorer: (filePath) => import_electron.ipcRenderer.invoke("recentMaps:revealInExplorer", filePath),
+  listOpenMapSessions: () => import_electron.ipcRenderer.invoke("map:listOpenSessions"),
+  switchActiveMapSession: (sessionId) => import_electron.ipcRenderer.invoke("map:switchActiveSession", sessionId),
+  closeMapSession: (sessionId) => import_electron.ipcRenderer.invoke("map:closeSession", sessionId),
+  detachMapTabToWindow: (sessionId, coords) => import_electron.ipcRenderer.invoke("window:detachMapTab", sessionId, coords),
+  redockMapTabToMainWindow: (sessionId) => import_electron.ipcRenderer.invoke("window:redockMapTab", sessionId),
+  onOpenMapSessionsChanged: (cb) => {
+    const listener = (_, payload) => cb(payload);
+    import_electron.ipcRenderer.on("map:sessionsChanged", listener);
+    return () => import_electron.ipcRenderer.removeListener("map:sessionsChanged", listener);
+  }
 };
 import_electron.contextBridge.exposeInMainWorld("opence", api);
 //# sourceMappingURL=preload.js.map

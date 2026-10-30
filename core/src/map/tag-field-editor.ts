@@ -167,7 +167,7 @@ export function ensureExternalTagInternalized(
   out.writeUInt32LE(0, entryPos + 0x18); // isExternal = 0 (now in-map!)
 
   const newFileSize = out.length;
-  const newTagDataSize = header.tagDataSize + totalAlloc;
+  const newTagDataSize = out.length - header.tagDataOffset;
   out.writeUInt32LE(newFileSize, 0x08);
   out.writeUInt32LE(newTagDataSize, 0x14);
 
@@ -724,7 +724,7 @@ export function addReflexiveChunk(
 
   // Update header file size & tag data size
   const newFileSize = out.length;
-  const newTagDataSize = header.tagDataSize + totalAlloc;
+  const newTagDataSize = out.length - header.tagDataOffset;
   out.writeUInt32LE(newFileSize, 0x08);
   out.writeUInt32LE(newTagDataSize, 0x14);
 

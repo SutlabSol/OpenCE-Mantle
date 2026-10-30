@@ -1,7 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
-import type { AppSettings, HaloBitmapVersion, ResourceMapKind, VersionResourceMaps } from './shared-types';
+import type { AppSettings, AppThemeId, HaloBitmapVersion, ResourceMapKind, VersionResourceMaps } from './shared-types';
+
+const VALID_THEMES = new Set<AppThemeId>(['dark', 'light', 'forerunner', 'classic-ce', 'covenant', 'unsc']);
 
 function storePath(): string {
   return path.join(app.getPath('userData'), 'settings.json');
@@ -16,6 +18,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   checkForUpdatesOnLaunch: true,
   autoDownloadUpdates: false,
   skippedUpdateVersion: null,
+  theme: 'dark',
 };
 
 function migratePath(p: unknown): string | null {
@@ -72,6 +75,7 @@ export function getSettings(): AppSettings {
       checkForUpdatesOnLaunch: typeof parsed.checkForUpdatesOnLaunch === "boolean" ? parsed.checkForUpdatesOnLaunch : true,
       autoDownloadUpdates: typeof parsed.autoDownloadUpdates === "boolean" ? parsed.autoDownloadUpdates : false,
       skippedUpdateVersion: typeof parsed.skippedUpdateVersion === "string" ? parsed.skippedUpdateVersion : null,
+      theme: typeof parsed.theme === "string" && VALID_THEMES.has(parsed.theme as AppThemeId) ? (parsed.theme as AppThemeId) : "dark",
     };
 
     if (changed) {
@@ -183,4 +187,14 @@ export function setSkippedUpdateVersion(version: string | null): void {
     ...current,
     skippedUpdateVersion: version ? String(version).trim() : null,
   });
+}
+
+export function setAppTheme(theme: AppThemeId): AppThemeId {
+  const validTheme: AppThemeId = VALID_THEMES.has(theme) ? theme : 'dark';
+  const current = getSettings();
+  writeSettings({
+    ...current,
+    theme: validTheme,
+  });
+  return validTheme;
 }

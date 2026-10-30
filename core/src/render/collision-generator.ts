@@ -3240,9 +3240,10 @@ export function compileMeshCollisionBspData(
         else if (c.state === 'back') backCount++;
         else if (c.state === 'split') splitCount++;
       }
+      const horizBonus = depth < 6 && Math.abs(pl[2]) > 0.7 ? -90 : 0;
       const score = !isConcave && frontCount === 0 && splitCount === 0
-        ? -1000 - backCount
-        : splitCount * 3 + Math.abs(frontCount - backCount);
+        ? -1000 - backCount + horizBonus
+        : splitCount * 3 + Math.abs(frontCount - backCount) + horizBonus;
       if (score < bestScore) {
         bestScore = score;
         bestPlane = pIdx;
@@ -3250,27 +3251,46 @@ export function compileMeshCollisionBspData(
     }
 
     const pl = planes[bestPlane];
-    const frontList: ClipPoly[] = [];
-    const backList: ClipPoly[] = [];
+    const rawFrontList: ClipPoly[] = [];
+    const rawBackList: ClipPoly[] = [];
     for (const poly of polys) {
       if (poly.planeIdx === bestPlane) continue;
       const c = clipPolyAgainstPlane(poly.pts, pl);
       if (c.state === 'front') {
-        frontList.push(poly);
+        rawFrontList.push(poly);
       } else if (c.state === 'back') {
-        backList.push(poly);
+        rawBackList.push(poly);
       } else if (c.state === 'split') {
-        // If tree is already deep, assign by centroid to prevent exponential fragment explosion
-        if (depth >= 18 || polys.length > 400) {
-          const dC = pl[0] * poly.centroid[0] + pl[1] * poly.centroid[1] + pl[2] * poly.centroid[2] - pl[3];
-          if (dC >= 0) frontList.push(poly);
-          else backList.push(poly);
+        // Always include straddling planes in BOTH subtrees so horizontal bridge decks, ramps, and street pads
+        // are never dropped when vertical walls split the 3D space!
+        if (c.front && c.front.length >= 3) {
+          rawFrontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
         } else {
-          if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
-          if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+          rawFrontList.push(poly);
+        }
+        if (c.back && c.back.length >= 3) {
+          rawBackList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+        } else {
+          rawBackList.push(poly);
         }
       }
     }
+
+    // Deduplicate fragments sharing the same planeIdx once the list or depth grows so the 3D BSP stays compact
+    // while 100% preserving every plane on both sides of every split
+    const compactByPlane = (list: ClipPoly[]): ClipPoly[] => {
+      if (depth < 6 && list.length <= 180) return list;
+      const byPlane = new Map<number, ClipPoly>();
+      for (const item of list) {
+        const existing = byPlane.get(item.planeIdx);
+        if (!existing || item.pts.length > existing.pts.length) {
+          byPlane.set(item.planeIdx, item);
+        }
+      }
+      return Array.from(byPlane.values());
+    };
+    const frontList = compactByPlane(rawFrontList);
+    const backList = compactByPlane(rawBackList);
 
     const nodeIdx = bsp3dNodes.length;
     bsp3dNodes.push([bestPlane, defaultBackLeaf, 0x80000000]);
@@ -4314,10 +4334,37 @@ export function scaleObjectAndCoupledPhysicsInMap(
   let physTagId = 0xffffffff;
   let updatedWeaponOrEquipmentScale = false;
 
-  const cls = fourCCToString(entry.primaryClassFourCC);
-  const rootOff = ptrToOff(entry.tagDataPointerOrResourceIndex);
+  let cls = fourCCToString(entry.primaryClassFourCC);
+  let rootOff = ptrToOff(entry.tagDataPointerOrResourceIndex);
   if (rootOff === null) {
     throw new Error(`Tag "${entry.path}" (${cls}) has no in-map tag data pointer.`);
+  }
+
+  // If the caller passed an `item_collection` (`itmc`) or `actor_variant` (`actv`), unwrap its underlying Object tag first
+  if (cls === 'itmc' && rootOff + 0x0c <= mapBuffer.length) {
+    const permCount = mapBuffer.readUInt32LE(rootOff + 0x00);
+    const permOff = ptrToOff(mapBuffer.readUInt32LE(rootOff + 0x04));
+    if (permOff !== null && permCount > 0 && permOff + 0x34 <= mapBuffer.length) {
+      const innerId = mapBuffer.readUInt32LE(permOff + 0x24 + 0x0c);
+      const innerEntry = innerId !== 0xffffffff ? tagIndex.entries[innerId & 0xffff] : undefined;
+      if (innerEntry) {
+        const innerOff = ptrToOff(innerEntry.tagDataPointerOrResourceIndex);
+        if (innerOff !== null) {
+          cls = fourCCToString(innerEntry.primaryClassFourCC);
+          rootOff = innerOff;
+        }
+      }
+    }
+  } else if (cls === 'actv' && rootOff + 0x24 <= mapBuffer.length) {
+    const unitId = mapBuffer.readUInt32LE(rootOff + 0x14 + 0x0c);
+    const unitEntry = unitId !== 0xffffffff ? tagIndex.entries[unitId & 0xffff] : undefined;
+    if (unitEntry) {
+      const unitOff = ptrToOff(unitEntry.tagDataPointerOrResourceIndex);
+      if (unitOff !== null) {
+        cls = fourCCToString(unitEntry.primaryClassFourCC);
+        rootOff = unitOff;
+      }
+    }
   }
 
   if (cls === 'mod2' || cls === 'mode') {
@@ -4372,10 +4419,11 @@ export function scaleObjectAndCoupledPhysicsInMap(
   let scaledVehicleSuspensions = 0;
   let newPhysicsMass: number | undefined;
 
-  // 1. Scale `gbxmodel` (`mod2`)
+  // 1. Scale `gbxmodel` (`mod2`) or Xbox `model` (`mode`)
   const mod2Entry = mod2TagId !== 0xffffffff ? tagIndex.entries[mod2TagId & 0xffff] : undefined;
   if (mod2Entry && !mod2Entry.isExternal) {
     const mOff = ptrToOff(mod2Entry.tagDataPointerOrResourceIndex);
+    const isXboxModel = header.engine === 5 || mod2Entry.primaryClassFourCC === 0x6d6f6465;
     if (mOff !== null && mOff + 232 <= mapBuffer.length) {
       // Markers (`+0x18`, stride 64 -> instances `+0x34`, stride 32 -> translation `+0x04..0x0C`)
       const markersCount = mapBuffer.readUInt32LE(mOff + 0x18);
@@ -4417,6 +4465,7 @@ export function scaleObjectAndCoupledPhysicsInMap(
       // Geometries (`+0xD0`, stride 48 -> parts `+0x24`, stride 132)
       const geomCount = mapBuffer.readUInt32LE(mOff + 0xd0);
       const geomOff = ptrToOff(mapBuffer.readUInt32LE(mOff + 0xd4));
+      const scaledVertexOffsets = new Set<number>();
       if (geomOff !== null && geomCount > 0 && geomCount <= 256) {
         for (let g = 0; g < geomCount; g++) {
           const go = geomOff + g * 48;
@@ -4433,13 +4482,27 @@ export function scaleObjectAndCoupledPhysicsInMap(
             scaleFloatAt(po + 0x1c, s1);
             const vCount = mapBuffer.readUInt32LE(po + 0x58);
             const vOffsetOrPtr = mapBuffer.readUInt32LE(po + 0x64);
-            const vOff =
-              header.engine === 5
-                ? ptrToOff(vOffsetOrPtr)
-                : tagIndex.modelDataFileOffset + vOffsetOrPtr;
-            if (vOff !== null && vCount > 0 && vCount <= 65535 && vOff >= 0 && vOff + vCount * 68 <= mapBuffer.length) {
+            let vOff: number | null = null;
+            const vStride = isXboxModel ? 32 : 68;
+            if (isXboxModel) {
+              const indirectOff = ptrToOff(vOffsetOrPtr);
+              if (indirectOff !== null && indirectOff + 12 <= mapBuffer.length) {
+                vOff = ptrToOff(mapBuffer.readUInt32LE(indirectOff + 4));
+              }
+            } else {
+              vOff = tagIndex.modelDataFileOffset + vOffsetOrPtr;
+            }
+            if (
+              vOff !== null &&
+              !scaledVertexOffsets.has(vOff) &&
+              vCount > 0 &&
+              vCount <= 65535 &&
+              vOff >= 0 &&
+              vOff + vCount * vStride <= mapBuffer.length
+            ) {
+              scaledVertexOffsets.add(vOff);
               for (let v = 0; v < vCount; v++) {
-                const vo = vOff + v * 68;
+                const vo = vOff + v * vStride;
                 scaleFloatAt(vo + 0x00, s1);
                 scaleFloatAt(vo + 0x04, s1);
                 scaleFloatAt(vo + 0x08, s1);

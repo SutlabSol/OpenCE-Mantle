@@ -1,4 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
+import {
+  evaluateBlamFunctionCurve,
+  type BlamPeriodicFunctionType,
+} from '../../../core/src/map/baboon-browser-utils';
 
 export type HaloTransitionFunction =
   | 'linear'
@@ -82,6 +86,13 @@ export default function CurveGraphVisualizer({
   const [exponent, setExponent] = useState<number>(initialParameters?.exponent ?? 1.0);
   const [scale, setScale] = useState<number>(initialParameters?.scale ?? 1.0);
   const [frequency, setFrequency] = useState<number>(initialParameters?.frequency ?? 1.0);
+  const [curveKind, setCurveKind] = useState<'transition' | 'periodic' | 'linear' | 'spline'>('transition');
+  const [periodicFn, setPeriodicFn] = useState<BlamPeriodicFunctionType>('sine');
+  const [phase, setPhase] = useState<number>(0);
+  const [colorStopA, setColorStopA] = useState<string>('#0ea5e9');
+  const [colorStopB, setColorStopB] = useState<string>('#22c55e');
+  const [colorStopC, setColorStopC] = useState<string>('#f59e0b');
+  const [colorStopD, setColorStopD] = useState<string>('#ef4444');
 
   // Hover cursor state
   const [hoverCoord, setHoverCoord] = useState<{ t: number; y: number; px: number; py: number } | null>(null);
@@ -155,13 +166,41 @@ export default function CurveGraphVisualizer({
     ctx.strokeStyle = '#38bdf8';
     ctx.lineWidth = 2.5;
 
+    const hexToRgb01 = (hex: string): [number, number, number] => {
+      const clean = hex.replace('#', '');
+      return [
+        parseInt(clean.slice(0, 2), 16) / 255,
+        parseInt(clean.slice(2, 4), 16) / 255,
+        parseInt(clean.slice(4, 6), 16) / 255,
+      ];
+    };
+
+    const evaluated = evaluateBlamFunctionCurve(
+      {
+        kind: curveKind,
+        periodicFunction: periodicFn,
+        transitionFunction: transition,
+        frequency,
+        phase,
+        minBound: 0,
+        maxBound: scale,
+        colorStops: [
+          hexToRgb01(colorStopA),
+          hexToRgb01(colorStopB),
+          hexToRgb01(colorStopC),
+          hexToRgb01(colorStopD),
+        ],
+      },
+      200,
+    );
+
     const numPoints = 200;
     for (let i = 0; i <= numPoints; i++) {
       const t = i / numPoints;
-      // Evaluate function
-      const normT = (t * frequency) % 1.0;
-      const rawVal = evaluateHaloFunction(normT, transition, exponent);
-      const val = Math.max(0, Math.min(1, rawVal * scale));
+      const val =
+        curveKind === 'transition'
+          ? Math.max(0, Math.min(1, evaluateHaloFunction((t * frequency) % 1.0, transition, exponent) * scale))
+          : Math.max(0, Math.min(1, evaluated.samples[i]?.y ?? 0));
 
       const px = padding + t * plotW;
       const py = padding + (1.0 - val) * plotH;
@@ -202,7 +241,7 @@ export default function CurveGraphVisualizer({
       ctx.arc(hoverCoord.px, hoverCoord.py, 4, 0, Math.PI * 2);
       ctx.fill();
     }
-  }, [transition, exponent, scale, frequency, hoverCoord, compact]);
+  }, [transition, exponent, scale, frequency, curveKind, periodicFn, phase, colorStopA, colorStopB, colorStopC, colorStopD, hoverCoord, compact]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -285,11 +324,70 @@ export default function CurveGraphVisualizer({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(4, 1fr)',
+          gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(3, 1fr)',
           gap: 8,
           fontSize: 11,
         }}
       >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <label style={{ color: 'var(--text-dim, #94a3b8)' }}>Function Mode:</label>
+          <select
+            data-testid="curve-kind-select"
+            value={curveKind}
+            onChange={(e) => setCurveKind(e.target.value as any)}
+            style={{
+              background: '#0b0f19',
+              color: '#fff',
+              border: '1px solid #334155',
+              borderRadius: 3,
+              padding: '3px 6px',
+              fontSize: 11,
+            }}
+          >
+            <option value="transition">Transition (Ease / Exponent)</option>
+            <option value="periodic">Periodic (12 Blam Waveforms)</option>
+            <option value="linear">Linear Ramp</option>
+            <option value="spline">Hermite Spline</option>
+          </select>
+        </div>
+
+        {curveKind === 'periodic' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <label style={{ color: 'var(--text-dim, #94a3b8)' }}>Periodic Waveform:</label>
+            <select
+              data-testid="curve-periodic-select"
+              value={periodicFn}
+              onChange={(e) => setPeriodicFn(e.target.value as BlamPeriodicFunctionType)}
+              style={{
+                background: '#0b0f19',
+                color: '#fff',
+                border: '1px solid #334155',
+                borderRadius: 3,
+                padding: '3px 6px',
+                fontSize: 11,
+              }}
+            >
+              {[
+                'one',
+                'zero',
+                'cosine',
+                'cosine (variable period)',
+                'diagonal wave',
+                'diagonal wave (variable period)',
+                'slide',
+                'slide (variable period)',
+                'noise',
+                'jitter',
+                'wander',
+                'spark',
+              ].map((fn) => (
+                <option key={fn} value={fn}>
+                  {fn}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
           <label style={{ color: 'var(--text-dim, #94a3b8)' }}>Transition:</label>
           <select
@@ -363,6 +461,43 @@ export default function CurveGraphVisualizer({
             style={{ width: '100%' }}
           />
         </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <label style={{ color: 'var(--text-dim, #94a3b8)' }}>Phase:</label>
+            <span>{phase.toFixed(2)}</span>
+          </div>
+          <input
+            type="range"
+            min="0.0"
+            max="1.0"
+            step="0.05"
+            value={phase}
+            onChange={(e) => setPhase(parseFloat(e.target.value))}
+            style={{ width: '100%' }}
+          />
+        </div>
+      </div>
+
+      {/* 4-Stop Color Gradient Ramp (Baboon Function Color-Stop Preview) */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 4 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11 }}>
+          <span style={{ color: 'var(--text-dim, #94a3b8)' }}>4-Stop Color Ramp Preview (Lower / Mid-Low / Mid-High / Upper):</span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input type="color" value={colorStopA} onChange={(e) => setColorStopA(e.target.value)} title="Stop A (0%)" style={{ width: 24, height: 20, padding: 0, border: 'none', cursor: 'pointer' }} />
+            <input type="color" value={colorStopB} onChange={(e) => setColorStopB(e.target.value)} title="Stop B (33%)" style={{ width: 24, height: 20, padding: 0, border: 'none', cursor: 'pointer' }} />
+            <input type="color" value={colorStopC} onChange={(e) => setColorStopC(e.target.value)} title="Stop C (66%)" style={{ width: 24, height: 20, padding: 0, border: 'none', cursor: 'pointer' }} />
+            <input type="color" value={colorStopD} onChange={(e) => setColorStopD(e.target.value)} title="Stop D (100%)" style={{ width: 24, height: 20, padding: 0, border: 'none', cursor: 'pointer' }} />
+          </div>
+        </div>
+        <div
+          data-testid="curve-color-ramp-bar"
+          style={{
+            height: 14,
+            borderRadius: 3,
+            border: '1px solid #334155',
+            background: `linear-gradient(90deg, ${colorStopA} 0%, ${colorStopB} 33%, ${colorStopC} 66%, ${colorStopD} 100%)`,
+          }}
+        />
       </div>
     </div>
   );

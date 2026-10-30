@@ -360,6 +360,16 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [savingField, setSavingField] = useState<string | null>(null);
   const [addingChunkPath, setAddingChunkPath] = useState<string | null>(null);
+  const [hudSafetyReport, setHudSafetyReport] = useState<{
+    isGlobalHudMessageText: boolean;
+    messageCount: number;
+    warningBanner: string | null;
+  } | null>(null);
+  const [organizerState, setOrganizerState] = useState<{
+    reflexivePath: string;
+    structName: string;
+    items: Array<{ sourceIndex: number; label: string; renameTo?: string }>;
+  } | null>(null);
 
   // Expanded bitfields set
   const [expandedBitfields, setExpandedBitfields] = useState<Set<string>>(() => new Set());
@@ -391,6 +401,23 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
         setFieldsError(res.message);
       }
     });
+
+    if (focusedTag.primaryClassName === 'hud_message_text' && typeof window.opence.analyzeHudMessageSafety === 'function') {
+      void window.opence.analyzeHudMessageSafety(focusedTag.index).then((res) => {
+        if (isCancelled) return;
+        if (res.ok) {
+          setHudSafetyReport({
+            isGlobalHudMessageText: res.report.isGlobalHudMessageText,
+            messageCount: res.report.messageCount,
+            warningBanner: res.report.warningBanner,
+          });
+        } else {
+          setHudSafetyReport(null);
+        }
+      });
+    } else {
+      setHudSafetyReport(null);
+    }
 
     return () => {
       isCancelled = true;
@@ -755,8 +782,112 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
     input.click();
   };
 
+  const handleOpenBlockOrganizer = (reflexiveFieldPath: string, reflexiveField: TagFieldDescriptor) => {
+    const items = (reflexiveField.children ?? []).map((el, idx) => {
+      const nameField = el.fields.find((cf) => cf.kind === 'string' && cf.name.toLowerCase().includes('name'));
+      const depField = el.fields.find((cf) => cf.kind === 'dependency' && cf.dependencyTarget);
+      let label = `${el.structName} #${idx}`;
+      if (nameField && typeof nameField.value === 'string' && nameField.value.trim()) {
+        label = nameField.value.trim();
+      } else if (depField?.dependencyTarget?.path) {
+        label = `${depField.dependencyTarget.path.split('\\').pop()} (${depField.dependencyTarget.group})`;
+      }
+      return { sourceIndex: idx, label, renameTo: typeof nameField?.value === 'string' ? nameField.value : undefined };
+    });
+    setOrganizerState({
+      reflexivePath: reflexiveFieldPath,
+      structName: reflexiveField.reflexiveStruct ?? 'Block',
+      items,
+    });
+  };
+
+  const handleCommitBlockOrganizer = async () => {
+    if (!focusedTag || !organizerState || typeof window.opence.reorganizeReflexiveBlock !== 'function') return;
+    setAddingChunkPath(organizerState.reflexivePath);
+    try {
+      const res = await window.opence.reorganizeReflexiveBlock({
+        tagIndex: focusedTag.index,
+        reflexivePath: organizerState.reflexivePath,
+        desiredOrder: organizerState.items.map((it) => ({
+          sourceIndex: it.sourceIndex,
+          renameTo: it.renameTo,
+        })),
+      });
+      if (res.ok) {
+        setFieldsResult(res.fields);
+        setStatusMessage(
+          `Committed staged Block Organizer changes to "${organizerState.reflexivePath}" (${res.newCount} elements).`,
+        );
+        setOrganizerState(null);
+      } else {
+        setStatusMessage(`Block Organizer failed: ${res.message}`);
+      }
+    } catch (err) {
+      setStatusMessage(`Block Organizer failed: ${(err as Error).message}`);
+    } finally {
+      setAddingChunkPath(null);
+    }
+  };
+
+  const handleCopyBlockTsv = async (reflexiveFieldPath: string) => {
+    if (!focusedTag || typeof window.opence.exportReflexiveTsv !== 'function') return;
+    const res = await window.opence.exportReflexiveTsv(focusedTag.index, reflexiveFieldPath);
+    if (!res.ok) {
+      setStatusMessage(`Failed to export TSV: ${res.message}`);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(res.tsvText);
+      setStatusMessage(
+        `Copied "${reflexiveFieldPath}" (${res.rowCount} rows × ${res.columnHeaders.length} columns) as TSV to clipboard (paste into Excel / Google Sheets).`,
+      );
+    } catch {
+      setStatusMessage(`Exported TSV (${res.rowCount} rows).`);
+    }
+  };
+
+  const handlePasteBlockTsv = async (reflexiveFieldPath: string) => {
+    if (!focusedTag || typeof window.opence.importReflexiveTsv !== 'function') return;
+    try {
+      const tsvText = await navigator.clipboard.readText();
+      if (!tsvText || !tsvText.trim()) {
+        setStatusMessage('Clipboard is empty. Copy TSV cells from Excel/Sheets or another reflexive block first.');
+        return;
+      }
+      setAddingChunkPath(reflexiveFieldPath);
+      const res = await window.opence.importReflexiveTsv(focusedTag.index, reflexiveFieldPath, tsvText);
+      if (res.ok) {
+        setFieldsResult(res.fields);
+        setStatusMessage(
+          `Applied TSV spreadsheet paste to "${reflexiveFieldPath}" (${res.updatedCells} cell(s) updated across ${res.rowCount} row(s)).`,
+        );
+      } else {
+        setStatusMessage(`Failed to paste TSV: ${res.message}`);
+      }
+    } catch (err) {
+      setStatusMessage(`Failed to read clipboard TSV: ${(err as Error).message}`);
+    } finally {
+      setAddingChunkPath(null);
+    }
+  };
+
   return (
           <div data-testid="properties-palette-fields" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+            {hudSafetyReport?.warningBanner && (
+              <div
+                data-testid="hud-message-safety-banner"
+                style={{
+                  padding: '8px 10px',
+                  background: 'rgba(245, 158, 11, 0.14)',
+                  borderBottom: '1px solid rgba(245, 158, 11, 0.45)',
+                  fontSize: 11.5,
+                  color: '#fbbf24',
+                  lineHeight: 1.4,
+                }}
+              >
+                ⚠️ <strong>Global HUD Message Fixed-Index Safety:</strong> {hudSafetyReport.warningBanner}
+              </div>
+            )}
             {/* Tag Group Description Banner */}
             {groupExplanation && (
               <div
@@ -888,6 +1019,9 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
                     onAppendAndPasteJson={handleAppendAndPasteReflexiveElementJson}
                     onExportBlockFile={handleExportReflexiveBlockFile}
                     onImportBlockFile={handleImportReflexiveBlockFile}
+                    onOpenBlockOrganizer={handleOpenBlockOrganizer}
+                    onCopyBlockTsv={handleCopyBlockTsv}
+                    onPasteBlockTsv={handlePasteBlockTsv}
                     addingChunkPath={addingChunkPath}
                     expandedBitfields={expandedBitfields}
                     onToggleBitfield={toggleBitfieldExpand}
@@ -899,6 +1033,236 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
                 ))
               )}
             </div>
+            {organizerState && (
+              <div
+                data-testid="block-organizer-modal"
+                style={{
+                  position: 'fixed',
+                  inset: 0,
+                  background: 'rgba(0,0,0,0.68)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 260,
+                }}
+              >
+                <div
+                  style={{
+                    width: 580,
+                    maxHeight: '80vh',
+                    background: 'var(--bg-panel)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    overflow: 'hidden',
+                    boxShadow: '0 12px 40px rgba(0,0,0,0.6)',
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: '10px 14px',
+                      background: 'var(--bg-panel-header)',
+                      borderBottom: '1px solid var(--border)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>
+                      🗂️ Staged Block Organizer — {organizerState.reflexivePath} ({organizerState.items.length} elements)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setOrganizerState(null)}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--text-dim)', fontSize: 16, cursor: 'pointer' }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div style={{ padding: '8px 14px', fontSize: 11.5, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)' }}>
+                    Reorder, duplicate, insert, rename, or delete elements in a staged buffer. Nothing is mutated until you click <strong>Commit Order</strong>.
+                  </div>
+                  <div style={{ flex: 1, overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {organizerState.items.map((item, idx) => (
+                      <div
+                        key={`${idx}-${item.sourceIndex}`}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '5px 8px',
+                          background: 'var(--bg-panel-header)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 3,
+                          fontSize: 11.5,
+                        }}
+                      >
+                        <span style={{ fontFamily: 'var(--mono-font)', color: 'var(--accent-cyan)', minWidth: 32 }}>
+                          [{idx}]
+                        </span>
+                        <span style={{ fontSize: 10.5, color: 'var(--text-dim)', minWidth: 58 }}>
+                          {item.sourceIndex >= 0 ? `(src #${item.sourceIndex})` : '(new)'}
+                        </span>
+                        <input
+                          type="text"
+                          value={item.renameTo ?? item.label}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setOrganizerState((prev) =>
+                              prev
+                                ? {
+                                    ...prev,
+                                    items: prev.items.map((it, i) => (i === idx ? { ...it, label: val, renameTo: val } : it)),
+                                  }
+                                : null,
+                            );
+                          }}
+                          style={{
+                            flex: 1,
+                            background: 'var(--bg-input, #1e1e1e)',
+                            border: '1px solid var(--border)',
+                            borderRadius: 2,
+                            color: 'var(--text-primary)',
+                            fontSize: 11,
+                            padding: '3px 6px',
+                            fontFamily: 'var(--mono-font)',
+                          }}
+                        />
+                        <button
+                          type="button"
+                          disabled={idx === 0}
+                          onClick={() =>
+                            setOrganizerState((prev) => {
+                              if (!prev || idx === 0) return prev;
+                              const next = [...prev.items];
+                              [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                              return { ...prev, items: next };
+                            })
+                          }
+                          style={{ padding: '2px 6px', fontSize: 10.5, cursor: idx === 0 ? 'not-allowed' : 'pointer' }}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          disabled={idx === organizerState.items.length - 1}
+                          onClick={() =>
+                            setOrganizerState((prev) => {
+                              if (!prev || idx >= prev.items.length - 1) return prev;
+                              const next = [...prev.items];
+                              [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+                              return { ...prev, items: next };
+                            })
+                          }
+                          style={{ padding: '2px 6px', fontSize: 10.5, cursor: idx === organizerState.items.length - 1 ? 'not-allowed' : 'pointer' }}
+                        >
+                          ↓
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOrganizerState((prev) => {
+                              if (!prev) return prev;
+                              const next = [...prev.items];
+                              next.splice(idx + 1, 0, { ...item, label: `${item.label}_copy` });
+                              return { ...prev, items: next };
+                            })
+                          }
+                          style={{ padding: '2px 6px', fontSize: 10.5, cursor: 'pointer' }}
+                        >
+                          Clone
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOrganizerState((prev) => {
+                              if (!prev) return prev;
+                              return { ...prev, items: prev.items.filter((_, i) => i !== idx) };
+                            })
+                          }
+                          style={{ padding: '2px 6px', fontSize: 10.5, color: '#f87171', cursor: 'pointer' }}
+                        >
+                          Del
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div
+                    style={{
+                      padding: '10px 14px',
+                      background: 'var(--bg-panel-header)',
+                      borderTop: '1px solid var(--border)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOrganizerState((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                items: [
+                                  ...prev.items,
+                                  { sourceIndex: -1, label: `${prev.structName} #${prev.items.length}` },
+                                ],
+                              }
+                            : null,
+                        )
+                      }
+                      style={{
+                        padding: '5px 10px',
+                        fontSize: 11.5,
+                        background: 'rgba(34, 197, 94, 0.16)',
+                        border: '1px solid rgba(34, 197, 94, 0.45)',
+                        color: '#4ade80',
+                        borderRadius: 3,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      + Insert Blank Element
+                    </button>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => setOrganizerState(null)}
+                        style={{
+                          padding: '5px 12px',
+                          fontSize: 11.5,
+                          background: 'var(--bg-main)',
+                          border: '1px solid var(--border)',
+                          color: 'var(--text-primary)',
+                          borderRadius: 3,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="block-organizer-commit-btn"
+                        onClick={() => void handleCommitBlockOrganizer()}
+                        style={{
+                          padding: '5px 14px',
+                          fontSize: 11.5,
+                          fontWeight: 600,
+                          background: 'var(--accent-cyan)',
+                          border: 'none',
+                          color: '#06202c',
+                          borderRadius: 3,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Commit Order ({organizerState.items.length})
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
   );
 }
@@ -925,6 +1289,9 @@ interface FieldCardProps {
   onAppendAndPasteJson?: (reflexiveFieldPath: string) => void;
   onExportBlockFile?: (reflexiveFieldPath: string, reflexiveField: TagFieldDescriptor) => void;
   onImportBlockFile?: (reflexiveFieldPath: string, reflexiveField: TagFieldDescriptor) => void;
+  onOpenBlockOrganizer?: (reflexiveFieldPath: string, reflexiveField: TagFieldDescriptor) => void;
+  onCopyBlockTsv?: (reflexiveFieldPath: string) => void;
+  onPasteBlockTsv?: (reflexiveFieldPath: string) => void;
   addingChunkPath?: string | null;
   expandedBitfields: Set<string>;
   onToggleBitfield: (fieldPath: string) => void;
@@ -951,6 +1318,9 @@ function FieldCard({
   onAppendAndPasteJson,
   onExportBlockFile,
   onImportBlockFile,
+  onOpenBlockOrganizer,
+  onCopyBlockTsv,
+  onPasteBlockTsv,
   addingChunkPath,
   expandedBitfields,
   onToggleBitfield,
@@ -1085,6 +1455,75 @@ function FieldCard({
             </div>
             {canAddChunk && (
               <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {onOpenBlockOrganizer && (
+                  <button
+                    type="button"
+                    data-testid={`reflexive-organize-${fieldPath}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenBlockOrganizer(fieldPath, field);
+                    }}
+                    title="Open Staged Block Organizer (reorder, duplicate, insert, rename, or delete elements)"
+                    style={{
+                      background: 'rgba(56, 189, 248, 0.15)',
+                      border: '1px solid rgba(56, 189, 248, 0.45)',
+                      borderRadius: 2,
+                      color: '#38bdf8',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      padding: '2px 6px',
+                    }}
+                  >
+                    🗂️ Organize
+                  </button>
+                )}
+                {onCopyBlockTsv && (
+                  <button
+                    type="button"
+                    data-testid={`reflexive-copy-tsv-${fieldPath}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCopyBlockTsv(fieldPath);
+                    }}
+                    title="Copy entire reflexive block as TSV (paste directly into Excel or Google Sheets)"
+                    style={{
+                      background: 'rgba(16, 185, 129, 0.15)',
+                      border: '1px solid rgba(16, 185, 129, 0.45)',
+                      borderRadius: 2,
+                      color: '#34d399',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      padding: '2px 6px',
+                    }}
+                  >
+                    📊 Copy TSV
+                  </button>
+                )}
+                {onPasteBlockTsv && (
+                  <button
+                    type="button"
+                    data-testid={`reflexive-paste-tsv-${fieldPath}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPasteBlockTsv(fieldPath);
+                    }}
+                    title="Paste TSV cells from Excel / Google Sheets into this reflexive block"
+                    style={{
+                      background: 'rgba(245, 158, 11, 0.15)',
+                      border: '1px solid rgba(245, 158, 11, 0.45)',
+                      borderRadius: 2,
+                      color: '#fbbf24',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      padding: '2px 6px',
+                    }}
+                  >
+                    📥 Paste TSV
+                  </button>
+                )}
                 {!simpleMode && onExportBlockFile && (
                   <button
                     type="button"
@@ -1217,7 +1656,8 @@ function FieldCard({
                               fontFamily: 'var(--mono-font)',
                             }}
                           >
-                            {`${field.name} #${idx + 1} (${field.name}[${idx}])`}
+                            <span>{`${field.name} #${idx + 1}`}</span>
+                            <span style={{ marginLeft: 6, opacity: 0.85 }}>{`${fieldPath}[${idx}]`}</span>
                             {!simpleMode && (
                               <span style={{ marginLeft: 6, fontWeight: 400, color: 'var(--text-dim)' }}>
                                 {el.structName} @ 0x{el.structBase.toString(16).toUpperCase()}
@@ -1666,6 +2106,10 @@ function FieldCard({
             onSave(fieldPath, newTagId);
           }}
         />
+      ) : field.kind === 'composite' ? (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', fontStyle: 'italic' }}>
+          Unsupported value shape
+        </div>
       ) : (
         <div style={{ fontSize: 11, color: 'var(--text-dim)', fontStyle: 'italic' }}>
           Raw data buffer (managed automatically by OpenCE compilers)

@@ -3,6 +3,7 @@ import { CacheFileEngine } from '../../core/src/constants/cache-file';
 import { app, BrowserWindow, Menu, dialog, globalShortcut, ipcMain, screen, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
+import { execFileSync, spawn } from 'child_process';
 import {
   OCETAGS_EXTENSION,
   validateResourceMapFile,
@@ -18,10 +19,28 @@ import {
   encodeRgbaToPng,
   parseHaloWrl,
   analyzeHaloToolLog,
+  scanLooseTagsWorkspace,
+  readLooseBlamTagFields,
+  writeLooseBlamTagFieldValue,
+  compareBlamLooseTagBuffers,
+  fixBrokenTagDependenciesInWorkspace,
+  refactorRenameOrMoveLooseTagOnDisk,
+  evaluateBlamFunctionCurve,
+  queryHaloScriptDocs,
+  getToolCommandCatalog,
+  runNativeToolCommand,
+  type NativeToolCommandType,
+  type LooseTagsWorkspaceIndex,
   type RandomAccessFile,
 } from '../../core/src/index';
 import { discoverSteamMccInstallations, decodeMccModManifest } from './mcc-deploy';
-import { getRecentMaps, addRecentMap } from './recent-maps';
+import {
+  getRecentMaps,
+  addRecentMap,
+  getRecentMapCards,
+  togglePinRecentMap,
+  removeRecentMapEntry,
+} from './recent-maps';
 import {
   getSettings,
   setLastExtractDir,
@@ -31,6 +50,7 @@ import {
   setCheckForUpdatesOnLaunch,
   setAutoDownloadUpdates,
   setSkippedUpdateVersion,
+  setAppTheme,
 } from './settings';
 import {
   checkForGitHubUpdates,
@@ -122,9 +142,31 @@ import type {
   InspectDeprotectResult,
   DeprotectMapResult,
   SpoofMapCrc32Result,
+  AppThemeId,
+  OpenMapTabSession,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
+const openMapSessions = new Map<string, OpenMapTabSession>();
+let activeMapSessionId: string | null = null;
+const detachedWindows = new Map<string, BrowserWindow>();
+
+function normalizeSessionId(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function broadcastOpenMapSessions(): void {
+  const payload = {
+    activeSessionId: activeMapSessionId,
+    sessions: Array.from(openMapSessions.values()),
+  };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('map:sessionsChanged', payload);
+    }
+  }
+}
 let currentMapPath: string | null = null;
 let currentMapCompressed = false;
 let currentMapScenarioName: string | null = null;
@@ -163,7 +205,9 @@ function createWindow() {
     height: 820,
     minWidth: 960,
     minHeight: 600,
-    backgroundColor: '#15171c',
+    frame: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#0d1117',
     icon: getAppIconPath(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -171,6 +215,14 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
     },
+  });
+  mainWindow.setMenuBarVisibility(false);
+
+  mainWindow.on('maximize', () => {
+    mainWindow?.webContents.send('window:maximizedChanged', true);
+  });
+  mainWindow.on('unmaximize', () => {
+    mainWindow?.webContents.send('window:maximizedChanged', false);
   });
 
   if (isDev) {
@@ -185,11 +237,16 @@ function createWindow() {
   // Closing the window with unsaved changes: Save / Don't save / Cancel.
   let closeConfirmed = false;
   mainWindow.on('close', (event) => {
-    if (closeConfirmed || !currentMapModified) return;
+    const anyModified =
+      currentMapModified || Array.from(openMapSessions.values()).some((s) => s.modified);
+    if (closeConfirmed || !anyModified) return;
     event.preventDefault();
     void confirmUnsavedChanges(unsavedChangesDeps).then((ok) => {
       if (!ok) return;
       closeConfirmed = true;
+      for (const detWin of detachedWindows.values()) {
+        if (!detWin.isDestroyed()) detWin.close();
+      }
       mainWindow?.close();
     });
   });
@@ -207,9 +264,25 @@ function setOpenMapState(map: OpenMapSummary) {
   currentMapPath = map.filePath;
   currentMapScenarioName = map.header.scenarioName;
   currentMapModified = !!map.modified;
+  const sid = activeMapSessionId ?? normalizeSessionId(map.filePath);
+  activeMapSessionId = sid;
+  openMapSessions.set(sid, {
+    sessionId: sid,
+    filePath: map.filePath,
+    fileName: path.basename(map.filePath),
+    scenarioName: map.header.scenarioName,
+    modified: !!map.modified,
+    detachedWindowId: detachedWindows.get(sid)?.id ?? null,
+    map,
+  });
   buildMenu();
   updateTitle();
   mainWindow?.webContents.send('map:updated', map);
+  const detWin = detachedWindows.get(sid);
+  if (detWin && !detWin.isDestroyed()) {
+    detWin.webContents.send('map:updated', map);
+  }
+  broadcastOpenMapSessions();
 }
 
 const unsavedChangesDeps = {
@@ -231,9 +304,16 @@ const unsavedChangesDeps = {
   log: sendLog,
 };
 
-/** Every way of opening another map goes through here: unsaved-changes prompt first. null = cancelled there. */
+/** Every way of opening another map goes through here. With multi-map tabs, previously open maps stay in memory; only prompt if reloading an already-open modified session. */
 async function openMapGuarded(filePath: string): Promise<LoadMapResult | null> {
-  if (!(await confirmUnsavedChanges(unsavedChangesDeps))) return null;
+  const sid = normalizeSessionId(filePath);
+  const existing = openMapSessions.get(sid);
+  if (existing && existing.modified) {
+    if (activeMapSessionId !== sid) {
+      await switchActiveMapSessionFlow(sid);
+    }
+    if (!(await confirmUnsavedChanges(unsavedChangesDeps))) return null;
+  }
   return loadMapAtPath(filePath, { askBackup: true });
 }
 
@@ -277,8 +357,9 @@ async function showErrorBox(message: string, detail: string) {
 
 async function loadMapAtPath(filePath: string, options: { askBackup: boolean }): Promise<LoadMapResult> {
   sendLog('info', `Opening ${filePath}`);
+  const sid = normalizeSessionId(filePath);
   try {
-    const { promise } = sendWorkerRequest<LoadMapResult>({ type: 'inspect', filePath }, sendLog, (stage, percent) => {
+    const { promise } = sendWorkerRequest<LoadMapResult>({ type: 'inspect', filePath, sessionId: sid }, sendLog, (stage, percent) => {
       mainWindow?.webContents.send('map:progress', { taskId: 'load', stage, percent });
     });
     const result = await promise;
@@ -292,9 +373,20 @@ async function loadMapAtPath(filePath: string, options: { askBackup: boolean }):
       currentMapPath = filePath;
       currentMapCompressed = false;
       currentMapScenarioName = result.header.scenarioName;
+      activeMapSessionId = sid;
+      openMapSessions.set(sid, {
+        sessionId: sid,
+        filePath,
+        fileName: path.basename(filePath),
+        scenarioName: result.header.scenarioName,
+        modified: false,
+        detachedWindowId: detachedWindows.get(sid)?.id ?? null,
+        map: result,
+      });
       addRecentMap(filePath);
       buildMenu();
       updateTitle();
+      broadcastOpenMapSessions();
       sendLog('info', `Parsed "${result.header.scenarioName}" - ${result.tags.length} tags`);
 
       // If the edition has configured or auto-detected resource maps, automatically activate them
@@ -332,10 +424,105 @@ async function loadMapAtPath(filePath: string, options: { askBackup: boolean }):
   }
 }
 
-/** Open dialog (also accepts .bak backups). Unsaved-changes prompt first. null = cancelled. */
+async function switchActiveMapSessionFlow(
+  sessionId: string,
+): Promise<{ ok: boolean; session?: OpenMapTabSession; message?: string }> {
+  const target = openMapSessions.get(sessionId);
+  if (!target) {
+    return { ok: false, message: `Map session "${sessionId}" is not open.` };
+  }
+  try {
+    const { promise } = sendWorkerRequest<
+      { ok: true; map: OpenMapSummary } | { ok: false; message: string }
+    >({ type: 'activateMapSession', sessionId }, sendLog);
+    const res = await promise;
+    if (!res.ok) {
+      return { ok: false, message: res.message };
+    }
+    activeMapSessionId = sessionId;
+    currentOpenMapSummary = res.map;
+    currentMapPath = res.map.filePath;
+    currentMapCompressed = false;
+    currentMapScenarioName = res.map.header.scenarioName;
+    currentMapModified = !!res.map.modified;
+    const updatedSession: OpenMapTabSession = {
+      sessionId,
+      filePath: res.map.filePath,
+      fileName: path.basename(res.map.filePath),
+      scenarioName: res.map.header.scenarioName,
+      modified: !!res.map.modified,
+      detachedWindowId: detachedWindows.get(sessionId)?.id ?? null,
+      map: res.map,
+    };
+    openMapSessions.set(sessionId, updatedSession);
+    buildMenu();
+    updateTitle();
+    broadcastOpenMapSessions();
+    return { ok: true, session: updatedSession };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function closeMapSessionFlow(
+  sessionId: string,
+): Promise<{ ok: boolean; activeSessionId: string | null; sessions: OpenMapTabSession[] }> {
+  const existing = openMapSessions.get(sessionId);
+  if (existing && existing.modified) {
+    if (activeMapSessionId !== sessionId) {
+      await switchActiveMapSessionFlow(sessionId);
+    }
+    if (!(await confirmUnsavedChanges(unsavedChangesDeps))) {
+      return {
+        ok: false,
+        activeSessionId: activeMapSessionId,
+        sessions: Array.from(openMapSessions.values()),
+      };
+    }
+  }
+  const detWin = detachedWindows.get(sessionId);
+  if (detWin && !detWin.isDestroyed()) {
+    detachedWindows.delete(sessionId);
+    detWin.close();
+  }
+  openMapSessions.delete(sessionId);
+  try {
+    const { promise } = sendWorkerRequest<{
+      ok: true;
+      activeSessionId: string | null;
+      map: OpenMapSummary | null;
+    }>({ type: 'closeMapSession', sessionId }, sendLog);
+    const res = await promise;
+    activeMapSessionId = res.activeSessionId;
+    if (res.map) {
+      currentOpenMapSummary = res.map;
+      currentMapPath = res.map.filePath;
+      currentMapCompressed = false;
+      currentMapScenarioName = res.map.header.scenarioName;
+      currentMapModified = !!res.map.modified;
+    } else {
+      currentOpenMapSummary = null;
+      currentMapPath = null;
+      currentMapCompressed = false;
+      currentMapScenarioName = null;
+      currentMapModified = false;
+    }
+  } catch {
+    activeMapSessionId = null;
+  }
+  buildMenu();
+  updateTitle();
+  broadcastOpenMapSessions();
+  return {
+    ok: true,
+    activeSessionId: activeMapSessionId,
+    sessions: Array.from(openMapSessions.values()),
+  };
+}
+
+/** Open dialog (also accepts .bak backups). null = cancelled. */
 async function openMapDialogFlow(): Promise<LoadMapResult | null> {
   if (!mainWindow) return null;
-  if (!(await confirmUnsavedChanges(unsavedChangesDeps))) return null;
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: 'Open Halo CE Map',
     filters: [
@@ -345,7 +532,7 @@ async function openMapDialogFlow(): Promise<LoadMapResult | null> {
     properties: ['openFile'],
   });
   if (canceled || filePaths.length === 0) return null;
-  return loadMapAtPath(filePaths[0], { askBackup: true });
+  return openMapGuarded(filePaths[0]);
 }
 
 async function openMapFlow() {
@@ -423,9 +610,9 @@ async function getDependenciesFlow(originalIndices: unknown): Promise<GetDepende
 }
 
 /**
- * Shows the native Save As dialog (never takes a path from the renderer), validates it, confirms
- * overwrite, then has the worker extract + write a single `.ocetags` container (temp-file-then-
- * rename, so a cancel/crash/failure never leaves a partial file at the destination).
+ * Shows the native Save As or Folder dialog (never takes a path from the renderer), validates it,
+ * confirms overwrite, then has the worker extract + write either standard Blam loose tag files
+ * (`tags/<relative_path>.<group>` with 64-byte 'blam' headers, the default) or an `.ocetags` container.
  */
 async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTagsResult> {
   if (!mainWindow) return { ok: false, code: 'NO_WINDOW', message: 'Application window is not available.' };
@@ -436,15 +623,19 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
     return { ok: false, code: 'NO_MAP_LOADED', message: 'Open and decompress a map before extracting tags.' };
   }
 
+  const format: 'blam' | 'ocetags' = request.format ?? 'blam';
   const settings = getSettings();
   const defaultDir = settings.lastExtractDir && fs.existsSync(settings.lastExtractDir) ? settings.lastExtractDir : app.getPath('documents');
   const safeName = String(request.suggestedFileName || 'extracted_tags').replace(/[<>:"/\\|?*]/g, '_') || 'extracted_tags';
   const defaultPath = path.join(defaultDir, `${safeName}${OCETAGS_EXTENSION}`);
 
   let resolvedTarget: string;
-  if (request.originalIndices.length > 1) {
+  if (format === 'blam' || request.originalIndices.length > 1) {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-      title: 'Choose folder to save extracted tags to...',
+      title:
+        format === 'blam'
+          ? 'Choose folder to save standard Blam tags (tags\\<path>.<group>) to...'
+          : 'Choose folder to save extracted tags to...',
       defaultPath: defaultDir,
       properties: ['openDirectory', 'createDirectory'],
     });
@@ -452,7 +643,7 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
     resolvedTarget = path.resolve(filePaths[0]);
   } else {
     const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
-      title: 'Extract tags to...',
+      title: 'Extract tags to (.ocetags)...',
       defaultPath,
       filters: [{ name: 'OpenCE Tag Set', extensions: ['ocetags'] }],
     });
@@ -468,7 +659,7 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
     return { ok: false, code: 'REFUSED_APP_PATH', message: 'You cannot save inside the application install directory. Choose a different location.' };
   }
 
-  if (fs.existsSync(resolvedTarget)) {
+  if (format === 'ocetags' && request.originalIndices.length === 1 && fs.existsSync(resolvedTarget)) {
     const { response } = await dialog.showMessageBox(mainWindow, {
       type: 'warning',
       buttons: ['Overwrite', 'Cancel'],
@@ -480,8 +671,8 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
     if (response !== 0) return { ok: false, code: 'CANCELLED', message: 'Save was cancelled.' };
   }
 
-  setLastExtractDir(path.dirname(resolvedTarget));
-  sendLog('info', `Extracting ${request.originalIndices.length} tag(s) to ${resolvedTarget}`);
+  setLastExtractDir(format === 'blam' || request.originalIndices.length > 1 ? resolvedTarget : path.dirname(resolvedTarget));
+  sendLog('info', `Extracting ${request.originalIndices.length} tag(s) (${format === 'blam' ? 'Standard Blam loose tags' : '.ocetags'}) to ${resolvedTarget}`);
 
   const resolvedSourceRes = resolveResourceMapsForSource(currentMapPath);
   const resourceMapPaths: Partial<Record<ResourceMapKind, string>> = {
@@ -501,6 +692,7 @@ async function extractTagsFlow(request: ExtractTagsRequest): Promise<ExtractTags
       itemName: request.itemName,
       itemNames: request.itemNames,
       captureGbxmodelRawData: request.captureGbxmodelRawData,
+      format,
     },
     sendLog,
     (stage, percent) => mainWindow?.webContents.send('map:progress', { taskId: 'extract', stage, percent }),
@@ -624,9 +816,10 @@ async function startBatchExtractFlow(options: {
   }
 
   const sourceMapName = currentMapScenarioName ?? path.basename(currentMapPath, '.map');
+  const effectiveFormat: BatchExtractFormat = options.extractFormat ?? 'blam';
   sendLog(
     'info',
-    `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode}, format: ${options.extractFormat ?? 'ocetags'})...`,
+    `Starting batch extraction of ${sourceMapName} to ${options.parentDir} (mode: ${options.mode}, format: ${effectiveFormat})...`,
   );
 
   const { requestId, promise } = sendWorkerRequest<BatchExtractResult>(
@@ -635,7 +828,7 @@ async function startBatchExtractFlow(options: {
       parentDir: options.parentDir,
       sourceMapName,
       mode: options.mode,
-      extractFormat: options.extractFormat,
+      extractFormat: effectiveFormat,
       resourceMapPaths,
     },
     sendLog,
@@ -1056,8 +1249,68 @@ function detectDefaultResourceMapPathsFlow(): Record<HaloBitmapVersion, string |
 async function pickInjectContainerFlow(): Promise<{ path: string; paths: string[] } | null> {
   if (!mainWindow) return null;
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-    title: 'Inject tags from...',
-    filters: [{ name: 'OpenCE Tag Set', extensions: ['ocetags'] }],
+    title: 'Inject tags from Standard Blam Loose Tag or OpenCE Tag Set...',
+    filters: [
+      {
+        name: 'Standard Blam Loose Tags & OpenCE Containers',
+        extensions: [
+          'weapon',
+          'biped',
+          'vehicle',
+          'scenery',
+          'equipment',
+          'garbage',
+          'projectile',
+          'device_machine',
+          'device_control',
+          'device_light_fixture',
+          'gbxmodel',
+          'model',
+          'model_animations',
+          'model_collision_geometry',
+          'physics',
+          'bitmap',
+          'sound',
+          'effect',
+          'damage_effect',
+          'light',
+          'light_volume',
+          'contrail',
+          'particle',
+          'particle_system',
+          'shader_model',
+          'shader_environment',
+          'shader_transparent_chicago',
+          'shader_transparent_chicago_extended',
+          'shader_transparent_generic',
+          'shader_transparent_glass',
+          'shader_transparent_meter',
+          'shader_transparent_plasma',
+          'shader_transparent_water',
+          'item_collection',
+          'weapon_hud_interface',
+          'unit_hud_interface',
+          'grenade_hud_interface',
+          'hud_message_text',
+          'unicode_string_list',
+          'string_list',
+          'ui_widget_definition',
+          'ui_widget_collection',
+          'scenario',
+          'scenario_structure_bsp',
+          'sky',
+          'wind',
+          'fog',
+          'actor',
+          'actor_variant',
+          'globals',
+          'ocetags',
+          'meta',
+        ],
+      },
+      { name: 'OpenCE Tag Set (*.ocetags)', extensions: ['ocetags'] },
+      { name: 'All Files (*.*)', extensions: ['*'] },
+    ],
     properties: ['openFile', 'multiSelections'],
   });
   if (canceled || filePaths.length === 0) return null;
@@ -2422,6 +2675,7 @@ function buildMenu() {
       label: 'File',
       submenu: [
         { label: 'Open Map...', accelerator: 'CmdOrCtrl+O', click: () => openMapFlow() },
+        { label: 'Open Standard Blam tags/ Workspace...', click: () => mainWindow?.webContents.send('menu:action', 'open-loose-tags-workspace') },
         { id: 'save', label: 'Save', accelerator: 'CmdOrCtrl+S', enabled: canSaveMap(), click: () => void runSaveMap() },
         { id: 'save-as', label: 'Save As...', accelerator: 'CmdOrCtrl+Shift+S', enabled: canSaveMapAs(), click: () => void runSaveMapAs() },
         {
@@ -2461,6 +2715,9 @@ function buildMenu() {
         { label: 'Live HUD Editing & Weapon Tag Editor...', click: () => mainWindow?.webContents.send('menu:action', 'live-hud-editor') },
         { label: 'Inject / Replace HUD Bitmap...', click: () => mainWindow?.webContents.send('menu:action', 'hud-bitmap-injector') },
         { label: 'UI.map Menu (DeLa) & String (ustr) Studio...', click: () => mainWindow?.webContents.send('menu:action', 'ui-map-studio') },
+        { label: 'Content Explorer & Dependency Auto-Fix...', click: () => mainWindow?.webContents.send('menu:action', 'content-explorer') },
+        { label: 'Visual tool.exe Command Runner...', click: () => mainWindow?.webContents.send('menu:action', 'tool-command-runner') },
+        { label: 'Bitmap & 3D Model Library Browser...', click: () => mainWindow?.webContents.send('menu:action', 'asset-library-browser') },
         { type: 'separator' },
         {
           label: 'Identify Resource Maps',
@@ -2496,6 +2753,7 @@ function buildMenu() {
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  mainWindow?.setMenuBarVisibility(false);
 }
 
 app.whenReady().then(() => {
@@ -3969,9 +4227,14 @@ app.whenReady().then(() => {
       sendLog,
     );
     const res = await promise;
-    if (res.ok && res.map) {
-      setOpenMapState(res.map);
-      mainWindow?.webContents.send('map:updated', res.map);
+    if (res.ok) {
+      if (res.memoryPatches) {
+        tagTestRunner.writeMemoryPatches(res.memoryPatches);
+      }
+      if (res.map) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send('map:updated', res.map);
+      }
     }
     return res;
   });
@@ -3985,11 +4248,32 @@ app.whenReady().then(() => {
       sendLog,
     );
     const res = await promise;
-    if (res.ok && res.map) {
-      setOpenMapState(res.map);
-      mainWindow?.webContents.send('map:updated', res.map);
+    if (res.ok) {
+      if (res.memoryPatches) {
+        tagTestRunner.writeMemoryPatches(res.memoryPatches);
+      }
+      if (res.map) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send('map:updated', res.map);
+      }
     }
     return res;
+  });
+
+  ipcMain.handle('hud:blinkElement', async (_evt, offsetVirtualAddress: number, originalX: number) => {
+    return tagTestRunner.blinkHudElement(offsetVirtualAddress, originalX);
+  });
+
+  ipcMain.handle('hud:equipWeapon', async (_evt, weaponTagId: number) => {
+    return tagTestRunner.equipWeaponInGame(weaponTagId);
+  });
+
+  ipcMain.handle('hud:spawnVehicle', async (_evt, vehicleTagId: number) => {
+    return tagTestRunner.spawnVehicleInGame(vehicleTagId);
+  });
+
+  ipcMain.handle('hud:spawnAllArsenal', async () => {
+    return tagTestRunner.spawnAllArsenalInGame();
   });
 
   ipcMain.handle('hud:injectElementBitmap', async (_evt, request: any) => {
@@ -4059,6 +4343,564 @@ app.whenReady().then(() => {
       sendLog('info', `Saved ${res.entryCount} Unicode string(s) into ustr tag #${ustrTagIndex}.`);
     }
     return res;
+  });
+
+  ipcMain.handle('baboon:inspectContentExplorer', async (_evt, tagIndex: number) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'inspectContentExplorer', tagIndex },
+      sendLog,
+    );
+    return promise;
+  });
+
+  ipcMain.handle('baboon:autoFixTagDependencies', async (_evt, tagIndices?: number[]) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'autoFixTagDependencies', tagIndices },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send('map:updated', res.map);
+      sendLog('info', `Auto-fixed ${res.report.fixedCount} broken tag reference(s) (${res.report.ambiguousCount} ambiguous, ${res.report.unresolvedCount} unresolved).`);
+    }
+    return res;
+  });
+
+  ipcMain.handle('baboon:refactorMoveFolderInMap', async (_evt, oldPrefix: string, newPrefix: string) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'refactorMoveFolderInMap', oldPrefix, newPrefix },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send('map:updated', res.map);
+      sendLog('info', `Refactored folder prefix "${oldPrefix}" -> "${newPrefix}" (${res.report.movedTags.length} tag(s) updated).`);
+    }
+    return res;
+  });
+
+  ipcMain.handle('baboon:reorganizeReflexiveBlock', async (_evt, request: any) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'reorganizeReflexiveBlock', request },
+      sendLog,
+    );
+    const res = await promise;
+    if (res.ok && res.map) {
+      setOpenMapState(res.map);
+      mainWindow?.webContents.send('map:updated', res.map);
+      sendLog('info', `Committed staged block organizer changes to "${request.reflexivePath}" (${res.newCount} elements).`);
+    }
+    return res;
+  });
+
+  ipcMain.handle('baboon:exportReflexiveTsv', async (_evt, tagIndex: number, reflexivePath: string) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'exportReflexiveTsv', tagIndex, reflexivePath },
+      sendLog,
+    );
+    return promise;
+  });
+
+  ipcMain.handle(
+    'baboon:importReflexiveTsv',
+    async (_evt, tagIndex: number, reflexivePath: string, tsvText: string) => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      const { promise } = sendWorkerRequest<any>(
+        { type: 'importReflexiveTsv', tagIndex, reflexivePath, tsvText },
+        sendLog,
+      );
+      const res = await promise;
+      if (res.ok && res.map) {
+        setOpenMapState(res.map);
+        mainWindow?.webContents.send('map:updated', res.map);
+        sendLog('info', `Applied TSV spreadsheet paste to "${reflexivePath}" (${res.updatedCells} cells updated across ${res.rowCount} rows).`);
+      }
+      return res;
+    },
+  );
+
+  ipcMain.handle('baboon:evaluateFunctionCurve', async (_evt, params: any, sampleCount?: number) => {
+    return evaluateBlamFunctionCurve(params, sampleCount);
+  });
+
+  ipcMain.handle('baboon:analyzeHudMessageSafety', async (_evt, tagIndex: number) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'analyzeHudMessageSafety', tagIndex },
+      sendLog,
+    );
+    return promise;
+  });
+
+  ipcMain.handle('baboon:exportStringsCsv', async (_evt, ustrTagIndex: number) => {
+    if (!currentMapPath || currentMapCompressed) {
+      return { ok: false, message: 'Open an uncompressed map first.' };
+    }
+    const { promise } = sendWorkerRequest<any>(
+      { type: 'exportStringsCsv', ustrTagIndex },
+      sendLog,
+    );
+    return promise;
+  });
+
+  ipcMain.handle(
+    'baboon:previewStringsCsvImport',
+    async (_evt, ustrTagIndex: number, csvText: string, mode: 'amend' | 'replace') => {
+      if (!currentMapPath || currentMapCompressed) {
+        return { ok: false, message: 'Open an uncompressed map first.' };
+      }
+      const { promise } = sendWorkerRequest<any>(
+        { type: 'previewStringsCsvImport', ustrTagIndex, csvText, mode },
+        sendLog,
+      );
+      return promise;
+    },
+  );
+
+  const toUiLooseWorkspaceSnapshot = (raw: LooseTagsWorkspaceIndex) => {
+    const entryKeys = new Set(raw.entries.map((e) => e.key));
+    return {
+      tagsRootDir: raw.tagsDir,
+      totalFiles: raw.entries.length,
+      brokenDependencyCount: raw.brokenDependencies.length,
+      unreferencedTagCount: raw.unreferencedTagKeys.length,
+      entries: raw.entries.map((e) => {
+        const refs = e.dependencies.map((d) => ({
+          fieldPath: d.fieldPath,
+          group: d.group,
+          path: d.path,
+        }));
+        const brokenReferences = e.dependencies
+          .filter((d) => !entryKeys.has(d.targetKey))
+          .map((d) => ({
+            fieldPath: d.fieldPath,
+            group: d.group,
+            path: d.path,
+          }));
+        return {
+          key: e.key,
+          relativePath: e.tagPath,
+          groupName: e.group,
+          groupFourCC: e.groupFourCC,
+          absolutePath: e.filePath,
+          fileSize: e.size,
+          mtimeMs: e.mtimeMs,
+          headerFormat: e.headerFormat,
+          references: refs,
+          referencedByCount: raw.dependentsByTargetKey[e.key]?.length ?? 0,
+          brokenReferences,
+        };
+      }),
+    };
+  };
+
+  ipcMain.handle('baboon:openLooseTagsWorkspace', async (_evt, tagsRootDir?: string) => {
+    try {
+      let targetDir = tagsRootDir;
+      if (!targetDir) {
+        if (!mainWindow) return { ok: false, message: 'Main window unavailable.' };
+        const pick = await dialog.showOpenDialog(mainWindow, {
+          title: 'Select Standard Blam tags/ Folder Workspace...',
+          properties: ['openDirectory'],
+        });
+        if (pick.canceled || !pick.filePaths[0]) {
+          return { ok: false, cancelled: true, message: 'Cancelled.' };
+        }
+        targetDir = pick.filePaths[0];
+      }
+      const rawIndex = scanLooseTagsWorkspace(targetDir);
+      const snapshot = toUiLooseWorkspaceSnapshot(rawIndex);
+      sendLog(
+        'info',
+        `Indexed Loose Blam tags/ Workspace "${snapshot.tagsRootDir}": ${snapshot.totalFiles} tags (${snapshot.brokenDependencyCount} broken refs, ${snapshot.unreferencedTagCount} unreferenced).`,
+      );
+      return { ok: true, snapshot };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle(
+    'baboon:readLooseTagFields',
+    async (_evt, absolutePath: string, relativePath?: string) => {
+      try {
+        const buf = fs.readFileSync(absolutePath);
+        const rel =
+          relativePath ??
+          path.basename(absolutePath, path.extname(absolutePath));
+        const fields = readLooseBlamTagFields(buf, rel);
+        return { ok: true, fields, groupName: fields.group };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    'baboon:writeLooseTagField',
+    async (_evt, absolutePath: string, relativePath: string, fieldPath: string, newValue: unknown) => {
+      try {
+        const buf = fs.readFileSync(absolutePath);
+        const updated = writeLooseBlamTagFieldValue(buf, relativePath, fieldPath, newValue);
+        fs.writeFileSync(absolutePath, updated.buffer);
+        sendLog('info', `Saved loose Blam tag field "${fieldPath}" in ${relativePath}.${updated.fields.group}`);
+        return { ok: true, fields: updated.fields };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ipcMain.handle('baboon:fixLooseWorkspaceDependencies', async (_evt, tagsRootDir: string) => {
+    try {
+      const rawReport = fixBrokenTagDependenciesInWorkspace(tagsRootDir);
+      const report = {
+        ...rawReport,
+        fixedCount: rawReport.fixed.length,
+        ambiguousCount: rawReport.ambiguous.length,
+        unresolvedCount: rawReport.notFound.length,
+      };
+      const snapshot = toUiLooseWorkspaceSnapshot(scanLooseTagsWorkspace(tagsRootDir));
+      sendLog('info', `Repaired ${report.fixedCount} broken dependency reference(s) across loose tags/ workspace.`);
+      return { ok: true, report, snapshot };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle(
+    'baboon:refactorMoveLooseTag',
+    async (_evt, tagsRootDir: string, oldRelativePath: string, newRelativePath: string, groupName: string) => {
+      try {
+        const rawReport = refactorRenameOrMoveLooseTagOnDisk(
+          tagsRootDir,
+          oldRelativePath,
+          groupName,
+          newRelativePath,
+        );
+        const report = {
+          ...rawReport,
+          updatedReferenceSlots: rawReport.rewrittenReferencingFiles.length,
+        };
+        const snapshot = toUiLooseWorkspaceSnapshot(scanLooseTagsWorkspace(tagsRootDir));
+        sendLog(
+          'info',
+          `Moved loose Blam tag "${oldRelativePath}.${groupName}" -> "${newRelativePath}.${groupName}" and updated ${report.updatedReferenceSlots} referencing tag file(s).`,
+        );
+        return { ok: true, report, snapshot };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ipcMain.handle('baboon:inspectGitTagsWorkspace', async (_evt, tagsRootDir: string) => {
+    try {
+      let isGitRepo = false;
+      let branch = '';
+      const statusEntries: Array<{ status: string; relativePath: string; groupName: string; absolutePath: string }> = [];
+      const recentCommits: Array<{ hash: string; shortHash: string; author: string; date: string; subject: string }> = [];
+
+      try {
+        branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+          cwd: tagsRootDir,
+          encoding: 'utf8',
+          timeout: 4000,
+        }).trim();
+        isGitRepo = true;
+      } catch {
+        return { ok: true, isGitRepo: false, branch: '', statusEntries: [], recentCommits: [] };
+      }
+
+      const porcelain = execFileSync('git', ['status', '--porcelain', '.'], {
+        cwd: tagsRootDir,
+        encoding: 'utf8',
+        timeout: 5000,
+      });
+      for (const line of porcelain.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const status = line.slice(0, 2).trim();
+        const fileRel = line.slice(3).trim().replace(/^"|"$/g, '');
+        const abs = path.resolve(tagsRootDir, fileRel);
+        const ext = path.extname(fileRel).replace(/^\./, '').toLowerCase();
+        const relWithoutExt = fileRel.slice(0, fileRel.length - path.extname(fileRel).length).replace(/\//g, '\\');
+        statusEntries.push({
+          status,
+          relativePath: relWithoutExt,
+          groupName: ext,
+          absolutePath: abs,
+        });
+      }
+
+      try {
+        const logOut = execFileSync(
+          'git',
+          ['log', '-n', '20', '--pretty=format:%H|%h|%an|%ad|%s', '--date=short', '.'],
+          { cwd: tagsRootDir, encoding: 'utf8', timeout: 5000 },
+        );
+        for (const line of logOut.split(/\r?\n/)) {
+          if (!line.trim()) continue;
+          const [hash, shortHash, author, date, ...subjParts] = line.split('|');
+          recentCommits.push({
+            hash: hash ?? '',
+            shortHash: shortHash ?? '',
+            author: author ?? '',
+            date: date ?? '',
+            subject: subjParts.join('|'),
+          });
+        }
+      } catch {
+        /* ignore empty commit log */
+      }
+
+      return { ok: true, isGitRepo, branch, statusEntries, recentCommits };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle(
+    'baboon:diffGitLooseTag',
+    async (_evt, tagsRootDir: string, absolutePath: string, gitRef = 'HEAD') => {
+      try {
+        const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+          cwd: tagsRootDir,
+          encoding: 'utf8',
+          timeout: 4000,
+        }).trim();
+        const relToRepo = path.relative(repoRoot, absolutePath).replace(/\\/g, '/');
+        const oldBuf = execFileSync('git', ['show', `${gitRef}:${relToRepo}`], {
+          cwd: repoRoot,
+          maxBuffer: 64 * 1024 * 1024,
+          timeout: 5000,
+        });
+        const newBuf = fs.readFileSync(absolutePath);
+        const groupName = path.extname(absolutePath).replace(/^\./, '').toLowerCase();
+        const relTagPath = path
+          .relative(tagsRootDir, absolutePath)
+          .replace(/\.[^.]+$/, '')
+          .replace(/\//g, '\\');
+        const rows = compareBlamLooseTagBuffers(oldBuf, newBuf, relTagPath);
+        return {
+          ok: true,
+          relativePath: relTagPath,
+          groupName,
+          changedFieldsCount: rows.length,
+          fields: rows.map((r) => ({
+            fieldPath: r.property,
+            status: r.status,
+            leftValue: r.before,
+            rightValue: r.after,
+          })),
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
+  ipcMain.handle('baboon:queryHaloScriptCatalog', async (_evt, query: string, engineFilter?: string) => {
+    return queryHaloScriptDocs(query, engineFilter).map((doc) => ({
+      ...doc,
+      usage: doc.signature,
+    }));
+  });
+
+  ipcMain.handle('baboon:getToolCommands', async (_evt, engineFilter?: string) => {
+    return getToolCommandCatalog(engineFilter).map((cmd) => ({
+      ...cmd,
+      verb: cmd.name,
+      args: (cmd.args ?? []).map((a) => ({
+        ...a,
+        options: a.values,
+      })),
+    }));
+  });
+
+  ipcMain.handle(
+    'baboon:runToolExeCommand',
+    async (
+      _evt,
+      options: {
+        mode?: 'native' | 'external_exe';
+        toolExePath?: string;
+        workingDir: string;
+        verb: string;
+        args: string[];
+      },
+    ) => {
+      try {
+        const effectiveMode = options.mode ?? 'native';
+        // Resolve HEK root workingDir: if user pointed at `.../tags`, step up to its parent directory containing `data/` and `tags/`
+        let resolvedWorkDir = options.workingDir || getSettings().openCeDirectory || process.cwd();
+        if (path.basename(resolvedWorkDir).toLowerCase() === 'tags') {
+          resolvedWorkDir = path.dirname(resolvedWorkDir);
+        }
+
+        if (effectiveMode === 'native') {
+          const cleanArgs = options.args.filter((a) => a.trim().length > 0);
+          sendLog(
+            'info',
+            `Running Built-In Native Mantle Tool Compiler: tool ${options.verb} ${cleanArgs.join(' ')} (cwd: ${resolvedWorkDir})`,
+          );
+          const nativeRes = await runNativeToolCommand({
+            workingDir: resolvedWorkDir,
+            command: options.verb as NativeToolCommandType,
+            args: cleanArgs,
+          });
+          if (nativeRes.ok) {
+            sendLog('info', nativeRes.stdout);
+          } else {
+            sendLog('warn', nativeRes.stderr);
+          }
+          return {
+            ok: nativeRes.ok,
+            exitCode: nativeRes.exitCode,
+            stdout: nativeRes.stdout,
+            stderr: nativeRes.stderr,
+            writtenTagPaths: nativeRes.writtenTagPaths,
+            writtenMapPath: nativeRes.writtenMapPath,
+            wrlErrors: nativeRes.wrlErrors,
+            wrlPath: nativeRes.wrlPath,
+            executionEngine: 'native' as const,
+            message: nativeRes.ok ? undefined : nativeRes.stderr,
+          };
+        }
+
+        let toolExe = options.toolExePath;
+        if (!toolExe || !fs.existsSync(toolExe)) {
+          const candidates = [
+            path.join(resolvedWorkDir, 'tool.exe'),
+            path.join(resolvedWorkDir, 'tool_pro.exe'),
+            getSettings().openCeDirectory ? path.join(getSettings().openCeDirectory!, 'tool.exe') : '',
+          ].filter((p) => p && fs.existsSync(p));
+          toolExe = candidates[0];
+        }
+        if (!toolExe || !fs.existsSync(toolExe)) {
+          if (!mainWindow) return { ok: false, message: 'tool.exe not found.' };
+          const pick = await dialog.showOpenDialog(mainWindow, {
+            title: 'Locate Halo Editing Kit tool.exe...',
+            filters: [{ name: 'Executable (*.exe)', extensions: ['exe'] }],
+            properties: ['openFile'],
+          });
+          if (pick.canceled || !pick.filePaths[0]) {
+            return { ok: false, message: 'Cancelled locating tool.exe.' };
+          }
+          toolExe = pick.filePaths[0];
+        }
+
+        const fullArgs = [options.verb, ...options.args.filter((a) => a.trim().length > 0)];
+        sendLog('info', `Running external tool.exe: "${toolExe}" ${fullArgs.join(' ')}`);
+
+        return await new Promise<{
+          ok: boolean;
+          exitCode: number | null;
+          stdout: string;
+          stderr: string;
+          debugTxtTail?: string;
+          message?: string;
+          executionEngine: 'external_exe';
+        }>((resolve) => {
+          const child = spawn(toolExe!, fullArgs, {
+            cwd: resolvedWorkDir || path.dirname(toolExe!),
+            windowsHide: true,
+          });
+          let stdout = '';
+          let stderr = '';
+          child.stdout.on('data', (chunk) => {
+            stdout += chunk.toString();
+          });
+          child.stderr.on('data', (chunk) => {
+            stderr += chunk.toString();
+          });
+          child.on('error', (err) => {
+            resolve({ ok: false, exitCode: null, stdout, stderr, message: err.message, executionEngine: 'external_exe' });
+          });
+          child.on('close', (code) => {
+            let debugTxtTail: string | undefined;
+            const debugTxtPath = path.join(resolvedWorkDir || path.dirname(toolExe!), 'debug.txt');
+            if (fs.existsSync(debugTxtPath)) {
+              try {
+                const raw = fs.readFileSync(debugTxtPath, 'utf8');
+                debugTxtTail = raw.slice(-4096);
+              } catch {
+                /* ignore */
+              }
+            }
+            resolve({
+              ok: code === 0,
+              exitCode: code,
+              stdout,
+              stderr,
+              debugTxtTail,
+              executionEngine: 'external_exe',
+            });
+          });
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          exitCode: null,
+          stdout: '',
+          stderr: '',
+          message: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle('baboon:dropTagToExternalWindow', async (_evt, absoluteTagPath: string) => {
+    try {
+      if (!fs.existsSync(absoluteTagPath)) {
+        return { ok: false, message: `Tag file does not exist on disk: ${absoluteTagPath}` };
+      }
+      // Copy path to clipboard and invoke Guerilla/Sapien open or Shell reveal so user can immediately open/drop into Sapien/Guerilla
+      const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+$sc = New-Object System.Collections.Specialized.StringCollection
+$sc.Add('${absoluteTagPath.replace(/'/g, "''")}')
+[System.Windows.Forms.Clipboard]::SetFileDropList($sc)
+$proc = Get-Process | Where-Object { $_.ProcessName -match 'sapien|guerilla|mek|mozzarilla|baboon' -and $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if ($proc) {
+  $sig = '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);'
+  $t = Add-Type -MemberDefinition $sig -Name Win32Fg -Namespace OpenCEMantle -PassThru
+  $t::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+  Write-Output $proc.MainWindowTitle
+} else {
+  Write-Output "CLIPBOARD_ONLY"
+}
+`;
+      const out = execFileSync('powershell.exe', ['-NoProfile', '-STA', '-Command', psScript], {
+        encoding: 'utf8',
+        timeout: 5000,
+      }).trim();
+      const targetWindowTitle = out === 'CLIPBOARD_ONLY' ? 'Clipboard FileDropList (Sapien/Guerilla ready for Ctrl+V)' : out;
+      sendLog('info', `Prepared CF_HDROP file drop for "${path.basename(absoluteTagPath)}" -> ${targetWindowTitle}`);
+      return { ok: true, targetWindowTitle };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   ipcMain.handle('app:checkForUpdates', async () => {
@@ -4147,6 +4989,10 @@ app.whenReady().then(() => {
         'github.com',
         'objects.githubusercontent.com',
         'release-assets.githubusercontent.com',
+        'discord.com',
+        'discord.gg',
+        'halostats.cc',
+        'www.halostats.cc',
       ]);
       if (!allowedHosts.has(parsed.hostname)) {
         return { ok: false, message: `Host ${parsed.hostname} is not in the allowed release domain list.` };
@@ -4156,6 +5002,158 @@ app.whenReady().then(() => {
     } catch (err) {
       return { ok: false, message: (err as Error).message };
     }
+  });
+
+  // --- v0.6.9 Frameless Window Controls, Theme Engine, Recent Map Cards & Multi-Monitor Tab Tear-Off ---
+  ipcMain.handle('window:minimize', (evt) => {
+    const win = BrowserWindow.fromWebContents(evt.sender) ?? mainWindow;
+    win?.minimize();
+  });
+
+  ipcMain.handle('window:toggleMaximize', (evt) => {
+    const win = BrowserWindow.fromWebContents(evt.sender) ?? mainWindow;
+    if (!win) return false;
+    if (win.isMaximized()) {
+      win.unmaximize();
+    } else {
+      win.maximize();
+    }
+    return win.isMaximized();
+  });
+
+  ipcMain.handle('window:close', (evt) => {
+    const win = BrowserWindow.fromWebContents(evt.sender) ?? mainWindow;
+    win?.close();
+  });
+
+  ipcMain.handle('window:isMaximized', (evt) => {
+    const win = BrowserWindow.fromWebContents(evt.sender) ?? mainWindow;
+    return win?.isMaximized() ?? false;
+  });
+
+  ipcMain.handle('settings:getTheme', () => {
+    return getSettings().theme ?? 'dark';
+  });
+
+  ipcMain.handle('settings:setTheme', (_evt, theme: AppThemeId) => {
+    setAppTheme(theme);
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send('settings:themeChanged', theme);
+      }
+    }
+    return { ok: true as const, theme };
+  });
+
+  ipcMain.handle('recentMaps:getCards', () => {
+    return getRecentMapCards();
+  });
+
+  ipcMain.handle('recentMaps:togglePin', (_evt, filePath: string) => {
+    return togglePinRecentMap(filePath);
+  });
+
+  ipcMain.handle('recentMaps:remove', (_evt, filePath: string) => {
+    return removeRecentMapEntry(filePath);
+  });
+
+  ipcMain.handle('recentMaps:revealInExplorer', (_evt, filePath: string) => {
+    if (filePath && fs.existsSync(filePath)) {
+      shell.showItemInFolder(path.resolve(filePath));
+    }
+  });
+
+  ipcMain.handle('map:listOpenSessions', () => {
+    return {
+      activeSessionId: activeMapSessionId,
+      sessions: Array.from(openMapSessions.values()),
+    };
+  });
+
+  ipcMain.handle('map:switchActiveSession', (_evt, sessionId: string) => {
+    return switchActiveMapSessionFlow(sessionId);
+  });
+
+  ipcMain.handle('map:closeSession', (_evt, sessionId: string) => {
+    return closeMapSessionFlow(sessionId);
+  });
+
+  ipcMain.handle(
+    'window:detachMapTab',
+    async (_evt, sessionId: string, coords?: { screenX?: number; screenY?: number }) => {
+      const session = openMapSessions.get(sessionId);
+      if (!session) return { ok: false };
+      const existingWin = detachedWindows.get(sessionId);
+      if (existingWin && !existingWin.isDestroyed()) {
+        existingWin.focus();
+        return { ok: true, windowId: existingWin.id };
+      }
+      const detWin = new BrowserWindow({
+        width: 1200,
+        height: 800,
+        minWidth: 860,
+        minHeight: 540,
+        x: typeof coords?.screenX === 'number' ? Math.max(0, Math.round(coords.screenX - 240)) : undefined,
+        y: typeof coords?.screenY === 'number' ? Math.max(0, Math.round(coords.screenY - 24)) : undefined,
+        frame: false,
+        autoHideMenuBar: true,
+        backgroundColor: '#0d1117',
+        icon: getAppIconPath(),
+        title: `${session.fileName} - OpenCE Mantle (Detached Window)`,
+        webPreferences: {
+          preload: path.join(__dirname, 'preload.js'),
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: false,
+        },
+      });
+      detWin.setMenuBarVisibility(false);
+      detWin.on('maximize', () => {
+        if (!detWin.isDestroyed()) detWin.webContents.send('window:maximizedChanged', true);
+      });
+      detWin.on('unmaximize', () => {
+        if (!detWin.isDestroyed()) detWin.webContents.send('window:maximizedChanged', false);
+      });
+      detachedWindows.set(sessionId, detWin);
+      session.detachedWindowId = detWin.id;
+      openMapSessions.set(sessionId, session);
+      broadcastOpenMapSessions();
+
+      detWin.on('closed', () => {
+        detachedWindows.delete(sessionId);
+        const cur = openMapSessions.get(sessionId);
+        if (cur) {
+          cur.detachedWindowId = null;
+          openMapSessions.set(sessionId, cur);
+        }
+        broadcastOpenMapSessions();
+      });
+
+      if (isDev) {
+        await detWin.loadURL(`http://localhost:5173/?detachedSessionId=${encodeURIComponent(sessionId)}`);
+      } else {
+        await detWin.loadFile(path.join(__dirname, '../dist/index.html'), {
+          query: { detachedSessionId: sessionId },
+        });
+      }
+      return { ok: true, windowId: detWin.id };
+    },
+  );
+
+  ipcMain.handle('window:redockMapTab', async (_evt, sessionId: string) => {
+    const detWin = detachedWindows.get(sessionId);
+    if (detWin && !detWin.isDestroyed()) {
+      detWin.close();
+    }
+    detachedWindows.delete(sessionId);
+    const cur = openMapSessions.get(sessionId);
+    if (cur) {
+      cur.detachedWindowId = null;
+      openMapSessions.set(sessionId, cur);
+    }
+    await switchActiveMapSessionFlow(sessionId);
+    mainWindow?.focus();
+    return { ok: true };
   });
 
   // Ensure any previous uncleaned init.txt from crashes is restored to normal

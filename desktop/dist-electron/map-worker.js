@@ -37,12 +37,14 @@ __export(map_worker_exports, {
   __setMapFsForTest: () => __setMapFsForTest,
   __setSinkForTest: () => __setSinkForTest,
   describeMapWriteError: () => describeMapWriteError,
+  runActivateMapSession: () => runActivateMapSession,
   runAddReflexiveChunk: () => runAddReflexiveChunk,
   runAddScenarioPlacement: () => runAddScenarioPlacement,
   runApplyInject: () => runApplyInject,
   runBatchExtract: () => runBatchExtract,
   runBspSwapPreflight: () => runBspSwapPreflight,
   runBuildCustomObjectTag: () => runBuildCustomObjectTag,
+  runCloseMapSession: () => runCloseMapSession,
   runCompareMaps: () => runCompareMaps,
   runConvertMap: () => runConvertMap,
   runConvertPreflight: () => runConvertPreflight,
@@ -373,8 +375,8 @@ function parseTagIndex(buffer, header) {
   const tagFileChecksums = buffer.readUInt32LE(tagDataHeaderOffset + 8);
   const tagCount = buffer.readUInt32LE(tagDataHeaderOffset + 12);
   const modelPartCount = buffer.readUInt32LE(tagDataHeaderOffset + 16);
-  const modelDataFileOffset = buffer.readUInt32LE(tagDataHeaderOffset + 20);
-  const vertexSize = buffer.readUInt32LE(tagDataHeaderOffset + 28);
+  const modelDataFileOffset = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 20);
+  const vertexSize = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 28);
   const modelDataSize = isXbox ? 0 : buffer.readUInt32LE(tagDataHeaderOffset + 32);
   const isMcc = !isXbox && (header.engine === 13 /* MCC_CEA */ || tagArrayAddress === MCC_TAG_ARRAY_ADDRESS);
   const expectedTagArrayAddress = isXbox ? XBOX_TAG_ARRAY_ADDRESS : isMcc ? MCC_TAG_ARRAY_ADDRESS : CE_TAG_ARRAY_ADDRESS;
@@ -502,6 +504,25 @@ function ensureXboxMapDecompressed(buffer) {
   } catch {
     return buffer;
   }
+}
+function compressXboxMap(buffer) {
+  const header = parseCacheFileHeader(buffer);
+  if (header.engine !== 5 /* XBOX */) {
+    throw new UnsupportedMapVersionError(header.engine);
+  }
+  const decompressed = ensureXboxMapDecompressed(buffer);
+  const alignedDecompressedSize = Math.ceil(decompressed.length / CACHE_FILE_HEADER_SIZE) * CACHE_FILE_HEADER_SIZE;
+  const paddedDecompressed = alignedDecompressedSize > decompressed.length ? Buffer.concat([decompressed, Buffer.alloc(alignedDecompressedSize - decompressed.length, 202)]) : decompressed;
+  const deflatedBody = zlib.deflateSync(paddedDecompressed.subarray(CACHE_FILE_HEADER_SIZE));
+  const unpaddedOutSize = CACHE_FILE_HEADER_SIZE + deflatedBody.length;
+  const alignedOutSize = Math.ceil(unpaddedOutSize / CACHE_FILE_HEADER_SIZE) * CACHE_FILE_HEADER_SIZE;
+  const compressedPadding = alignedOutSize - unpaddedOutSize;
+  const out = Buffer.alloc(alignedOutSize, 0);
+  paddedDecompressed.copy(out, 0, 0, CACHE_FILE_HEADER_SIZE);
+  out.writeUInt32LE(alignedDecompressedSize >>> 0, 8);
+  out.writeUInt32LE(compressedPadding >>> 0, 12);
+  deflatedBody.copy(out, CACHE_FILE_HEADER_SIZE);
+  return out;
 }
 
 // ../core/src/map/open-map.ts
@@ -35118,10 +35139,12 @@ function captureEmbeddedFields(buffer, resolved, decoded, myBytes, myAbsoluteOff
       }
       capture.patches.push({ assetIndex: assetIndex2, patchOffset: myAbsoluteOffset + match.patchOffset, patchWidth: match.patchWidth });
       capturedAssetKeys?.add(`${match.resourceMap}:${match.fileOffset}:${match.size}`);
+      const isMccSource = buffer.length >= 8 && buffer.readUInt32LE(4) === 13;
       const flag = flagLocation(resolved, match.fieldName);
       if (flag) {
         if (flag.width === 2) {
-          myBytes.writeUInt16LE(myBytes.readUInt16LE(flag.offset) & ~flag.mask, flag.offset);
+          const mccMask = isMccSource && match.kind === "bitmap" ? 255 : 65535;
+          myBytes.writeUInt16LE(myBytes.readUInt16LE(flag.offset) & ~flag.mask & mccMask, flag.offset);
         } else if (flag.width === 4) {
           myBytes.writeUInt32LE(myBytes.readUInt32LE(flag.offset) & ~flag.mask, flag.offset);
         }
@@ -35137,6 +35160,9 @@ function captureEmbeddedFields(buffer, resolved, decoded, myBytes, myAbsoluteOff
       if (!validation.ok) {
         capture.blockedReasons.push(`${context}: ${validation.reason}.`);
         continue;
+      }
+      if (buffer.length >= 8 && buffer.readUInt32LE(4) === 13 && myBytes.length >= 16 && myBytes.readUInt32LE(0) === 1651078253) {
+        myBytes.writeUInt16LE(myBytes.readUInt16LE(14) & 255, 14);
       }
     }
     const dedupeKey = `${match.fileOffset}:${match.size}`;
@@ -35537,7 +35563,7 @@ function tagDataLayoutOf(header, tagIndex) {
     tagDataOffset: header.tagDataOffset,
     tagDataSize: header.tagDataSize,
     baseMemoryAddress: tagIndex.baseMemoryAddress,
-    tagArrayFileOffset: header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE,
+    tagArrayFileOffset: header.tagDataOffset + (header.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE),
     entries: tagIndex.entries
   };
 }
@@ -35574,6 +35600,13 @@ function collectTagDataPointers(buffer, layout, options = {}) {
     options.tolerated?.push(pointer);
   };
   const stalePath = (pathPointer) => options.tolerate?.staleReferencePaths === true && !inTagData(pathPointer, 1);
+  const isXboxLayout = layout.tagArrayFileOffset === tagDataOffset + 36;
+  if (isXboxLayout && tagDataOffset + 36 <= buffer.length) {
+    const vPartsPtr = buffer.readUInt32LE(tagDataOffset + 20);
+    if (vPartsPtr !== 0 && inTagData(vPartsPtr, 4)) addSite("dataBlock", tagDataOffset + 20, -1);
+    const iPartsPtr = buffer.readUInt32LE(tagDataOffset + 28);
+    if (iPartsPtr !== 0 && inTagData(iPartsPtr, 4)) addSite("dataBlock", tagDataOffset + 28, -1);
+  }
   for (const e of layout.entries) {
     const group = e.primaryClassName ?? "(unknown)";
     const fail = (reason) => {
@@ -35647,6 +35680,21 @@ function collectTagDataPointers(buffer, layout, options = {}) {
         } else if (field.def.type === "Pointer") {
           const raw = buffer.readUInt32LE(fieldAt);
           if (raw !== 0 && raw !== 4294967295 && inTagData(raw, 1)) fail(`${fieldWhere} is a runtime pointer into the tag data, which this build doesn't know how to move`);
+        }
+      }
+      if (isXboxLayout && structName === "ModelGeometryPart") {
+        const triOff1 = buffer.readUInt32LE(at + 76);
+        if (triOff1 !== 0 && inTagData(triOff1, 2)) addSite("dataBlock", at + 76, e.index);
+        const triOff2 = buffer.readUInt32LE(at + 80);
+        if (triOff2 !== 0 && inTagData(triOff2, 2)) addSite("dataBlock", at + 80, e.index);
+        const vertIndPtr = buffer.readUInt32LE(at + 100);
+        if (vertIndPtr !== 0 && inTagData(vertIndPtr, 12)) {
+          addSite("dataBlock", at + 100, e.index);
+          const indAt = fileOf(vertIndPtr);
+          const vertBufPtr = buffer.readUInt32LE(indAt + 4);
+          if (vertBufPtr !== 0 && inTagData(vertBufPtr, 32)) {
+            addSite("dataBlock", indAt + 4, e.index);
+          }
         }
       }
     };
@@ -35853,7 +35901,21 @@ function ceStructureBspRegions(buffer, header, tagIndex, purpose = "Cannot compu
   return regions;
 }
 function ceCrcRegions(buffer, header, tagIndex) {
-  const regions = ceStructureBspRegions(buffer, header, tagIndex);
+  const bspRegions = ceStructureBspRegions(buffer, header, tagIndex);
+  const regions = [];
+  if (header.engine === 13) {
+    for (let i = 0; i < bspRegions.length; i++) {
+      const prevEnd = i === 0 ? 2048 : bspRegions[i - 1].offset + bspRegions[i - 1].size;
+      const end = bspRegions[i].offset + bspRegions[i].size;
+      regions.push({
+        offset: prevEnd,
+        size: Math.max(0, end - prevEnd),
+        label: bspRegions[i].label
+      });
+    }
+  } else {
+    regions.push(...bspRegions);
+  }
   if (header.engine !== 5 && tagIndex.modelDataSize > 0) {
     regions.push({ offset: tagIndex.modelDataFileOffset, size: tagIndex.modelDataSize, label: "model data" });
   }
@@ -36784,8 +36846,10 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
       }
     }
   }
+  const isXboxTarget = targetHeader.engine === 5;
+  const tagHeaderSize = isXboxTarget ? 36 : TAG_DATA_HEADER_PC_SIZE;
   const subHeaderOffset = targetHeader.tagDataOffset;
-  const arrayOffset = subHeaderOffset + TAG_DATA_HEADER_PC_SIZE;
+  const arrayOffset = subHeaderOffset + tagHeaderSize;
   const oldTagCount = targetTagIndex.entries.length;
   const oldStructDataOffset = arrayOffset + oldTagCount * TAG_ENTRY_SIZE;
   const oldFileLength = targetBuffer.length;
@@ -36821,12 +36885,12 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
   const newTriangleBytes = padT > 0 ? Buffer.concat([unpaddedTriangles, Buffer.alloc(padT, 0)]) : unpaddedTriangles;
   const insertTriangleSize = newTriangleBytes.length;
   const totalModelPartCount = injectedParts.length;
-  const insertPos = targetTagIndex.modelDataFileOffset;
+  const insertPos = isXboxTarget ? subHeaderOffset : targetTagIndex.modelDataFileOffset;
   const embeddedAssetBuffers = options.allowEmbeddedRelocation ? writeTags.flatMap((t) => (t.embeddedRawDataAssets ?? []).filter((a) => a.kind === "bitmap" || a.kind === "sound").map((a) => Buffer.from(a.data, "base64"))) : [];
   const embeddedBlobSize = embeddedAssetBuffers.reduce((n, b) => n + b.length, 0);
   const insertSize = embeddedBlobSize === 0 ? 0 : embeddedBlobSize + (4 - embeddedBlobSize % 4) % 4;
   const shiftBeforeTagData = insertSize + insertVertexSize + insertTriangleSize;
-  const posVertex = targetTagIndex.modelDataFileOffset + targetTagIndex.vertexSize;
+  const posVertex = isXboxTarget ? subHeaderOffset : targetTagIndex.modelDataFileOffset + targetTagIndex.vertexSize;
   const posTriangle = subHeaderOffset;
   const baseMemoryAddress = targetTagIndex.baseMemoryAddress;
   const existingPointers = delta > 0 ? collectTagDataPointers(targetBuffer, tagDataLayoutOf(targetHeader, targetTagIndex), { tolerate: { staleReferencePaths: true } }) : [];
@@ -36870,10 +36934,10 @@ function applyInjectionWithReport(targetBuffer, targetHeader, targetTagIndex, co
     return at + shiftBeforeTagData + delta;
   };
   const oldArrayEndAddress = baseMemoryAddress + (oldStructDataOffset - subHeaderOffset) >>> 0;
-  const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: baseMemoryAddress + targetHeader.tagDataSize >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
+  const rebase = delta > 0 ? applyPointerShift(existingPointers, { from: oldArrayEndAddress, to: baseMemoryAddress + Math.max(targetHeader.tagDataSize, oldFileLength - subHeaderOffset) >>> 0, delta }, (at, value) => out.writeUInt32LE(value, outOffsetOf(at))) : null;
   out.writeUInt32LE(oldTagCount + addedCount, newTagDataOffset + 12);
-  if (insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 20);
-  if (totalModelPartCount > 0) {
+  if (!isXboxTarget && insertSize > 0) out.writeUInt32LE(insertPos + insertSize, newTagDataOffset + 20);
+  if (!isXboxTarget && totalModelPartCount > 0) {
     const newModelPartCount = targetTagIndex.modelPartCount + totalModelPartCount;
     out.writeUInt32LE(newModelPartCount, newTagDataOffset + 16);
     out.writeUInt32LE(newModelPartCount, newTagDataOffset + 24);
@@ -37193,17 +37257,19 @@ function scenarioNameFromFileName(fileName) {
   return { name, warnings };
 }
 function finalizeForSave(map, options) {
-  const header = parseCacheFileHeader(map);
-  const tagIndex = parseTagIndex(map, header);
+  const decompressed = ensureXboxMapDecompressed(map);
+  const header = parseCacheFileHeader(decompressed);
+  const tagIndex = parseTagIndex(decompressed, header);
   const { name, warnings } = scenarioNameFromFileName(options.fileName);
-  const out = Buffer.from(map);
+  const out = Buffer.from(decompressed);
   if (header.scenarioName !== name) {
     out.fill(0, SCENARIO_NAME_OFFSET, SCENARIO_NAME_OFFSET + TAG_STRING_SIZE);
     out.write(name, SCENARIO_NAME_OFFSET, "ascii");
   }
   const crc32 = computeCacheCrc32(out, ceCrcRegions(out, header, tagIndex));
   out.writeUInt32LE(crc32, CRC32_OFFSET);
-  return { buffer: out, scenarioName: name, previousScenarioName: header.scenarioName, crc32, previousCrc32: header.crc32 >>> 0, warnings };
+  const finalBuffer = header.engine === 5 && options.compressXbox !== false ? compressXboxMap(out) : out;
+  return { buffer: finalBuffer, scenarioName: name, previousScenarioName: header.scenarioName, crc32, previousCrc32: header.crc32 >>> 0, warnings };
 }
 
 // ../core/src/map/convert/classify.ts
@@ -39834,6 +39900,13 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
       counts.netgameFlags = (counts.netgameFlags || 0) + 1;
     }
   }
+  const decalPal = parsePalette(
+    buffer,
+    header,
+    tagIndex,
+    scnr.get("decal palette")?.value,
+    "ScenarioDecalPalette"
+  );
   const decRef = scnr.get("decals")?.value;
   if (decRef && decRef.count > 0) {
     const decSize = resolveStruct("ScenarioDecal").totalSize;
@@ -39844,17 +39917,19 @@ function extractScenarioPlacements(buffer, header, tagIndex) {
       const typeIdx = item.get("decal type")?.value ?? 0;
       const yaw = item.get("yaw")?.value ?? 0;
       const pitch = item.get("pitch")?.value ?? 0;
+      const pal = decalPal[typeIdx] || { tagId: 4294967295, path: `Decal ${typeIdx}`, modelTagId: 4294967295 };
+      const leafName = pal.path ? pal.path.split("\\").pop() || pal.path : `Decal ${typeIdx}`;
       placements.push({
         id: `decal-${i}`,
         kind: "decal",
         paletteIndex: typeIdx,
         nameIndex: -1,
-        objectTagId: 4294967295,
-        objectPath: `Decal ${typeIdx}`,
+        objectTagId: pal.tagId,
+        objectPath: pal.path || `Decal ${typeIdx}`,
         modelTagId: 4294967295,
         position: pos,
         rotation: [yaw / 128 * Math.PI, pitch / 128 * Math.PI, 0],
-        name: `Decal #${i}`
+        name: `${leafName} #${i}`
       });
       counts.decals = (counts.decals || 0) + 1;
     }
@@ -40003,7 +40078,8 @@ function updateScenarioPlacement(buffer, header, tagIndex, placementId, updates)
           });
           if (matchingItmc) resolvedItmcId = matchingItmc.tagId;
         }
-        const pathPtr = resolvedItmcId !== 4294967295 ? buffer.readUInt32LE(header.tagDataOffset + 40 + (resolvedItmcId & 65535) * 32 + 16) : 0;
+        const tagHeaderSize = header.engine === 5 ? 36 : 40;
+        const pathPtr = resolvedItmcId !== 4294967295 ? buffer.readUInt32LE(header.tagDataOffset + tagHeaderSize + (resolvedItmcId & 65535) * 32 + 16) : 0;
         buffer.writeUInt32LE(1769237859, itemOffset + 80);
         buffer.writeUInt32LE(pathPtr, itemOffset + 84);
         buffer.writeUInt32LE(0, itemOffset + 88);
@@ -40076,6 +40152,15 @@ function updateScenarioPlacement(buffer, header, tagIndex, placementId, updates)
       buffer.writeFloatLE(updates.position[0], itemOffset + 4);
       buffer.writeFloatLE(updates.position[1], itemOffset + 8);
       buffer.writeFloatLE(updates.position[2], itemOffset + 12);
+    }
+    if (updates.rotation) {
+      const yawByte = Math.max(-128, Math.min(127, Math.round(updates.rotation[0] / Math.PI * 128)));
+      const pitchByte = Math.max(-128, Math.min(127, Math.round(updates.rotation[1] / Math.PI * 128)));
+      buffer.writeInt8(yawByte, itemOffset + 2);
+      buffer.writeInt8(pitchByte, itemOffset + 3);
+    }
+    if (updates.paletteIndex !== void 0) {
+      buffer.writeInt16LE(updates.paletteIndex, itemOffset + 0);
     }
   } else if (kindStr === "encounter") {
     const parts = placementId.split("-");
@@ -40200,6 +40285,13 @@ function duplicateScenarioPlacement(buffer, header, tagIndex, placementId, offse
     newItemBytes.writeFloatLE(curX + offsetDelta[0], 0);
     newItemBytes.writeFloatLE(curY + offsetDelta[1], 4);
     newItemBytes.writeFloatLE(curZ + offsetDelta[2], 8);
+  } else if (kind === "decal") {
+    const curX = newItemBytes.readFloatLE(4);
+    const curY = newItemBytes.readFloatLE(8);
+    const curZ = newItemBytes.readFloatLE(12);
+    newItemBytes.writeFloatLE(curX + offsetDelta[0], 4);
+    newItemBytes.writeFloatLE(curY + offsetDelta[1], 8);
+    newItemBytes.writeFloatLE(curZ + offsetDelta[2], 12);
   } else if (kind === "equipment") {
     const curX = newItemBytes.readFloatLE(64);
     const curY = newItemBytes.readFloatLE(68);
@@ -40539,7 +40631,8 @@ function addScenarioPlacement(buffer, header, tagIndex, kind, paletteIndex, posi
         itmcBytes.writeUInt32LE(92, 4);
         itmcBytes.writeUInt32LE(0, 8);
         itmcBytes.writeInt16LE(30, 12);
-        const entryPathPtr = curBuf.readUInt32LE(curHdr.tagDataOffset + 40 + (chosen.tagId & 65535) * 32 + 16);
+        const tagHeaderSize2 = curHdr.engine === 5 ? 36 : 40;
+        const entryPathPtr = curBuf.readUInt32LE(curHdr.tagDataOffset + tagHeaderSize2 + (chosen.tagId & 65535) * 32 + 16);
         itmcBytes.writeFloatLE(1, 92 + 32);
         itmcBytes.writeUInt32LE(entry.primaryClassName === "weapon" ? 2003132784 : 1701931376, 92 + 36);
         itmcBytes.writeUInt32LE(entryPathPtr, 92 + 40);
@@ -40607,7 +40700,8 @@ function addScenarioPlacement(buffer, header, tagIndex, kind, paletteIndex, posi
   newItemBytes.writeFloatLE(position[1], 68);
   newItemBytes.writeFloatLE(position[2], 72);
   newItemBytes.writeFloatLE(rotation[0], 76);
-  const itmcPathPtr = itmcTagId !== 4294967295 ? curBuf.readUInt32LE(curHdr.tagDataOffset + 40 + (itmcTagId & 65535) * 32 + 16) : 0;
+  const tagHeaderSize = curHdr.engine === 5 ? 36 : 40;
+  const itmcPathPtr = itmcTagId !== 4294967295 ? curBuf.readUInt32LE(curHdr.tagDataOffset + tagHeaderSize + (itmcTagId & 65535) * 32 + 16) : 0;
   newItemBytes.writeUInt32LE(1769237859, 80);
   newItemBytes.writeUInt32LE(itmcPathPtr, 84);
   newItemBytes.writeUInt32LE(0, 88);
@@ -40983,7 +41077,7 @@ function renameTagInMap(buffer, header, tagIndex, tagEntryIndex, newPath) {
   const newOffset = buffer.length;
   const outBuffer = Buffer.concat([buffer, paddedBytes]);
   outBuffer.writeUInt32LE(outBuffer.length, 8);
-  outBuffer.writeUInt32LE(header.tagDataSize + paddedBytes.length, 20);
+  outBuffer.writeUInt32LE(outBuffer.length - header.tagDataOffset >>> 0, 20);
   const newPathPointer = tagIndex.baseMemoryAddress + (newOffset - header.tagDataOffset) >>> 0;
   outBuffer.writeUInt32LE(newPathPointer, entryOffset + 16);
   entry.path = cleanPath;
@@ -41044,7 +41138,8 @@ function duplicateTagInMap(buffer, header, tagIndex, sourceTagEntryIndex, newPat
     const newSbspTagId = sbspPlan.resolvedTagIdByLocalIndex.get(0) ?? computeNewTagId(tagIndex.entries.length);
     const newSbspIdx = newSbspTagId & 65535;
     const curTagOff = sbspReport.buffer.readUInt32LE(16);
-    const slotEntryOff = curTagOff + 40 + newSbspIdx * 32;
+    const tagHeaderSize = header.engine === 5 ? 36 : 40;
+    const slotEntryOff = curTagOff + tagHeaderSize + newSbspIdx * 32;
     if (slotEntryOff + 32 <= sbspReport.buffer.length) {
       sbspReport.buffer.writeUInt32LE(1935831920, slotEntryOff + 0);
       sbspReport.buffer.writeUInt32LE(4294967295, slotEntryOff + 4);
@@ -41311,7 +41406,8 @@ function writeTagClassToEntry(buffer, header, tagIndex, tagIdx, className) {
   if (!entry) return false;
   const { primaryFourCC, secondaryFourCC, tertiaryFourCC } = resolveClassHierarchyFourCCs(className);
   const changed = entry.primaryClassName !== className || entry.primaryClassFourCC !== primaryFourCC || (entry.secondaryClassFourCC ?? TAG_CLASS_NONE) !== secondaryFourCC || (entry.tertiaryClassFourCC ?? TAG_CLASS_NONE) !== tertiaryFourCC;
-  const entryOffset = header.tagDataOffset + TAG_DATA_HEADER_PC_SIZE + tagIdx * TAG_ENTRY_SIZE;
+  const tagHeaderSize = header.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE;
+  const entryOffset = header.tagDataOffset + tagHeaderSize + tagIdx * TAG_ENTRY_SIZE;
   if (isRangeInBuffer(entryOffset, TAG_ENTRY_SIZE, buffer.length)) {
     buffer.writeUInt32LE(primaryFourCC >>> 0, entryOffset + 0);
     buffer.writeUInt32LE(secondaryFourCC >>> 0, entryOffset + 4);
@@ -42700,6 +42796,7 @@ function verifyOutputAlignment(out) {
 // ../core/src/map/convert/demo-to-ce.ts
 var DEMO_BASE_MEMORY_ADDRESS = 1274085376;
 var DEMO_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - DEMO_BASE_MEMORY_ADDRESS;
+var MCC_TO_CE_DELTA = CE_BASE_MEMORY_ADDRESS - MCC_BASE_MEMORY_ADDRESS;
 var DEMO = {
   scenarioType: 2,
   head: 704,
@@ -42729,11 +42826,178 @@ function readDemoHeader(buffer) {
 }
 var hex5 = (n) => `0x${(n >>> 0).toString(16).toUpperCase()}`;
 var LAYOUT_LABEL = "Original Halo demo map (cache version 6)";
+var MCC_LAYOUT_LABEL = "MCC Halo 1 map (cache version 13)";
 var REBASE_LABEL = "Tag data moves to the Custom Edition address";
 function row(id, label, status, message, details = []) {
   return { id, label, status, message, details: details.slice(0, 50), requiresAcknowledgement: false };
 }
+function normalizeMccMap(source) {
+  const refuse = (id, message, details = [], earlier = []) => ({
+    ok: false,
+    rows: [...earlier, row(id, id === "demoLayout" ? MCC_LAYOUT_LABEL : REBASE_LABEL, "refuse", message, details)]
+  });
+  const layout = classifyMapLayout(source);
+  if (layout.kind !== "mcc") {
+    return refuse("demoLayout", "This is not an MCC Halo 1 map (cache version 13).");
+  }
+  const header = {
+    version: source.readUInt32LE(STD.version),
+    scenarioType: source.readUInt16LE(STD.scenarioType),
+    scenarioName: readFixedString(source, STD.scenarioName, TAG_STRING_SIZE),
+    buildString: readFixedString(source, STD.buildString, TAG_STRING_SIZE),
+    crc32: source.readUInt32LE(STD.crc32),
+    fileSize: source.readUInt32LE(STD.fileSize),
+    tagDataOffset: source.readUInt32LE(STD.tagDataOffset),
+    tagDataSize: source.readUInt32LE(STD.tagDataSize)
+  };
+  if (header.fileSize !== source.length) {
+    return refuse("demoLayout", `The header says ${header.fileSize} bytes but the file has ${source.length}.`);
+  }
+  const { tagDataOffset: tdo, tagDataSize: tds } = header;
+  if (tdo < CACHE_FILE_HEADER_SIZE || tds < TAG_DATA_HEADER_PC_SIZE || tdo + tds > source.length) {
+    return refuse("demoLayout", `The tag data (file offset ${tdo}, ${tds} bytes) is not inside the file.`);
+  }
+  const arrayPointer = source.readUInt32LE(tdo);
+  if (arrayPointer !== MCC_TAG_ARRAY_ADDRESS) {
+    return refuse("demoLayout", `The tag array pointer is ${hex5(arrayPointer)}, not ${hex5(MCC_TAG_ARRAY_ADDRESS)}.`);
+  }
+  const tagCount = source.readUInt32LE(tdo + 12);
+  if (TAG_DATA_HEADER_PC_SIZE + tagCount * TAG_ENTRY_SIZE > tds) {
+    return refuse("demoLayout", `The tag array (${tagCount} tags) doesn't fit in the tag data.`);
+  }
+  const layoutRow = row(
+    "demoLayout",
+    MCC_LAYOUT_LABEL,
+    "pass",
+    `Standard header, cache version 13 (MCC CEA), build ${header.buildString}, ${tagCount} tags at ${hex5(MCC_BASE_MEMORY_ADDRESS)}. BSP vertex pools are folded into each BSP block and the tag data is rebased to the Custom Edition address.`
+  );
+  const copy = Buffer.from(source);
+  const arrayAt = tdo + TAG_DATA_HEADER_PC_SIZE;
+  const scenarioTagId = copy.readUInt32LE(tdo + 4);
+  const scnrIdx = scenarioTagId & 65535;
+  const scnrEntryAt = arrayAt + scnrIdx * TAG_ENTRY_SIZE;
+  const scnrPtr = copy.readUInt32LE(scnrEntryAt + 20);
+  const scnrOff = tdo + (scnrPtr - MCC_BASE_MEMORY_ADDRESS);
+  if (scnrOff >= tdo && scnrOff + 1456 <= copy.length) {
+    const bspCount = copy.readInt32LE(scnrOff + 1444);
+    const bspPtr = copy.readUInt32LE(scnrOff + 1448);
+    const bspBase = tdo + (bspPtr - MCC_BASE_MEMORY_ADDRESS);
+    let prevOriginalBspEnd = CACHE_FILE_HEADER_SIZE;
+    for (let i = 0; i < bspCount; i++) {
+      const bEntryOff = bspBase + i * 32;
+      if (bEntryOff + 32 > copy.length) break;
+      const oldBspStart = copy.readUInt32LE(bEntryOff + 0);
+      const oldBspSize = copy.readUInt32LE(bEntryOff + 4);
+      const oldBspAddr = copy.readUInt32LE(bEntryOff + 8);
+      const vertPoolOff = prevOriginalBspEnd;
+      const vertPoolSize = oldBspStart - vertPoolOff;
+      prevOriginalBspEnd = oldBspStart + oldBspSize;
+      if (vertPoolSize >= 0 && oldBspStart + oldBspSize <= copy.length) {
+        const vertPoolBuf = Buffer.from(copy.subarray(vertPoolOff, oldBspStart));
+        const bspBodyBuf = Buffer.from(copy.subarray(oldBspStart, oldBspStart + oldBspSize));
+        bspBodyBuf.copy(copy, vertPoolOff);
+        vertPoolBuf.copy(copy, vertPoolOff + oldBspSize);
+        const newBspStart = vertPoolOff;
+        const newBspSize = oldBspSize + vertPoolSize;
+        copy.writeUInt32LE(newBspStart >>> 0, bEntryOff + 0);
+        copy.writeUInt32LE(newBspSize >>> 0, bEntryOff + 4);
+        copy.writeUInt32LE(0, newBspStart + 4);
+        copy.writeUInt32LE(0, newBspStart + 8);
+        const sbspHeaderPtr = copy.readUInt32LE(newBspStart + 0);
+        const sbspOff = newBspStart + (sbspHeaderPtr - oldBspAddr);
+        if (sbspOff >= newBspStart && sbspOff + 292 <= newBspStart + newBspSize) {
+          const lmCount = copy.readInt32LE(sbspOff + 280);
+          const lmPtr = copy.readUInt32LE(sbspOff + 284);
+          const lmBase = newBspStart + (lmPtr - oldBspAddr);
+          for (let l = 0; l < lmCount; l++) {
+            const lmEntry = lmBase + l * 32;
+            if (lmEntry + 32 > newBspStart + newBspSize) break;
+            const matCount = copy.readInt32LE(lmEntry + 20);
+            const matPtr = copy.readUInt32LE(lmEntry + 24);
+            const matBase = newBspStart + (matPtr - oldBspAddr);
+            for (let m = 0; m < matCount; m++) {
+              const matOff = matBase + m * 256;
+              if (matOff + 256 > newBspStart + newBspSize) break;
+              const vCount = copy.readUInt32LE(matOff + 184);
+              const rvOff = copy.readUInt32LE(matOff + 188);
+              const lmvCount = copy.readUInt32LE(matOff + 196);
+              const totalVertBytes = vCount * 56 + lmvCount * 20;
+              const vertAddr = oldBspAddr + oldBspSize + rvOff >>> 0;
+              copy.writeUInt32LE(totalVertBytes >>> 0, matOff + 216);
+              copy.writeUInt32LE(0, matOff + 220);
+              copy.writeUInt32LE(0, matOff + 224);
+              copy.writeUInt32LE(vertAddr, matOff + 228);
+            }
+          }
+        }
+      }
+    }
+  }
+  const entries = [];
+  for (let i = 0; i < tagCount; i++) {
+    const at = arrayAt + i * TAG_ENTRY_SIZE;
+    const fourcc = copy.readUInt32LE(at);
+    const isExt = copy.readUInt32LE(at + 24) === 1;
+    if (fourcc === 1651078253 && !isExt) {
+      const bitmStructAt = tdo + (copy.readUInt32LE(at + 20) - MCC_BASE_MEMORY_ADDRESS | 0);
+      if (bitmStructAt >= tdo && bitmStructAt + 104 <= copy.length) {
+        const bCount = copy.readUInt32LE(bitmStructAt + 96);
+        const bPtr = copy.readUInt32LE(bitmStructAt + 100);
+        const bArrAt = tdo + (bPtr - MCC_BASE_MEMORY_ADDRESS | 0);
+        if (bCount > 0 && bCount < 4096 && bArrAt >= tdo && bArrAt + bCount * 48 <= copy.length) {
+          for (let b = 0; b < bCount; b++) {
+            const bOff = bArrAt + b * 48;
+            const rawFlags = copy.readUInt16LE(bOff + 14);
+            if ((rawFlags & ~511) !== 0) {
+              copy.writeUInt16LE(rawFlags & 511, bOff + 14);
+            }
+          }
+        }
+      }
+    }
+    const pathAt = tdo + (copy.readUInt32LE(at + 16) - MCC_BASE_MEMORY_ADDRESS | 0);
+    entries.push({
+      index: i,
+      path: pathAt >= tdo && pathAt < tdo + tds ? readCStringWithin(copy, pathAt, tdo + tds) : `(tag #${i})`,
+      primaryClassName: i === (scenarioTagId & 65535) && copy.readUInt32LE(at + 12) === scenarioTagId ? "scenario" : lookupTagClass(fourcc)?.name ?? fourCCToString(fourcc),
+      isExternal: isExt
+    });
+  }
+  const tagLayout = { tagDataOffset: tdo, tagDataSize: tds, baseMemoryAddress: MCC_BASE_MEMORY_ADDRESS, tagArrayFileOffset: arrayAt, entries };
+  const tolerated = [];
+  const tolerate = { staleReferencePaths: true, rootsOutsideTagData: true };
+  let sites;
+  try {
+    sites = [...collectTagDataPointers(copy, tagLayout, { tolerate, tolerated }), ...collectBspSpacePointers(copy, tagLayout, { tolerate })];
+  } catch (err) {
+    if (!(err instanceof UnwalkableTagError)) throw err;
+    return refuse("demoRebase", `The tag data can't be moved: ${err.message}`, [], [layoutRow]);
+  }
+  const moved = Object.fromEntries([...TAG_DATA_POINTER_KINDS, ...BSP_SPACE_POINTER_KINDS].map((k) => [k, 0]));
+  for (const s of sites) {
+    copy.writeUInt32LE(s.value + MCC_TO_CE_DELTA >>> 0, s.at);
+    moved[s.kind]++;
+  }
+  copy.writeUInt32LE(CE_TAG_ARRAY_ADDRESS, tdo);
+  copy.writeUInt32LE(7 /* RETAIL */, STD.version);
+  copy.writeUInt32LE(0, STD.padding);
+  const total = sites.length;
+  const rebaseRow = row(
+    "demoRebase",
+    REBASE_LABEL,
+    "pass",
+    `${total.toLocaleString("en-US")} pointers move from ${hex5(MCC_BASE_MEMORY_ADDRESS)} to ${hex5(CE_BASE_MEMORY_ADDRESS)}, found by walking every tag and structure BSP with the tag definitions.`,
+    [
+      ...Object.entries(moved).filter(([, n]) => n > 0).map(([k, n]) => `${k}: ${n.toLocaleString("en-US")}`),
+      ...tolerated.length > 0 ? [`${tolerated.length} stale pointer(s) outside the tag data are left as they are.`] : []
+    ]
+  );
+  return { ok: true, value: { buffer: copy, header, moved, tolerated }, rows: [layoutRow, rebaseRow] };
+}
 function normalizeDemoMap(source) {
+  if (classifyMapLayout(source).kind === "mcc") {
+    return normalizeMccMap(source);
+  }
   const refuse = (id, message, details = [], earlier = []) => ({
     ok: false,
     rows: [...earlier, row(id, id === "demoLayout" ? LAYOUT_LABEL : REBASE_LABEL, "refuse", message, details)]
@@ -43177,7 +43441,7 @@ function ensureExternalTagInternalized(buffer, header, tagIndex, tagEntryIndex) 
   out.writeUInt32LE(newVirtualPtr, entryPos + 20);
   out.writeUInt32LE(0, entryPos + 24);
   const newFileSize = out.length;
-  const newTagDataSize = header.tagDataSize + totalAlloc;
+  const newTagDataSize = out.length - header.tagDataOffset;
   out.writeUInt32LE(newFileSize, 8);
   out.writeUInt32LE(newTagDataSize, 20);
   const newHeader = parseCacheFileHeader(out);
@@ -43571,7 +43835,7 @@ function addReflexiveChunk(buffer, header, tagIndex, tagEntryIndex, reflexiveFie
   out.writeUInt32LE(newVirtualPointer, refFieldAbsOffset + 4);
   out.writeUInt32LE(0, refFieldAbsOffset + 8);
   const newFileSize = out.length;
-  const newTagDataSize = header.tagDataSize + totalAlloc;
+  const newTagDataSize = out.length - header.tagDataOffset;
   out.writeUInt32LE(newFileSize, 8);
   out.writeUInt32LE(newTagDataSize, 20);
   const newHeader = {
@@ -43766,7 +44030,8 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
     const lmOffset = lightmapsOffset + lmIdx * lmStructSize;
     const decodedLm = decodeStruct(buffer, lmOffset, "ScenarioStructureBSPLightmap");
     const bitmapField = decodedLm.get("bitmap");
-    const lightmapBitmapIndex = bitmapField?.value ?? -1;
+    const rawBitmapIdx = bitmapField?.value ?? -1;
+    const lightmapBitmapIndex = rawBitmapIdx === 65535 || rawBitmapIdx < 0 ? -1 : rawBitmapIdx;
     const materialsReflexive = decodedLm.get("materials");
     if (!materialsReflexive || materialsReflexive.kind !== "reflexive" || materialsReflexive.value.count === 0) {
       continue;
@@ -43875,7 +44140,7 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
       }
       const lightmapUvs = new Float32Array(vertexCount * 2);
       if (isXboxCompressedBsp) {
-        if (lmVertOffset > 0 && lmVertexCount >= vertexCount) {
+        if (lightmapBitmapIndex >= 0 && lmVertOffset > 0 && lmVertexCount >= vertexCount) {
           for (let v = 0; v < vertexCount; v++) {
             const lmvOff = lmVertOffset + v * 8;
             const lu = buffer.readInt16LE(lmvOff + 4) / 32767;
@@ -43884,7 +44149,7 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
             lightmapUvs[v * 2 + 1] = lv;
           }
         }
-      } else {
+      } else if (lightmapBitmapIndex >= 0 && lmVertexCount >= vertexCount && lmVertOffset > 0 && lmVertOffset + vertexCount * 20 <= buffer.length) {
         for (let v = 0; v < vertexCount; v++) {
           const lmvOff = lmVertOffset + v * 20;
           const lu = buffer.readFloatLE(lmvOff + 12);
@@ -44033,6 +44298,49 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
       }
     }
   }
+  let skyModelTagId;
+  let skyOutdoorAmbientColor;
+  let skyOutdoorFogColor;
+  try {
+    const skiesField = decodedScenario.get("skies");
+    if (skiesField && skiesField.kind === "reflexive" && skiesField.value.count > 0 && skiesField.value.pointerLow > 0) {
+      const skiesOffset = header.tagDataOffset + (skiesField.value.pointerLow - tagIndex.baseMemoryAddress);
+      const skyDep = decodeStruct(buffer, skiesOffset, "ScenarioSky").get("sky");
+      const skyTagId = skyDep && skyDep.kind === "dependency" ? skyDep.value.tagId : 4294967295;
+      if (skyTagId !== 4294967295) {
+        const skyEntry = tagIndex.entries[skyTagId & 65535];
+        if (skyEntry && !skyEntry.isExternal) {
+          const skyFileOffset = resolveTagDataPointer(
+            skyEntry.tagDataPointerOrResourceIndex,
+            header,
+            tagIndex.baseMemoryAddress
+          );
+          const decodedSky = decodeStruct(buffer, skyFileOffset, "Sky");
+          const modelDep = decodedSky.get("model");
+          if (modelDep && modelDep.kind === "dependency" && modelDep.value.tagId !== 4294967295) {
+            skyModelTagId = modelDep.value.tagId;
+          }
+          const ambField = decodedSky.get("outdoor ambient radiosity color");
+          if (ambField && ambField.kind === "array" && Array.isArray(ambField.value) && ambField.value.length >= 3) {
+            skyOutdoorAmbientColor = [
+              Number(ambField.value[0]) || 0,
+              Number(ambField.value[1]) || 0,
+              Number(ambField.value[2]) || 0
+            ];
+          }
+          const fogField2 = decodedSky.get("outdoor fog color");
+          if (fogField2 && fogField2.kind === "array" && Array.isArray(fogField2.value) && fogField2.value.length >= 3) {
+            skyOutdoorFogColor = [
+              Number(fogField2.value[0]) || 0,
+              Number(fogField2.value[1]) || 0,
+              Number(fogField2.value[2]) || 0
+            ];
+          }
+        }
+      }
+    }
+  } catch {
+  }
   return {
     bspIndex,
     bspCount,
@@ -44045,7 +44353,10 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
     submeshes,
     clusterPortals,
     fogPlanes,
-    weatherPolyhedra
+    weatherPolyhedra,
+    skyModelTagId,
+    skyOutdoorAmbientColor,
+    skyOutdoorFogColor
   };
 }
 function updateBspVerticesInMap(buffer, header, tagIndex, bspIndex, updates) {
@@ -44309,7 +44620,17 @@ function updateBspVerticesInMap(buffer, header, tagIndex, bspIndex, updates) {
         }
       }
       const modifiedCollVerts = /* @__PURE__ */ new Set();
-      if (cVertCount > 0 && cVertPtr > 0) {
+      const uniqueMoved = [];
+      const seenMovedKeys = /* @__PURE__ */ new Set();
+      for (let m = 0; m < movedPositions.length; m++) {
+        const mp = movedPositions[m];
+        const k = `${Math.round(mp.oldX * 200)},${Math.round(mp.oldY * 200)},${Math.round(mp.oldZ * 200)}`;
+        if (!seenMovedKeys.has(k)) {
+          seenMovedKeys.add(k);
+          uniqueMoved.push(mp);
+        }
+      }
+      if (cVertCount > 0 && cVertPtr > 0 && uniqueMoved.length > 0) {
         const cVertBase = toOff(cVertPtr);
         for (let cv = 0; cv < cVertCount; cv++) {
           const cvOff = cVertBase + cv * 16;
@@ -44317,10 +44638,10 @@ function updateBspVerticesInMap(buffer, header, tagIndex, bspIndex, updates) {
           const cx = buffer.readFloatLE(cvOff + 0);
           const cy = buffer.readFloatLE(cvOff + 4);
           const cz = buffer.readFloatLE(cvOff + 8);
-          let bestDistSq = 0.25;
+          let bestDistSq = 25e-4;
           let bestMp = null;
-          for (let m = 0; m < movedPositions.length; m++) {
-            const mp = movedPositions[m];
+          for (let m = 0; m < uniqueMoved.length; m++) {
+            const mp = uniqueMoved[m];
             const dx = cx - mp.oldX;
             const dy = cy - mp.oldY;
             const dz = cz - mp.oldZ;
@@ -44331,9 +44652,12 @@ function updateBspVerticesInMap(buffer, header, tagIndex, bspIndex, updates) {
             }
           }
           if (bestMp) {
-            buffer.writeFloatLE(bestMp.newX, cvOff + 0);
-            buffer.writeFloatLE(bestMp.newY, cvOff + 4);
-            buffer.writeFloatLE(bestMp.newZ, cvOff + 8);
+            const nx = cx + (bestMp.newX - bestMp.oldX);
+            const ny = cy + (bestMp.newY - bestMp.oldY);
+            const nz = cz + (bestMp.newZ - bestMp.oldZ);
+            buffer.writeFloatLE(nx, cvOff + 0);
+            buffer.writeFloatLE(ny, cvOff + 4);
+            buffer.writeFloatLE(nz, cvOff + 8);
             modifiedCollVerts.add(cv);
             updatedCollisionVertices++;
           } else {
@@ -44341,16 +44665,16 @@ function updateBspVerticesInMap(buffer, header, tagIndex, bspIndex, updates) {
             let dXSum = 0;
             let dYSum = 0;
             let dZSum = 0;
-            for (let m = 0; m < movedPositions.length; m++) {
-              const mp = movedPositions[m];
+            for (let m = 0; m < uniqueMoved.length; m++) {
+              const mp = uniqueMoved[m];
               const dx = cx - mp.oldX;
               const dy = cy - mp.oldY;
               const dz = cz - mp.oldZ;
               const dSq = dx * dx + dy * dy + dz * dz;
-              if (dSq < 4) {
+              if (dSq < 1.5625) {
                 const dist = Math.sqrt(dSq);
-                const falloff = 1 - dist / 2;
-                const w = falloff * falloff / (dSq + 0.01);
+                const falloff = 1 - dist / 1.25;
+                const w = falloff * falloff / (dSq + 5e-3);
                 wSum += w;
                 dXSum += (mp.newX - mp.oldX) * w;
                 dYSum += (mp.newY - mp.oldY) * w;
@@ -44468,7 +44792,9 @@ function updateBspVerticesInMap(buffer, header, tagIndex, bspIndex, updates) {
             }
             if (uniqueVerts.size <= 3) continue;
             const modSurfs = sList.filter((s) => (surfaceLoops.get(s) ?? []).some((v) => modifiedCollVerts.has(v)));
+            if (sList.length > 2 && modSurfs.length < sList.length) continue;
             const fitSurfs = modSurfs.length > 0 ? modSurfs : sList;
+            const nodeUses = plane3dNodeUseCount.get(pIdx) ?? 0;
             const pOff = cPlaneBase + pIdx * 16;
             const oldA = buffer.readFloatLE(pOff + 0);
             const oldB = buffer.readFloatLE(pOff + 4);
@@ -44505,30 +44831,35 @@ function updateBspVerticesInMap(buffer, header, tagIndex, bspIndex, updates) {
                 ny = -ny;
                 nz = -nz;
               }
-              if (nx * oldA + ny * oldB + nz * oldC >= 0.08) {
-                cx /= cnt;
-                cy /= cnt;
-                cz /= cnt;
+              const dot = nx * oldA + ny * oldB + nz * oldC;
+              cx /= cnt;
+              cy /= cnt;
+              cz /= cnt;
+              if (nodeUses <= 2 && dot >= 0.5) {
                 pa = nx;
                 pb = ny;
                 pc = nz;
-                pd = pa * cx + pb * cy + pc * cz;
-                buffer.writeFloatLE(pa, pOff + 0);
-                buffer.writeFloatLE(pb, pOff + 4);
-                buffer.writeFloatLE(pc, pOff + 8);
-                buffer.writeFloatLE(pd, pOff + 12);
-                modifiedPlanes.add(pIdx);
-                if (sList.length <= 2) {
-                  for (const vIdx of uniqueVerts) {
-                    const vOff = cVertBase + vIdx * 16;
-                    const vx = buffer.readFloatLE(vOff + 0);
-                    const vy = buffer.readFloatLE(vOff + 4);
-                    const vz = buffer.readFloatLE(vOff + 8);
-                    const dist = pa * vx + pb * vy + pc * vz - pd;
-                    buffer.writeFloatLE(vx - pa * dist, vOff + 0);
-                    buffer.writeFloatLE(vy - pb * dist, vOff + 4);
-                    buffer.writeFloatLE(vz - pc * dist, vOff + 8);
-                  }
+              } else if (dot >= 0.88) {
+                pa = nx;
+                pb = ny;
+                pc = nz;
+              }
+              pd = pa * cx + pb * cy + pc * cz;
+              buffer.writeFloatLE(pa, pOff + 0);
+              buffer.writeFloatLE(pb, pOff + 4);
+              buffer.writeFloatLE(pc, pOff + 8);
+              buffer.writeFloatLE(pd, pOff + 12);
+              modifiedPlanes.add(pIdx);
+              if (sList.length <= 2) {
+                for (const vIdx of uniqueVerts) {
+                  const vOff = cVertBase + vIdx * 16;
+                  const vx = buffer.readFloatLE(vOff + 0);
+                  const vy = buffer.readFloatLE(vOff + 4);
+                  const vz = buffer.readFloatLE(vOff + 8);
+                  const dist = pa * vx + pb * vy + pc * vz - pd;
+                  buffer.writeFloatLE(vx - pa * dist, vOff + 0);
+                  buffer.writeFloatLE(vy - pb * dist, vOff + 4);
+                  buffer.writeFloatLE(vz - pc * dist, vOff + 8);
                 }
               }
             }
@@ -44567,11 +44898,20 @@ function updateBspVerticesInMap(buffer, header, tagIndex, bspIndex, updates) {
                 ny = -ny;
                 nz = -nz;
               }
-              if (nx * oldA + ny * oldB + nz * oldC >= 0.05) {
+              const dot = nx * oldA + ny * oldB + nz * oldC;
+              const nodeUses = plane3dNodeUseCount.get(pIdx) ?? 0;
+              const cx = (x0 + x1 + x2) / 3;
+              const cy = (y0 + y1 + y2) / 3;
+              const cz = (z0 + z1 + z2) / 3;
+              if (nodeUses <= 2 && dot >= 0.35 || dot >= 0.85) {
                 const pd = nx * x0 + ny * y0 + nz * z0;
                 buffer.writeFloatLE(nx, pOff + 0);
                 buffer.writeFloatLE(ny, pOff + 4);
                 buffer.writeFloatLE(nz, pOff + 8);
+                buffer.writeFloatLE(pd, pOff + 12);
+                modifiedPlanes.add(pIdx);
+              } else {
+                const pd = oldA * cx + oldB * cy + oldC * cz;
                 buffer.writeFloatLE(pd, pOff + 12);
                 modifiedPlanes.add(pIdx);
               }
@@ -44890,7 +45230,24 @@ function extractModelRenderGeometry(buffer, header, tagIndex, modelTagId, lod = 
       for (let t = 0; t + 2 < raw.length; t += 3) {
         const v0 = raw[t], v1 = raw[t + 1], v2 = raw[t + 2];
         if (v0 === v1 || v1 === v2 || v0 === v2) continue;
-        indices.push(v0, v1, v2);
+        const o0 = v0 * 8, o1 = v1 * 8, o2 = v2 * 8;
+        const e1x = vertices[o1] - vertices[o0];
+        const e1y = vertices[o1 + 1] - vertices[o0 + 1];
+        const e1z = vertices[o1 + 2] - vertices[o0 + 2];
+        const e2x = vertices[o2] - vertices[o0];
+        const e2y = vertices[o2 + 1] - vertices[o0 + 1];
+        const e2z = vertices[o2 + 2] - vertices[o0 + 2];
+        const fnx = e1y * e2z - e1z * e2y;
+        const fny = e1z * e2x - e1x * e2z;
+        const fnz = e1x * e2y - e1y * e2x;
+        const vnx = vertices[o0 + 3] + vertices[o1 + 3] + vertices[o2 + 3];
+        const vny = vertices[o0 + 4] + vertices[o1 + 4] + vertices[o2 + 4];
+        const vnz = vertices[o0 + 5] + vertices[o1 + 5] + vertices[o2 + 5];
+        if (fnx * vnx + fny * vny + fnz * vnz < 0) {
+          indices.push(v0, v2, v1);
+        } else {
+          indices.push(v0, v1, v2);
+        }
       }
       submeshes.push({
         partIndex: partIndexCounter++,
@@ -45266,7 +45623,208 @@ function unswizzleMorton2D(src, srcOffset, width, height, bytesPerPixel) {
   }
   return out;
 }
-function resolveShaderBaseBitmapTagId(buffer, header, tagIndex, shaderTagId) {
+function resolveShaderRenderMetadata(buffer, header, tagIndex, shaderTagId) {
+  const entry = tagIndex.entries.find((e) => e.tagId === shaderTagId);
+  if (!entry || entry.isExternal) return void 0;
+  const shaderClass = entry.primaryClassName || "shader";
+  const shaderPath = (entry.path || "").toLowerCase();
+  const shaderOffset = resolveTagDataPointer(
+    entry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  try {
+    if (shaderClass === "shader_environment") {
+      const decoded = decodeStruct(buffer, shaderOffset, "ShaderEnvironment");
+      const envFlags = decoded.get("shader environment flags")?.value ?? 0;
+      const envType = decoded.get("shader environment type")?.value ?? 0;
+      const detailFunc = decoded.get("detail map function")?.value ?? 0;
+      const pScale = decoded.get("primary detail map scale")?.value || 1;
+      const pDep = decoded.get("primary detail map");
+      const pTagId = pDep && pDep.kind === "dependency" && pDep.value.tagId !== 4294967295 ? pDep.value.tagId : void 0;
+      const sScale = decoded.get("secondary detail map scale")?.value || 1;
+      const sDep = decoded.get("secondary detail map");
+      const sTagId = sDep && sDep.kind === "dependency" && sDep.value.tagId !== 4294967295 ? sDep.value.tagId : void 0;
+      const mScale = decoded.get("micro detail map scale")?.value || 1;
+      const mDep = decoded.get("micro detail map");
+      const mTagId = mDep && mDep.kind === "dependency" && mDep.value.tagId !== 4294967295 ? mDep.value.tagId : void 0;
+      const bScale = decoded.get("bump map scale")?.value || 1;
+      const bDep = decoded.get("bump map");
+      const bTagId = bDep && bDep.kind === "dependency" && bDep.value.tagId !== 4294967295 ? bDep.value.tagId : void 0;
+      const alphaTested = (envFlags & 1) !== 0 || shaderPath.includes("grate") || shaderPath.includes("fence") || shaderPath.includes("ladder") || shaderPath.includes("chainlink") || shaderPath.includes("leaf") || shaderPath.includes("leaves") || shaderPath.includes("fern");
+      return {
+        shaderClass,
+        alphaTested,
+        twoSided: alphaTested,
+        environmentType: envType,
+        detailFunction: detailFunc,
+        primaryDetailTagId: pTagId,
+        primaryDetailScale: pScale > 0 ? pScale : 1,
+        secondaryDetailTagId: sTagId,
+        secondaryDetailScale: sScale > 0 ? sScale : 1,
+        microDetailTagId: mTagId,
+        microDetailScale: mScale > 0 ? mScale : 1,
+        bumpMapTagId: bTagId,
+        bumpMapScale: bScale > 0 ? bScale : 1
+      };
+    }
+    if (shaderClass === "shader_model") {
+      const decoded = decodeStruct(buffer, shaderOffset, "ShaderModel");
+      const modelFlags = decoded.get("shader model flags")?.value ?? 0;
+      const twoSided = (modelFlags & 2) !== 0;
+      const notAlphaTested = (modelFlags & 4) !== 0;
+      const alphaBlendedDecal = (modelFlags & 8) !== 0;
+      const uScale = decoded.get("map u scale")?.value || 1;
+      const vScale = decoded.get("map v scale")?.value || 1;
+      const detailFunc = decoded.get("detail function")?.value ?? 0;
+      const dScale = decoded.get("detail map scale")?.value || 1;
+      const dDep = decoded.get("detail map");
+      const dTagId = dDep && dDep.kind === "dependency" && dDep.value.tagId !== 4294967295 ? dDep.value.tagId : void 0;
+      const isFoliagePath = shaderPath.includes("leaf") || shaderPath.includes("leaves") || shaderPath.includes("foliage") || shaderPath.includes("branch") || shaderPath.includes("fern") || shaderPath.includes("vine") || shaderPath.includes("bush") || shaderPath.includes("shrub") || shaderPath.includes("pine") || shaderPath.includes("frond");
+      return {
+        shaderClass,
+        twoSided: twoSided || isFoliagePath,
+        alphaTested: twoSided && !notAlphaTested || isFoliagePath,
+        alphaBlended: alphaBlendedDecal,
+        detailFunction: detailFunc,
+        primaryDetailTagId: dTagId,
+        primaryDetailScale: dScale > 0 ? dScale : 1,
+        uScale: uScale > 0 ? uScale : 1,
+        vScale: vScale > 0 ? vScale : 1
+      };
+    }
+    if (shaderClass.startsWith("shader_transparent") || shaderClass === "shader_transparent_chicago" || shaderClass === "shader_transparent_chicago_extended" || shaderClass === "shader_transparent_generic" || shaderClass === "shader_transparent_glass" || shaderClass === "shader_transparent_water" || shaderClass === "shader_transparent_plasma" || shaderClass === "shader_transparent_meter") {
+      return {
+        shaderClass,
+        alphaBlended: true,
+        twoSided: true
+      };
+    }
+    if (shaderClass === "decal" || entry.primaryClassFourCC === 1684366177) {
+      const decoded = decodeStruct(buffer, shaderOffset, "Decal");
+      const radiusBounds = decoded.get("radius")?.value;
+      const rMin = radiusBounds ? Number(radiusBounds[0]) || 0 : 0;
+      const rMax = radiusBounds ? Number(radiusBounds[1]) || 0 : 0;
+      let decalRadius = rMax > 0 ? rMin > 0 ? (rMin + rMax) * 0.5 : rMax : rMin > 0 ? rMin : 0.65;
+      if (!Number.isFinite(decalRadius) || decalRadius <= 0.02) decalRadius = 0.65;
+      decalRadius = Math.max(0.15, Math.min(8, decalRadius));
+      const intensityBounds = decoded.get("intensity")?.value;
+      const iMin = intensityBounds ? Number(intensityBounds[0]) || 0 : 0;
+      const iMax = intensityBounds ? Number(intensityBounds[1]) || 0 : 0;
+      const decalIntensity = iMax > 0 ? iMax : iMin > 0 ? iMin : 1;
+      const blendFunc = decoded.get("framebuffer blend function")?.value ?? 0;
+      const colLow = decoded.get("color lower bounds")?.value;
+      const colHigh = decoded.get("color upper bounds")?.value;
+      let decalTint = [1, 1, 1];
+      if (colLow && colHigh) {
+        const avgR = (colLow[0] + colHigh[0]) * 0.5;
+        const avgG = (colLow[1] + colHigh[1]) * 0.5;
+        const avgB = (colLow[2] + colHigh[2]) * 0.5;
+        if (avgR > 0.02 || avgG > 0.02 || avgB > 0.02) {
+          decalTint = [
+            Math.min(1, Math.max(0.1, avgR)),
+            Math.min(1, Math.max(0.1, avgG)),
+            Math.min(1, Math.max(0.1, avgB))
+          ];
+        }
+      }
+      return {
+        shaderClass: "decal",
+        alphaBlended: true,
+        twoSided: true,
+        decalRadius,
+        decalBlendFunction: blendFunc,
+        decalIntensity: Math.max(0.25, Math.min(1, decalIntensity)),
+        decalTint
+      };
+    }
+  } catch {
+  }
+  return { shaderClass };
+}
+function applyDecalBlendToRgba(rgbaData, width, height, meta) {
+  if (width <= 0 || height <= 0 || rgbaData.length < width * height * 4) return;
+  const blendFunc = meta.decalBlendFunction ?? 0;
+  const intensity = meta.decalIntensity ?? 1;
+  const [tintR, tintG, tintB] = meta.decalTint ?? [1, 1, 1];
+  const cornerCoords = [
+    [0, 0],
+    [width - 1, 0],
+    [0, height - 1],
+    [width - 1, height - 1]
+  ];
+  let bgR = 0, bgG = 0, bgB = 0, bgA = 0;
+  for (const [cx, cy] of cornerCoords) {
+    const idx = (cy * width + cx) * 4;
+    bgR += rgbaData[idx + 0];
+    bgG += rgbaData[idx + 1];
+    bgB += rgbaData[idx + 2];
+    bgA += rgbaData[idx + 3];
+  }
+  bgR /= 4;
+  bgG /= 4;
+  bgB /= 4;
+  bgA /= 4;
+  const hasCornerTransparency = bgA < 40;
+  for (let y = 0; y < height; y++) {
+    const ny = height > 1 ? y / (height - 1) * 2 - 1 : 0;
+    for (let x = 0; x < width; x++) {
+      const nx = width > 1 ? x / (width - 1) * 2 - 1 : 0;
+      const idx = (y * width + x) * 4;
+      const r = rgbaData[idx + 0];
+      const g = rgbaData[idx + 1];
+      const b = rgbaData[idx + 2];
+      const a = rgbaData[idx + 3];
+      let outR = Math.round(r * tintR);
+      let outG = Math.round(g * tintG);
+      let outB = Math.round(b * tintB);
+      let outA = a;
+      if (blendFunc === 1 || blendFunc === 5) {
+        const lum = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+        const darkness = Math.max(0, Math.min(1, (1 - lum) * 1.35));
+        outA = Math.round(darkness * a * intensity);
+      } else if (blendFunc === 2) {
+        if (!hasCornerTransparency) {
+          const dev = Math.max(Math.abs(r - bgR), Math.abs(g - bgG), Math.abs(b - bgB)) / 128;
+          const strength = Math.max(0, Math.min(1, dev * 1.65));
+          outA = Math.round(strength * a * intensity);
+        } else {
+          outA = Math.round(a * intensity);
+        }
+      } else if (blendFunc === 3 || blendFunc === 6 || blendFunc === 7) {
+        const bright = Math.max(r, g, b) / 255;
+        outA = Math.round(Math.min(1, bright * 1.25) * a * intensity);
+      } else {
+        if (!hasCornerTransparency && bgA > 235) {
+          if (bgR > 230 && bgG > 230 && bgB > 230) {
+            const lum = (r + g + b) / (3 * 255);
+            outA = Math.round(Math.max(0, Math.min(1, (1 - lum) * 1.35)) * 255 * intensity);
+          } else if (bgR < 25 && bgG < 25 && bgB < 25) {
+            const bright = Math.max(r, g, b) / 255;
+            outA = Math.round(Math.min(1, bright * 1.35) * 255 * intensity);
+          } else {
+            const dev = Math.max(Math.abs(r - bgR), Math.abs(g - bgG), Math.abs(b - bgB)) / 128;
+            outA = Math.round(Math.max(0, Math.min(1, dev * 1.6)) * 255 * intensity);
+          }
+        } else {
+          outA = Math.round(a * intensity);
+        }
+      }
+      if (!hasCornerTransparency) {
+        const edgeDist = Math.max(Math.abs(nx), Math.abs(ny));
+        if (edgeDist > 0.9) {
+          const fade = Math.max(0, (1 - edgeDist) / 0.1);
+          outA = Math.round(outA * fade);
+        }
+      }
+      rgbaData[idx + 0] = Math.max(0, Math.min(255, outR));
+      rgbaData[idx + 1] = Math.max(0, Math.min(255, outG));
+      rgbaData[idx + 2] = Math.max(0, Math.min(255, outB));
+      rgbaData[idx + 3] = Math.max(0, Math.min(255, outA));
+    }
+  }
+}
+function resolveShaderBaseBitmapTagId(buffer, header, tagIndex, shaderTagId, _depth = 0) {
   const entry = tagIndex.entries.find((e) => e.tagId === shaderTagId);
   if (!entry || entry.isExternal) return null;
   const shaderOffset = resolveTagDataPointer(
@@ -45286,6 +45844,14 @@ function resolveShaderBaseBitmapTagId(buffer, header, tagIndex, shaderTagId) {
             return tagId;
           }
         }
+      }
+    }
+  }
+  if ((entry.primaryClassName === "decal" || entry.primaryClassFourCC === 1684366177) && _depth < 4) {
+    if (shaderOffset + 24 <= buffer.length) {
+      const nextDecalTagId = buffer.readUInt32LE(shaderOffset + 8 + 12);
+      if (nextDecalTagId !== 4294967295 && nextDecalTagId !== shaderTagId) {
+        return resolveShaderBaseBitmapTagId(buffer, header, tagIndex, nextDecalTagId, _depth + 1);
       }
     }
   }
@@ -46671,7 +47237,7 @@ function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageI
     if (imageIndex >= imgCount2) {
       throw new BitmapTextureError(`Image index ${imageIndex} out of range (count=${imgCount2}).`);
     }
-    const insertAt = tagIndex.modelDataFileOffset;
+    const insertAt = header.engine === 5 ? header.tagDataOffset : tagIndex.modelDataFileOffset;
     if (insertAt > 0 && insertAt <= header.tagDataOffset) {
       const pixelShift = newPixels.length + 3 & ~3;
       const newTagDataOffset = header.tagDataOffset + pixelShift;
@@ -46713,11 +47279,13 @@ function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageI
       outBuffer2.writeUInt32LE(totalNewLength2, 8);
       outBuffer2.writeUInt32LE(newTagDataOffset, 16);
       outBuffer2.writeUInt32LE(newTagDataSize2, 20);
-      outBuffer2.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 20);
+      if (header.engine !== 5) {
+        outBuffer2.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 20);
+        tagIndex.modelDataFileOffset = newModelDataFileOffset;
+      }
       header.decompressedFileSize = totalNewLength2;
       header.tagDataOffset = newTagDataOffset;
       header.tagDataSize = newTagDataSize2;
-      tagIndex.modelDataFileOffset = newModelDataFileOffset;
       return outBuffer2;
     }
     const tagStartInMap = mapBuffer.length + 3 & ~3;
@@ -46747,7 +47315,7 @@ function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageI
     mapBuffer.copy(outBuffer, 0);
     tagCopy.copy(outBuffer, tagStartInMap);
     Buffer.from(newPixels).copy(outBuffer, pixelsStartInMap);
-    const tagArrayOffset = header.tagDataOffset + 40;
+    const tagArrayOffset = header.tagDataOffset + (header.engine === 5 ? 36 : 40);
     const entryOffset = tagArrayOffset + entryIdx * 32;
     outBuffer.writeUInt32LE(tagVirtualAddress, entryOffset + 20);
     outBuffer.writeUInt32LE(0, entryOffset + 24);
@@ -46783,7 +47351,7 @@ function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageI
   if (!isImageExternal && newPixels.length <= oldSize && oldOffset + newPixels.length <= mapBuffer.length) {
     Buffer.from(newPixels).copy(outputBuffer, oldOffset);
   } else {
-    const insertAt = tagIndex.modelDataFileOffset;
+    const insertAt = header.engine === 5 ? header.tagDataOffset : tagIndex.modelDataFileOffset;
     if (insertAt > 0 && insertAt <= header.tagDataOffset) {
       const shift = newPixels.length + 3 & ~3;
       const newBuf = Buffer.alloc(mapBuffer.length + shift, 0);
@@ -46792,12 +47360,17 @@ function replaceBitmapImageData(mapBuffer, header, tagIndex, bitmapTagId, imageI
       mapBuffer.copy(newBuf, insertAt + shift, insertAt);
       const newTagDataOffset = header.tagDataOffset + shift;
       const newModelDataFileOffset = insertAt + shift;
+      const newTagDataSize = newBuf.length - newTagDataOffset;
       newBuf.writeUInt32LE(newBuf.length, 8);
       newBuf.writeUInt32LE(newTagDataOffset, 16);
-      newBuf.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 20);
+      newBuf.writeUInt32LE(newTagDataSize, 20);
+      if (header.engine !== 5) {
+        newBuf.writeUInt32LE(newModelDataFileOffset, newTagDataOffset + 20);
+        tagIndex.modelDataFileOffset = newModelDataFileOffset;
+      }
       header.decompressedFileSize = newBuf.length;
       header.tagDataOffset = newTagDataOffset;
-      tagIndex.modelDataFileOffset = newModelDataFileOffset;
+      header.tagDataSize = newTagDataSize;
       outputBuffer = newBuf;
       targetOffset = insertAt;
       finalTagStart = tagStart + shift;
@@ -49233,33 +49806,49 @@ function compileMeshCollisionBspData(mesh, materialCount, options) {
         else if (c.state === "back") backCount++;
         else if (c.state === "split") splitCount++;
       }
-      const score = !isConcave && frontCount === 0 && splitCount === 0 ? -1e3 - backCount : splitCount * 3 + Math.abs(frontCount - backCount);
+      const horizBonus = depth < 6 && Math.abs(pl2[2]) > 0.7 ? -90 : 0;
+      const score = !isConcave && frontCount === 0 && splitCount === 0 ? -1e3 - backCount + horizBonus : splitCount * 3 + Math.abs(frontCount - backCount) + horizBonus;
       if (score < bestScore) {
         bestScore = score;
         bestPlane = pIdx;
       }
     }
     const pl = planes[bestPlane];
-    const frontList = [];
-    const backList = [];
+    const rawFrontList = [];
+    const rawBackList = [];
     for (const poly of polys) {
       if (poly.planeIdx === bestPlane) continue;
       const c = clipPolyAgainstPlane(poly.pts, pl);
       if (c.state === "front") {
-        frontList.push(poly);
+        rawFrontList.push(poly);
       } else if (c.state === "back") {
-        backList.push(poly);
+        rawBackList.push(poly);
       } else if (c.state === "split") {
-        if (depth >= 18 || polys.length > 400) {
-          const dC = pl[0] * poly.centroid[0] + pl[1] * poly.centroid[1] + pl[2] * poly.centroid[2] - pl[3];
-          if (dC >= 0) frontList.push(poly);
-          else backList.push(poly);
+        if (c.front && c.front.length >= 3) {
+          rawFrontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
         } else {
-          if (c.front) frontList.push({ pts: c.front, planeIdx: poly.planeIdx, centroid: computeCentroid(c.front) });
-          if (c.back) backList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+          rawFrontList.push(poly);
+        }
+        if (c.back && c.back.length >= 3) {
+          rawBackList.push({ pts: c.back, planeIdx: poly.planeIdx, centroid: computeCentroid(c.back) });
+        } else {
+          rawBackList.push(poly);
         }
       }
     }
+    const compactByPlane = (list) => {
+      if (depth < 6 && list.length <= 180) return list;
+      const byPlane = /* @__PURE__ */ new Map();
+      for (const item of list) {
+        const existing = byPlane.get(item.planeIdx);
+        if (!existing || item.pts.length > existing.pts.length) {
+          byPlane.set(item.planeIdx, item);
+        }
+      }
+      return Array.from(byPlane.values());
+    };
+    const frontList = compactByPlane(rawFrontList);
+    const backList = compactByPlane(rawBackList);
     const nodeIdx = bsp3dNodes.length;
     bsp3dNodes.push([bestPlane, defaultBackLeaf, 2147483648]);
     const nextUsed = new Set(usedPlanes);
@@ -49973,10 +50562,35 @@ function scaleObjectAndCoupledPhysicsInMap(mapBuffer, header, tagIndex, objectTa
   let collTagId = 4294967295;
   let physTagId = 4294967295;
   let updatedWeaponOrEquipmentScale = false;
-  const cls = fourCCToString(entry.primaryClassFourCC);
-  const rootOff = ptrToOff(entry.tagDataPointerOrResourceIndex);
+  let cls = fourCCToString(entry.primaryClassFourCC);
+  let rootOff = ptrToOff(entry.tagDataPointerOrResourceIndex);
   if (rootOff === null) {
     throw new Error(`Tag "${entry.path}" (${cls}) has no in-map tag data pointer.`);
+  }
+  if (cls === "itmc" && rootOff + 12 <= mapBuffer.length) {
+    const permCount = mapBuffer.readUInt32LE(rootOff + 0);
+    const permOff = ptrToOff(mapBuffer.readUInt32LE(rootOff + 4));
+    if (permOff !== null && permCount > 0 && permOff + 52 <= mapBuffer.length) {
+      const innerId = mapBuffer.readUInt32LE(permOff + 36 + 12);
+      const innerEntry = innerId !== 4294967295 ? tagIndex.entries[innerId & 65535] : void 0;
+      if (innerEntry) {
+        const innerOff = ptrToOff(innerEntry.tagDataPointerOrResourceIndex);
+        if (innerOff !== null) {
+          cls = fourCCToString(innerEntry.primaryClassFourCC);
+          rootOff = innerOff;
+        }
+      }
+    }
+  } else if (cls === "actv" && rootOff + 36 <= mapBuffer.length) {
+    const unitId = mapBuffer.readUInt32LE(rootOff + 20 + 12);
+    const unitEntry = unitId !== 4294967295 ? tagIndex.entries[unitId & 65535] : void 0;
+    if (unitEntry) {
+      const unitOff = ptrToOff(unitEntry.tagDataPointerOrResourceIndex);
+      if (unitOff !== null) {
+        cls = fourCCToString(unitEntry.primaryClassFourCC);
+        rootOff = unitOff;
+      }
+    }
   }
   if (cls === "mod2" || cls === "mode") {
     mod2TagId = entry.tagId;
@@ -50027,6 +50641,7 @@ function scaleObjectAndCoupledPhysicsInMap(mapBuffer, header, tagIndex, objectTa
   const mod2Entry = mod2TagId !== 4294967295 ? tagIndex.entries[mod2TagId & 65535] : void 0;
   if (mod2Entry && !mod2Entry.isExternal) {
     const mOff = ptrToOff(mod2Entry.tagDataPointerOrResourceIndex);
+    const isXboxModel = header.engine === 5 || mod2Entry.primaryClassFourCC === 1836016741;
     if (mOff !== null && mOff + 232 <= mapBuffer.length) {
       const markersCount = mapBuffer.readUInt32LE(mOff + 24);
       const markersOff = ptrToOff(mapBuffer.readUInt32LE(mOff + 28));
@@ -50063,6 +50678,7 @@ function scaleObjectAndCoupledPhysicsInMap(mapBuffer, header, tagIndex, objectTa
       }
       const geomCount = mapBuffer.readUInt32LE(mOff + 208);
       const geomOff = ptrToOff(mapBuffer.readUInt32LE(mOff + 212));
+      const scaledVertexOffsets = /* @__PURE__ */ new Set();
       if (geomOff !== null && geomCount > 0 && geomCount <= 256) {
         for (let g = 0; g < geomCount; g++) {
           const go = geomOff + g * 48;
@@ -50078,10 +50694,20 @@ function scaleObjectAndCoupledPhysicsInMap(mapBuffer, header, tagIndex, objectTa
             scaleFloatAt(po + 28, s1);
             const vCount = mapBuffer.readUInt32LE(po + 88);
             const vOffsetOrPtr = mapBuffer.readUInt32LE(po + 100);
-            const vOff = header.engine === 5 ? ptrToOff(vOffsetOrPtr) : tagIndex.modelDataFileOffset + vOffsetOrPtr;
-            if (vOff !== null && vCount > 0 && vCount <= 65535 && vOff >= 0 && vOff + vCount * 68 <= mapBuffer.length) {
+            let vOff = null;
+            const vStride = isXboxModel ? 32 : 68;
+            if (isXboxModel) {
+              const indirectOff = ptrToOff(vOffsetOrPtr);
+              if (indirectOff !== null && indirectOff + 12 <= mapBuffer.length) {
+                vOff = ptrToOff(mapBuffer.readUInt32LE(indirectOff + 4));
+              }
+            } else {
+              vOff = tagIndex.modelDataFileOffset + vOffsetOrPtr;
+            }
+            if (vOff !== null && !scaledVertexOffsets.has(vOff) && vCount > 0 && vCount <= 65535 && vOff >= 0 && vOff + vCount * vStride <= mapBuffer.length) {
+              scaledVertexOffsets.add(vOff);
               for (let v = 0; v < vCount; v++) {
-                const vo = vOff + v * 68;
+                const vo = vOff + v * vStride;
                 scaleFloatAt(vo + 0, s1);
                 scaleFloatAt(vo + 4, s1);
                 scaleFloatAt(vo + 8, s1);
@@ -50365,9 +50991,22 @@ function resolveDefaultHaloShadersForWorld(mapTags, rolesOrOverrides) {
   const shaderTags = normalizedTags.filter(
     (t) => ["senv", "soso", "schi", "sgla", "smet", "spla", "swat"].includes(t.classA)
   );
-  const sortedShaders = [...shaderTags].sort((a, b) => {
-    const rank = (c) => c === "senv" ? 0 : c === "soso" ? 1 : 2;
-    return rank(a.classA) - rank(b.classA);
+  const hasBspEnvShaders = shaderTags.some(
+    (t) => t.classA === "senv" || t.path.toLowerCase().startsWith("levels\\")
+  );
+  const candidateShaders = hasBspEnvShaders ? shaderTags.filter((t) => {
+    const lower = t.path.toLowerCase();
+    if (/^(weapons|characters|ui|hud|effects|powerups|vehicles)\\/i.test(lower)) return false;
+    if (/decal|blood|teleporter|shield|flare|contrail|particle|reticle| hud|alpha_test|leaves|frond/i.test(lower)) return false;
+    return t.classA === "senv" || lower.startsWith("levels\\") || lower.startsWith("scenery\\");
+  }) : shaderTags;
+  const sortedShaders = [...candidateShaders.length > 0 ? candidateShaders : shaderTags].sort((a, b) => {
+    const rank = (t) => {
+      const isLevel = t.path.toLowerCase().startsWith("levels\\") ? 0 : 1;
+      const isSenv = t.classA === "senv" ? 0 : t.classA === "soso" ? 2 : 4;
+      return isLevel + isSenv;
+    };
+    return rank(a) - rank(b);
   });
   const fallbackShader = sortedShaders[0] ?? {
     tagId: 4294967295,
@@ -50396,12 +51035,12 @@ function resolveDefaultHaloShadersForWorld(mapTags, rolesOrOverrides) {
     let bestScore = -1;
     for (const st of sortedShaders) {
       const lower = st.path.toLowerCase();
-      if (/sky|portal|invisible|nodraw|blank|weather|fog/i.test(lower)) continue;
-      let score = st.classA === "senv" ? 2 : 0;
+      if (/sky|portal|invisible|nodraw|blank|weather|fog|cloud/i.test(lower)) continue;
+      let score = (st.classA === "senv" ? 12 : 0) + (lower.startsWith("levels\\") ? 10 : 0);
       for (let k = 0; k < spec.keywords.length; k++) {
         const kw = spec.keywords[k].toLowerCase();
         if (lower.includes(kw)) {
-          score += (spec.keywords.length - k) * 5;
+          score += (spec.keywords.length - k) * 6;
         }
       }
       if (score > bestScore) {
@@ -52567,7 +53206,7 @@ function injectProceduralWorldIntoMapBsp(sourceBuffer, worldMesh, options = {}) 
   const oldCEdgeRel = toRel(bspBuf.readUInt32LE(collRel + 76));
   const oldCVertCount = bspBuf.readUInt32LE(collRel + 84);
   const oldCVertRel = toRel(bspBuf.readUInt32LE(collRel + 88));
-  const pad = 0.5;
+  const pad = 3.5;
   const [wMinX, wMinY, wMinZ] = [
     worldMesh.bounds.min[0] - pad,
     worldMesh.bounds.min[1] - pad,
@@ -52576,7 +53215,7 @@ function injectProceduralWorldIntoMapBsp(sourceBuffer, worldMesh, options = {}) 
   const [wMaxX, wMaxY, wMaxZ] = [
     worldMesh.bounds.max[0] + pad,
     worldMesh.bounds.max[1] + pad,
-    worldMesh.bounds.max[2] + pad
+    worldMesh.bounds.max[2] + 5
   ];
   const boxPlanes = [
     [1, 0, 0, wMaxX],
@@ -54718,7 +55357,7 @@ function buildRecordedFlightStreamFromWaypoints(waypoints, isExit = false) {
     const isFinalWp = curWp === waypoints.length - 1;
     const prevWp = waypoints[curWp - 1];
     const target = waypoints[curWp];
-    const targetZ = isFinalWp && !isExit ? target.z - 0.8 : target.z;
+    const targetZ = target.z;
     const prevZ = prevWp.z;
     const dx = target.x - veh.pos[0];
     const dy = target.y - veh.pos[1];
@@ -58083,7 +58722,8 @@ function rewriteBspDependencies(buffer, structName, fileOffset, bspStart, bspSiz
           if (mapped !== void 0) {
             buffer.writeUInt32LE(mapped >>> 0, fieldOffset + 12);
             if (tagDataOffset !== void 0) {
-              const entryOff = tagDataOffset + 40 + (mapped & 65535) * 32;
+              const tagHeaderSize = buffer.readUInt32LE(4) === 5 ? 36 : 40;
+              const entryOff = tagDataOffset + tagHeaderSize + (mapped & 65535) * 32;
               if (entryOff + 20 <= buffer.length) {
                 const pathPtr = buffer.readUInt32LE(entryOff + 16);
                 buffer.writeUInt32LE(pathPtr >>> 0, fieldOffset + 4);
@@ -59532,7 +60172,8 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
           reinspected.tagIndex.baseMemoryAddress
         );
         const curTagOff = out.readUInt32LE(16);
-        const sbspEntryOff = curTagOff + 40 + (newSbspTagId & 65535) * 32;
+        const tagHeaderSize = reinspected.header.engine === 5 ? 36 : 40;
+        const sbspEntryOff = curTagOff + tagHeaderSize + (newSbspTagId & 65535) * 32;
         const sbspPathPtr = sbspEntryOff + 20 <= out.length ? out.readUInt32LE(sbspEntryOff + 16) : 0;
         const elemBuf = Buffer.alloc(32, 0);
         elemBuf.writeUInt32LE(insertAt >>> 0, 0);
@@ -59667,8 +60308,8 @@ function performBspSwap(sourceBuffer, targetBuffer, options) {
             ptBtoA = { x: midX - dx * 2.2, y: midY - dy * 2.2, z: midZ };
             ptAtoB = { x: midX + dx * 2.2, y: midY + dy * 2.2, z: midZ };
           }
-          const sep3 = Math.hypot(ptAtoB.x - ptBtoA.x, ptAtoB.y - ptBtoA.y);
-          if (sep3 < 4) {
+          const sep4 = Math.hypot(ptAtoB.x - ptBtoA.x, ptAtoB.y - ptBtoA.y);
+          if (sep4 < 4) {
             const midX = 0.5 * (ptBtoA.x + ptAtoB.x);
             const midY = 0.5 * (ptBtoA.y + ptAtoB.y);
             const xyLen = Math.hypot(dx, dy) || 1;
@@ -60545,7 +61186,7 @@ function replaceSoundPermutationData(mapBuffer, header, tagIndex, soundTagId, pi
     for (const payload of audioPayloads) {
       payload.data.copy(outBuffer, payload.offset);
     }
-    const tagArrayOffset = header.tagDataOffset + 40;
+    const tagArrayOffset = header.tagDataOffset + (header.engine === 5 ? 36 : 40);
     const entryOffset = tagArrayOffset + entryIdx * 32;
     outBuffer.writeUInt32LE(tagVirtualAddress, entryOffset + 20);
     outBuffer.writeUInt32LE(0, entryOffset + 24);
@@ -62891,9 +63532,8 @@ function convertObjectTagClassInMap(view, sourceTagIndex, targetGroup, targetPat
                 clonedRegs.writeUInt32LE(newPermsPtr, 68);
                 outBuf.writeUInt32LE(newRegsPtr, newModelAt + 200);
                 outBuf = Buffer.concat([outBuf, pad1, clonedRegs, clonedPerms]);
-                const delta = pad1.length + clonedRegs.length + clonedPerms.length;
                 outBuf.writeUInt32LE(outBuf.length >>> 0, 8);
-                outBuf.writeUInt32LE(curHeader.tagDataSize + delta >>> 0, 20);
+                outBuf.writeUInt32LE(outBuf.length - curHeader.tagDataOffset >>> 0, 20);
                 curHeader = parseCacheFileHeader(outBuf);
                 curTagIndex = parseTagIndex(outBuf, curHeader);
                 outBuf = deepCloneReflexiveAtOffset(
@@ -62965,9 +63605,8 @@ function convertObjectTagClassInMap(view, sourceTagIndex, targetGroup, targetPat
             outBuf.writeUInt32LE(donorNodesCount, newCollAt + 652);
             outBuf.writeUInt32LE(newNodesPtr, newCollAt + 656);
             outBuf = Buffer.concat([outBuf, pad2, newCollNodes]);
-            const delta2 = pad2.length + newCollNodes.length;
             outBuf.writeUInt32LE(outBuf.length >>> 0, 8);
-            outBuf.writeUInt32LE(curHeader.tagDataSize + delta2 >>> 0, 20);
+            outBuf.writeUInt32LE(outBuf.length - curHeader.tagDataOffset >>> 0, 20);
             curHeader = parseCacheFileHeader(outBuf);
             curTagIndex = parseTagIndex(outBuf, curHeader);
           }
@@ -63021,11 +63660,9 @@ function convertObjectTagClassInMap(view, sourceTagIndex, targetGroup, targetPat
   newStructBuf.writeInt16LE(spec.objectTypeEnum, 0);
   newStructBuf.writeUInt32LE(0, 368);
   newStructBuf.writeUInt32LE(0, 372);
-  const prevSize = outBuf.length;
   outBuf = Buffer.concat([outBuf, pad, newStructBuf]);
-  const addedBytes = outBuf.length - prevSize;
   outBuf.writeUInt32LE(outBuf.length >>> 0, 8);
-  outBuf.writeUInt32LE(curHeader.tagDataSize + addedBytes >>> 0, 20);
+  outBuf.writeUInt32LE(outBuf.length - curHeader.tagDataOffset >>> 0, 20);
   const tagHeaderSize = curHeader.engine === 5 ? 36 : TAG_DATA_HEADER_PC_SIZE;
   const entryOffset = curHeader.tagDataOffset + tagHeaderSize + dup.newTagIndex * TAG_ENTRY_SIZE;
   outBuf.writeUInt32LE(fourCCFromString(spec.fourCC), entryOffset + 0);
@@ -63106,11 +63743,10 @@ function deepCloneReflexiveAtOffset(buf, header, tagIndex, refHeaderAbsOffset, c
   const clonedSlice = Buffer.from(buf.subarray(oldArrayAt, oldArrayAt + totalBytes));
   const newPtr = tagIndex.baseMemoryAddress + (alignedStart - header.tagDataOffset) >>> 0;
   let out = Buffer.concat([buf, pad, clonedSlice]);
-  const delta = pad.length + clonedSlice.length;
   out.writeUInt32LE(newPtr, refHeaderAbsOffset + 4);
   out.writeUInt32LE(0, refHeaderAbsOffset + 8);
   out.writeUInt32LE(out.length >>> 0, 8);
-  out.writeUInt32LE(header.tagDataSize + delta >>> 0, 20);
+  out.writeUInt32LE(out.length - header.tagDataOffset >>> 0, 20);
   let curHeader = parseCacheFileHeader(out);
   let curTagIndex = parseTagIndex(out, curHeader);
   for (let i = 0; i < count2; i++) {
@@ -63145,55 +63781,88 @@ function deepCloneStructReflexives(buf, header, tagIndex, structAbsOffset, struc
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
 var HEK_GROUP_VERSIONS = {
-  bitm: 7,
-  mod2: 5,
-  mode: 4,
-  coll: 10,
-  scen: 1,
+  actr: 2,
+  actv: 2,
+  "ant!": 1,
   bipd: 3,
-  vehi: 1,
-  weap: 2,
-  eqip: 2,
-  garb: 1,
-  proj: 5,
-  mach: 1,
+  bitm: 7,
+  trak: 2,
+  colo: 1,
+  cdmg: 1,
+  cont: 3,
+  "jpt!": 6,
+  deca: 1,
+  dobc: 1,
+  devi: 1,
   ctrl: 1,
   lifi: 1,
-  ssce: 1,
-  soso: 2,
-  senv: 2,
-  sgla: 1,
-  schi: 1,
-  scex: 1,
-  swat: 2,
-  smet: 1,
-  spla: 1,
-  "str#": 1,
-  ustr: 1,
-  "snd!": 4,
-  antr: 4,
-  phys: 4,
-  foot: 1,
+  mach: 1,
+  udlg: 1,
   effe: 4,
+  eqip: 2,
+  flag: 1,
+  "fog ": 1,
+  font: 1,
+  garb: 1,
+  mod2: 5,
+  matg: 3,
+  "glw!": 1,
+  grhi: 1,
+  hudg: 1,
+  "hmt ": 1,
+  "hud#": 1,
+  devc: 1,
+  item: 2,
+  itmc: 0,
+  lens: 2,
+  ligh: 3,
+  elec: 1,
+  mgs2: 1,
+  foot: 1,
+  metr: 1,
+  mode: 4,
+  antr: 4,
+  coll: 10,
+  mply: 1,
+  obje: 1,
   part: 2,
   pctl: 4,
-  cont: 3,
-  ligh: 3,
-  lens: 2,
-  mgs2: 1,
-  deca: 1,
-  itmc: 0,
-  actv: 2,
-  actr: 2,
-  "jpt!": 6,
-  unhi: 1,
-  wphi: 2,
-  grhi: 1,
-  udlg: 1,
-  lsnd: 3,
-  trak: 2,
+  phys: 4,
+  plac: 2,
+  pphy: 1,
+  ngpr: 1,
+  proj: 5,
   scnr: 2,
-  sbsp: 5
+  sbsp: 5,
+  scen: 1,
+  shdr: 1,
+  senv: 2,
+  soso: 2,
+  schi: 1,
+  scex: 1,
+  sotr: 1,
+  sgla: 1,
+  smet: 1,
+  spla: 1,
+  swat: 2,
+  "sky ": 1,
+  "snd!": 4,
+  snde: 1,
+  lsnd: 3,
+  ssce: 1,
+  "str#": 1,
+  tagc: 1,
+  Soul: 1,
+  DeLa: 1,
+  ustr: 1,
+  unit: 2,
+  unhi: 1,
+  vehi: 1,
+  vcky: 2,
+  weap: 2,
+  wphi: 2,
+  rain: 1,
+  wind: 1
 };
 function isTwoByteScalarType(field) {
   const t = field.def.type;
@@ -63485,6 +64154,126 @@ function serializeContainerTagToHekLooseBuffer(tag) {
   };
   writeStructArray(tag.structName, 0, 1, tag.path, () => tag.path);
   return Buffer.concat(outChunks);
+}
+function serializeOceContainerToBlamTagFiles(container, options) {
+  const prefixTagsDir = options?.prefixTagsDir ?? false;
+  const rootSet = options?.rootIndicesOnly ? new Set(container.rootOriginalIndices) : null;
+  const files = [];
+  for (const tag of container.tags) {
+    if (rootSet && !rootSet.has(tag.originalIndex)) continue;
+    const looseBytes = serializeContainerTagToHekLooseBuffer(tag);
+    const normTagPath = tag.path.replace(/[\\/]+/g, path.sep);
+    const relPath = prefixTagsDir ? path.join("tags", `${normTagPath}.${tag.group}`) : `${normTagPath}.${tag.group}`;
+    files.push({
+      relativePath: relPath,
+      group: tag.group,
+      tagPath: tag.path,
+      bytes: looseBytes
+    });
+  }
+  return files;
+}
+function extractTagsToBlamFilesFromMap(mapBuffer, rootTagIndices, options) {
+  const header = parseCacheFileHeader(mapBuffer);
+  const tagIndex = parseTagIndex(mapBuffer, header);
+  const includeDependencies = options?.includeDependencies ?? true;
+  const prefixTagsDir = options?.prefixTagsDir ?? false;
+  const nonExternalRoots = rootTagIndices.filter((idx) => {
+    const ent = tagIndex.entries[idx];
+    return ent && !ent.isExternal;
+  });
+  let container;
+  if (nonExternalRoots.length > 0) {
+    const extracted = extractTagSet(mapBuffer, header, tagIndex, nonExternalRoots, {
+      resourceFiles: options?.resourceFiles,
+      captureGbxmodelRawData: options?.captureGbxmodelRawData ?? true
+    });
+    container = deserializeContainer(serializeContainer(extracted, header.scenarioName));
+    hydrateExternalRawDataInContainer(container, options?.resourceFiles);
+  } else {
+    container = {
+      magic: OCETAGS_MAGIC,
+      formatVersion: OCETAGS_FORMAT_VERSION,
+      sourceMapName: header.scenarioName,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      hasUnresolvedBspReferences: false,
+      rootOriginalIndices: [...rootTagIndices],
+      tags: [],
+      notExtracted: [],
+      warnings: [],
+      resourceMapIdentities: {},
+      externalResourceRefs: [],
+      externalData: "embedded"
+    };
+  }
+  const bitmapsFile = options?.resourceFiles?.bitmaps;
+  if (bitmapsFile) {
+    for (const rootIdx of rootTagIndices) {
+      const ent = tagIndex.entries[rootIdx];
+      if (!ent || !ent.isExternal || ent.primaryClassName !== "bitmap") continue;
+      if (container.tags.some((t) => t.group === "bitmap" && t.path.toLowerCase() === ent.path.toLowerCase())) {
+        continue;
+      }
+      const resIdx = ent.tagDataPointerOrResourceIndex >>> 0;
+      const hdr = bitmapsFile.read(0, 16);
+      const tableOffset = hdr.readUInt32LE(8);
+      const entryCount = hdr.readUInt32LE(12);
+      if (resIdx >= entryCount) continue;
+      const eBuf = bitmapsFile.read(tableOffset + resIdx * 12, 12);
+      const dataSize = eBuf.readUInt32LE(4);
+      const dataOffset = eBuf.readUInt32LE(8);
+      if (dataSize < 108 || dataOffset + dataSize > bitmapsFile.size) continue;
+      const fullTagBuf = bitmapsFile.read(dataOffset, dataSize);
+      const bCount = fullTagBuf.readUInt32LE(96);
+      if (bCount <= 0 || bCount > 256 || 108 + bCount * 48 > fullTagBuf.length) continue;
+      const structBytes = Buffer.alloc(108 + bCount * 48, 0);
+      fullTagBuf.copy(structBytes, 0, 0, 108);
+      structBytes.writeUInt32LE(108, 100);
+      structBytes.writeUInt32LE(0, 104);
+      const assets = [];
+      const patches = [];
+      for (let i = 0; i < bCount; i++) {
+        const srcElemOff = 108 + i * 48;
+        const dstElemOff = 108 + i * 48;
+        fullTagBuf.copy(structBytes, dstElemOff, srcElemOff, srcElemOff + 48);
+        const flags = structBytes.readUInt16LE(dstElemOff + 14);
+        structBytes.writeUInt16LE(flags & ~256, dstElemOff + 14);
+        const pixOff = fullTagBuf.readUInt32LE(srcElemOff + 24);
+        const pixLen = fullTagBuf.readUInt32LE(srcElemOff + 28);
+        if (pixLen > 0 && pixOff + pixLen <= bitmapsFile.size) {
+          const pixBytes = bitmapsFile.read(pixOff, pixLen);
+          const assetIndex = assets.length;
+          assets.push({
+            kind: "bitmap",
+            data: pixBytes.toString("base64")
+          });
+          patches.push({
+            assetIndex,
+            patchOffset: dstElemOff + 24,
+            patchWidth: 4
+          });
+        }
+      }
+      container.tags.push({
+        originalIndex: rootIdx,
+        group: "bitmap",
+        path: ent.path,
+        structName: "Bitmap",
+        data: structBytes.toString("base64"),
+        dependencies: [],
+        embeddedRawDataAssets: assets,
+        embeddedRawDataPatches: patches
+      });
+    }
+  }
+  const tagFiles = serializeOceContainerToBlamTagFiles(container, {
+    prefixTagsDir,
+    rootIndicesOnly: !includeDependencies
+  });
+  return {
+    tagFiles,
+    container
+  };
 }
 function exportOpenCeModPackageFromMap(mapBuffer, rootTagIndices, modConfig, options) {
   const header = parseCacheFileHeader(mapBuffer);
@@ -64848,6 +65637,338 @@ var MAX_FILE = 4 * 1024 * 1024;
 var MAX_MATCH_DISTANCE_SQ = 0.25 ** 2;
 
 // ../core/src/map/map-compare.ts
+var IDENTITY_FIELD_CANDIDATES = [
+  "name",
+  "label",
+  "permutation name",
+  "marker name",
+  "node name",
+  "script name",
+  "region name",
+  "camera point name",
+  "object name",
+  "shader",
+  "item collection",
+  "weapon",
+  "vehicle",
+  "biped",
+  "equipment",
+  "scenery",
+  "sound",
+  "bitmap",
+  "damage effect",
+  "projectile"
+];
+function extractElementIdentity(elem) {
+  for (const candidate of IDENTITY_FIELD_CANDIDATES) {
+    const f = elem.fields.find((field) => field.name.toLowerCase() === candidate);
+    if (!f) continue;
+    if (f.kind === "string" && typeof f.value === "string" && f.value.trim()) {
+      return f.value.trim();
+    }
+    if (f.kind === "dependency" && f.dependencyTarget && f.dependencyTarget.path) {
+      return `${f.dependencyTarget.group}:${normalizeComparePath(f.dependencyTarget.path)}`;
+    }
+  }
+  for (const f of elem.fields) {
+    if (f.kind === "string" && typeof f.value === "string" && f.value.trim()) {
+      return f.value.trim();
+    }
+  }
+  for (const f of elem.fields) {
+    if (f.kind === "dependency" && f.dependencyTarget && f.dependencyTarget.path) {
+      return `${f.dependencyTarget.group}:${normalizeComparePath(f.dependencyTarget.path)}`;
+    }
+  }
+  return null;
+}
+function computeElementFingerprints(elem) {
+  const shallowParts = [];
+  const deepParts = [];
+  for (const f of elem.fields) {
+    if (f.kind === "reflexive") {
+      const childDeep = (f.children ?? []).map((c) => computeElementFingerprints(c).deep).join(";");
+      deepParts.push(`${f.name}=[${childDeep}]`);
+    } else {
+      const val = formatFieldDisplay(f);
+      shallowParts.push(`${f.name}=${val}`);
+      deepParts.push(`${f.name}=${val}`);
+    }
+  }
+  return {
+    shallow: shallowParts.join("|"),
+    deep: deepParts.join("|")
+  };
+}
+function computeLisKeepIndices(seq) {
+  if (seq.length === 0) return /* @__PURE__ */ new Set();
+  const tails = [];
+  const tailIdx = [];
+  const prev = new Array(seq.length).fill(-1);
+  for (let i = 0; i < seq.length; i++) {
+    const val = seq[i];
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = lo + hi >>> 1;
+      if (tails[mid] < val) lo = mid + 1;
+      else hi = mid;
+    }
+    tails[lo] = val;
+    tailIdx[lo] = i;
+    if (lo > 0) prev[i] = tailIdx[lo - 1];
+  }
+  const keep = /* @__PURE__ */ new Set();
+  let cur = tailIdx[tails.length - 1] ?? -1;
+  while (cur >= 0) {
+    keep.add(cur);
+    cur = prev[cur];
+  }
+  return keep;
+}
+function lcsIndexPairs(leftKeys, rightKeys) {
+  const m = leftKeys.length;
+  const n = rightKeys.length;
+  if (m === 0 || n === 0) return [];
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i2 = m - 1; i2 >= 0; i2--) {
+    for (let j2 = n - 1; j2 >= 0; j2--) {
+      if (leftKeys[i2] === rightKeys[j2]) {
+        dp[i2][j2] = 1 + dp[i2 + 1][j2 + 1];
+      } else {
+        dp[i2][j2] = Math.max(dp[i2 + 1][j2], dp[i2][j2 + 1]);
+      }
+    }
+  }
+  const pairs = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (leftKeys[i] === rightKeys[j]) {
+      pairs.push([i, j]);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return pairs;
+}
+function alignReflexiveElements(leftChildren, rightChildren) {
+  const leftIds = leftChildren.map(extractElementIdentity);
+  const rightIds = rightChildren.map(extractElementIdentity);
+  const allLeftValid = leftChildren.length > 0 && leftIds.every((id) => !!id);
+  const allRightValid = rightChildren.length > 0 && rightIds.every((id) => !!id);
+  const uniqueLeft = new Set(leftIds).size === leftIds.length;
+  const uniqueRight = new Set(rightIds).size === rightIds.length;
+  if (allLeftValid && allRightValid && uniqueLeft && uniqueRight) {
+    const rightById = /* @__PURE__ */ new Map();
+    rightIds.forEach((id, idx) => rightById.set(id, idx));
+    const rawPairs = [];
+    const matchedOld = /* @__PURE__ */ new Set();
+    const matchedNew = /* @__PURE__ */ new Set();
+    for (let oldIdx = 0; oldIdx < leftChildren.length; oldIdx++) {
+      const id = leftIds[oldIdx];
+      const newIdx = rightById.get(id);
+      if (newIdx !== void 0) {
+        rawPairs.push({ oldIdx, newIdx, identity: id });
+        matchedOld.add(oldIdx);
+        matchedNew.add(newIdx);
+      }
+    }
+    const lisSet = computeLisKeepIndices(rawPairs.map((p) => p.newIdx));
+    const matchedPairs2 = rawPairs.map((p, idx) => ({
+      oldIdx: p.oldIdx,
+      newIdx: p.newIdx,
+      identity: p.identity,
+      moved: !lisSet.has(idx)
+    }));
+    const unmatchedOld = leftChildren.map((_, i) => i).filter((i) => !matchedOld.has(i));
+    const unmatchedNew = rightChildren.map((_, i) => i).filter((i) => !matchedNew.has(i));
+    if (unmatchedOld.length > 0 && unmatchedOld.length === unmatchedNew.length) {
+      for (let k = 0; k < unmatchedOld.length; k++) {
+        matchedPairs2.push({
+          oldIdx: unmatchedOld[k],
+          newIdx: unmatchedNew[k],
+          identity: `${leftIds[unmatchedOld[k]]} -> ${rightIds[unmatchedNew[k]]}`,
+          moved: false
+        });
+      }
+      matchedPairs2.sort((a, b) => a.oldIdx - b.oldIdx);
+      return {
+        matchedPairs: matchedPairs2,
+        addedIndices: [],
+        removedIndices: [],
+        strategy: "identity"
+      };
+    }
+    return {
+      matchedPairs: matchedPairs2,
+      addedIndices: unmatchedNew,
+      removedIndices: unmatchedOld,
+      strategy: "identity"
+    };
+  }
+  const leftFp = leftChildren.map(computeElementFingerprints);
+  const rightFp = rightChildren.map(computeElementFingerprints);
+  const deepPairs = lcsIndexPairs(
+    leftFp.map((f) => f.deep),
+    rightFp.map((f) => f.deep)
+  );
+  const matchedPairs = [];
+  const removedIndices = [];
+  const addedIndices = [];
+  const anchors = [...deepPairs, [leftChildren.length, rightChildren.length]];
+  let prevOld = 0;
+  let prevNew = 0;
+  for (const [anchorOld, anchorNew] of anchors) {
+    const gapOldLen = anchorOld - prevOld;
+    const gapNewLen = anchorNew - prevNew;
+    if (gapOldLen > 0 && gapNewLen > 0) {
+      const gapOldShallow = leftFp.slice(prevOld, anchorOld).map((f) => f.shallow);
+      const gapNewShallow = rightFp.slice(prevNew, anchorNew).map((f) => f.shallow);
+      const shallowSubPairs = lcsIndexPairs(gapOldShallow, gapNewShallow);
+      if (shallowSubPairs.length > 0) {
+        const subAnchors = [...shallowSubPairs, [gapOldLen, gapNewLen]];
+        let subPrevO = 0;
+        let subPrevN = 0;
+        for (const [so, sn] of subAnchors) {
+          const remO = so - subPrevO;
+          const remN = sn - subPrevN;
+          const pairCount = Math.min(remO, remN);
+          for (let k = 0; k < pairCount; k++) {
+            const oi = prevOld + subPrevO + k;
+            const ni = prevNew + subPrevN + k;
+            matchedPairs.push({
+              oldIdx: oi,
+              newIdx: ni,
+              identity: leftIds[oi] ?? rightIds[ni] ?? void 0,
+              moved: false
+            });
+          }
+          for (let k = pairCount; k < remO; k++) removedIndices.push(prevOld + subPrevO + k);
+          for (let k = pairCount; k < remN; k++) addedIndices.push(prevNew + subPrevN + k);
+          if (so < gapOldLen && sn < gapNewLen) {
+            const oi = prevOld + so;
+            const ni = prevNew + sn;
+            matchedPairs.push({
+              oldIdx: oi,
+              newIdx: ni,
+              identity: leftIds[oi] ?? rightIds[ni] ?? void 0,
+              moved: false
+            });
+          }
+          subPrevO = so + 1;
+          subPrevN = sn + 1;
+        }
+      } else {
+        const pairCount = Math.min(gapOldLen, gapNewLen);
+        for (let k = 0; k < pairCount; k++) {
+          const oi = prevOld + k;
+          const ni = prevNew + k;
+          matchedPairs.push({
+            oldIdx: oi,
+            newIdx: ni,
+            identity: leftIds[oi] ?? rightIds[ni] ?? void 0,
+            moved: false
+          });
+        }
+        for (let k = pairCount; k < gapOldLen; k++) removedIndices.push(prevOld + k);
+        for (let k = pairCount; k < gapNewLen; k++) addedIndices.push(prevNew + k);
+      }
+    } else if (gapOldLen > 0) {
+      for (let k = 0; k < gapOldLen; k++) removedIndices.push(prevOld + k);
+    } else if (gapNewLen > 0) {
+      for (let k = 0; k < gapNewLen; k++) addedIndices.push(prevNew + k);
+    }
+    if (anchorOld < leftChildren.length && anchorNew < rightChildren.length) {
+      matchedPairs.push({
+        oldIdx: anchorOld,
+        newIdx: anchorNew,
+        identity: leftIds[anchorOld] ?? rightIds[anchorNew] ?? void 0,
+        moved: false
+      });
+    }
+    prevOld = anchorOld + 1;
+    prevNew = anchorNew + 1;
+  }
+  return {
+    matchedPairs,
+    addedIndices,
+    removedIndices,
+    strategy: "content"
+  };
+}
+function compareTagFieldListsSemantically(leftFields, rightFields, pushRow, prefix = "", depth = 0) {
+  if (depth > 3) return;
+  const rightByName = new Map(rightFields.map((f) => [f.name, f]));
+  for (const lf of leftFields) {
+    const rf = rightByName.get(lf.name);
+    if (!rf) continue;
+    const propPath = prefix ? `${prefix}.${lf.name}` : lf.name;
+    if (lf.kind === "reflexive" && Array.isArray(lf.children) && Array.isArray(rf.children)) {
+      if (lf.children.length !== rf.children.length) {
+        pushRow(
+          propPath,
+          formatFieldDisplay(lf),
+          formatFieldDisplay(rf),
+          "changed",
+          `Reflexive block count changed (${lf.children.length} -> ${rf.children.length})`
+        );
+      }
+      if (lf.children.length <= 64 && rf.children.length <= 64 && (lf.children.length > 0 || rf.children.length > 0)) {
+        const alignment = alignReflexiveElements(lf.children, rf.children);
+        for (const remIdx of alignment.removedIndices) {
+          const remChild = lf.children[remIdx];
+          const label = remChild ? extractElementIdentity(remChild) ?? `#${remIdx}` : `#${remIdx}`;
+          pushRow(
+            `${propPath}[-${remIdx}:${label}]`,
+            label,
+            "Removed",
+            "removed",
+            `Removed element ${remIdx} (${label})`
+          );
+        }
+        for (const addIdx of alignment.addedIndices) {
+          const addChild = rf.children[addIdx];
+          const label = addChild ? extractElementIdentity(addChild) ?? `#${addIdx}` : `#${addIdx}`;
+          pushRow(
+            `${propPath}[+${addIdx}:${label}]`,
+            "Not present",
+            label,
+            "added",
+            `Added element at index ${addIdx} (${label})`
+          );
+        }
+        for (const pair of alignment.matchedPairs) {
+          const lChild = lf.children[pair.oldIdx];
+          const rChild = rf.children[pair.newIdx];
+          if (!lChild || !rChild) continue;
+          const idSuffix = pair.identity ? `:${pair.identity}` : "";
+          const idxLabel = pair.oldIdx === pair.newIdx ? `${propPath}[${pair.oldIdx}${idSuffix}]` : `${propPath}[${pair.oldIdx}->${pair.newIdx}${idSuffix}]`;
+          if (pair.moved) {
+            pushRow(
+              idxLabel,
+              `Index #${pair.oldIdx}`,
+              `Index #${pair.newIdx}`,
+              "changed",
+              `Reordered element${pair.identity ? ` "${pair.identity}"` : ""}`
+            );
+          }
+          compareTagFieldListsSemantically(lChild.fields, rChild.fields, pushRow, idxLabel, depth + 1);
+        }
+      }
+      continue;
+    }
+    const lv = formatFieldDisplay(lf);
+    const rv = formatFieldDisplay(rf);
+    if (lv !== rv) {
+      pushRow(propPath, lv, rv, "changed");
+    }
+  }
+}
 var normalizeComparePath = (path5) => path5.replace(/\\/g, "/").replace(/\/{2,}/g, "/").trim().toLowerCase();
 var tagIdentityKey = (group, path5) => `${(group ?? "unknown").toLowerCase()}:${normalizeComparePath(path5)}`;
 var ASSET_GROUPS = /* @__PURE__ */ new Set([
@@ -65054,52 +66175,23 @@ function compareMaps(leftBuffer, rightBuffer, maxDifferenceRows = 2500) {
       try {
         const leftFields = readTagFieldValues(leftBuffer, leftHeader, leftIndex, leftEntry.index);
         const rightFields = readTagFieldValues(rightBuffer, rightHeader, rightIndex, rightEntry.index);
-        const rightByName = new Map(rightFields.fields.map((f) => [f.name, f]));
-        for (const lf of leftFields.fields) {
-          const rf = rightByName.get(lf.name);
-          if (!rf) continue;
-          const lv = formatFieldDisplay(lf);
-          const rv = formatFieldDisplay(rf);
-          if (lv !== rv) {
+        compareTagFieldListsSemantically(
+          leftFields.fields,
+          rightFields.fields,
+          (property, before, after, status = "changed", detail) => {
             pushRow(
               category,
               subject,
-              lf.name,
-              lv,
-              rv,
-              "changed",
-              void 0,
+              property,
+              before,
+              after,
+              status,
+              detail,
               leftEntry.index,
               rightEntry.index
             );
-          } else if (lf.kind === "reflexive" && Array.isArray(lf.children) && Array.isArray(rf.children) && lf.children.length === rf.children.length && lf.children.length <= 64) {
-            for (let idx = 0; idx < lf.children.length; idx++) {
-              const lChild = lf.children[idx];
-              const rChild = rf.children[idx];
-              if (!lChild || !rChild) continue;
-              const rChildMap = new Map(rChild.fields.map((cf) => [cf.name, cf]));
-              for (const lcf of lChild.fields) {
-                const rcf = rChildMap.get(lcf.name);
-                if (!rcf) continue;
-                const lcv = formatFieldDisplay(lcf);
-                const rcv = formatFieldDisplay(rcf);
-                if (lcv !== rcv) {
-                  pushRow(
-                    category,
-                    subject,
-                    `${lf.name}[${idx}].${lcf.name}`,
-                    lcv,
-                    rcv,
-                    "changed",
-                    void 0,
-                    leftEntry.index,
-                    rightEntry.index
-                  );
-                }
-              }
-            }
           }
-        }
+        );
       } catch {
       }
     }
@@ -65159,6 +66251,11 @@ function getPoint2DVal(fields, name) {
     return [Number(f.value[0]) || 0, Number(f.value[1]) || 0];
   }
   return [0, 0];
+}
+function getFieldVirtualAddress(fields, name, header, tagIndex) {
+  const f = findField(fields, name);
+  if (!f || f.offset < header.tagDataOffset) return 0;
+  return tagIndex.baseMemoryAddress + (f.offset - header.tagDataOffset) >>> 0;
 }
 function getRect2DVal(fields, name) {
   const f = findField(fields, name);
@@ -65237,6 +66334,7 @@ function parseWeaponHudLevel(buffer, header, tagIndex, wphiTagIndex, level, shar
       sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: `static elements[${elemIdx}].anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, "anchor offset", header, tagIndex),
       scaleXFieldPath: `static elements[${elemIdx}].width scale`,
       scaleYFieldPath: `static elements[${elemIdx}].height scale`,
       visibilityFieldPath: `static elements[${elemIdx}].allowed view type`,
@@ -65283,6 +66381,7 @@ function parseWeaponHudLevel(buffer, header, tagIndex, wphiTagIndex, level, shar
       sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: `meter elements[${elemIdx}].anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, "anchor offset", header, tagIndex),
       scaleXFieldPath: `meter elements[${elemIdx}].width scale`,
       scaleYFieldPath: `meter elements[${elemIdx}].height scale`,
       visibilityFieldPath: `meter elements[${elemIdx}].allowed view type`,
@@ -65326,6 +66425,7 @@ function parseWeaponHudLevel(buffer, header, tagIndex, wphiTagIndex, level, shar
       sequenceIndex: 0,
       defaultColorArgb: color,
       offsetFieldPath: `number elements[${elemIdx}].anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, "anchor offset", header, tagIndex),
       scaleXFieldPath: `number elements[${elemIdx}].width scale`,
       scaleYFieldPath: `number elements[${elemIdx}].height scale`,
       visibilityFieldPath: `number elements[${elemIdx}].allowed view type`,
@@ -65374,6 +66474,7 @@ function parseWeaponHudLevel(buffer, header, tagIndex, wphiTagIndex, level, shar
         sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
         defaultColorArgb: color,
         offsetFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].anchor offset`,
+        offsetVirtualAddress: getFieldVirtualAddress(item.fields, "anchor offset", header, tagIndex),
         scaleXFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].width scale`,
         scaleYFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].height scale`,
         visibilityFieldPath: `crosshairs[${elemIdx}].crosshair overlays[${itemIdx}].flags`,
@@ -65425,6 +66526,7 @@ function parseWeaponHudLevel(buffer, header, tagIndex, wphiTagIndex, level, shar
         sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
         defaultColorArgb: color,
         offsetFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].anchor offset`,
+        offsetVirtualAddress: getFieldVirtualAddress(item.fields, "anchor offset", header, tagIndex),
         scaleXFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].width scale`,
         scaleYFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].height scale`,
         visibilityFieldPath: `overlay elements[${elemIdx}].overlays[${itemIdx}].flags`,
@@ -65575,6 +66677,7 @@ function parseUnitHudLevel(buffer, header, tagIndex, unhiTagIndex, sharedByPaths
       sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: spec.offsetField,
+      offsetVirtualAddress: getFieldVirtualAddress(decoded.fields, spec.offsetField, header, tagIndex),
       scaleXFieldPath: spec.scaleXField,
       scaleYFieldPath: spec.scaleYField,
       visibilityMode: "scaling_hide",
@@ -65616,6 +66719,7 @@ function parseUnitHudLevel(buffer, header, tagIndex, unhiTagIndex, sharedByPaths
       sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: `overlays[${elemIdx}].anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, "anchor offset", header, tagIndex),
       scaleXFieldPath: `overlays[${elemIdx}].width scale`,
       scaleYFieldPath: `overlays[${elemIdx}].height scale`,
       visibilityMode: "scaling_hide",
@@ -65657,6 +66761,7 @@ function parseUnitHudLevel(buffer, header, tagIndex, unhiTagIndex, sharedByPaths
       sequenceIndex: seqIdx === 65535 ? 0 : seqIdx,
       defaultColorArgb: color,
       offsetFieldPath: `meters[${elemIdx}].meter anchor offset`,
+      offsetVirtualAddress: getFieldVirtualAddress(child.fields, "meter anchor offset", header, tagIndex),
       scaleXFieldPath: `meters[${elemIdx}].meter width scale`,
       scaleYFieldPath: `meters[${elemIdx}].meter height scale`,
       visibilityMode: "scaling_hide",
@@ -65723,6 +66828,7 @@ function parseGlobalHudLevel(buffer, header, tagIndex, hudgTagIndex) {
       sequenceIndex: gSeq === 65535 ? 0 : gSeq,
       defaultColorArgb: gColor,
       offsetFieldPath: "anchor offset",
+      offsetVirtualAddress: getFieldVirtualAddress(decoded.fields, "anchor offset", header, tagIndex),
       scaleXFieldPath: "width scale",
       scaleYFieldPath: "height scale",
       visibilityMode: "scaling_hide",
@@ -65758,6 +66864,7 @@ function parseGlobalHudLevel(buffer, header, tagIndex, hudgTagIndex) {
       sequenceIndex: 0,
       defaultColorArgb: 4283222512,
       offsetFieldPath: "anchor offset",
+      offsetVirtualAddress: getFieldVirtualAddress(decoded.fields, "anchor offset", header, tagIndex),
       scaleXFieldPath: "width scale",
       scaleYFieldPath: "height scale",
       bitmapFieldPath: "waypoint arrows bitmap"
@@ -66400,7 +67507,103 @@ function resolveWeaponHudChainIndices(buffer, header, tagIndex, firstWphiTagInde
   }
   return chain;
 }
+function collectSpartanHoldableWeaponIndices(buffer, header, tagIndex) {
+  const vehicleWeaponIndices = /* @__PURE__ */ new Set();
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "vehicle" || entry.isExternal) continue;
+    try {
+      const vehDecoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const vehWeapons = findField(vehDecoded.fields, "weapons")?.children ?? [];
+      for (const vw of vehWeapons) {
+        const wDep = getDepTarget(vw.fields, "weapon", tagIndex);
+        if (wDep.tagIndex !== null) {
+          vehicleWeaponIndices.add(wDep.tagIndex);
+        }
+      }
+    } catch {
+    }
+  }
+  const allowedLabels = /* @__PURE__ */ new Set([
+    "ar",
+    "hp",
+    "pr",
+    "pp",
+    "rl",
+    "sr",
+    "sg",
+    "ne",
+    "ft",
+    "fc",
+    "flag",
+    "ball",
+    "br",
+    "smg",
+    "cs",
+    "gl",
+    "sp"
+  ]);
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "biped" || entry.isExternal) continue;
+    const normPath = entry.path.replace(/\//g, "\\").toLowerCase();
+    if (!normPath.includes("cyborg") && !normPath.includes("spartan") && !normPath.includes("masterchief")) {
+      continue;
+    }
+    try {
+      const bipedDecoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const antrDep = getDepTarget(bipedDecoded.fields, "animation graph", tagIndex);
+      if (antrDep.tagIndex === null) continue;
+      const antrDecoded = readTagFieldValues(buffer, header, tagIndex, antrDep.tagIndex);
+      const units = findField(antrDecoded.fields, "units")?.children ?? [];
+      for (const seat of units) {
+        const seatLabelField = findField(seat.fields, "label");
+        const seatLabel = typeof seatLabelField?.value === "string" ? seatLabelField.value.trim().toLowerCase() : "";
+        if (seatLabel && seatLabel !== "stand" && seatLabel !== "alert" && seatLabel !== "crouch" && seatLabel !== "flee" && seatLabel !== "flaming") {
+          continue;
+        }
+        const seatWeapons = findField(seat.fields, "weapons")?.children ?? [];
+        for (const sw of seatWeapons) {
+          const weaponTypes = findField(sw.fields, "weapon types")?.children ?? [];
+          for (const wt of weaponTypes) {
+            const wtLabelField = findField(wt.fields, "label");
+            const wtLabel = typeof wtLabelField?.value === "string" ? wtLabelField.value.trim().toLowerCase() : "";
+            if (wtLabel && wtLabel !== "gun" && wtLabel !== "unarmed") {
+              allowedLabels.add(wtLabel);
+            }
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  const nonHoldableNamePattern = /(\bwarthog\b|\bscorpion\b|\bghost[\s_-]*gun\b|\bbanshee\b|\bwraith\b|\bturret\b|\bpelican\b|\bdropship\b|\bphantom\b|\bscarab\b|\bmounted\b|\bunarmed\b|\benergy[\s_-]*blade[\s_-]*useless\b)/i;
+  const holdable = /* @__PURE__ */ new Set();
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "weapon" || entry.isExternal) continue;
+    if (vehicleWeaponIndices.has(entry.index)) continue;
+    const normPath = entry.path.replace(/\//g, "\\").toLowerCase();
+    if (normPath.startsWith("vehicles\\") || nonHoldableNamePattern.test(normPath)) {
+      continue;
+    }
+    try {
+      const decoded = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const labelField = findField(decoded.fields, "label");
+      const weapLabel = typeof labelField?.value === "string" ? labelField.value.trim().toLowerCase() : "";
+      if (!weapLabel || weapLabel === "gun" || !allowedLabels.has(weapLabel)) {
+        continue;
+      }
+      const fpModelDep = getDepTarget(decoded.fields, "first person model", tagIndex);
+      const hudDep = getDepTarget(decoded.fields, "hud interface", tagIndex);
+      if (fpModelDep.tagIndex === null && hudDep.tagIndex === null) {
+        continue;
+      }
+      holdable.add(entry.index);
+    } catch {
+    }
+  }
+  return holdable;
+}
 function inspectMapHudAndUiTargets(buffer, header, tagIndex) {
+  const holdableWeaponIndices = collectSpartanHoldableWeaponIndices(buffer, header, tagIndex);
   const wphiSharers = /* @__PURE__ */ new Map();
   const weaponRawChains = /* @__PURE__ */ new Map();
   for (const entry of tagIndex.entries) {
@@ -66410,10 +67613,12 @@ function inspectMapHudAndUiTargets(buffer, header, tagIndex) {
       const hudDep = getDepTarget(decoded.fields, "hud interface", tagIndex);
       const chain = hudDep.tagIndex !== null ? resolveWeaponHudChainIndices(buffer, header, tagIndex, hudDep.tagIndex) : [];
       weaponRawChains.set(entry.index, { fields: decoded.fields, chain });
-      for (const wphiIdx of chain) {
-        const list = wphiSharers.get(wphiIdx) ?? [];
-        if (!list.includes(entry.path)) list.push(entry.path);
-        wphiSharers.set(wphiIdx, list);
+      if (holdableWeaponIndices.has(entry.index)) {
+        for (const wphiIdx of chain) {
+          const list = wphiSharers.get(wphiIdx) ?? [];
+          if (!list.includes(entry.path)) list.push(entry.path);
+          wphiSharers.set(wphiIdx, list);
+        }
       }
     } catch {
     }
@@ -66421,6 +67626,7 @@ function inspectMapHudAndUiTargets(buffer, header, tagIndex) {
   const weapons = [];
   for (const entry of tagIndex.entries) {
     if (entry.primaryClassName !== "weapon" || entry.isExternal) continue;
+    if (!holdableWeaponIndices.has(entry.index)) continue;
     const raw = weaponRawChains.get(entry.index);
     if (!raw) continue;
     const hudChain = [];
@@ -66459,9 +67665,12 @@ function inspectMapHudAndUiTargets(buffer, header, tagIndex) {
       if (vehWeapons.length > 0) {
         const weapDep = getDepTarget(vehWeapons[0].fields, "weapon", tagIndex);
         if (weapDep.tagIndex !== null) {
-          const foundWeap = weapons.find((w) => w.tagIndex === weapDep.tagIndex);
-          if (foundWeap) {
-            weaponHudChain.push(...foundWeap.hudChain);
+          const rawVehWeap = weaponRawChains.get(weapDep.tagIndex);
+          if (rawVehWeap) {
+            rawVehWeap.chain.forEach((wphiIdx, lvl) => {
+              const p = parseWeaponHudLevel(buffer, header, tagIndex, wphiIdx, lvl, []);
+              if (p) weaponHudChain.push(p);
+            });
           } else {
             const weapDecoded = readTagFieldValues(buffer, header, tagIndex, weapDep.tagIndex);
             const hudDep = getDepTarget(weapDecoded.fields, "hud interface", tagIndex);
@@ -66539,7 +67748,156 @@ function inspectMapHudAndUiTargets(buffer, header, tagIndex) {
     unicodeStringLists
   };
 }
+function computeTagDataMemoryPatches(beforeTagData, afterBuffer, header, tagIndex) {
+  const tagStart = header.tagDataOffset;
+  const tagLen = Math.min(beforeTagData.length, Math.max(0, afterBuffer.length - tagStart));
+  if (tagLen <= 0) return [];
+  const patches = [];
+  let i = 0;
+  while (i < tagLen) {
+    if (beforeTagData[i] === afterBuffer[tagStart + i]) {
+      i++;
+      continue;
+    }
+    const runStart = i;
+    let runEnd = i + 1;
+    while (runEnd < tagLen) {
+      if (beforeTagData[runEnd] !== afterBuffer[tagStart + runEnd]) {
+        runEnd++;
+      } else {
+        let gap = 1;
+        while (gap <= 16 && runEnd + gap < tagLen && beforeTagData[runEnd + gap] === afterBuffer[tagStart + runEnd + gap]) {
+          gap++;
+        }
+        if (gap <= 16 && runEnd + gap < tagLen) {
+          runEnd += gap + 1;
+        } else {
+          break;
+        }
+      }
+    }
+    const slice = afterBuffer.subarray(tagStart + runStart, tagStart + runEnd);
+    patches.push({
+      address: tagIndex.baseMemoryAddress + runStart >>> 0,
+      dataBase64: Buffer.from(slice).toString("base64")
+    });
+    i = runEnd;
+  }
+  return patches;
+}
+function prepareMapBufferForLiveHudSession(buffer, header, tagIndex) {
+  const holdableIndices = collectSpartanHoldableWeaponIndices(buffer, header, tagIndex);
+  const holdableWeaponTagIds = [];
+  for (const weapIdx of holdableIndices) {
+    const entry = tagIndex.entries[weapIdx];
+    if (!entry || entry.isExternal) continue;
+    holdableWeaponTagIds.push(entry.tagId);
+    try {
+      const decoded = readTagFieldValues(buffer, header, tagIndex, weapIdx);
+      const flagsField = findField(decoded.fields, "weapon flags");
+      if (flagsField && flagsField.offset >= header.tagDataOffset && flagsField.offset + 4 <= buffer.length) {
+        const curFlags = buffer.readUInt32LE(flagsField.offset);
+        buffer.writeUInt32LE((curFlags | 1 << 4) >>> 0, flagsField.offset);
+      }
+      const mags = findField(decoded.fields, "magazines")?.children ?? [];
+      for (const mag of mags) {
+        const loadedMax = Math.max(1, getNumberVal(mag.fields, "rounds loaded maximum", 30));
+        const desiredAmmo = Math.min(999, Math.max(loadedMax * 4, 120));
+        const initField = findField(mag.fields, "rounds total initial");
+        const maxField = findField(mag.fields, "rounds reserved maximum");
+        if (initField && initField.offset >= header.tagDataOffset && initField.offset + 2 <= buffer.length) {
+          const curInit = buffer.readInt16LE(initField.offset);
+          if (curInit < loadedMax) {
+            buffer.writeInt16LE(desiredAmmo, initField.offset);
+          }
+        }
+        if (maxField && maxField.offset >= header.tagDataOffset && maxField.offset + 2 <= buffer.length) {
+          const curMax = buffer.readInt16LE(maxField.offset);
+          if (curMax < loadedMax) {
+            buffer.writeInt16LE(desiredAmmo, maxField.offset);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  const vehWithHud = [];
+  const vehOther = [];
+  for (const entry of tagIndex.entries) {
+    if (entry.primaryClassName !== "vehicle" || entry.isExternal) continue;
+    const norm = entry.path.replace(/\//g, "\\").toLowerCase();
+    let hasHudOrWeapon = false;
+    try {
+      const d = readTagFieldValues(buffer, header, tagIndex, entry.index);
+      const uHuds = findField(d.fields, "new unit hud interface")?.children ?? [];
+      const vWeaps = findField(d.fields, "weapons")?.children ?? [];
+      const seats = findField(d.fields, "seats")?.children ?? [];
+      if (uHuds.length > 0 || vWeaps.length > 0 || seats.length > 0) {
+        hasHudOrWeapon = true;
+      }
+    } catch {
+    }
+    if (norm.includes("pelican") || norm.includes("dropship") || norm.includes("lifepod")) {
+      continue;
+    }
+    if (hasHudOrWeapon) {
+      vehWithHud.push(entry.tagId);
+    } else {
+      vehOther.push(entry.tagId);
+    }
+  }
+  const vehicleTagIds = [...vehWithHud, ...vehOther];
+  if (holdableWeaponTagIds.length > 0) {
+    for (const entry of tagIndex.entries) {
+      if (entry.primaryClassName !== "biped" || entry.isExternal) continue;
+      const norm = entry.path.replace(/\//g, "\\").toLowerCase();
+      if (!norm.includes("cyborg") && !norm.includes("spartan") && !norm.includes("masterchief")) continue;
+      try {
+        const d = readTagFieldValues(buffer, header, tagIndex, entry.index);
+        const bipedWeaps = findField(d.fields, "weapons")?.children ?? [];
+        for (let i = 0; i < bipedWeaps.length && i < holdableWeaponTagIds.length; i++) {
+          writeTagFieldValue(buffer, header, tagIndex, entry.index, `weapons[${i}].weapon`, holdableWeaponTagIds[i]);
+        }
+      } catch {
+      }
+    }
+  }
+  let matgVirtualAddress = 0;
+  const matgEntry = tagIndex.entries.find((e) => e.primaryClassName === "globals" && !e.isExternal);
+  if (matgEntry) {
+    matgVirtualAddress = matgEntry.tagDataPointerOrResourceIndex >>> 0;
+    try {
+      const matgDecoded = readTagFieldValues(buffer, header, tagIndex, matgEntry.index);
+      const weapList = findField(matgDecoded.fields, "weapon list")?.children ?? [];
+      for (let i = 0; i < weapList.length && i < holdableWeaponTagIds.length; i++) {
+        writeTagFieldValue(buffer, header, tagIndex, matgEntry.index, `weapon list[${i}].weapon`, holdableWeaponTagIds[i]);
+      }
+      const mpInfo = findField(matgDecoded.fields, "multiplayer information")?.children ?? [];
+      if (mpInfo.length > 0) {
+        const mpVehicles = findField(mpInfo[0].fields, "vehicles")?.children ?? [];
+        for (let i = 0; i < mpVehicles.length && i < vehicleTagIds.length; i++) {
+          const vField = findField(mpVehicles[i].fields, "vehicle");
+          if (vField && vField.offset >= header.tagDataOffset && vField.offset + 16 <= buffer.length) {
+            buffer.writeUInt32LE(1986357353, vField.offset);
+            buffer.writeUInt32LE(0, vField.offset + 4);
+            buffer.writeUInt32LE(0, vField.offset + 8);
+            buffer.writeInt32LE(vehicleTagIds[i], vField.offset + 12);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  return {
+    matgVirtualAddress,
+    holdableWeaponTagIds,
+    vehicleTagIds
+  };
+}
 function applyLiveHudEdit(buffer, header, tagIndex, req) {
+  const beforeTagData = Buffer.from(
+    buffer.subarray(header.tagDataOffset, Math.min(buffer.length, header.tagDataOffset + header.tagDataSize))
+  );
   let curBuf = buffer;
   let curHeader = header;
   let curTagIndex = tagIndex;
@@ -66580,7 +67938,14 @@ function applyLiveHudEdit(buffer, header, tagIndex, req) {
   if (req.editType === "anchor" && typeof req.anchorIndex === "number") {
     const clamped = Math.max(0, Math.min(4, Math.round(req.anchorIndex)));
     writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, "anchor", clamped);
-    return { buffer: curBuf, header: curHeader, tagIndex: curTagIndex, effectiveHudTagIndex: targetHudIndex };
+    const memoryPatches2 = computeTagDataMemoryPatches(beforeTagData, curBuf, curHeader, curTagIndex);
+    return {
+      buffer: curBuf,
+      header: curHeader,
+      tagIndex: curTagIndex,
+      effectiveHudTagIndex: targetHudIndex,
+      memoryPatches: memoryPatches2
+    };
   }
   if (req.offsetFieldPath && typeof req.x === "number" && typeof req.y === "number") {
     const clampedX = Math.max(-640, Math.min(640, Math.round(req.x)));
@@ -66622,9 +67987,19 @@ function applyLiveHudEdit(buffer, header, tagIndex, req) {
       writeTagFieldValue(curBuf, curHeader, curTagIndex, targetHudIndex, req.scaleYFieldPath, nextScale);
     }
   }
-  return { buffer: curBuf, header: curHeader, tagIndex: curTagIndex, effectiveHudTagIndex: targetHudIndex };
+  const memoryPatches = computeTagDataMemoryPatches(beforeTagData, curBuf, curHeader, curTagIndex);
+  return {
+    buffer: curBuf,
+    header: curHeader,
+    tagIndex: curTagIndex,
+    effectiveHudTagIndex: targetHudIndex,
+    memoryPatches
+  };
 }
 function applyLiveWeaponStatEdit(buffer, header, tagIndex, req) {
+  const beforeTagData = Buffer.from(
+    buffer.subarray(header.tagDataOffset, Math.min(buffer.length, header.tagDataOffset + header.tagDataSize))
+  );
   let rawVal = Number(req.value);
   if (req.conversion === "rad_to_deg") {
     rawVal = rawVal * Math.PI / 180;
@@ -66650,10 +68025,12 @@ function applyLiveWeaponStatEdit(buffer, header, tagIndex, req) {
     }
     currentBounds[req.boundsIndex] = rawVal;
     writeTagFieldValue(buffer, header, tagIndex, req.targetTagIndex, req.fieldPath, currentBounds);
-    return { ok: true, writtenValue: currentBounds };
+    const memoryPatches2 = computeTagDataMemoryPatches(beforeTagData, buffer, header, tagIndex);
+    return { ok: true, writtenValue: currentBounds, memoryPatches: memoryPatches2 };
   }
   writeTagFieldValue(buffer, header, tagIndex, req.targetTagIndex, req.fieldPath, rawVal);
-  return { ok: true, writtenValue: rawVal };
+  const memoryPatches = computeTagDataMemoryPatches(beforeTagData, buffer, header, tagIndex);
+  return { ok: true, writtenValue: rawVal, memoryPatches };
 }
 function injectHudElementBitmap(buffer, header, tagIndex, req, externalBitmapsBuffer) {
   let curBuf = buffer;
@@ -67020,6 +68397,624 @@ function saveUnicodeStringListTable(buffer, header, tagIndex, ustrTagIndex, stri
   };
 }
 
+// ../core/src/map/baboon-features.ts
+function inspectContentExplorerNodeInMap(buffer, tagEntryIndex) {
+  const header = parseCacheFileHeader(buffer);
+  const tagIndex = parseTagIndex(buffer, header);
+  const entry = tagIndex.entries[tagEntryIndex];
+  if (!entry) {
+    throw new Error(`Tag #${tagEntryIndex} not found in map.`);
+  }
+  const byTagId = /* @__PURE__ */ new Map();
+  for (const e of tagIndex.entries) {
+    byTagId.set(e.tagId, e);
+  }
+  const references = [];
+  if (!entry.isExternal && entry.primaryClassName !== "scenario_structure_bsp") {
+    try {
+      const slots = listTagDependencySlots(buffer, header, tagIndex, tagEntryIndex);
+      for (const slot of slots) {
+        if (slot.currentTagId === NULL_TAG_ID) continue;
+        const targetEntry = byTagId.get(slot.currentTagId);
+        references.push({
+          tagIndex: targetEntry ? targetEntry.index : null,
+          tagId: slot.currentTagId,
+          path: slot.currentPath ?? targetEntry?.path ?? `Unknown (0x${slot.currentTagId.toString(16)})`,
+          group: slot.currentGroup ?? targetEntry?.primaryClassName ?? "",
+          fieldPath: slot.fieldPath,
+          isExternal: Boolean(targetEntry?.isExternal),
+          isBroken: !targetEntry
+        });
+      }
+    } catch {
+    }
+  }
+  const referencedBy = [];
+  for (let i = 0; i < tagIndex.entries.length; i++) {
+    if (i === tagEntryIndex) continue;
+    const other = tagIndex.entries[i];
+    if (other.isExternal || !other.primaryClassName || other.primaryClassName === "scenario_structure_bsp") {
+      continue;
+    }
+    try {
+      const slots = listTagDependencySlots(buffer, header, tagIndex, i);
+      for (const slot of slots) {
+        if (slot.currentTagId === entry.tagId) {
+          referencedBy.push({
+            tagIndex: other.index,
+            tagId: other.tagId,
+            path: other.path,
+            group: other.primaryClassName,
+            fieldPath: slot.fieldPath,
+            isExternal: other.isExternal,
+            isBroken: false
+          });
+        }
+      }
+    } catch {
+    }
+  }
+  return {
+    tagIndex: entry.index,
+    tagId: entry.tagId,
+    path: entry.path,
+    group: entry.primaryClassName ?? "unknown",
+    referencedBy,
+    references
+  };
+}
+function fixBrokenTagDependenciesInMap(buffer, targetTagEntryIndex) {
+  const header = parseCacheFileHeader(buffer);
+  const tagIndex = parseTagIndex(buffer, header);
+  const byGroupAndLeaf = /* @__PURE__ */ new Map();
+  for (const e of tagIndex.entries) {
+    if (!e.primaryClassName || e.tagId === NULL_TAG_ID) continue;
+    const leaf = e.path.replace(/\//g, "\\").split("\\").pop()?.toLowerCase() ?? "";
+    if (!leaf) continue;
+    const k = `${e.primaryClassName.toLowerCase()}:${leaf}`;
+    const list = byGroupAndLeaf.get(k);
+    if (list) list.push(e);
+    else byGroupAndLeaf.set(k, [e]);
+  }
+  const indicesToScan = targetTagEntryIndex !== void 0 ? [targetTagEntryIndex] : tagIndex.entries.map((e) => e.index);
+  const fixed = [];
+  const ambiguous = [];
+  const notFound = [];
+  const byTagId = /* @__PURE__ */ new Map();
+  for (const e of tagIndex.entries) {
+    byTagId.set(e.tagId, e);
+  }
+  for (const idx of indicesToScan) {
+    const entry = tagIndex.entries[idx];
+    if (!entry || entry.isExternal || !entry.primaryClassName || entry.primaryClassName === "scenario_structure_bsp") {
+      continue;
+    }
+    let slots;
+    try {
+      slots = listTagDependencySlots(buffer, header, tagIndex, idx);
+    } catch {
+      continue;
+    }
+    for (const slot of slots) {
+      if (slot.currentTagId === NULL_TAG_ID) continue;
+      const targetEntry = byTagId.get(slot.currentTagId);
+      const isBrokenTagId = !targetEntry;
+      if (!isBrokenTagId) continue;
+      const brokenPath = slot.currentPath || "";
+      const leaf = brokenPath.replace(/\//g, "\\").split("\\").pop()?.toLowerCase() ?? "";
+      const groupCandidates = slot.currentGroup ? [slot.currentGroup] : slot.allowedClasses.length > 0 ? slot.allowedClasses : [];
+      if (!leaf || groupCandidates.length === 0) {
+        notFound.push({
+          sourcePath: entry.path,
+          fieldPath: slot.fieldPath,
+          oldTargetPath: brokenPath || `0x${slot.currentTagId.toString(16)}`,
+          targetGroup: groupCandidates[0] ?? "unknown"
+        });
+        continue;
+      }
+      const matches = [];
+      for (const g of groupCandidates) {
+        const found = byGroupAndLeaf.get(`${g.toLowerCase()}:${leaf}`);
+        if (found) matches.push(...found);
+      }
+      if (matches.length === 1) {
+        const match = matches[0];
+        setTagDependencySlot(buffer, header, tagIndex, idx, slot.fieldPath, match.tagId);
+        fixed.push({
+          sourceTagIndex: idx,
+          sourcePath: entry.path,
+          sourceGroup: entry.primaryClassName,
+          fieldPath: slot.fieldPath,
+          oldTargetPath: brokenPath || `0x${slot.currentTagId.toString(16)}`,
+          newTargetPath: match.path,
+          targetGroup: match.primaryClassName ?? groupCandidates[0]
+        });
+      } else if (matches.length > 1) {
+        ambiguous.push({
+          sourcePath: entry.path,
+          fieldPath: slot.fieldPath,
+          oldTargetPath: brokenPath,
+          targetGroup: groupCandidates[0],
+          candidatePaths: matches.map((m) => m.path)
+        });
+      } else {
+        notFound.push({
+          sourcePath: entry.path,
+          fieldPath: slot.fieldPath,
+          oldTargetPath: brokenPath,
+          targetGroup: groupCandidates[0]
+        });
+      }
+    }
+  }
+  return { fixed, ambiguous, notFound };
+}
+function refactorRenameOrMoveFolderInMap(buffer, oldFolderPrefix, newFolderPrefix) {
+  let currentBuf = buffer;
+  let header = parseCacheFileHeader(currentBuf);
+  let tagIndex = parseTagIndex(currentBuf, header);
+  const normOld = oldFolderPrefix.replace(/\//g, "\\").replace(/^\\+|\\+$/g, "").toLowerCase();
+  const cleanNew = newFolderPrefix.replace(/\//g, "\\").replace(/^\\+|\\+$/g, "");
+  if (!normOld || !cleanNew) {
+    throw new Error("Both source and destination folder prefixes must be non-empty.");
+  }
+  const renamedTags = [];
+  for (let i = 0; i < tagIndex.entries.length; i++) {
+    const entry = tagIndex.entries[i];
+    if (!entry.path) continue;
+    const entryNorm = entry.path.replace(/\//g, "\\");
+    const entryLower = entryNorm.toLowerCase();
+    if (entryLower === normOld || entryLower.startsWith(`${normOld}\\`)) {
+      const suffix = entryNorm.slice(normOld.length);
+      const targetPath = `${cleanNew}${suffix}`;
+      const res = renameTagInMap(currentBuf, header, tagIndex, i, targetPath);
+      currentBuf = res.buffer;
+      header = parseCacheFileHeader(currentBuf);
+      tagIndex = parseTagIndex(currentBuf, header);
+      renamedTags.push({
+        tagIndex: i,
+        group: entry.primaryClassName ?? "unknown",
+        oldPath: entryNorm,
+        newPath: res.path
+      });
+    }
+  }
+  return {
+    buffer: currentBuf,
+    header,
+    tagIndex,
+    renamedTags
+  };
+}
+function reorganizeReflexiveBlockInMap(buffer, tagEntryIndex, reflexiveFieldPath, plan) {
+  const header = parseCacheFileHeader(buffer);
+  const tagIndex = parseTagIndex(buffer, header);
+  const entry = tagIndex.entries[tagEntryIndex];
+  if (!entry) {
+    throw new Error(`Tag #${tagEntryIndex} not found in map.`);
+  }
+  const structDef = getGroupDefinition(entry.primaryClassName);
+  const rootFileOffset = resolveTagDataPointer(
+    entry.tagDataPointerOrResourceIndex,
+    header,
+    tagIndex.baseMemoryAddress
+  );
+  const segments = reflexiveFieldPath.split(".");
+  let currentStruct = structDef;
+  let currentBase = rootFileOffset;
+  for (let i = 0; i < segments.length - 1; i++) {
+    const seg = segments[i];
+    const m = seg.match(/^(.+)\[(\d+)\]$/);
+    if (!m) throw new Error(`Invalid reflexive path segment "${seg}".`);
+    const f = currentStruct.fields.find((field) => field.name === m[1]);
+    if (!f || f.def.type !== "TagReflexive" || !f.def.struct) {
+      throw new Error(`Field "${m[1]}" is not a TagReflexive.`);
+    }
+    const idx = Number(m[2]);
+    const count2 = buffer.readUInt32LE(currentBase + f.offset);
+    const ptrLow = buffer.readUInt32LE(currentBase + f.offset + 4);
+    if (idx < 0 || idx >= count2) throw new Error(`Reflexive index ${idx} out of bounds.`);
+    const childStruct2 = resolveStruct(f.def.struct);
+    const childBase = header.tagDataOffset + (ptrLow - tagIndex.baseMemoryAddress);
+    currentStruct = childStruct2;
+    currentBase = childBase + idx * childStruct2.totalSize;
+  }
+  const leafRefName = segments[segments.length - 1];
+  const refField = currentStruct.fields.find((field) => field.name === leafRefName);
+  if (!refField || refField.def.type !== "TagReflexive" || !refField.def.struct) {
+    throw new Error(`Field "${leafRefName}" is not a TagReflexive.`);
+  }
+  const refHeaderAbsOffset = currentBase + refField.offset;
+  const oldCount = buffer.readUInt32LE(refHeaderAbsOffset);
+  const oldPtrLow = buffer.readUInt32LE(refHeaderAbsOffset + 4);
+  const childStruct = resolveStruct(refField.def.struct);
+  const elemSize = childStruct.totalSize;
+  const oldChildBase = oldCount > 0 && oldPtrLow >= tagIndex.baseMemoryAddress ? header.tagDataOffset + (oldPtrLow - tagIndex.baseMemoryAddress) : 0;
+  const newCount = plan.length;
+  if (newCount === 0) {
+    const out2 = Buffer.from(buffer);
+    out2.writeUInt32LE(0, refHeaderAbsOffset);
+    out2.writeUInt32LE(0, refHeaderAbsOffset + 4);
+    out2.writeUInt32LE(0, refHeaderAbsOffset + 8);
+    return {
+      buffer: out2,
+      header: parseCacheFileHeader(out2),
+      tagIndex: parseTagIndex(out2, header),
+      oldCount,
+      newCount: 0
+    };
+  }
+  const stagedArray = Buffer.alloc(newCount * elemSize, 0);
+  const nameField = childStruct.fields.find(
+    (f) => f.def.type === "TagString" && (f.name === "name" || f.name === "label" || f.name.endsWith("name"))
+  );
+  for (let dstIdx = 0; dstIdx < newCount; dstIdx++) {
+    const item = plan[dstIdx];
+    const dstOff = dstIdx * elemSize;
+    if (item.sourceIndex >= 0 && item.sourceIndex < oldCount && oldChildBase > 0 && isRangeInBuffer(oldChildBase + item.sourceIndex * elemSize, elemSize, buffer.length)) {
+      buffer.copy(
+        stagedArray,
+        dstOff,
+        oldChildBase + item.sourceIndex * elemSize,
+        oldChildBase + (item.sourceIndex + 1) * elemSize
+      );
+    } else {
+      for (const cf of childStruct.fields) {
+        if (cf.def.type === "TagDependency") {
+          stagedArray.writeUInt32LE(NULL_TAG_ID, dstOff + cf.offset + 0);
+          stagedArray.writeUInt32LE(0, dstOff + cf.offset + 4);
+          stagedArray.writeUInt32LE(0, dstOff + cf.offset + 8);
+          stagedArray.writeUInt32LE(NULL_TAG_ID, dstOff + cf.offset + 12);
+        } else if (cf.def.type === "Index" && cf.name === "name") {
+          stagedArray.writeUInt16LE(65535, dstOff + cf.offset);
+        }
+      }
+    }
+    if (item.newName !== void 0 && nameField) {
+      stagedArray.fill(0, dstOff + nameField.offset, dstOff + nameField.offset + 32);
+      stagedArray.write(item.newName.slice(0, 31), dstOff + nameField.offset, "latin1");
+    }
+  }
+  if (newCount <= oldCount && oldChildBase > 0 && isRangeInBuffer(oldChildBase, oldCount * elemSize, buffer.length)) {
+    const out2 = Buffer.from(buffer);
+    stagedArray.copy(out2, oldChildBase, 0, stagedArray.length);
+    out2.writeUInt32LE(newCount, refHeaderAbsOffset);
+    return {
+      buffer: out2,
+      header: parseCacheFileHeader(out2),
+      tagIndex: parseTagIndex(out2, header),
+      oldCount,
+      newCount
+    };
+  }
+  const prePad = (4 - (buffer.length - header.tagDataOffset) % 4) % 4;
+  const postPad = (4 - stagedArray.length % 4) % 4;
+  const newArrayOffset = buffer.length + prePad;
+  const newVirtualPointer = tagIndex.baseMemoryAddress + (newArrayOffset - header.tagDataOffset);
+  const out = Buffer.alloc(buffer.length + prePad + stagedArray.length + postPad, 0);
+  buffer.copy(out, 0, 0, buffer.length);
+  stagedArray.copy(out, newArrayOffset);
+  out.writeUInt32LE(newCount, refHeaderAbsOffset);
+  out.writeUInt32LE(newVirtualPointer, refHeaderAbsOffset + 4);
+  out.writeUInt32LE(0, refHeaderAbsOffset + 8);
+  const newFileSize = out.length;
+  const newTagDataSize = out.length - header.tagDataOffset;
+  out.writeUInt32LE(newFileSize, 8);
+  out.writeUInt32LE(newTagDataSize, 20);
+  const newHeader = parseCacheFileHeader(out);
+  const newTagIndex = parseTagIndex(out, newHeader);
+  return {
+    buffer: out,
+    header: newHeader,
+    tagIndex: newTagIndex,
+    oldCount,
+    newCount
+  };
+}
+function findReflexiveDescriptorByPath(fields, reflexiveFieldPath) {
+  const segments = reflexiveFieldPath.split(".");
+  let currentFields = fields;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (i === segments.length - 1) {
+      const f2 = currentFields.find((field) => field.name === seg && field.kind === "reflexive");
+      return f2 ?? null;
+    }
+    const m = seg.match(/^(.+)\[(\d+)\]$/);
+    if (!m) return null;
+    const f = currentFields.find((field) => field.name === m[1] && field.kind === "reflexive");
+    const idx = Number(m[2]);
+    const child = f?.children?.[idx];
+    if (!child) return null;
+    currentFields = child.fields;
+  }
+  return null;
+}
+function exportReflexiveBlockToTsv(fieldsResult, reflexiveFieldPath) {
+  const refField = findReflexiveDescriptorByPath(fieldsResult.fields, reflexiveFieldPath);
+  if (!refField || refField.kind !== "reflexive") {
+    throw new Error(`Reflexive block "${reflexiveFieldPath}" not found.`);
+  }
+  const children = refField.children ?? [];
+  if (children.length === 0) {
+    return { tsv: "", rowCount: 0, columnNames: [] };
+  }
+  const firstChild = children[0];
+  const exportableFields = firstChild.fields.filter(
+    (f) => f.kind !== "reflexive" && f.kind !== "unsupported" && !f.readOnly
+  );
+  const columnNames = exportableFields.map((f) => f.name);
+  const formatCell = (f) => {
+    if (f.kind === "dependency") {
+      if (!f.dependencyTarget) return "";
+      return `${f.dependencyTarget.group}:${f.dependencyTarget.path}`;
+    }
+    if (f.kind === "enum" && f.enumOptions && typeof f.value === "number") {
+      return f.enumOptions[f.value] ?? String(f.value);
+    }
+    if (Array.isArray(f.value)) {
+      return f.value.join(",");
+    }
+    if (f.value === null || f.value === void 0) return "";
+    return String(f.value).replace(/[\t\r\n]+/g, " ");
+  };
+  const lines = [columnNames.join("	")];
+  for (const elem of children) {
+    const byName = new Map(elem.fields.map((f) => [f.name, f]));
+    const rowCells = columnNames.map((col) => {
+      const f = byName.get(col);
+      return f ? formatCell(f) : "";
+    });
+    lines.push(rowCells.join("	"));
+  }
+  return {
+    tsv: lines.join("\n"),
+    rowCount: children.length,
+    columnNames
+  };
+}
+function applyTsvToReflexiveBlockInMap(buffer, tagEntryIndex, reflexiveFieldPath, tsvText) {
+  const rawLines = tsvText.replace(/\r\n/g, "\n").split("\n").filter((line) => line.trim().length > 0);
+  if (rawLines.length < 2) {
+    throw new Error("TSV input must include a header line and at least one data row.");
+  }
+  const headers = rawLines[0].split("	").map((h) => h.trim());
+  const dataRows = rawLines.slice(1).map((line) => line.split("	"));
+  let currentBuf = Buffer.from(buffer);
+  let header = parseCacheFileHeader(currentBuf);
+  let tagIndex = parseTagIndex(currentBuf, header);
+  let decoded = readTagFieldValues(currentBuf, header, tagIndex, tagEntryIndex);
+  let refField = findReflexiveDescriptorByPath(decoded.fields, reflexiveFieldPath);
+  if (!refField || refField.kind !== "reflexive") {
+    throw new Error(`Reflexive block "${reflexiveFieldPath}" not found.`);
+  }
+  const existingCount = refField.children?.length ?? 0;
+  for (let r = existingCount; r < dataRows.length; r++) {
+    const added = addReflexiveChunk(
+      currentBuf,
+      header,
+      tagIndex,
+      tagEntryIndex,
+      reflexiveFieldPath,
+      existingCount > 0 ? existingCount - 1 : -1
+    );
+    currentBuf = added.buffer;
+    header = added.header;
+    tagIndex = added.tagIndex;
+  }
+  decoded = readTagFieldValues(currentBuf, header, tagIndex, tagEntryIndex);
+  refField = findReflexiveDescriptorByPath(decoded.fields, reflexiveFieldPath);
+  const children = refField.children ?? [];
+  let updatedCells = 0;
+  for (let rowIdx = 0; rowIdx < dataRows.length && rowIdx < children.length; rowIdx++) {
+    const row2 = dataRows[rowIdx];
+    const elem = children[rowIdx];
+    const fieldByName = new Map(elem.fields.map((f) => [f.name, f]));
+    for (let colIdx = 0; colIdx < headers.length && colIdx < row2.length; colIdx++) {
+      const colName = headers[colIdx];
+      const rawCell = row2[colIdx].trim();
+      const fieldDesc = fieldByName.get(colName);
+      if (!fieldDesc || fieldDesc.readOnly || fieldDesc.kind === "reflexive" || fieldDesc.kind === "unsupported") {
+        continue;
+      }
+      const fullFieldPath = `${reflexiveFieldPath}[${rowIdx}].${colName}`;
+      let parsedVal = rawCell;
+      if (fieldDesc.kind === "number") {
+        const num = Number(rawCell);
+        if (Number.isNaN(num)) continue;
+        parsedVal = num;
+      } else if (fieldDesc.kind === "bitfield") {
+        const num = rawCell.startsWith("0x") ? parseInt(rawCell, 16) : Number(rawCell);
+        if (Number.isNaN(num)) continue;
+        parsedVal = num >>> 0;
+      } else if (fieldDesc.kind === "bounds" || fieldDesc.kind === "composite") {
+        const parts = rawCell.split(",").map((s) => Number(s.trim()));
+        if (parts.some((n) => Number.isNaN(n))) continue;
+        parsedVal = parts;
+      } else if (fieldDesc.kind === "enum") {
+        if (fieldDesc.enumOptions) {
+          const optIdx = fieldDesc.enumOptions.findIndex(
+            (o) => o.toLowerCase() === rawCell.toLowerCase()
+          );
+          if (optIdx >= 0) {
+            parsedVal = optIdx;
+          } else {
+            const num = Number(rawCell);
+            if (Number.isNaN(num)) continue;
+            parsedVal = num;
+          }
+        }
+      } else if (fieldDesc.kind === "dependency") {
+        if (!rawCell || rawCell.toLowerCase() === "null") {
+          parsedVal = NULL_TAG_ID;
+        } else {
+          const colonIdx = rawCell.indexOf(":");
+          const grp = colonIdx >= 0 ? rawCell.slice(0, colonIdx).trim().toLowerCase() : null;
+          const pth = (colonIdx >= 0 ? rawCell.slice(colonIdx + 1) : rawCell).trim();
+          const normPth = normalizeComparePath(pth);
+          const match = tagIndex.entries.find(
+            (e) => normalizeComparePath(e.path) === normPth && (!grp || (e.primaryClassName ?? "").toLowerCase() === grp)
+          );
+          if (!match) continue;
+          parsedVal = match.tagId;
+        }
+      }
+      try {
+        writeTagFieldValue(currentBuf, header, tagIndex, tagEntryIndex, fullFieldPath, parsedVal);
+        updatedCells++;
+      } catch {
+      }
+    }
+  }
+  return {
+    buffer: currentBuf,
+    header,
+    tagIndex,
+    updatedRows: Math.min(dataRows.length, children.length),
+    updatedCells
+  };
+}
+function analyzeHudMessageTextSafety(buffer, hmtTagEntryIndex) {
+  const node = inspectContentExplorerNodeInMap(buffer, hmtTagEntryIndex);
+  let hasGlobal = false;
+  let hasMission = false;
+  const referencedByPaths = [];
+  for (const parent of node.referencedBy) {
+    referencedByPaths.push(`${parent.path}.${parent.group}`);
+    if (parent.group === "hud_globals" || parent.group === "globals") {
+      hasGlobal = true;
+    } else if (parent.group === "scenario") {
+      hasMission = true;
+    }
+  }
+  if (node.path.toLowerCase().startsWith("ui\\hud\\")) {
+    hasGlobal = true;
+  }
+  const usage = hasGlobal && hasMission ? "both" : hasGlobal ? "global" : hasMission ? "mission" : "unreferenced";
+  const fixedIndexLocked = hasGlobal;
+  return {
+    hmtTagIndex: hmtTagEntryIndex,
+    hmtTagPath: node.path,
+    usage,
+    referencedByPaths,
+    fixedIndexLocked,
+    warningMessage: fixedIndexLocked ? "This HUD message tag is referenced by hud_globals. The Halo engine indexes its slots by hardcoded slot numbers \u2014 edit message text in-place or append at the end, and never delete or reorder existing slots." : void 0
+  };
+}
+function exportUnicodeStringsToCsv(list) {
+  const escapeCsv = (val) => {
+    if (val.includes('"') || val.includes(",") || val.includes("\n") || val.includes("\r")) {
+      return `"${val.replace(/"/g, '""')}"`;
+    }
+    return val;
+  };
+  const items = Array.isArray(list) ? list : list.strings;
+  const lines = ["index,text"];
+  for (const item of items) {
+    lines.push(`${item.index},${escapeCsv(item.text)}`);
+  }
+  return lines.join("\r\n");
+}
+function parseCsvRows(csvText) {
+  const rows = [];
+  let currentRow = [];
+  let currentCell = "";
+  let inQuotes = false;
+  for (let i = 0; i < csvText.length; i++) {
+    const ch = csvText[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (csvText[i + 1] === '"') {
+          currentCell += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        currentCell += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      currentRow.push(currentCell);
+      currentCell = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && csvText[i + 1] === "\n") i++;
+      currentRow.push(currentCell);
+      currentCell = "";
+      if (currentRow.some((c) => c.length > 0)) {
+        rows.push(currentRow);
+      }
+      currentRow = [];
+    } else {
+      currentCell += ch;
+    }
+  }
+  if (currentCell.length > 0 || currentRow.length > 0) {
+    currentRow.push(currentCell);
+    rows.push(currentRow);
+  }
+  return rows;
+}
+function previewUnicodeStringsCsvImport(existingInput, csvText, mode = "amend") {
+  const existingStrings = existingInput.map(
+    (item) => typeof item === "string" ? item : item.text
+  );
+  const rows = parseCsvRows(csvText);
+  if (rows.length === 0) {
+    throw new Error("CSV is empty.");
+  }
+  const startIdx = rows[0][0]?.trim().toLowerCase() === "index" || rows[0][0]?.trim().toLowerCase() === "key" ? 1 : 0;
+  const incomingByIndex = /* @__PURE__ */ new Map();
+  let maxIndex = mode === "amend" ? existingStrings.length - 1 : -1;
+  for (let r = startIdx; r < rows.length; r++) {
+    const row2 = rows[r];
+    if (row2.length < 2) continue;
+    const idx = Number(row2[0].trim());
+    const text = row2[1] ?? "";
+    if (!Number.isInteger(idx) || idx < 0) continue;
+    incomingByIndex.set(idx, text);
+    if (idx > maxIndex) maxIndex = idx;
+  }
+  const mergedStrings = [];
+  const diffs = [];
+  let addedCount = 0;
+  let modifiedCount = 0;
+  let removedCount = 0;
+  let unchangedCount = 0;
+  const totalLen = Math.max(existingStrings.length, maxIndex + 1);
+  for (let i = 0; i < totalLen; i++) {
+    const hadOld = i < existingStrings.length;
+    const oldVal = hadOld ? existingStrings[i] : "";
+    const hasNew = incomingByIndex.has(i);
+    const newVal = hasNew ? incomingByIndex.get(i) : mode === "amend" ? oldVal : "";
+    if (mode === "replace" && i > maxIndex) {
+      removedCount++;
+      diffs.push({ index: i, status: "removed", before: oldVal, after: "" });
+      continue;
+    }
+    mergedStrings.push(newVal);
+    if (!hadOld) {
+      addedCount++;
+      diffs.push({ index: i, status: "added", before: "", after: newVal });
+    } else if (oldVal !== newVal) {
+      modifiedCount++;
+      diffs.push({ index: i, status: "modified", before: oldVal, after: newVal });
+    } else {
+      unchangedCount++;
+    }
+  }
+  return {
+    mode,
+    mergedStrings,
+    addedCount,
+    modifiedCount,
+    removedCount,
+    unchangedCount,
+    diffs
+  };
+}
+
 // electron/mcc-deploy.ts
 var fs2 = __toESM(require("fs"));
 var path2 = __toESM(require("path"));
@@ -67229,15 +69224,15 @@ function sanitizeSegment(segment) {
   }
   return cleaned;
 }
-function sanitizeTagRelativePath(tagPath, group) {
+function sanitizeTagRelativePath(tagPath, group, format = "ocetags") {
   const normalized = tagPath.replace(/[\/\\]+/g, "\\").replace(/^\\+|\\+$/g, "");
   const rawSegments = normalized.split("\\").filter((s) => s.length > 0);
   const rawLeaf = rawSegments.length > 0 ? rawSegments.pop() : "tag";
   const leafSanitized = sanitizeSegment(rawLeaf);
   const groupSanitized = sanitizeSegment(group || "tag");
-  const fileName = `${leafSanitized}.${groupSanitized}.ocetags`;
+  const fileName = format === "blam" ? `${leafSanitized}.${groupSanitized}` : `${leafSanitized}.${groupSanitized}.ocetags`;
   const dirSegments = rawSegments.map(sanitizeSegment);
-  const relativeDir = dirSegments.join(path3.sep);
+  const relativeDir = format === "blam" ? path3.join("tags", ...dirSegments) : dirSegments.join(path3.sep);
   const fullRelativePath = relativeDir ? path3.join(relativeDir, fileName) : fileName;
   return { relativeDir, fileName, fullRelativePath };
 }
@@ -67349,6 +69344,8 @@ function __setMapFsForTest(ops) {
   mapFs = ops ? { ...realMapFs, ...ops } : realMapFs;
 }
 var currentMap = null;
+var activeSessionId = null;
+var loadedMapSessions = /* @__PURE__ */ new Map();
 var currentInject = null;
 var modelGeometryCache = /* @__PURE__ */ new Map();
 var cancelledRequests = /* @__PURE__ */ new Set();
@@ -67373,6 +69370,52 @@ function openResourceReadOnly(file) {
       }
     },
     close: () => fs4.closeSync(fd)
+  };
+}
+var MCC_MAPS_CANDIDATES = [
+  "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps",
+  "C:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps",
+  "D:\\SteamLibrary\\steamapps\\common\\Halo The Master Chief Collection\\halo1\\maps"
+];
+var SOUNDS_FALLBACK_CANDIDATES = [
+  "C:\\Users\\LeviB\\Projects\\OpenCE-Mantle\\sample_maps\\PC\\sounds.map",
+  "C:\\Users\\LeviB\\Projects\\OpenCE-Mantle\\sample_maps\\custom edition\\sounds.map",
+  "C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\sounds.map",
+  "C:\\Program Files (x86)\\Microsoft Games\\Halo\\maps\\sounds.map",
+  "D:\\custom_maps\\sounds.map"
+];
+function resolveMapResourcePaths(mapFilePath, mapEngine, configured) {
+  const mapDir = mapFilePath ? path4.dirname(mapFilePath) : "";
+  const isMcc = mapEngine === 13 /* MCC_CEA */;
+  const resolveOne = (kind, cfgPath) => {
+    const filename = `${kind}.map`;
+    const localSibling = mapDir ? path4.join(mapDir, filename) : "";
+    if (isMcc && kind === "bitmaps") {
+      if (cfgPath && fs4.existsSync(cfgPath)) {
+        const lower = cfgPath.toLowerCase();
+        const sameDir = mapDir && path4.dirname(path4.resolve(cfgPath)).toLowerCase() === path4.resolve(mapDir).toLowerCase();
+        if (sameDir || lower.includes("master chief collection") || lower.includes("halo1")) {
+          return cfgPath;
+        }
+      }
+      if (localSibling && fs4.existsSync(localSibling)) return localSibling;
+      for (const mccDir of MCC_MAPS_CANDIDATES) {
+        const candidate = path4.join(mccDir, filename);
+        if (fs4.existsSync(candidate)) return candidate;
+      }
+    }
+    if (cfgPath && fs4.existsSync(cfgPath)) return cfgPath;
+    if (localSibling && fs4.existsSync(localSibling)) return localSibling;
+    if (isMcc && kind === "sounds") {
+      for (const sndCandidate of SOUNDS_FALLBACK_CANDIDATES) {
+        if (fs4.existsSync(sndCandidate)) return sndCandidate;
+      }
+    }
+    return cfgPath;
+  };
+  return {
+    bitmaps: resolveOne("bitmaps", configured?.bitmaps),
+    sounds: resolveOne("sounds", configured?.sounds)
   };
 }
 function openConversionResources(paths) {
@@ -67486,11 +69529,15 @@ function summarizeOpenMap(map) {
 }
 function reparse(filePath, buffer, modified, diskStat) {
   modelGeometryCache.clear();
-  const inspected = inspectCustomEditionMap(buffer);
+  const decompressed = ensureXboxMapDecompressed(buffer);
+  const inspected = inspectCustomEditionMap(decompressed);
   if (inspected.status !== "ok") throw new Error(`The result could not be read back as a Custom Edition map (${inspected.status}).`);
-  return { filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified, diskStat };
+  return { filePath, buffer: decompressed, header: inspected.header, tagIndex: inspected.tagIndex, modified, diskStat };
 }
 async function runInspect(task) {
+  if (activeSessionId && currentMap) {
+    loadedMapSessions.set(activeSessionId, currentMap);
+  }
   progress(task.requestId, "Reading file", 10);
   const buffer = ensureXboxMapDecompressed(fs4.readFileSync(task.filePath));
   const diskStat = diskStatOf(task.filePath);
@@ -67513,6 +69560,9 @@ async function runInspect(task) {
   let payload;
   if (inspected.status === "ok") {
     currentMap = { filePath: task.filePath, buffer, header: inspected.header, tagIndex: inspected.tagIndex, modified: false, diskStat };
+    const sid = task.sessionId ?? task.filePath;
+    activeSessionId = sid;
+    loadedMapSessions.set(sid, currentMap);
     payload = summarizeOpenMap(currentMap);
   } else if (inspected.status === "compressed") {
     currentMap = null;
@@ -67523,6 +69573,39 @@ async function runInspect(task) {
   }
   progress(task.requestId, "Done", 100);
   sendResult(task.requestId, payload);
+}
+function runActivateMapSession(task) {
+  if (activeSessionId && currentMap) {
+    loadedMapSessions.set(activeSessionId, currentMap);
+  }
+  const target = loadedMapSessions.get(task.sessionId) ?? null;
+  if (!target) {
+    return sendResult(task.requestId, { ok: false, message: `Map session "${task.sessionId}" not found in worker.` });
+  }
+  activeSessionId = task.sessionId;
+  currentMap = target;
+  currentInject = null;
+  modelGeometryCache.clear();
+  sendResult(task.requestId, { ok: true, map: summarizeOpenMap(target) });
+}
+function runCloseMapSession(task) {
+  if (activeSessionId && currentMap && activeSessionId !== task.sessionId) {
+    loadedMapSessions.set(activeSessionId, currentMap);
+  }
+  loadedMapSessions.delete(task.sessionId);
+  if (activeSessionId === task.sessionId) {
+    const remainingKeys = Array.from(loadedMapSessions.keys());
+    const nextSid = remainingKeys.length > 0 ? remainingKeys[remainingKeys.length - 1] : null;
+    activeSessionId = nextSid;
+    currentMap = nextSid ? loadedMapSessions.get(nextSid) ?? null : null;
+    currentInject = null;
+    modelGeometryCache.clear();
+  }
+  sendResult(task.requestId, {
+    ok: true,
+    activeSessionId,
+    map: currentMap ? summarizeOpenMap(currentMap) : null
+  });
 }
 async function runCompression(task) {
   progress(task.requestId, "Reading file", 10);
@@ -67584,11 +69667,98 @@ function runExtractTags(task) {
   const cancelCtl = makeCancelController(task.requestId);
   const tempPath = `${task.outputPath}.tmp-${(0, import_crypto3.randomUUID)()}`;
   const pendingTemps = [];
-  const resources = openConversionResources({
-    bitmaps: task.resourceMapPaths?.bitmaps,
-    sounds: task.resourceMapPaths?.sounds
-  });
+  const resources = openConversionResources(
+    resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+      bitmaps: task.resourceMapPaths?.bitmaps,
+      sounds: task.resourceMapPaths?.sounds
+    })
+  );
   try {
+    const isOceTagsTarget = task.format === "ocetags" || !task.format && task.outputPath.toLowerCase().endsWith(".ocetags");
+    if (!isOceTagsTarget && task.format === "blam") {
+      progress(task.requestId, "Extracting standard Blam loose tags", 15);
+      const blamRes = extractTagsToBlamFilesFromMap(
+        currentMap.buffer,
+        task.originalIndices,
+        {
+          includeDependencies: true,
+          prefixTagsDir: false,
+          captureGbxmodelRawData: task.captureGbxmodelRawData ?? true,
+          resourceFiles: resources.files
+        }
+      );
+      if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
+      const writtenFiles2 = [];
+      let totalBytes2 = 0;
+      const isDirTarget = fs4.existsSync(task.outputPath) && fs4.statSync(task.outputPath).isDirectory() || task.originalIndices.length > 1 || !path4.extname(task.outputPath);
+      if (isDirTarget) {
+        const baseNameLower = path4.basename(task.outputPath).toLowerCase();
+        const tagsRoot = baseNameLower === "tags" ? task.outputPath : path4.join(task.outputPath, "tags");
+        for (let i = 0; i < blamRes.tagFiles.length; i++) {
+          if (cancelledRequests.has(task.requestId)) throw new OperationCancelledError();
+          const tf = blamRes.tagFiles[i];
+          const destFile = path4.join(tagsRoot, ...tf.relativePath.split(/[\\/]+/));
+          fs4.mkdirSync(path4.dirname(destFile), { recursive: true });
+          const tmp = `${destFile}.tmp-${(0, import_crypto3.randomUUID)()}`;
+          pendingTemps.push(tmp);
+          fs4.writeFileSync(tmp, tf.bytes);
+          fs4.renameSync(tmp, destFile);
+          pendingTemps.pop();
+          writtenFiles2.push(destFile);
+          totalBytes2 += tf.bytes.length;
+        }
+        progress(task.requestId, "Done", 100);
+        sendResult(task.requestId, {
+          ok: true,
+          outputPath: tagsRoot,
+          tagCount: blamRes.tagFiles.length,
+          fileSizeBytes: totalBytes2,
+          carriedOverWarnings: blamRes.container.warnings.map(toWarningInfo),
+          outputFiles: writtenFiles2,
+          format: "blam"
+        });
+        return;
+      }
+      const rootOrigIdx = task.originalIndices[0];
+      const rootEntry = currentMap.tagIndex.entries[rootOrigIdx];
+      const rootFile = blamRes.tagFiles.find(
+        (tf) => rootEntry && tf.group === rootEntry.primaryClassName && tf.tagPath.toLowerCase() === rootEntry.path.toLowerCase()
+      ) ?? blamRes.tagFiles[0];
+      if (rootFile) {
+        fs4.mkdirSync(path4.dirname(task.outputPath), { recursive: true });
+        fs4.writeFileSync(tempPath, rootFile.bytes);
+        fs4.renameSync(tempPath, task.outputPath);
+        writtenFiles2.push(task.outputPath);
+        totalBytes2 += rootFile.bytes.length;
+      }
+      const outLower = task.outputPath.toLowerCase();
+      const tagsMarker = `${path4.sep}tags${path4.sep}`;
+      const tagsIdx = outLower.lastIndexOf(tagsMarker);
+      const tagsRootDir = tagsIdx >= 0 ? task.outputPath.slice(0, tagsIdx + 5) : path4.join(path4.dirname(task.outputPath), "tags");
+      for (const tf of blamRes.tagFiles) {
+        if (tf === rootFile) continue;
+        const depDest = path4.join(tagsRootDir, ...tf.relativePath.split(/[\\/]+/));
+        fs4.mkdirSync(path4.dirname(depDest), { recursive: true });
+        const tmp = `${depDest}.tmp-${(0, import_crypto3.randomUUID)()}`;
+        pendingTemps.push(tmp);
+        fs4.writeFileSync(tmp, tf.bytes);
+        fs4.renameSync(tmp, depDest);
+        pendingTemps.pop();
+        writtenFiles2.push(depDest);
+        totalBytes2 += tf.bytes.length;
+      }
+      progress(task.requestId, "Done", 100);
+      sendResult(task.requestId, {
+        ok: true,
+        outputPath: task.outputPath,
+        tagCount: blamRes.tagFiles.length,
+        fileSizeBytes: totalBytes2,
+        carriedOverWarnings: blamRes.container.warnings.map(toWarningInfo),
+        outputFiles: writtenFiles2,
+        format: "blam"
+      });
+      return;
+    }
     if (task.originalIndices.length === 1) {
       progress(task.requestId, "Walking dependencies", 5);
       const set = extractTagSet(currentMap.buffer, currentMap.header, currentMap.tagIndex, task.originalIndices, {
@@ -67692,10 +69862,12 @@ function runBatchExtract(task) {
   let skippedCount = 0;
   let failedCount = 0;
   let totalBytesWritten = 0;
-  const batchResources = openConversionResources({
-    bitmaps: task.resourceMapPaths?.bitmaps,
-    sounds: task.resourceMapPaths?.sounds
-  });
+  const batchResources = openConversionResources(
+    resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+      bitmaps: task.resourceMapPaths?.bitmaps,
+      sounds: task.resourceMapPaths?.sounds
+    })
+  );
   try {
     fs4.mkdirSync(targetDir, { recursive: true });
     fs4.mkdirSync(stagingDir, { recursive: true });
@@ -67758,7 +69930,11 @@ function runBatchExtract(task) {
         });
         continue;
       }
-      const { fullRelativePath } = sanitizeTagRelativePath(entry.path, group);
+      const { fullRelativePath } = sanitizeTagRelativePath(
+        entry.path,
+        group,
+        task.extractFormat === "blam" ? "blam" : "ocetags"
+      );
       const finalDest = path4.join(targetDir, fullRelativePath);
       candidates.push({
         index: entry.index,
@@ -67886,6 +70062,37 @@ function runBatchExtract(task) {
         });
         if (cancelledRequests.has(task.requestId)) {
           throw new OperationCancelledError();
+        }
+        if (task.extractFormat === "blam") {
+          const containerBuf = serializeContainer(set, task.sourceMapName, resourceMapIdentities);
+          const container = deserializeContainer(containerBuf);
+          hydrateExternalRawDataInContainer(container, batchResources.files);
+          const rootTag = container.tags.find(
+            (t) => t.path.replace(/\//g, "\\").toLowerCase() === candidate.entry.path.replace(/\//g, "\\").toLowerCase() && t.group === candidate.group
+          ) ?? container.tags[0];
+          const blamBuf = serializeContainerTagToHekLooseBuffer(rootTag);
+          const stagedDest2 = path4.join(stagingDir, candidate.fullRelativePath);
+          fs4.mkdirSync(path4.dirname(stagedDest2), { recursive: true });
+          fs4.writeFileSync(stagedDest2, blamBuf);
+          extractedCount++;
+          totalBytesWritten += blamBuf.length;
+          manifestFiles.push({
+            path: candidate.entry.path,
+            group: candidate.group,
+            relativePath: candidate.fullRelativePath,
+            sizeBytes: blamBuf.length,
+            tagCount: 1
+          });
+          reports.push({
+            path: candidate.entry.path,
+            group: candidate.group,
+            status: "extracted",
+            outputPath: candidate.finalDest,
+            sizeBytes: blamBuf.length,
+            tagCount: 1,
+            warnings: set.warnings.map(toWarningInfo)
+          });
+          continue;
         }
         const buf = serializeContainer(set, task.sourceMapName, resourceMapIdentities);
         const stagedDest = path4.join(stagingDir, candidate.fullRelativePath);
@@ -68022,9 +70229,22 @@ function summarizePlan(containerPath, container, plan) {
 function runPlanInject(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open to inject into.");
   try {
-    progress(task.requestId, "Reading container file", 10);
-    const containerBuffer = fs4.readFileSync(task.containerPath);
-    const container = deserializeContainer(containerBuffer);
+    progress(task.requestId, "Reading tag or container file", 10);
+    let container;
+    const isDir = fs4.existsSync(task.containerPath) && fs4.statSync(task.containerPath).isDirectory();
+    if (isDir) {
+      const legacyRes = buildContainerFromLegacyTags([task.containerPath]);
+      container = legacyRes.container;
+    } else {
+      const containerBuffer = fs4.readFileSync(task.containerPath);
+      const isOcetags = task.containerPath.toLowerCase().endsWith(".ocetags") || containerBuffer.length >= 4 && containerBuffer.readUInt32LE(0) === 1413825359;
+      if (isOcetags) {
+        container = deserializeContainer(containerBuffer);
+      } else {
+        const legacyRes = buildContainerFromLegacyTags([task.containerPath]);
+        container = legacyRes.container;
+      }
+    }
     if (currentMap.header.engine === 609) {
       const compactedBuf = reclaimOrphanedScriptSyntaxBlocks(currentMap.buffer);
       if (compactedBuf.length < currentMap.buffer.length) {
@@ -68239,10 +70459,14 @@ function runStageTagTestMap(task) {
           }
         }
       }
-      const resources = openConversionResources({ bitmaps: bitmapsPath, sounds: soundsPath });
+      const resolvedResources = resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+        bitmaps: bitmapsPath,
+        sounds: soundsPath
+      });
+      const resources = openConversionResources(resolvedResources);
       try {
         const layout = classifyMapLayout(bufferCopy);
-        const convert = layout.kind === "demo" ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+        const convert = layout.kind === "demo" || layout.kind === "mcc" ? convertDemoToCustomEdition : convertRetailToCustomEdition;
         const converted = convert(bufferCopy, {
           acknowledgeScripts: true,
           repairs: {
@@ -68272,6 +70496,15 @@ function runStageTagTestMap(task) {
       repairTruncatedBitmapMipmaps(bufferCopy, currentMap.header, currentMap.tagIndex);
       repairCorruptedModelPartStrips(bufferCopy, currentMap.header, currentMap.tagIndex);
     }
+    let liveHudSetup;
+    if (task.liveHudMode) {
+      try {
+        const stagedHeader = parseCacheFileHeader(bufferCopy);
+        const stagedTagIndex = parseTagIndex(bufferCopy, stagedHeader);
+        liveHudSetup = prepareMapBufferForLiveHudSession(bufferCopy, stagedHeader, stagedTagIndex);
+      } catch {
+      }
+    }
     progress(task.requestId, "Writing staged map", 60);
     const finalized = writeFinalizedMap2(bufferCopy, target, "Staging for OpenCE Tag Test");
     progress(task.requestId, "Done", 100);
@@ -68280,7 +70513,8 @@ function runStageTagTestMap(task) {
       targetPath: target,
       crc32: finalized.crc32,
       scenarioName: finalized.scenarioName,
-      mapType: currentMap.header.mapType
+      mapType: currentMap.header.mapType,
+      liveHudSetup
     });
   } catch (err) {
     sendWriteError(task.requestId, err);
@@ -68288,31 +70522,45 @@ function runStageTagTestMap(task) {
 }
 var samePath = (a, b) => path4.resolve(a).toLowerCase() === path4.resolve(b).toLowerCase();
 function runConvertPreflight(task) {
-  const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
+  let resources = null;
   try {
     progress(task.requestId, "Reading file", 10);
     const buffer = fs4.readFileSync(task.filePath);
+    const layout = classifyMapLayout(buffer);
+    resources = openConversionResources(
+      resolveMapResourcePaths(task.filePath, layout.kind === "mcc" ? 13 /* MCC_CEA */ : void 0, {
+        bitmaps: task.bitmapsPath,
+        sounds: task.soundsPath
+      })
+    );
     progress(task.requestId, "Checking the map", 40);
-    const report = classifyMapLayout(buffer).kind === "demo" ? preflightDemoConversion(buffer, resources.files) : preflightRetailConversion(buffer, resources.files);
+    const report = layout.kind === "demo" || layout.kind === "mcc" ? preflightDemoConversion(buffer, resources.files) : preflightRetailConversion(buffer, resources.files);
     progress(task.requestId, "Done", 100);
     sendResult(task.requestId, { ok: true, sourceFileName: path4.basename(task.filePath), report });
   } catch (err) {
     handleTaskError(task.requestId, err);
   } finally {
-    resources.close();
+    resources?.close();
   }
 }
 function runConvertMap(task) {
   if (samePath(task.sourcePath, task.outputPath)) return sendError(task.requestId, "REFUSED_SOURCE_PATH", "The converted map cannot overwrite the map it was converted from. Choose a different file name or folder.");
   if (isOpenMapPath(task.outputPath)) return sendError(task.requestId, "REFUSED_OPEN_MAP", "The converted map cannot overwrite the map that is open in the app. Choose a different file name.");
   if (isBackupFilePath(task.outputPath)) return sendError(task.requestId, "REFUSED_BACKUP_FILE", "The converted map cannot be written as a .bak file. Choose a .map file name.");
-  const resources = openConversionResources({ bitmaps: task.bitmapsPath, sounds: task.soundsPath });
+  let resources = null;
   try {
     progress(task.requestId, "Reading file", 10);
     const source = fs4.readFileSync(task.sourcePath);
+    const layout = classifyMapLayout(source);
+    resources = openConversionResources(
+      resolveMapResourcePaths(task.sourcePath, layout.kind === "mcc" ? 13 /* MCC_CEA */ : void 0, {
+        bitmaps: task.bitmapsPath,
+        sounds: task.soundsPath
+      })
+    );
     progress(task.requestId, "Converting the header", 40);
     let copyPercent = -1;
-    const convert = classifyMapLayout(source).kind === "demo" ? convertDemoToCustomEdition : convertRetailToCustomEdition;
+    const convert = layout.kind === "demo" || layout.kind === "mcc" ? convertDemoToCustomEdition : convertRetailToCustomEdition;
     const converted = convert(source, {
       acknowledgeScripts: task.acknowledgeScripts,
       repairs: task.repairs ?? {},
@@ -68346,7 +70594,7 @@ function runConvertMap(task) {
     if (err instanceof ConversionRefusedError) return sendError(task.requestId, err.code, err.message);
     sendWriteError(task.requestId, err);
   } finally {
-    resources.close();
+    resources?.close();
   }
 }
 function runApplyInject(task) {
@@ -68482,6 +70730,7 @@ function runSetDependencySlot(task) {
 var cachedBitmapsMap = null;
 function getBitmapsBuffer(bitmapsPath) {
   const isCeMap = currentMap?.header?.engine === 609;
+  const isMccMap = currentMap?.header?.engine === 13 /* MCC_CEA */;
   const isCompatibleBitmaps = (p) => {
     try {
       if (!fs4.existsSync(p)) return false;
@@ -68492,12 +70741,14 @@ function getBitmapsBuffer(bitmapsPath) {
       return false;
     }
   };
-  let resolved = bitmapsPath && isCompatibleBitmaps(bitmapsPath) ? bitmapsPath : void 0;
+  const preResolved = resolveMapResourcePaths(currentMap?.filePath, currentMap?.header?.engine, { bitmaps: bitmapsPath }).bitmaps;
+  let resolved = preResolved && isCompatibleBitmaps(preResolved) ? preResolved : void 0;
   if (!resolved && currentMap?.filePath) {
     const mapDir = path4.dirname(currentMap.filePath);
     const parentDir = path4.dirname(mapDir);
     const candidates = [
       path4.join(mapDir, "bitmaps.map"),
+      ...isMccMap ? MCC_MAPS_CANDIDATES.map((d) => path4.join(d, "bitmaps.map")) : [],
       path4.join(mapDir, "custom edition", "bitmaps.map"),
       path4.join(parentDir, "custom edition", "bitmaps.map"),
       path4.join(parentDir, "bitmaps.map"),
@@ -68580,8 +70831,10 @@ function runGetBitmapTexture(task) {
   if (!currentMap) return sendError(task.requestId, "NO_MAP_LOADED", "No map is open.");
   try {
     let tagId = task.bitmapTagId;
+    let shaderMeta;
     const entry = currentMap.tagIndex.entries.find((e) => e.tagId === tagId);
     if (entry && entry.primaryClassFourCC !== BITM_FOURCC) {
+      shaderMeta = resolveShaderRenderMetadata(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId);
       const resolvedId = resolveShaderBaseBitmapTagId(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId);
       if (resolvedId !== null) {
         tagId = resolvedId;
@@ -68591,6 +70844,12 @@ function runGetBitmapTexture(task) {
     }
     const externalBitmaps = getBitmapsBuffer(task.bitmapsPath);
     const texture = decodeBitmapTagImage(currentMap.buffer, currentMap.header, currentMap.tagIndex, tagId, task.imageIndex ?? 0, externalBitmaps);
+    if (shaderMeta) {
+      if (shaderMeta.shaderClass === "decal") {
+        applyDecalBlendToRgba(texture.rgbaData, texture.width, texture.height, shaderMeta);
+      }
+      texture.shaderMeta = shaderMeta;
+    }
     sendResult(task.requestId, { ok: true, texture });
   } catch (err) {
     sendError(task.requestId, "BITMAP_TEXTURE_ERROR", err instanceof Error ? err.message : String(err));
@@ -69238,10 +71497,12 @@ function runBuildCustomObjectTag(task) {
   if (needsInject && !currentMap) {
     return sendError(task.requestId, "NO_MAP_LOADED", "No map is open to inject into.");
   }
-  const resources = openConversionResources({
-    bitmaps: task.resourceMapPaths?.bitmaps,
-    sounds: task.resourceMapPaths?.sounds
-  });
+  const resources = openConversionResources(
+    resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+      bitmaps: task.resourceMapPaths?.bitmaps,
+      sounds: task.resourceMapPaths?.sounds
+    })
+  );
   try {
     progress(task.requestId, "Reading 3D mesh (.obj / .jms / .dae)...", 10);
     const readMeshAsObj = (filePath) => {
@@ -70162,6 +72423,7 @@ function runScaleCoupledPhysics(task) {
       task.objectTagId,
       task.scaleFactor
     );
+    modelGeometryCache.clear();
     currentMap.modified = true;
     sendResult(task.requestId, {
       ok: true,
@@ -70211,7 +72473,8 @@ function runApplyLiveHudEdit(task) {
       ok: true,
       effectiveHudTagIndex: res.effectiveHudTagIndex,
       catalog,
-      map: summarizeOpenMap(currentMap)
+      map: summarizeOpenMap(currentMap),
+      memoryPatches: res.memoryPatches
     });
   } catch (err) {
     sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
@@ -70232,7 +72495,8 @@ function runApplyLiveWeaponStatEdit(task) {
     sendResult(task.requestId, {
       ok: true,
       writtenValue: res.writtenValue,
-      map: summarizeOpenMap(currentMap)
+      map: summarizeOpenMap(currentMap),
+      memoryPatches: res.memoryPatches
     });
   } catch (err) {
     sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
@@ -70350,6 +72614,213 @@ function runSaveUnicodeStringTable(task) {
     sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
   }
 }
+function runInspectContentExplorer(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const raw = inspectContentExplorerNodeInMap(currentMap.buffer, task.tagIndex);
+    const result = {
+      ...raw,
+      tagPath: raw.path,
+      tagGroup: raw.group,
+      referencedByParents: raw.referencedBy.map((p) => ({
+        tagIndex: p.tagIndex ?? 0,
+        tagPath: p.path,
+        tagGroup: p.group,
+        fieldPath: p.fieldPath
+      })),
+      referencesChildren: raw.references.map((c) => ({
+        fieldPath: c.fieldPath,
+        targetTagIndex: c.tagIndex,
+        targetPath: c.path,
+        targetGroup: c.group,
+        isBroken: c.isBroken
+      }))
+    };
+    sendResult(task.requestId, { ok: true, result });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runAutoFixTagDependencies(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const rawReport = fixBrokenTagDependenciesInMap(currentMap.buffer, task.tagIndices?.[0]);
+    if (rawReport.fixed.length > 0) {
+      currentMap.modified = true;
+    }
+    const report = {
+      ...rawReport,
+      fixedCount: rawReport.fixed.length,
+      ambiguousCount: rawReport.ambiguous.length,
+      unresolvedCount: rawReport.notFound.length
+    };
+    sendResult(task.requestId, {
+      ok: true,
+      report,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runRefactorMoveFolderInMap(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = refactorRenameOrMoveFolderInMap(currentMap.buffer, task.oldPrefix, task.newPrefix);
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    sendResult(task.requestId, {
+      ok: true,
+      report: {
+        renamedCount: res.renamedTags.length,
+        renamedTags: res.renamedTags,
+        movedTags: res.renamedTags
+      },
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runReorganizeReflexiveBlock(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const plan = task.request.desiredOrder.map((d) => ({
+      sourceIndex: d.sourceIndex,
+      newName: d.renameTo
+    }));
+    const res = reorganizeReflexiveBlockInMap(
+      currentMap.buffer,
+      task.request.tagIndex,
+      task.request.reflexivePath,
+      plan
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    currentMap.modified = true;
+    const fields = readTagFieldValues(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.request.tagIndex
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      newCount: res.newCount,
+      fields,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runExportReflexiveTsv(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const fields = readTagFieldValues(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.tagIndex
+    );
+    const res = exportReflexiveBlockToTsv(fields, task.reflexivePath);
+    sendResult(task.requestId, { ok: true, tsvText: res.tsv, ...res });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runImportReflexiveTsv(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const res = applyTsvToReflexiveBlockInMap(
+      currentMap.buffer,
+      task.tagIndex,
+      task.reflexivePath,
+      task.tsvText
+    );
+    currentMap.buffer = res.buffer;
+    currentMap.header = res.header;
+    currentMap.tagIndex = res.tagIndex;
+    if (res.updatedCells > 0) {
+      currentMap.modified = true;
+    }
+    const fields = readTagFieldValues(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.tagIndex
+    );
+    sendResult(task.requestId, {
+      ok: true,
+      updatedRows: res.updatedRows,
+      updatedCells: res.updatedCells,
+      fields,
+      map: summarizeOpenMap(currentMap)
+    });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runAnalyzeHudMessageSafety(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const report = analyzeHudMessageTextSafety(currentMap.buffer, task.tagIndex);
+    sendResult(task.requestId, { ok: true, report });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runExportStringsCsv(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const strList = readUnicodeStringList(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.ustrTagIndex
+    );
+    const csvText = exportUnicodeStringsToCsv(strList.strings);
+    sendResult(task.requestId, { ok: true, csvText, rowCount: strList.strings.length });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+function runPreviewStringsCsvImport(task) {
+  if (!currentMap) {
+    return sendResult(task.requestId, { ok: false, message: "No map is currently open." });
+  }
+  try {
+    const strList = readUnicodeStringList(
+      currentMap.buffer,
+      currentMap.header,
+      currentMap.tagIndex,
+      task.ustrTagIndex
+    );
+    const preview = previewUnicodeStringsCsvImport(strList.strings, task.csvText, task.mode);
+    sendResult(task.requestId, { ok: true, preview });
+  } catch (err) {
+    sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
 import_worker_threads.parentPort?.on("message", async (task) => {
   try {
     if (task.type === "cancel") {
@@ -70357,6 +72828,8 @@ import_worker_threads.parentPort?.on("message", async (task) => {
       return;
     }
     if (task.type === "inspect") await runInspect(task);
+    else if (task.type === "activateMapSession") runActivateMapSession(task);
+    else if (task.type === "closeMapSession") runCloseMapSession(task);
     else if (task.type === "compress" || task.type === "decompress") await runCompression(task);
     else if (task.type === "getDependencies") runGetDependencies(task);
     else if (task.type === "extractTags") runExtractTags(task);
@@ -70439,6 +72912,18 @@ import_worker_threads.parentPort?.on("message", async (task) => {
     else if (task.type === "inspectUiWidgetCanvas") runInspectUiWidgetCanvas(task);
     else if (task.type === "updateUiWidgetPlacement") runUpdateUiWidgetPlacement(task);
     else if (task.type === "saveUnicodeStringTable") runSaveUnicodeStringTable(task);
+    else if (task.type === "inspectContentExplorer") runInspectContentExplorer(task);
+    else if (task.type === "autoFixTagDependencies") runAutoFixTagDependencies(task);
+    else if (task.type === "refactorMoveFolderInMap") runRefactorMoveFolderInMap(task);
+    else if (task.type === "reorganizeReflexiveBlock") runReorganizeReflexiveBlock(task);
+    else if (task.type === "exportReflexiveTsv") runExportReflexiveTsv(task);
+    else if (task.type === "importReflexiveTsv") runImportReflexiveTsv(task);
+    else if (task.type === "analyzeHudMessageSafety") runAnalyzeHudMessageSafety(task);
+    else if (task.type === "exportStringsCsv") runExportStringsCsv(task);
+    else if (task.type === "previewStringsCsvImport") runPreviewStringsCsvImport(task);
+    if (activeSessionId && currentMap) {
+      loadedMapSessions.set(activeSessionId, currentMap);
+    }
   } catch (err) {
     handleTaskError(task.requestId, err);
   }
@@ -70458,12 +72943,14 @@ try {
   __setMapFsForTest,
   __setSinkForTest,
   describeMapWriteError,
+  runActivateMapSession,
   runAddReflexiveChunk,
   runAddScenarioPlacement,
   runApplyInject,
   runBatchExtract,
   runBspSwapPreflight,
   runBuildCustomObjectTag,
+  runCloseMapSession,
   runCompareMaps,
   runConvertMap,
   runConvertPreflight,

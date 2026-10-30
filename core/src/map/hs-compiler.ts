@@ -1336,7 +1336,7 @@ export function buildRecordedFlightStreamFromWaypoints(
     const isFinalWp = curWp === waypoints.length - 1;
     const prevWp = waypoints[curWp - 1]!;
     const target = waypoints[curWp]!;
-    const targetZ = isFinalWp && !isExit ? target.z - 0.8 : target.z;
+    const targetZ = target.z;
     const prevZ = prevWp.z;
 
     const dx = target.x - veh.pos[0];

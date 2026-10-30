@@ -20,15 +20,6 @@ function formatSize(n: number): string {
 
 type WarningGroupId = 'uncaptured' | 'embedded' | 'invalidLayout' | 'external' | 'uncertain' | 'unresolved' | 'other';
 
-/**
- * Display order + severity. Severity mirrors what core actually does with each kind (see
- * `tag-injector.ts`): uncapturedData and extractionFailed block ADD/SWAP unconditionally,
- * embeddedRawData blocks ADD/SWAP while embedded relocation is disabled, invalidReflexive stops
- * the walker AND blocks ADD/SWAP unconditionally (the extractor leaves that reflexive's pointer
- * unrelocated and records a per-tag blocker in the container). uncertainGroup blocks ADD/SWAP
- * unconditionally, and a noDefinition tag fails extraction for that tag alone (extractionFailed),
- * so the shared "uncertain" group is blocking too.
- */
 const WARNING_GROUPS: { id: WarningGroupId; title: string; severity: 'blocking' | 'info' }[] = [
   { id: 'uncaptured', title: 'Cannot be captured / blocked for injection', severity: 'blocking' },
   { id: 'embedded', title: 'Embedded data (captured and relocated for injection)', severity: 'info' },
@@ -39,7 +30,6 @@ const WARNING_GROUPS: { id: WarningGroupId; title: string; severity: 'blocking' 
   { id: 'other', title: 'Other warnings', severity: 'info' },
 ];
 
-/** Exhaustive over core's WARNING_KINDS - a new kind in core fails `yarn typecheck` until it's mapped here. */
 const GROUP_BY_KIND: Record<DependencyWarningKind, WarningGroupId> = {
   uncapturedData: 'uncaptured',
   extractionFailed: 'uncaptured',
@@ -52,7 +42,6 @@ const GROUP_BY_KIND: Record<DependencyWarningKind, WarningGroupId> = {
   bspTag: 'unresolved',
 };
 
-/** Unknown kinds (e.g. from a mismatched worker build) land in "Other warnings" rather than vanishing. */
 function warningGroupOf(kind: string): WarningGroupId {
   return (GROUP_BY_KIND as Record<string, WarningGroupId>)[kind] ?? 'other';
 }
@@ -64,16 +53,12 @@ function suggestedFileName(summary: DependencyWalkSummary, selectedIndices: numb
   return selectedIndices.length > 1 ? `${base}_and_${selectedIndices.length - 1}_more` : base;
 }
 
-/**
- * M4 dependency + extraction dialog. Two-step flow: (1) read-only `getDependencies` walk shown
- * here with grouped warnings, (2) on confirm, `extractTags` re-walks in main and shows the
- * native Save As dialog - this component never picks a path itself.
- */
 export default function DependencyDialog({ selectedIndices, onClose, log }: Props) {
   const [phase, setPhase] = useState<Phase>('loading');
   const [summary, setSummary] = useState<DependencyWalkSummary | null>(null);
   const [depsError, setDepsError] = useState('');
   const [understand, setUnderstand] = useState(false);
+  const [extractFormat, setExtractFormat] = useState<'blam' | 'ocetags'>('blam');
   const [search, setSearch] = useState('');
   const [progress, setProgress] = useState<{ stage: string; percent: number } | null>(null);
   const [result, setResult] = useState<ExtractTagsResult | null>(null);
@@ -137,7 +122,11 @@ export default function DependencyDialog({ selectedIndices, onClose, log }: Prop
     setPhase('extracting');
     setProgress({ stage: 'Starting', percent: 0 });
     const fileName = suggestedFileName(summary, selectedIndices);
-    const res = await window.opence.extractTags({ originalIndices: selectedIndices, suggestedFileName: fileName });
+    const res = await window.opence.extractTags({
+      originalIndices: selectedIndices,
+      suggestedFileName: fileName,
+      format: extractFormat,
+    });
     if (res.ok) {
       setResult(res);
       setPhase('result');
@@ -301,6 +290,31 @@ export default function DependencyDialog({ selectedIndices, onClose, log }: Prop
         </div>
 
         <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 10, fontSize: 12, color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
+            <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Output Format:</span>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input
+                type="radio"
+                name="extractTagFormat"
+                data-testid="dependency-format-blam"
+                checked={extractFormat === 'blam'}
+                onChange={() => setExtractFormat('blam')}
+              />
+              <span>
+                <strong>Standard Blam Loose Tags (tags\&lt;path&gt;.&lt;group&gt; — Default)</strong> — 64-byte &apos;blam&apos; header (Sapien / Guerilla / tool.exe / Invader / Baboon)
+              </span>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input
+                type="radio"
+                name="extractTagFormat"
+                data-testid="dependency-format-ocetags"
+                checked={extractFormat === 'ocetags'}
+                onChange={() => setExtractFormat('ocetags')}
+              />
+              <span>OpenCE Container (.ocetags — Secondary)</span>
+            </label>
+          </div>
           {hasSeriousWarnings && !nothingExtractable && (
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 12, color: 'var(--text-secondary)' }}>
               <input data-testid="dependency-understand-checkbox" type="checkbox" checked={understand} onChange={(e) => setUnderstand(e.target.checked)} />
@@ -318,7 +332,11 @@ export default function DependencyDialog({ selectedIndices, onClose, log }: Prop
               onClick={handleConfirm}
               style={buttonStyle(!confirmDisabledReason)}
             >
-              {selectedIndices.length > 1 ? 'Extract to folder...' : 'Extract to .ocetags'}
+              {extractFormat === 'blam'
+                ? 'Extract Standard Blam Tags to Folder...'
+                : selectedIndices.length > 1
+                  ? 'Extract to folder...'
+                  : 'Extract to .ocetags'}
             </button>
           </div>
           {confirmDisabledReason && (

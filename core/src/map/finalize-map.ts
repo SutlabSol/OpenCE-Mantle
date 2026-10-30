@@ -2,6 +2,7 @@ import { TAG_STRING_SIZE } from '../constants/cache-file';
 import { parseCacheFileHeader } from './header';
 import { parseTagIndex } from './tag-index';
 import { ceCrcRegions, computeCacheCrc32 } from './cache-crc';
+import { ensureXboxMapDecompressed, compressXboxMap } from './compression';
 
 /**
  * The last step before any map is written to disk (File > Save As, Inject): the header's scenario
@@ -59,20 +60,22 @@ export interface FinalizeResult {
 }
 
 /**
- * Returns a copy of an uncompressed Custom Edition map with the scenario name set from `fileName`
- * and the crc32 recomputed. Never mutates `map`. When the name is unchanged its 32 bytes are left
- * untouched, so finalizing an unmodified map under its own name is byte-identical.
+ * Returns a copy of an uncompressed Custom Edition, Retail, MCC, or Xbox map with the scenario name
+ * set from `fileName` and the crc32 recomputed (and compressed back to Xbox zlib format when `engine === 5`).
+ * Never mutates `map`. When the name is unchanged its 32 bytes are left untouched.
  */
-export function finalizeForSave(map: Buffer, options: { fileName: string }): FinalizeResult {
-  const header = parseCacheFileHeader(map);
-  const tagIndex = parseTagIndex(map, header);
+export function finalizeForSave(map: Buffer, options: { fileName: string; compressXbox?: boolean }): FinalizeResult {
+  const decompressed = ensureXboxMapDecompressed(map);
+  const header = parseCacheFileHeader(decompressed);
+  const tagIndex = parseTagIndex(decompressed, header);
   const { name, warnings } = scenarioNameFromFileName(options.fileName);
-  const out = Buffer.from(map);
+  const out = Buffer.from(decompressed);
   if (header.scenarioName !== name) {
     out.fill(0, SCENARIO_NAME_OFFSET, SCENARIO_NAME_OFFSET + TAG_STRING_SIZE);
     out.write(name, SCENARIO_NAME_OFFSET, 'ascii');
   }
   const crc32 = computeCacheCrc32(out, ceCrcRegions(out, header, tagIndex));
   out.writeUInt32LE(crc32, CRC32_OFFSET);
-  return { buffer: out, scenarioName: name, previousScenarioName: header.scenarioName, crc32, previousCrc32: header.crc32 >>> 0, warnings };
+  const finalBuffer = header.engine === 5 && options.compressXbox !== false ? compressXboxMap(out) : out;
+  return { buffer: finalBuffer, scenarioName: name, previousScenarioName: header.scenarioName, crc32, previousCrc32: header.crc32 >>> 0, warnings };
 }

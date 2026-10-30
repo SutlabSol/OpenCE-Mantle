@@ -7,6 +7,7 @@ import {
   decodeDxt1,
   decodeDxt3,
   decodeDxt5,
+  applyDecalBlendToRgba,
   resolveShaderBaseBitmapTagId,
   readBitmapImageDescriptor,
   decodeBitmapTagImage,
@@ -203,6 +204,53 @@ describe('Bitmap Texture Decoder (bitmap-textures)', () => {
       expect(() => {
         readBitmapImageDescriptor(buffer, header, tagIndex, bsp.lightmapsBitmapTagId, 0, undefined);
       }).toThrow(/External bitmaps\.map buffer is required/);
+    });
+  });
+
+  describe('applyDecalBlendToRgba (Halo CE decal border transparency)', () => {
+    it('makes white border pixels transparent for multiply (blendFunc = 1) decals while keeping dark scorch artwork opaque', () => {
+      const rgba = new Uint8Array(4 * 4 * 4);
+      for (let i = 0; i < 16; i++) {
+        rgba[i * 4 + 0] = 255;
+        rgba[i * 4 + 1] = 255;
+        rgba[i * 4 + 2] = 255;
+        rgba[i * 4 + 3] = 255;
+      }
+      // Interior center pixel at (1, 1) -> index 5 is a dark scorch mark
+      const centerIdx = (1 * 4 + 1) * 4;
+      rgba[centerIdx + 0] = 20;
+      rgba[centerIdx + 1] = 15;
+      rgba[centerIdx + 2] = 10;
+      applyDecalBlendToRgba(rgba, 4, 4, {
+        decalBlendFunction: 1,
+        decalIntensity: 1.0,
+        decalTint: [1, 1, 1],
+      });
+      // Corner white pixel (0, 0) becomes 100% transparent
+      expect(rgba[3]).toBe(0);
+      // Interior dark scorch pixel remains visible with high alpha
+      expect(rgba[centerIdx + 3]).toBeGreaterThan(150);
+    });
+
+    it('makes 50% gray border pixels transparent for double-multiply (blendFunc = 2) decals', () => {
+      const rgba = new Uint8Array(4 * 4 * 4);
+      for (let i = 0; i < 16; i++) {
+        rgba[i * 4 + 0] = 128;
+        rgba[i * 4 + 1] = 128;
+        rgba[i * 4 + 2] = 128;
+        rgba[i * 4 + 3] = 255;
+      }
+      const centerIdx = (1 * 4 + 1) * 4;
+      rgba[centerIdx + 0] = 15;
+      rgba[centerIdx + 1] = 15;
+      rgba[centerIdx + 2] = 15;
+      applyDecalBlendToRgba(rgba, 4, 4, {
+        decalBlendFunction: 2,
+        decalIntensity: 1.0,
+        decalTint: [1, 1, 1],
+      });
+      expect(rgba[3]).toBe(0);
+      expect(rgba[centerIdx + 3]).toBeGreaterThan(120);
     });
   });
 });

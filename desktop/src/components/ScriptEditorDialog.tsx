@@ -759,7 +759,8 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
       }
 
       // Resolve ordered 3D Entry Waypoint Chain for THIS track
-      // IMPORTANT: Never include ground patrol (wp_patrol*), migration (wp_mig*), trigger (wp_trig*), camera (cam_*), or exit waypoints in the air flight path!
+      // IMPORTANT: Never include ground patrol (wp_patrol*), migration (wp_mig*), trigger (wp_trig*), camera (cam_*), or _exit waypoints in the inbound air flight path!
+      // Note: Do NOT exclude the LZ waypoint even though exitFlightChain starts at the LZ waypoint for handoff!
       const isGroundOrAuxWp = (name: string) =>
         name.startsWith('cam_') ||
         name.startsWith('wp_trig') ||
@@ -769,12 +770,11 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
         name.startsWith('wp_mig') ||
         name.includes('_mig') ||
         name.includes('_exit');
-      const exitSet = new Set(trk.exitFlightChain ?? []);
       const chainPts: Array<{ x: number; y: number; z: number; name: string }> = [];
       const seenNames = new Set<string>();
       for (const nm of trk.flightChain) {
         const found = trk.waypoints.find((w) => w.name === nm);
-        if (found && !exitSet.has(found.name) && !isGroundOrAuxWp(found.name) && !seenNames.has(found.name)) {
+        if (found && !isGroundOrAuxWp(found.name) && !seenNames.has(found.name)) {
           seenNames.add(found.name);
           chainPts.push({
             name: found.name,
@@ -787,7 +787,7 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
       // Only fall back to scanning remaining non-ground/non-aux waypoints if flightChain was empty
       if (chainPts.length === 0) {
         for (const wp of trk.waypoints) {
-          if (!isGroundOrAuxWp(wp.name) && !exitSet.has(wp.name) && !seenNames.has(wp.name)) {
+          if (!isGroundOrAuxWp(wp.name) && !seenNames.has(wp.name)) {
             seenNames.add(wp.name);
             chainPts.push({
               name: wp.name,
@@ -799,16 +799,32 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
         }
       }
 
-      // Resolve ordered 3D Departure / Exit Waypoint Chain for THIS track
+      // Resolve ordered 3D Departure / Exit Waypoint Chain for THIS track.
+      // Guarantee that exitChainPts begins at the exact final LZ waypoint of chainPts so departure starts where inbound flight ended!
       const exitChainPts: Array<{ x: number; y: number; z: number; name: string }> = [];
+      const finalInboundPt = chainPts[chainPts.length - 1];
+      if (finalInboundPt) {
+        exitChainPts.push({ ...finalInboundPt });
+      }
       for (const nm of trk.exitFlightChain ?? []) {
         const found = trk.waypoints.find((w) => w.name === nm);
-        if (found) {
+        if (found && (!finalInboundPt || found.name !== finalInboundPt.name)) {
           exitChainPts.push({
             name: found.name,
             x: Number((playerAnchor.x + found.xOffset).toFixed(4)),
             y: Number((playerAnchor.y + found.yOffset).toFixed(4)),
             z: Number((playerAnchor.z + found.zOffset).toFixed(4)),
+          });
+        }
+      }
+      if (exitChainPts.length < 2) {
+        const fallbackExitWp = trk.waypoints.find((w) => w.name.includes('_exit'));
+        if (fallbackExitWp && (!finalInboundPt || fallbackExitWp.name !== finalInboundPt.name)) {
+          exitChainPts.push({
+            name: fallbackExitWp.name,
+            x: Number((playerAnchor.x + fallbackExitWp.xOffset).toFixed(4)),
+            y: Number((playerAnchor.y + fallbackExitWp.yOffset).toFixed(4)),
+            z: Number((playerAnchor.z + fallbackExitWp.zOffset).toFixed(4)),
           });
         }
       }
@@ -1117,9 +1133,9 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
             }
             lines.push(`  (recording_play_and_hover ${trk.objectName} ${animIn})`);
           }
-          const leadTicks = Math.max(0, Math.round(act.sleepTicks ?? 45));
-          const settleTicks = Math.max(1, Math.round(act.secondarySleepTicks ?? 45));
-          lines.push(`  (sleep (max 0 (- (recording_time ${trk.objectName}) ${leadTicks})))`);
+          const settleTicks = Math.max(15, Math.round(act.secondarySleepTicks ?? 30));
+          lines.push(`  (sleep (recording_time ${trk.objectName}))`);
+          lines.push(`  (vehicle_hover ${trk.objectName} true)`);
           if (trk.role.startsWith('cov_dropship')) {
             lines.push(`  (unit_open ${trk.objectName})`);
           }
@@ -1255,14 +1271,14 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
         } else if (act.kind === 'close_bay_doors') {
           lines.push(`  (unit_close ${trk.objectName})`);
         } else if (act.kind === 'fly_away_and_despawn') {
-          const minOutTicks = Math.max(30, Math.round(act.sleepTicks ?? 210));
           if (trk.role.startsWith('cov_dropship')) {
             lines.push(`  (unit_close ${trk.objectName})`);
           }
           lines.push(`  (vehicle_hover ${trk.objectName} false)`);
           lines.push(`  (object_set_collideable ${trk.objectName} false)`);
           lines.push(`  (recording_play_and_delete ${trk.objectName} ${animOut})`);
-          lines.push(`  (sleep (max ${minOutTicks} (recording_time ${trk.objectName})))`);
+          lines.push(`  (sleep (recording_time ${trk.objectName}))`);
+          lines.push('  (sleep 30)');
           lines.push(`  (object_destroy ${trk.objectName})`);
         } else if (act.kind === 'enable_turret_autoboard') {
           const vehTarget = trk.cargoObjectName || trk.objectName;
@@ -3093,14 +3109,25 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
     }
   }, [builderTracks, selectedTrack, playerAnchor, selectedWaypointId, activeStudioTab]);
 
-  // Compute real-time 30 Hz flight physics trajectory + cutscene camera schedule for the Live 3D Preview Scrubber
+  // Compute real-time 30 Hz flight physics trajectory (inbound -> LZ hover/unload -> outbound departure + ground AI march) + cutscene camera schedule for the Live 3D Preview Scrubber
   const flightPreviewSim = useMemo(() => {
     if (!selectedTrack) return null;
     try {
+      const isGroundOrAuxWp = (name: string) =>
+        name.startsWith('cam_') ||
+        name.startsWith('wp_trig') ||
+        name.includes('_trig') ||
+        name.startsWith('wp_patrol') ||
+        name.includes('_patrol') ||
+        name.startsWith('wp_mig') ||
+        name.includes('_mig') ||
+        name.includes('_exit');
       const chainWps: Array<{ x: number; y: number; z: number; name: string }> = [];
+      const seenIn = new Set<string>();
       for (const nm of selectedTrack.flightChain) {
         const w = selectedTrack.waypoints.find((wp) => wp.name === nm);
-        if (w) {
+        if (w && !isGroundOrAuxWp(w.name) && !seenIn.has(w.name)) {
+          seenIn.add(w.name);
           chainWps.push({
             name: w.name,
             x: playerAnchor.x + w.xOffset,
@@ -3109,7 +3136,88 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
           });
         }
       }
-      const entrySim = chainWps.length >= 2 ? buildRecordedFlightStreamFromWaypoints(chainWps) : null;
+      const entrySim = chainWps.length >= 2 ? buildRecordedFlightStreamFromWaypoints(chainWps, false) : null;
+
+      // Build departure/exit chain starting from the exact final inbound LZ waypoint
+      const exitWps: Array<{ x: number; y: number; z: number; name: string }> = [];
+      const lzPt = chainWps[chainWps.length - 1];
+      if (lzPt) exitWps.push({ ...lzPt });
+      for (const nm of selectedTrack.exitFlightChain ?? []) {
+        const w = selectedTrack.waypoints.find((wp) => wp.name === nm);
+        if (w && (!lzPt || w.name !== lzPt.name)) {
+          exitWps.push({
+            name: w.name,
+            x: playerAnchor.x + w.xOffset,
+            y: playerAnchor.y + w.yOffset,
+            z: playerAnchor.z + w.zOffset,
+          });
+        }
+      }
+      if (exitWps.length < 2 && lzPt) {
+        const fallbackExit = selectedTrack.waypoints.find((wp) => wp.name.includes('_exit'));
+        if (fallbackExit && fallbackExit.name !== lzPt.name) {
+          exitWps.push({
+            name: fallbackExit.name,
+            x: playerAnchor.x + fallbackExit.xOffset,
+            y: playerAnchor.y + fallbackExit.yOffset,
+            z: playerAnchor.z + fallbackExit.zOffset,
+          });
+        }
+      }
+      const hasDepartAction = selectedTrack.actions.some((a) => a.kind === 'fly_away_and_despawn');
+      const exitSim =
+        hasDepartAction && exitWps.length >= 2 ? buildRecordedFlightStreamFromWaypoints(exitWps, true) : null;
+
+      // Ground patrol / migration route starting from LZ
+      const patrolWps: Array<{ x: number; y: number; z: number; name: string }> = [];
+      if (lzPt) {
+        patrolWps.push({ ...lzPt, z: playerAnchor.z + 0.6 });
+      }
+      for (const w of selectedTrack.waypoints) {
+        if (
+          w.name.startsWith('wp_patrol') ||
+          w.name.includes('_patrol') ||
+          w.name.startsWith('wp_mig') ||
+          w.name.includes('_mig')
+        ) {
+          patrolWps.push({
+            name: w.name,
+            x: playerAnchor.x + w.xOffset,
+            y: playerAnchor.y + w.yOffset,
+            z: playerAnchor.z + Math.min(w.zOffset, 1.5),
+          });
+        }
+      }
+
+      // Stitch combined trajectory samples (every 2 ticks): Inbound -> 75-tick LZ Hover/Unload -> Outbound Departure
+      const combinedSamples: Array<{ tick: number; x: number; y: number; z: number }> = [];
+      const entrySamples = entrySim?.trajectorySamples ?? [];
+      for (const s of entrySamples) {
+        combinedSamples.push({ ...s });
+      }
+      const entryEndTick = entrySim?.totalTicks ?? 0;
+      const hoverTicks = entrySamples.length > 0 ? 76 : 0;
+      const hoverSamplePos = entrySamples[entrySamples.length - 1] ?? lzPt ?? { x: playerAnchor.x, y: playerAnchor.y, z: playerAnchor.z };
+      for (let ht = 2; ht <= hoverTicks; ht += 2) {
+        combinedSamples.push({
+          tick: entryEndTick + ht,
+          x: hoverSamplePos.x,
+          y: hoverSamplePos.y,
+          z: hoverSamplePos.z,
+        });
+      }
+      const exitStartTick = entryEndTick + hoverTicks;
+      const exitSamples = exitSim?.trajectorySamples ?? [];
+      for (let i = 1; i < exitSamples.length; i++) {
+        const es = exitSamples[i]!;
+        combinedSamples.push({
+          tick: exitStartTick + es.tick,
+          x: es.x,
+          y: es.y,
+          z: es.z,
+        });
+      }
+
       const camWps = selectedTrack.waypoints
         .filter((w) => w.name.startsWith('cam_'))
         .map((w) => ({
@@ -3169,11 +3277,16 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
         curTick += span;
       }
 
-      const totalFlightTicks = entrySim?.totalTicks ?? 0;
+      const totalFlightTicks = entryEndTick + hoverTicks + (exitSim?.totalTicks ?? 0);
       const totalCamTicks = curTick;
       const maxTicks = Math.max(totalFlightTicks, totalCamTicks, 180);
       return {
         entrySim,
+        exitSim,
+        combinedSamples,
+        entryEndTick,
+        exitStartTick,
+        patrolWps,
         camWps,
         camSegments,
         totalFlightTicks,
@@ -3222,7 +3335,7 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
     if (!flightPreviewSim || !selectedTrack) return;
 
     const toThree = (hx: number, hy: number, hz: number) => new THREE.Vector3(hx, hz, -hy);
-    const samples = flightPreviewSim.entrySim?.trajectorySamples ?? [];
+    const samples = flightPreviewSim.combinedSamples ?? flightPreviewSim.entrySim?.trajectorySamples ?? [];
     let shipWorldPos: { x: number; y: number; z: number } | null = null;
     let shipNextPos: { x: number; y: number; z: number } | null = null;
 
@@ -3230,7 +3343,7 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
       // trajectorySamples is recorded every 2 simulation ticks (tick % 2 === 0)
       const sIdx = Math.max(0, Math.min(samples.length - 1, Math.round(previewTick / 2)));
       shipWorldPos = samples[sIdx]!;
-      shipNextPos = samples[Math.min(samples.length - 1, sIdx + 2)] ?? samples[Math.max(0, sIdx - 2)] ?? shipWorldPos;
+      shipNextPos = samples[Math.min(samples.length - 1, sIdx + 3)] ?? samples[Math.max(0, sIdx - 3)] ?? shipWorldPos;
 
       const shipThree = toThree(shipWorldPos.x, shipWorldPos.y, shipWorldPos.z);
       const nextThree = toThree(shipNextPos.x, shipNextPos.y, shipNextPos.z);
@@ -3265,6 +3378,24 @@ export default function ScriptEditorDialog({ onClose, onMapModified, embedded = 
       noseCone.position.set(0, 0, 3.4);
       shipGroup.add(bodyMesh, wingMesh, noseCone);
       pGrp.add(shipGroup);
+
+      // Show unloaded Cargo & AI Squad marching along ground patrol route after LZ arrival!
+      if (previewTick >= (flightPreviewSim.entryEndTick || 0) && (flightPreviewSim.patrolWps?.length ?? 0) >= 1) {
+        const pWps = flightPreviewSim.patrolWps!;
+        const elapsedSinceDrop = Math.max(0, previewTick - (flightPreviewSim.entryEndTick || 0) - 25);
+        const marchAlpha = Math.min(1, elapsedSinceDrop / 180);
+        const p0 = pWps[0]!;
+        const p1 = pWps[pWps.length - 1]!;
+        const gx = p0.x + (p1.x - p0.x) * marchAlpha;
+        const gy = p0.y + (p1.y - p0.y) * marchAlpha;
+        const gz = p0.z + (p1.z - p0.z) * marchAlpha;
+        const squadMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(2.0, 1.1, 2.8),
+          new THREE.MeshLambertMaterial({ color: 0x22c55e }),
+        );
+        squadMesh.position.copy(toThree(gx, gy, gz));
+        pGrp.add(squadMesh);
+      }
     }
 
     // Interpolate active Cutscene Camera position at previewTick

@@ -78,7 +78,7 @@ export function renameTagInMap(
 
   // Update header fileLength (0x08) and tagDataSize (0x14)
   outBuffer.writeUInt32LE(outBuffer.length, 0x08);
-  outBuffer.writeUInt32LE(header.tagDataSize + paddedBytes.length, 0x14);
+  outBuffer.writeUInt32LE((outBuffer.length - header.tagDataOffset) >>> 0, 0x14);
 
   // Update tag index entry path pointer
   const newPathPointer = (tagIndex.baseMemoryAddress + (newOffset - header.tagDataOffset)) >>> 0;
@@ -159,7 +159,8 @@ export function duplicateTagInMap(
     const newSbspTagId = sbspPlan.resolvedTagIdByLocalIndex.get(0) ?? computeNewTagId(tagIndex.entries.length);
     const newSbspIdx = newSbspTagId & 0xffff;
     const curTagOff = sbspReport.buffer.readUInt32LE(0x10);
-    const slotEntryOff = curTagOff + 0x28 + newSbspIdx * 32;
+    const tagHeaderSize = header.engine === 5 ? 0x24 : 0x28;
+    const slotEntryOff = curTagOff + tagHeaderSize + newSbspIdx * 32;
     if (slotEntryOff + 32 <= sbspReport.buffer.length) {
       sbspReport.buffer.writeUInt32LE(0x73627370, slotEntryOff + 0x00); // 'sbsp'
       sbspReport.buffer.writeUInt32LE(0xffffffff, slotEntryOff + 0x04);
