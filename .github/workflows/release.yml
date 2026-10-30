@@ -41,3 +41,4 @@ jobs:
           files: |
             desktop/release/OpenCE Mantle *.exe
             desktop/release/OpenCE Mantle Setup *.exe.blockmap
+            desktop/release/latest.yml

@@ -47,6 +47,13 @@
   "build": {
     "appId": "com.opence.mantle",
     "productName": "OpenCE Mantle",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "SutlabSol",
+        "repo": "OpenCE-Mantle"
+      }
+    ],
     "directories": {
       "output": "release"
     },

@@ -118,6 +118,7 @@ export default function App() {
   const [splitViewEnabled, setSplitViewEnabled] = useState(false);
   const [splitRatio, setSplitRatio] = useState(0.58);
   const [isCheckingUpdatesManual, setIsCheckingUpdatesManual] = useState(false);
+  const [launcherUpdateStatusMsg, setLauncherUpdateStatusMsg] = useState<string | null>(null);
   const detachedSessionIdParam =
     typeof window !== 'undefined'
       ? new URLSearchParams(window.location.search).get('detachedSessionId')
@@ -162,14 +163,20 @@ export default function App() {
   };
 
   const handleManualCheckForUpdates = async () => {
+    if (updateBanner?.updateAvailable) {
+      void handleDownloadAndInstallUpdate(true);
+      return;
+    }
     if (typeof window.opence.checkForUpdates !== 'function') return;
     setIsCheckingUpdatesManual(true);
+    setLauncherUpdateStatusMsg(null);
     log('info', 'Checking GitHub Releases for updates...');
     try {
       const res = await window.opence.checkForUpdates();
       if (!res.ok) {
         log('warn', `Update check failed: ${res.error}`);
-        setSettingsDialogOpen(true);
+        setLauncherUpdateStatusMsg('Update Check Failed');
+        setTimeout(() => setLauncherUpdateStatusMsg(null), 5000);
         return;
       }
       if (res.updateAvailable) {
@@ -177,7 +184,8 @@ export default function App() {
         log('info', `New release available: ${res.releaseName} (v${res.latestVersion})!`);
       } else {
         log('info', `OpenCE Mantle is up to date (v${res.currentVersion}).`);
-        setSettingsDialogOpen(true);
+        setLauncherUpdateStatusMsg(`✓ Up to Date (v${res.currentVersion})`);
+        setTimeout(() => setLauncherUpdateStatusMsg(null), 5000);
       }
     } finally {
       setIsCheckingUpdatesManual(false);
@@ -1015,6 +1023,7 @@ export default function App() {
             currentTheme={currentTheme}
             updateAvailableVersion={updateBanner?.latestVersion ?? null}
             isCheckingUpdates={isCheckingUpdatesManual}
+            updateStatusMessage={launcherUpdateStatusMsg}
             onCheckUpdates={() => void handleManualCheckForUpdates()}
             onOpenThemeModal={() => setThemeModalOpen(true)}
             onOpenMapDialog={() => void handleOpen()}
@@ -1046,7 +1055,10 @@ export default function App() {
           onSelectSecondarySession={(sid) => setSecondarySessionId(sid)}
           onCloseSession={(sid) => void handleCloseSession(sid)}
           onOpenNewMapTab={() => void handleOpen()}
-          onToggleSplitView={() => setSplitViewEnabled((prev) => !prev)}
+          onToggleSplitView={() => {
+            setShowLauncherHome(false);
+            setSplitViewEnabled((prev) => !prev);
+          }}
           onDetachSessionToWindow={(sid, coords) => {
             void window.opence.detachMapTabToWindow?.(sid, coords);
           }}

@@ -8,6 +8,7 @@ interface WorkspaceHomeProps {
   currentTheme: AppThemeId;
   updateAvailableVersion?: string | null;
   isCheckingUpdates?: boolean;
+  updateStatusMessage?: string | null;
   onCheckUpdates: () => void;
   onOpenThemeModal: () => void;
   onOpenMapDialog: () => void;
@@ -51,6 +52,7 @@ export default function WorkspaceHome({
   currentTheme,
   updateAvailableVersion,
   isCheckingUpdates,
+  updateStatusMessage,
   onCheckUpdates,
   onOpenThemeModal,
   onOpenMapDialog,
@@ -169,10 +171,12 @@ export default function WorkspaceHome({
                 ? 'Checking Updates...'
                 : updateAvailableVersion
                 ? `Update Available (v${updateAvailableVersion})`
+                : updateStatusMessage
+                ? updateStatusMessage
                 : 'Check Updates'}
             </div>
             <div style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--mono-font)', whiteSpace: 'nowrap' }}>
-              {updateAvailableVersion ? 'Click to view release' : `Current v${appVersion || '0.6.9'}`}
+              {updateAvailableVersion ? 'Click to download & install' : `Current v${appVersion || '0.7.0'}`}
             </div>
           </div>
         </button>
@@ -389,7 +393,7 @@ export default function WorkspaceHome({
             {[
               { id: 'whats-new', label: "What's New", badge: `v${appVersion || '0.7.0'}`, onClick: onOpenWhatsNew },
               { id: 'help', label: 'Help', badge: 'About', onClick: onOpenHelp },
-              { id: 'tutorials', label: 'Tutorials', badge: '12 Guides', onClick: onOpenTutorials },
+              { id: 'tutorials', label: 'Tutorials', badge: '16 Guides', onClick: onOpenTutorials },
               { id: 'glossary', label: 'Glossary', badge: 'UI Atlas', onClick: onOpenGlossary },
               { id: 'community', label: 'Community', badge: 'Links', onClick: onOpenCommunity },
             ].map((nav) => (

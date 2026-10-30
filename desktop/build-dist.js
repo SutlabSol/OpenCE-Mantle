@@ -149,6 +149,31 @@ async function main() {
     console.log('Artifact:', artifact);
   }
 
+  // Generate latest.yml for electron-updater / differential update metadata
+  const setupExeName = `OpenCE Mantle Setup ${displayVersion}.exe`;
+  const setupExePath = path.join(__dirname, 'release', setupExeName);
+  if (fs.existsSync(setupExePath)) {
+    const crypto = require('crypto');
+    const setupBuf = fs.readFileSync(setupExePath);
+    const sha512 = crypto.createHash('sha512').update(setupBuf).digest('base64');
+    const releaseDate = new Date().toISOString();
+    const ghSafeSetupName = setupExeName.replace(/\s+/g, '.');
+    const latestYml = [
+      `version: ${displayVersion}`,
+      `files:`,
+      `  - url: ${ghSafeSetupName}`,
+      `    sha512: ${sha512}`,
+      `    size: ${setupBuf.length}`,
+      `path: ${ghSafeSetupName}`,
+      `sha512: ${sha512}`,
+      `releaseDate: '${releaseDate}'`,
+      '',
+    ].join('\n');
+    const latestYmlPath = path.join(__dirname, 'release', 'latest.yml');
+    fs.writeFileSync(latestYmlPath, latestYml, 'utf8');
+    console.log('Artifact:', latestYmlPath);
+  }
+
   // Only sync resources/app.asar into %LOCALAPPDATA%\Programs\opence-desktop when --sync-installed is explicitly passed
   if (process.argv.includes('--sync-installed')) {
     const unpackedResources = path.join(__dirname, 'release', 'win-unpacked', 'resources');

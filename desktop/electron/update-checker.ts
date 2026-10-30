@@ -552,21 +552,55 @@ if (Test-Path '${escapedInstalledExe}') {
     child.unref();
     return { ok: true };
   } else {
-    // Portable mode: replace the outer portable .exe in place and relaunch it
-    const portableTarget = (process.env.PORTABLE_EXECUTABLE_FILE || app.getPath('exe')).replace(/'/g, "''");
+    // Portable mode: replace the outer portable .exe in place (and update versioned filename + Desktop shortcut if applicable) and relaunch it
+    const rawPortableTarget = process.env.PORTABLE_EXECUTABLE_FILE || app.getPath('exe');
+    const newVer = lastStagedUpdate?.version ? normalizeVersionString(lastStagedUpdate.version) : '';
+    const targetDir = path.dirname(rawPortableTarget);
+    const targetBase = path.basename(rawPortableTarget);
+    let finalLaunchPath = rawPortableTarget;
+    if (newVer && /^OpenCE[\s._-]+Mantle[\s._-]+\d+\.\d+\.\d+.*\.exe$/i.test(targetBase)) {
+      finalLaunchPath = path.join(targetDir, `OpenCE Mantle ${newVer}.exe`);
+    }
+    const portableTargetEsc = rawPortableTarget.replace(/'/g, "''");
+    const finalLaunchEsc = finalLaunchPath.replace(/'/g, "''");
+    const newVerEsc = newVer.replace(/'/g, "''");
+
     const psScript = `
 $ErrorActionPreference = 'SilentlyContinue'
 Wait-Process -Id ${pid} -Timeout 15
 for ($i = 0; $i -lt 25; $i++) {
   Start-Sleep -Milliseconds 400
   try {
-    Copy-Item -LiteralPath '${escapedStaged}' -Destination '${portableTarget}' -Force -ErrorAction Stop
+    Copy-Item -LiteralPath '${escapedStaged}' -Destination '${finalLaunchEsc}' -Force -ErrorAction Stop
+    if ('${finalLaunchEsc}' -ne '${portableTargetEsc}' -and (Test-Path -LiteralPath '${portableTargetEsc}')) {
+      Remove-Item -LiteralPath '${portableTargetEsc}' -Force -ErrorAction SilentlyContinue
+    }
     break
   } catch {
     # Still releasing file lock from portable wrapper
   }
 }
-Start-Process -FilePath '${portableTarget}'
+try {
+  $desktopDir = [Environment]::GetFolderPath('Desktop')
+  if ($desktopDir -and (Test-Path -LiteralPath $desktopDir)) {
+    $lnks = Get-ChildItem -LiteralPath $desktopDir -Filter 'OpenCE Mantle*.lnk' -ErrorAction SilentlyContinue
+    if ($lnks -and $lnks.Count -gt 0) {
+      $sh = New-Object -ComObject WScript.Shell
+      $primaryLnk = $lnks[0].FullName
+      $newLnkName = if ('${newVerEsc}') { "OpenCE Mantle ${newVerEsc}.lnk" } else { $lnks[0].Name }
+      $newLnkPath = Join-Path $desktopDir $newLnkName
+      if ($primaryLnk -ne $newLnkPath) {
+        if (Test-Path -LiteralPath $newLnkPath) { Remove-Item -LiteralPath $newLnkPath -Force }
+        Rename-Item -LiteralPath $primaryLnk -NewName $newLnkName -Force
+      }
+      $sc = $sh.CreateShortcut($newLnkPath)
+      $sc.TargetPath = '${finalLaunchEsc}'
+      $sc.WorkingDirectory = Split-Path -Parent '${finalLaunchEsc}'
+      $sc.Save()
+    }
+  }
+} catch {}
+Start-Process -FilePath '${finalLaunchEsc}'
 `;
     const child = spawn(
       'powershell.exe',
