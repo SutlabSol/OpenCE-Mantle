@@ -20,6 +20,21 @@ import { resolveTagDataPointer } from './tag-index';
 import { ensurePaletteEntry, appendReflexiveElements } from '../render/scenario-objects';
 import { compileHaloScriptIntoScenario } from './hs-compiler';
 import { duplicateTagInMap } from './tag-index-editor';
+import {
+  parseModelFileForBsp,
+  type ModelImportOptions,
+  type ModelBounds3D,
+} from '../render/glb-model-importer';
+import {
+  buildCustomBitmapTag,
+  buildCustomShaderEnvironmentTag,
+  buildCustomShaderModelTag,
+  compileMeshCollisionBspData,
+} from '../render/collision-generator';
+import { BitmapFormat } from '../render/bitmap-textures';
+import { ceCrcRegions, computeCacheCrc32 } from './cache-crc';
+import { fourCCFromString } from '../constants/tag-classes';
+import type { ExtractedTag, ExtractedTagSet } from './tag-extractor';
 
 export interface BspInfo {
   index: number;
@@ -753,11 +768,11 @@ export function performBspSwap(
   if (srcIndices.length > 1 && shouldMergeMultiBsp) {
     const useExpandedEngineLimits = options.useExpandedEngineLimits === true;
     const CE_TAG_SPACE_BYTES = useExpandedEngineLimits
-      ? 128 * 1024 * 1024 // 128 MiB OpenCE extended tag/BSP cache
+      ? 122 * 1024 * 1024 // 122 MiB OpenCE extended tag/BSP cache (0x07A00000)
       : 23 * 1024 * 1024; // 23 MiB Standard Halo CE tag/BSP cache
     const safeMaxBspBytes = useExpandedEngineLimits
       ? Math.min(
-          116 * 1024 * 1024,
+          110 * 1024 * 1024,
           Math.max(16 * 1024 * 1024, CE_TAG_SPACE_BYTES - targetInspected.header.tagDataSize - 2 * 1024 * 1024),
         )
       : Math.min(
@@ -786,7 +801,7 @@ export function performBspSwap(
     const CE_BSP_CACHE_CEILING =
       options.useExpandedEngineLimits === true &&
       (srcBspSize > 17_616_076 || targetInspected.header.tagDataSize + srcBspSize + 1_500_000 > 23 * 1024 * 1024)
-        ? 0x48440000
+        ? 0x47e40000
         : 0x41b40000;
     let rebasedAddr = srcBspAddress;
     if (srcBspAddress + srcBspSize > CE_BSP_CACHE_CEILING) {
@@ -1992,7 +2007,7 @@ export function performBspSwap(
       const extraCeiling =
         extraBspSize <= 17_616_076 && targetInspected.header.tagDataSize + extraBspSize + 1_500_000 <= 23 * 1024 * 1024
           ? 0x41b40000
-          : 0x48440000;
+          : 0x47e40000;
       let extraBspAddress = donorBspInfo.bspAddress;
       let rebasedExtraAddr = extraBspAddress;
       if (extraBspAddress + extraBspSize > extraCeiling) {
@@ -2344,6 +2359,1835 @@ export function performBspSwap(
       removedDuplicateTriangles,
       removedPortalBlockerTriangles,
       createdTriggerVolumes,
+    },
+  };
+}
+
+// ============================================================================
+// Part 2: Direct 3D Model File (.glb / .gltf / .obj / .jms) + Original Textures
+//         BSP Replacement & Merge
+// ============================================================================
+
+export interface BspModelSwapOptions extends ModelImportOptions {
+  /** Target BSP slot index in the open donor map (default: 0). */
+  targetBspIndex?: number;
+  /** Whether to replace the target BSP geometry/collision or merge/append into it (default: 'replace'). */
+  injectionMode?: 'replace' | 'merge';
+  /** Whether to extract & inject original embedded/external textures as A8R8G8B8 bitmaps + ShaderModel tags (default: true). */
+  extractTextures?: boolean;
+  /** Automatically enable two-sided and alpha-tested flags on foliage/cutout shaders (default: true). */
+  autoAlphaAndTwoSided?: boolean;
+  /** Render diffuse textures at full brightness (ScenarioStructureBSPLightmap.bitmap = -1) (default: true). */
+  fullBrightnessLightmap?: boolean;
+  /** Simplify solid collision via area-weighted vertex clustering + coplanar polygon merging (default: true). */
+  simplifyCollision?: boolean;
+  /** Relocate player spawns, netgame flags, equipment, vehicles, and ground objects onto new solid ground (default: true). */
+  relocateGroundObjects?: boolean;
+  /** Clear existing scenery, runtime decals, and detail objects (DOBC) (default: true). */
+  clearExistingPlacements?: boolean;
+  /** Strip Detail Objects (DOBC) and Runtime Decals from the target BSP (default: true). */
+  stripDobcAndDecals?: boolean;
+  /** Cache ceiling mode: 'expanded_opence' (122 MiB / 0x47E40000) or 'stock_ce' (23 MiB / 0x41B40000) (default: 'expanded_opence'). */
+  cacheCeilingMode?: 'expanded_opence' | 'stock_ce';
+  /** Optional new scenario name to write into the map header (+0x20). */
+  newScenarioName?: string;
+}
+
+function toBoundsTuple(b: ModelBounds3D): [number, number, number, number, number, number] {
+  return [b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]];
+}
+
+export interface BspModelPreflightResult {
+  ok: boolean;
+  modelFileName: string;
+  format: 'glb' | 'gltf' | 'obj' | 'jms';
+  nodeCount: number;
+  meshCount: number;
+  rawVertexCount: number;
+  weldedVertexCount: number;
+  totalTriangleCount: number;
+  solidCollisionTriangleCount: number;
+  foliageTriangleCount: number;
+  foliageMeshCount: number;
+  materialCount: number;
+  textureCount: number;
+  submeshChunkCount: number;
+  appliedScale: number;
+  rawBounds: [number, number, number, number, number, number];
+  scaledBounds: [number, number, number, number, number, number];
+  playableScaledBounds: [number, number, number, number, number, number];
+  targetBsps: BspInfo[];
+  selectedTargetBsp: BspInfo | null;
+  estimatedBspBytes: number;
+  estimatedNewMapBytes: number;
+  warnings: string[];
+  error?: string;
+}
+
+export interface BspModelSwapResult {
+  ok: boolean;
+  buffer: Buffer;
+  summary: {
+    modelFileName: string;
+    targetBspName: string;
+    injectionMode: 'replace' | 'merge';
+    oldSize: number;
+    newSize: number;
+    delta: number;
+    weldedVertices: number;
+    totalTriangles: number;
+    solidCollisionTriangles: number;
+    foliageTriangles: number;
+    submeshChunks: number;
+    injectedBitmaps: number;
+    injectedShaders: number;
+    collisionNodes3d: number;
+    collisionSurfaces: number;
+    relocatedSpawns: number;
+    strippedDobc: boolean;
+    strippedDecals: boolean;
+    newBspAddress: number;
+    newBspSize: number;
+    worldBounds: [number, number, number, number, number, number];
+  };
+  error?: string;
+}
+
+/**
+ * Preflights a direct 3D model file (`.glb`, `.gltf`, `.obj`, `.jms`) for BSP replacement or merge.
+ */
+export function preflightModelBspSwap(
+  modelPathOrBuffer: string | Buffer,
+  targetMapBuffer: Buffer,
+  targetBspIndex = 0,
+  options: BspModelSwapOptions = {},
+): BspModelPreflightResult {
+  const targetBsps = getMapBsps(targetMapBuffer);
+  const selectedTargetBsp = targetBsps[targetBspIndex] ?? targetBsps[0] ?? null;
+
+  try {
+    const parsed = parseModelFileForBsp(modelPathOrBuffer, {
+      ...options,
+      decodeTexturesNow: false,
+    });
+
+    const isMerge = options.injectionMode === 'merge';
+    const baseBspBytes = isMerge && selectedTargetBsp ? selectedTargetBsp.bspSize : 96_000;
+    const renderBytes =
+      parsed.weldedVertexCount * 56 +
+      parsed.totalTriangleCount * 10 +
+      parsed.submeshChunks.length * 256;
+    const estCollFaces = Math.min(
+      options.targetCollisionFaces ?? 3500,
+      Math.max(100, parsed.solidTriangleCount),
+    );
+    const estCollBytes = estCollFaces * 220;
+    const estimatedBspBytes = (baseBspBytes + renderBytes + estCollBytes + 65535) & ~511;
+
+    const rawTexEstimate =
+      options.extractTextures !== false ? Math.max(0, parsed.embeddedTextureCount) * 262_144 : 0;
+    const oldTargetBspBytes = selectedTargetBsp?.bspSize ?? 0;
+    const estimatedNewMapBytes =
+      targetMapBuffer.length - oldTargetBspBytes + estimatedBspBytes + rawTexEstimate;
+
+    const warnings: string[] = [];
+    if (!selectedTargetBsp) {
+      warnings.push('No valid Structure BSP found in the currently open map.');
+    }
+    if (
+      options.cacheCeilingMode === 'stock_ce' &&
+      estimatedBspBytes > 17_500_000
+    ) {
+      warnings.push(
+        `Estimated BSP size (${(estimatedBspBytes / (1024 * 1024)).toFixed(1)} MiB) exceeds Stock Halo CE's 23 MiB cache ceiling; it will automatically promote to Expanded OpenCE 122 MiB (0x47E40000).`,
+      );
+    }
+
+    return {
+      ok: Boolean(selectedTargetBsp) && parsed.totalTriangleCount > 0,
+      modelFileName: parsed.modelName,
+      format: parsed.format,
+      nodeCount: parsed.sceneNodeCount,
+      meshCount: parsed.meshCount,
+      rawVertexCount: parsed.rawVertexCount,
+      weldedVertexCount: parsed.weldedVertexCount,
+      totalTriangleCount: parsed.totalTriangleCount,
+      solidCollisionTriangleCount: parsed.solidTriangleCount,
+      foliageTriangleCount: parsed.passThroughTriangleCount,
+      foliageMeshCount: parsed.passThroughMeshCount,
+      materialCount: parsed.materialCount,
+      textureCount: parsed.embeddedTextureCount,
+      submeshChunkCount: parsed.submeshChunks.length,
+      appliedScale: parsed.appliedScale,
+      rawBounds: toBoundsTuple(parsed.rawBounds),
+      scaledBounds: toBoundsTuple(parsed.scaledBounds),
+      playableScaledBounds: toBoundsTuple(parsed.playableScaledBounds),
+      targetBsps,
+      selectedTargetBsp,
+      estimatedBspBytes,
+      estimatedNewMapBytes,
+      warnings,
+      error: !selectedTargetBsp
+        ? 'No valid Structure BSP found in target map.'
+        : parsed.totalTriangleCount === 0
+          ? '3D model contains 0 valid triangles.'
+          : undefined,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      modelFileName: typeof modelPathOrBuffer === 'string' ? modelPathOrBuffer : 'model',
+      format: 'glb',
+      nodeCount: 0,
+      meshCount: 0,
+      rawVertexCount: 0,
+      weldedVertexCount: 0,
+      totalTriangleCount: 0,
+      solidCollisionTriangleCount: 0,
+      foliageTriangleCount: 0,
+      foliageMeshCount: 0,
+      materialCount: 0,
+      textureCount: 0,
+      submeshChunkCount: 0,
+      appliedScale: 1,
+      rawBounds: [0, 0, 0, 0, 0, 0],
+      scaledBounds: [0, 0, 0, 0, 0, 0],
+      playableScaledBounds: [0, 0, 0, 0, 0, 0],
+      targetBsps,
+      selectedTargetBsp,
+      estimatedBspBytes: 0,
+      estimatedNewMapBytes: targetMapBuffer.length,
+      warnings: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Downward raycaster over `solidRaycastTriangles` (`[x0,y0,z0, x1,y1,z1, x2,y2,z2, ...]`)
+ * accelerated by a 2D spatial grid so spawns, flags, equipment, vehicles, and scenery
+ * snap accurately onto walkable ground surfaces.
+ */
+function createGroundSnapper(
+  solidRaycastTriangles: Float32Array,
+  playableBounds: [number, number, number, number, number, number],
+): {
+  snapXYToGround: (x: number, y: number, fallbackIndex?: number) => [number, number, number];
+  raycastGroundZ: (x: number, y: number, preferBelowZ?: number) => number | null;
+} {
+  const cellSize = 8.0;
+  const grid = new Map<string, number[]>();
+  const triCount = Math.floor(solidRaycastTriangles.length / 9);
+  const samplePoints: [number, number, number][] = [];
+
+  for (let t = 0; t < triCount; t++) {
+    const base = t * 9;
+    const x0 = solidRaycastTriangles[base + 0]!;
+    const y0 = solidRaycastTriangles[base + 1]!;
+    const z0 = solidRaycastTriangles[base + 2]!;
+    const x1 = solidRaycastTriangles[base + 3]!;
+    const y1 = solidRaycastTriangles[base + 4]!;
+    const z1 = solidRaycastTriangles[base + 5]!;
+    const x2 = solidRaycastTriangles[base + 6]!;
+    const y2 = solidRaycastTriangles[base + 7]!;
+    const z2 = solidRaycastTriangles[base + 8]!;
+
+    const minGx = Math.floor(Math.min(x0, x1, x2) / cellSize);
+    const maxGx = Math.floor(Math.max(x0, x1, x2) / cellSize);
+    const minGy = Math.floor(Math.min(y0, y1, y2) / cellSize);
+    const maxGy = Math.floor(Math.max(y0, y1, y2) / cellSize);
+    for (let gy = minGy; gy <= maxGy; gy++) {
+      for (let gx = minGx; gx <= maxGx; gx++) {
+        const key = `${gx},${gy}`;
+        let list = grid.get(key);
+        if (!list) {
+          list = [];
+          grid.set(key, list);
+        }
+        list.push(t);
+      }
+    }
+
+    const cx = (x0 + x1 + x2) / 3;
+    const cy = (y0 + y1 + y2) / 3;
+    const cz = (z0 + z1 + z2) / 3;
+    if (
+      cx >= playableBounds[0] + 4 &&
+      cx <= playableBounds[3] - 4 &&
+      cy >= playableBounds[1] + 4 &&
+      cy <= playableBounds[4] - 4
+    ) {
+      samplePoints.push([cx, cy, cz]);
+    }
+  }
+
+  // Sort sample points by distance to playable center so fallback points cluster around the main village/arena
+  const midX = 0.5 * (playableBounds[0] + playableBounds[3]);
+  const midY = 0.5 * (playableBounds[1] + playableBounds[4]);
+  samplePoints.sort(
+    (a, b) =>
+      (a[0] - midX) ** 2 + (a[1] - midY) ** 2 - ((b[0] - midX) ** 2 + (b[1] - midY) ** 2),
+  );
+
+  const raycastGroundZ = (x: number, y: number, preferBelowZ?: number): number | null => {
+    const gx = Math.floor(x / cellSize);
+    const gy = Math.floor(y / cellSize);
+    const list = grid.get(`${gx},${gy}`);
+    if (!list || list.length === 0) return null;
+
+    let bestZ: number | null = null;
+    for (let i = 0; i < list.length; i++) {
+      const base = list[i]! * 9;
+      const x0 = solidRaycastTriangles[base + 0]!;
+      const y0 = solidRaycastTriangles[base + 1]!;
+      const z0 = solidRaycastTriangles[base + 2]!;
+      const x1 = solidRaycastTriangles[base + 3]!;
+      const y1 = solidRaycastTriangles[base + 4]!;
+      const z1 = solidRaycastTriangles[base + 5]!;
+      const x2 = solidRaycastTriangles[base + 6]!;
+      const y2 = solidRaycastTriangles[base + 7]!;
+      const z2 = solidRaycastTriangles[base + 8]!;
+
+      const denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+      if (Math.abs(denom) < 1e-8) continue;
+      const w0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) / denom;
+      const w1 = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) / denom;
+      const w2 = 1.0 - w0 - w1;
+      if (w0 >= -1e-4 && w1 >= -1e-4 && w2 >= -1e-4) {
+        const hitZ = w0 * z0 + w1 * z1 + w2 * z2;
+        if (preferBelowZ !== undefined && hitZ > preferBelowZ + 6.0) continue;
+        if (bestZ === null || hitZ > bestZ) {
+          bestZ = hitZ;
+        }
+      }
+    }
+    return bestZ;
+  };
+
+  const snapXYToGround = (x: number, y: number, fallbackIndex = 0): [number, number, number] => {
+    const margin = 4.0;
+    const inPlayable =
+      x >= playableBounds[0] + margin &&
+      x <= playableBounds[3] - margin &&
+      y >= playableBounds[1] + margin &&
+      y <= playableBounds[4] - margin;
+    if (inPlayable) {
+      const hitZ = raycastGroundZ(x, y);
+      if (hitZ !== null) return [x, y, hitZ];
+    }
+    // Search nearby ring around (clampedX, clampedY)
+    const cx = Math.min(Math.max(x, playableBounds[0] + margin), playableBounds[3] - margin);
+    const cy = Math.min(Math.max(y, playableBounds[1] + margin), playableBounds[4] - margin);
+    const hitClamped = raycastGroundZ(cx, cy);
+    if (hitClamped !== null) return [cx, cy, hitClamped];
+
+    for (let r = 2; r <= 24; r += 3) {
+      for (let a = 0; a < 8; a++) {
+        const ang = (a / 8) * Math.PI * 2;
+        const tx = cx + Math.cos(ang) * r;
+        const ty = cy + Math.sin(ang) * r;
+        const hz = raycastGroundZ(tx, ty);
+        if (hz !== null) return [tx, ty, hz];
+      }
+    }
+
+    if (samplePoints.length > 0) {
+      const sp = samplePoints[(fallbackIndex * 13) % Math.min(samplePoints.length, 256)]!;
+      return [sp[0], sp[1], sp[2]];
+    }
+    return [midX, midY, playableBounds[2] + 0.5];
+  };
+
+  return { snapXYToGround, raycastGroundZ };
+}
+
+/**
+ * Replaces or merges a direct 3D model file (`.glb`, `.gltf`, `.obj`, `.jms`) and all of its
+ * original embedded/external textures into the target map's `ScenarioStructureBSP`.
+ */
+export function swapMapBspFromModelFile(
+  modelPathOrBuffer: string | Buffer,
+  targetMapBuffer: Buffer,
+  options: BspModelSwapOptions = {},
+): BspModelSwapResult {
+  const dstIdx = options.targetBspIndex ?? 0;
+  const injectionMode: 'replace' | 'merge' = options.injectionMode === 'merge' ? 'merge' : 'replace';
+  const extractTextures = options.extractTextures !== false;
+  const autoAlphaAndTwoSided = options.autoAlphaAndTwoSided !== false;
+  const fullBrightnessLightmap = options.fullBrightnessLightmap !== false;
+  const simplifyCollision = options.simplifyCollision !== false;
+  const relocateGroundObjects = options.relocateGroundObjects !== false;
+  const clearExistingPlacements = options.clearExistingPlacements !== false;
+  const stripDobcAndDecals = options.stripDobcAndDecals !== false;
+  const cacheCeilingMode = options.cacheCeilingMode ?? 'expanded_opence';
+
+  const makeErrorResult = (errMsg: string): BspModelSwapResult => ({
+    ok: false,
+    buffer: targetMapBuffer,
+    summary: {
+      modelFileName: '',
+      targetBspName: '',
+      injectionMode,
+      oldSize: targetMapBuffer.length,
+      newSize: targetMapBuffer.length,
+      delta: 0,
+      weldedVertices: 0,
+      totalTriangles: 0,
+      solidCollisionTriangles: 0,
+      foliageTriangles: 0,
+      submeshChunks: 0,
+      injectedBitmaps: 0,
+      injectedShaders: 0,
+      collisionNodes3d: 0,
+      collisionSurfaces: 0,
+      relocatedSpawns: 0,
+      strippedDobc: false,
+      strippedDecals: false,
+      newBspAddress: 0,
+      newBspSize: 0,
+      worldBounds: [0, 0, 0, 0, 0, 0],
+    },
+    error: errMsg,
+  });
+
+  let reinspected = inspectCustomEditionMap(targetMapBuffer);
+  if (reinspected.status !== 'ok') {
+    return makeErrorResult('Failed to inspect target map header or tag index.');
+  }
+
+  let parsed;
+  try {
+    parsed = parseModelFileForBsp(modelPathOrBuffer, {
+      ...options,
+      decodeTexturesNow: extractTextures,
+    });
+  } catch (err) {
+    return makeErrorResult(err instanceof Error ? err.message : String(err));
+  }
+
+  if (parsed.totalTriangleCount === 0 || parsed.submeshChunks.length === 0) {
+    return makeErrorResult('3D model contains 0 valid triangles.');
+  }
+
+  let workMapBuf: Buffer = Buffer.from(targetMapBuffer);
+  let injectedBitmaps = 0;
+  let injectedShaders = 0;
+
+  // Map from materialIndex -> resolved target shader tag info
+  const materialShaderMap = new Map<
+    number,
+    { tagId: number; pathPtr: number; classFourCC: number }
+  >();
+
+  // 1. Extract & inject original textures (`bitm`) and shaders (`soso`) into `workMapBuf` BEFORE splicing the BSP
+  if (extractTextures && parsed.submeshChunks.length > 0) {
+    const modelSlug =
+      parsed.modelName
+        .replace(/\.[^.]+$/, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '_')
+        .slice(0, 28) || 'custom_model';
+
+    const extractedTags: ExtractedTag[] = [];
+    const bitmapIdxByImageIndex = new Map<number, { localIndex: number; path: string }>();
+    const solidColorBitmaps = new Map<string, { localIndex: number; path: string }>();
+
+    // Build custom `bitmap` tags for every decoded embedded/external texture
+    for (let tIdx = 0; tIdx < parsed.extractedTextures.length; tIdx++) {
+      const tex = parsed.extractedTextures[tIdx]!;
+      if (!tex.rgba || tex.width <= 0 || tex.height <= 0) continue;
+      const texSlug =
+        tex.name
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '_')
+          .slice(0, 28) || `tex_${tex.imageIndex}`;
+      const bitmPath = `levels\\custom_import\\${modelSlug}\\bitmaps\\${texSlug}_${tex.imageIndex}`;
+      const localIdx = extractedTags.length;
+      const bitmTag = buildCustomBitmapTag(
+        bitmPath,
+        localIdx,
+        tex.rgba,
+        tex.width,
+        tex.height,
+        BitmapFormat.A8R8G8B8,
+      );
+      extractedTags.push(bitmTag);
+      bitmapIdxByImageIndex.set(tex.imageIndex, { localIndex: localIdx, path: bitmPath });
+    }
+
+    // Build custom `shader_model` (`soso`) tags for every unique material referenced by `submeshChunks`
+    const chunkRepByMatIndex = new Map<number, (typeof parsed.submeshChunks)[number]>();
+    for (const chunk of parsed.submeshChunks) {
+      if (!chunkRepByMatIndex.has(chunk.materialIndex)) {
+        chunkRepByMatIndex.set(chunk.materialIndex, chunk);
+      }
+    }
+
+    const shaderLocalIdxByMatIndex = new Map<number, number>();
+    for (const [matIdx, chunk] of chunkRepByMatIndex.entries()) {
+      let bitmRef =
+        chunk.textureIndex >= 0 ? bitmapIdxByImageIndex.get(chunk.textureIndex) : undefined;
+      if (!bitmRef) {
+        // Synthesize a 4x4 solid-color RGBA texture from `chunk.baseColorRgba`
+        const r = Math.max(0, Math.min(255, Math.round((chunk.baseColorRgba[0] ?? 0.8) * 255)));
+        const g = Math.max(0, Math.min(255, Math.round((chunk.baseColorRgba[1] ?? 0.8) * 255)));
+        const b = Math.max(0, Math.min(255, Math.round((chunk.baseColorRgba[2] ?? 0.8) * 255)));
+        const a = Math.max(0, Math.min(255, Math.round((chunk.baseColorRgba[3] ?? 1.0) * 255)));
+        const colorKey = `${r}_${g}_${b}_${a}`;
+        bitmRef = solidColorBitmaps.get(colorKey);
+        if (!bitmRef) {
+          const solidRgba = new Uint8Array(4 * 4 * 4);
+          for (let p = 0; p < 16; p++) {
+            solidRgba[p * 4 + 0] = r;
+            solidRgba[p * 4 + 1] = g;
+            solidRgba[p * 4 + 2] = b;
+            solidRgba[p * 4 + 3] = a;
+          }
+          const bitmPath = `levels\\custom_import\\${modelSlug}\\bitmaps\\solid_${colorKey}`;
+          const localIdx = extractedTags.length;
+          extractedTags.push(
+            buildCustomBitmapTag(bitmPath, localIdx, solidRgba, 4, 4, BitmapFormat.A8R8G8B8),
+          );
+          bitmRef = { localIndex: localIdx, path: bitmPath };
+          solidColorBitmaps.set(colorKey, bitmRef);
+        }
+      }
+
+      const matSlug =
+        chunk.materialName
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '_')
+          .slice(0, 28) || `mat_${matIdx}`;
+      const shaderPath = `levels\\custom_import\\${modelSlug}\\shaders\\${matSlug}_${matIdx}`;
+      const alphaTested =
+        autoAlphaAndTwoSided && (chunk.hasAlphaCutout || chunk.isPassThrough);
+      const matType = chunk.haloMaterialType;
+
+      const shaderLocalIdx = extractedTags.length;
+      const shaderTag = buildCustomShaderEnvironmentTag(
+        shaderPath,
+        shaderLocalIdx,
+        bitmRef.path,
+        bitmRef.localIndex,
+        matType,
+        { alphaTested },
+      );
+      extractedTags.push(shaderTag);
+      shaderLocalIdxByMatIndex.set(matIdx, shaderLocalIdx);
+    }
+
+    if (extractedTags.length > 0) {
+      const rootOriginalIndices = Array.from(shaderLocalIdxByMatIndex.values());
+      const tagSet: ExtractedTagSet = {
+        rootOriginalIndices,
+        tags: extractedTags,
+        notExtracted: [],
+        warnings: [],
+      };
+      const containerBuf = serializeContainer(tagSet, `model_bsp_${modelSlug}`);
+      const container = deserializeContainer(containerBuf);
+      const planRes = planAddInjection(
+        {
+          buffer: workMapBuf,
+          header: reinspected.header,
+          tagIndex: reinspected.tagIndex,
+        },
+        container,
+        {},
+        {
+          allowEmbeddedRelocation: true,
+          allowGbxmodelGeometryRelocation: true,
+          allowExpandedTagSpace: true,
+        },
+      );
+      if (planRes.kind !== 'refused') {
+        workMapBuf = Buffer.from(
+          applyAddInjection(
+            workMapBuf,
+            reinspected.header,
+            reinspected.tagIndex,
+            container,
+            planRes,
+            {
+              allowEmbeddedRelocation: true,
+              allowGbxmodelGeometryRelocation: true,
+              allowExpandedTagSpace: true,
+            },
+          ),
+        );
+        const afterInject = inspectCustomEditionMap(workMapBuf);
+        if (afterInject.status === 'ok') {
+          reinspected = afterInject;
+        }
+        for (const t of container.tags) {
+          if (t.group === 'bitmap') injectedBitmaps++;
+          if (t.group === 'shader_environment' || t.group === 'shader_model') injectedShaders++;
+        }
+
+        const tagHeaderSize = reinspected.header.engine === 5 ? 0x24 : 0x28;
+        const curTagDataOffset = reinspected.header.tagDataOffset;
+        for (const [matIdx, localIdx] of shaderLocalIdxByMatIndex.entries()) {
+          const resolvedTagId = planRes.resolvedTagIdByLocalIndex.get(localIdx);
+          if (resolvedTagId !== undefined && resolvedTagId !== 0xffffffff) {
+            const entryOff =
+              curTagDataOffset + tagHeaderSize + (resolvedTagId & 0xffff) * 32;
+            const pathPtr =
+              entryOff + 0x14 <= workMapBuf.length
+                ? workMapBuf.readUInt32LE(entryOff + 0x10)
+                : 0;
+            materialShaderMap.set(matIdx, {
+              tagId: resolvedTagId,
+              pathPtr,
+              classFourCC: fourCCFromString('senv'),
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback in-map shader if any submesh has no injected shader (e.g. extractTextures === false)
+  let fallbackShader: { tagId: number; pathPtr: number; classFourCC: number } = {
+    tagId: 0xffffffff,
+    pathPtr: 0,
+    classFourCC: fourCCFromString('senv'),
+  };
+  {
+    const tagHeaderSize = reinspected.header.engine === 5 ? 0x24 : 0x28;
+    const curTagDataOffset = reinspected.header.tagDataOffset;
+    const candidate =
+      reinspected.tagIndex.entries.find(
+        (e) =>
+          (e.primaryClassName === 'shader_environment' ||
+            e.primaryClassName === 'shader_model') &&
+          !/sky|portal|invisible|nodraw/i.test(e.path),
+      ) ??
+      reinspected.tagIndex.entries.find((e) => e.primaryClassName?.startsWith('shader'));
+    if (candidate) {
+      const entryOff = curTagDataOffset + tagHeaderSize + candidate.index * 32;
+      const pathPtr =
+        entryOff + 0x14 <= workMapBuf.length
+          ? workMapBuf.readUInt32LE(entryOff + 0x10)
+          : 0;
+      fallbackShader = {
+        tagId: candidate.tagId,
+        pathPtr,
+        classFourCC: candidate.primaryClassFourCC,
+      };
+    }
+  }
+
+  // 2. Locate target BSP in `workMapBuf`
+  const targetBsps = getMapBsps(workMapBuf);
+  const dstBsp = targetBsps[dstIdx] ?? targetBsps[0];
+  if (!dstBsp) {
+    return makeErrorResult(`Invalid target BSP index ${dstIdx}.`);
+  }
+
+  const { header, tagIndex } = reinspected;
+  const scenarioEntry = tagIndex.entries[tagIndex.scenarioTagId & 0xffff];
+  if (!scenarioEntry) {
+    return makeErrorResult('Scenario tag not found in target map.');
+  }
+  const scenarioFileOffset =
+    header.tagDataOffset +
+    (scenarioEntry.tagDataPointerOrResourceIndex - tagIndex.baseMemoryAddress);
+  const decodedScenario = decodeStruct(workMapBuf, scenarioFileOffset, 'Scenario');
+  const bspsField = decodedScenario.get('structure bsps');
+  if (!bspsField || bspsField.kind !== 'reflexive' || bspsField.value.count === 0) {
+    return makeErrorResult('Scenario has no structure bsps.');
+  }
+  const effectiveBspIdx = Math.max(0, Math.min(bspsField.value.count - 1, dstIdx));
+  const scenarioBspSize = resolveStruct('ScenarioBSP').totalSize;
+  const bspsArrayOffset =
+    header.tagDataOffset + (bspsField.value.pointerLow - tagIndex.baseMemoryAddress);
+  const bspEntryOffset = bspsArrayOffset + effectiveBspIdx * scenarioBspSize;
+  const decodedBspEntry = decodeStruct(workMapBuf, bspEntryOffset, 'ScenarioBSP');
+  const bspDep = decodedBspEntry.get('structure bsp');
+  const bspTagId = bspDep && bspDep.kind === 'dependency' ? bspDep.value.tagId : 0xffffffff;
+  const oldBspStart = (decodedBspEntry.get('bsp start') as { kind: 'basic'; value: number }).value;
+  const oldBspSize = (decodedBspEntry.get('bsp size') as { kind: 'basic'; value: number }).value;
+  const baseAddress = (decodedBspEntry.get('bsp address') as { kind: 'basic'; value: number }).value;
+
+  const loc = locateStructureBsp(
+    workMapBuf,
+    tagIndex,
+    scenarioFileOffset,
+    header.tagDataOffset,
+    tagIndex.baseMemoryAddress,
+    bspTagId,
+    effectiveBspIdx,
+  );
+  if (!loc) {
+    return makeErrorResult(`Failed to locate Structure BSP ${effectiveBspIdx}.`);
+  }
+  const decodedBsp = decodeStruct(workMapBuf, loc.fileOffset, 'ScenarioStructureBSP');
+
+  // 3. Compile solid 3D CollisionBSP from `parsed.collisionMesh`
+  const targetCollFaces = options.targetCollisionFaces ?? 3500;
+  const compiledColl = compileMeshCollisionBspData(parsed.collisionMesh, 1, {
+    mode: simplifyCollision ? 'auto' : 'exact',
+    targetFaces: targetCollFaces,
+  });
+  if (!compiledColl) {
+    return makeErrorResult('Failed to compile 3D CollisionBSP from model geometry.');
+  }
+
+  // 4. Construct the updated `ScenarioStructureBSP` buffer (`replace` or `merge` mode)
+  const getRefl = (decoded: Map<string, any>, key: string): { count: number; pointerLow: number } => {
+    const f = decoded.get(key);
+    return f && f.kind === 'reflexive' && f.value ? f.value : { count: 0, pointerLow: 0 };
+  };
+  const getBnds = (decoded: Map<string, any>, key: string): [number, number] => {
+    const f = decoded.get(key);
+    return f && f.kind === 'bounds' && Array.isArray(f.value) ? f.value : [0, 0];
+  };
+
+  const toRel = (ptr: number): number => ptr - baseAddress;
+  const rootOff = loc.fileOffset - oldBspStart;
+  const lmStructSize = 32;
+  const matStructSize = 256;
+
+  // Estimate working capacity for the new/merged BSP
+  const extraCapacity =
+    parsed.weldedVertexCount * 64 +
+    parsed.totalTriangleCount * 16 +
+    parsed.submeshChunks.length * 512 +
+    compiledColl.bsp3dNodes.length * 16 +
+    compiledColl.planes.length * 20 +
+    compiledColl.leaves.length * 32 +
+    compiledColl.bsp2dReferences.length * 16 +
+    compiledColl.bsp2dNodes.length * 24 +
+    compiledColl.surfaces.length * 16 +
+    compiledColl.edges.length * 32 +
+    compiledColl.vertices.length * 20 +
+    8 * 1024 * 1024;
+  const bspBuf = Buffer.alloc(oldBspSize + extraCapacity, 0);
+  workMapBuf.copy(bspBuf, 0, oldBspStart, oldBspStart + oldBspSize);
+  let cursor = (oldBspSize + 15) & ~15;
+
+  const freeRanges: { start: number; end: number }[] = [];
+  const markFreeRange = (relStart: number, byteLen: number): void => {
+    if (byteLen < 32 || relStart < 0x280 || relStart + byteLen > oldBspSize) return;
+    freeRanges.push({ start: relStart, end: relStart + byteLen });
+  };
+  const sliceAndReclaim = (relStart: number, byteLen: number): Buffer => {
+    if (byteLen <= 0 || relStart < 0 || relStart + byteLen > oldBspSize) return Buffer.alloc(0);
+    const copy = Buffer.from(bspBuf.subarray(relStart, relStart + byteLen));
+    markFreeRange(relStart, byteLen);
+    return copy;
+  };
+
+  // Extract a template 256-byte `ScenarioStructureBSPMaterial` from the donor BSP
+  const oldLmRefl = getRefl(decodedBsp, 'lightmaps');
+  const oldLmCount = oldLmRefl.count;
+  const oldLmRel = toRel(oldLmRefl.pointerLow);
+  const templateMatBuf = Buffer.alloc(matStructSize, 0);
+  if (oldLmCount > 0 && oldLmRel >= 0 && oldLmRel + lmStructSize <= oldBspSize) {
+    const firstMatsCount = bspBuf.readUInt32LE(oldLmRel + 0x14);
+    const firstMatsPtr = bspBuf.readUInt32LE(oldLmRel + 0x18);
+    const firstMatsRel = toRel(firstMatsPtr);
+    if (firstMatsCount > 0 && firstMatsRel >= 0 && firstMatsRel + matStructSize <= oldBspSize) {
+      bspBuf.copy(templateMatBuf, 0, firstMatsRel, firstMatsRel + matStructSize);
+    }
+  }
+
+  const oldSurfacesRefl = getRefl(decodedBsp, 'surfaces');
+  const oldSurfCount = injectionMode === 'merge' ? oldSurfacesRefl.count : 0;
+  const oldSurfRel = toRel(oldSurfacesRefl.pointerLow);
+  const oldSurfacesBuf = sliceAndReclaim(oldSurfRel, oldSurfacesRefl.count * 6);
+
+  // In 'replace' mode, reclaim all old lightmaps, materials, and uncompressed vertex buffers
+  if (injectionMode === 'replace' && oldLmCount > 0 && oldLmRel >= 0 && oldLmRel + oldLmCount * lmStructSize <= oldBspSize) {
+    for (let i = 0; i < oldLmCount; i++) {
+      const mCnt = bspBuf.readUInt32LE(oldLmRel + i * lmStructSize + 0x14);
+      const mRel = toRel(bspBuf.readUInt32LE(oldLmRel + i * lmStructSize + 0x18));
+      if (mCnt > 0 && mRel >= 0 && mRel + mCnt * matStructSize <= oldBspSize) {
+        for (let j = 0; j < mCnt; j++) {
+          const uSz = bspBuf.readUInt32LE(mRel + j * matStructSize + 0xd8);
+          const uRel = toRel(bspBuf.readUInt32LE(mRel + j * matStructSize + 0xe4));
+          markFreeRange(uRel, uSz);
+        }
+        markFreeRange(mRel, mCnt * matStructSize);
+      }
+    }
+  }
+  const oldLmBuf = sliceAndReclaim(oldLmRel, oldLmCount * lmStructSize);
+
+  const clustersRefl = getRefl(decodedBsp, 'clusters');
+  const clustersRel = clustersRefl.count > 0 ? toRel(clustersRefl.pointerLow) : -1;
+  const oldScChunks: Buffer[] = [];
+  if (clustersRel >= 0) {
+    for (let c = 0; c < clustersRefl.count; c++) {
+      const cEnt = clustersRel + c * 104;
+      const scCnt = bspBuf.readUInt32LE(cEnt + 0x34);
+      const scRel = toRel(bspBuf.readUInt32LE(cEnt + 0x38));
+      if (scCnt > 0 && scRel >= 0 && scRel + scCnt * 36 <= oldBspSize) {
+        if (injectionMode === 'replace') {
+          for (let s = 0; s < scCnt; s++) {
+            const siCnt = bspBuf.readUInt32LE(scRel + s * 36 + 0x18);
+            const siRel = toRel(bspBuf.readUInt32LE(scRel + s * 36 + 0x1c));
+            markFreeRange(siRel, siCnt * 4);
+          }
+          markFreeRange(scRel, scCnt * 36);
+        } else {
+          oldScChunks.push(sliceAndReclaim(scRel, scCnt * 36));
+        }
+      }
+    }
+  }
+  const oldScBuf = oldScChunks.length > 0 ? Buffer.concat(oldScChunks) : Buffer.alloc(0);
+  const oldScCount = Math.floor(oldScBuf.length / 36);
+
+  const collRefl = getRefl(decodedBsp, 'collision bsp');
+  const collRel = toRel(collRefl.pointerLow);
+  const rawOldN3dCount = bspBuf.readUInt32LE(collRel + 0x00);
+  const oldN3dBuf = sliceAndReclaim(toRel(bspBuf.readUInt32LE(collRel + 0x04)), rawOldN3dCount * 12);
+  const rawOldPlnCount = bspBuf.readUInt32LE(collRel + 0x0c);
+  const oldPlnBuf = sliceAndReclaim(toRel(bspBuf.readUInt32LE(collRel + 0x10)), rawOldPlnCount * 16);
+  const rawOldLeafCount = bspBuf.readUInt32LE(collRel + 0x18);
+  const oldLeafBuf = sliceAndReclaim(toRel(bspBuf.readUInt32LE(collRel + 0x1c)), rawOldLeafCount * 8);
+  const rawOldRef2dCount = bspBuf.readUInt32LE(collRel + 0x24);
+  const oldRef2dBuf = sliceAndReclaim(toRel(bspBuf.readUInt32LE(collRel + 0x28)), rawOldRef2dCount * 8);
+  const rawOldNode2dCount = bspBuf.readUInt32LE(collRel + 0x30);
+  const oldNode2dBuf = sliceAndReclaim(toRel(bspBuf.readUInt32LE(collRel + 0x34)), rawOldNode2dCount * 20);
+  const rawOldCSurfCount = bspBuf.readUInt32LE(collRel + 0x3c);
+  const oldCSurfBuf = sliceAndReclaim(toRel(bspBuf.readUInt32LE(collRel + 0x40)), rawOldCSurfCount * 12);
+  const rawOldCEdgeCount = bspBuf.readUInt32LE(collRel + 0x48);
+  const oldCEdgeBuf = sliceAndReclaim(toRel(bspBuf.readUInt32LE(collRel + 0x4c)), rawOldCEdgeCount * 24);
+  const rawOldCVertCount = bspBuf.readUInt32LE(collRel + 0x54);
+  const oldCVertBuf = sliceAndReclaim(toRel(bspBuf.readUInt32LE(collRel + 0x58)), rawOldCVertCount * 16);
+
+  const sbspLeavesRefl = getRefl(decodedBsp, 'leaves');
+  const oldSbspLeavesBuf = sliceAndReclaim(toRel(sbspLeavesRefl.pointerLow), sbspLeavesRefl.count * 16);
+
+  if (injectionMode === 'replace') {
+    const nodesRefl = getRefl(decodedBsp, 'nodes');
+    markFreeRange(toRel(nodesRefl.pointerLow), nodesRefl.count * 6);
+    const leafSurfRefl = getRefl(decodedBsp, 'leaf surfaces');
+    markFreeRange(toRel(leafSurfRefl.pointerLow), leafSurfRefl.count * 8);
+    const portalsRefl = getRefl(decodedBsp, 'cluster portals');
+    markFreeRange(toRel(portalsRefl.pointerLow), portalsRefl.count * 64);
+  }
+  if (stripDobcAndDecals) {
+    const dobcRefl = getRefl(decodedBsp, 'detail objects');
+    markFreeRange(toRel(dobcRefl.pointerLow), dobcRefl.count * 64);
+    const decalsRefl = getRefl(decodedBsp, 'runtime decals');
+    markFreeRange(toRel(decalsRefl.pointerLow), decalsRefl.count * 16);
+  }
+
+  // Coalesce free ranges for best-fit allocation
+  freeRanges.sort((a, b) => a.start - b.start);
+  const mergedFreeRanges: { start: number; end: number }[] = [];
+  for (const r of freeRanges) {
+    const last = mergedFreeRanges[mergedFreeRanges.length - 1];
+    if (last && r.start <= last.end + 16) {
+      last.end = Math.max(last.end, r.end);
+    } else {
+      mergedFreeRanges.push({ ...r });
+    }
+  }
+
+  const alloc = (byteLen: number): number => {
+    const aligned = (Math.max(1, byteLen) + 15) & ~15;
+    let bestIdx = -1;
+    let bestRem = Infinity;
+    for (let i = 0; i < mergedFreeRanges.length; i++) {
+      const r = mergedFreeRanges[i]!;
+      const aStart = (r.start + 15) & ~15;
+      if (aStart + aligned <= r.end) {
+        const rem = r.end - (aStart + aligned);
+        if (rem < bestRem) {
+          bestRem = rem;
+          bestIdx = i;
+        }
+      }
+    }
+    if (bestIdx !== -1) {
+      const r = mergedFreeRanges[bestIdx]!;
+      const aStart = (r.start + 15) & ~15;
+      r.start = aStart + aligned;
+      if (r.end - r.start < 16) mergedFreeRanges.splice(bestIdx, 1);
+      return aStart;
+    }
+    const out = cursor;
+    cursor += aligned;
+    return out;
+  };
+
+  // 4A. Build 56-byte uncompressed vertex buffers and 6-byte surface buffers for each `SubmeshChunk`
+  interface BuiltSubmesh {
+    shaderTagId: number;
+    shaderPathPtr: number;
+    shaderClassFourCC: number;
+    vertBuf: Buffer;
+    vertCount: number;
+    surfBuf: Buffer;
+    surfStart: number;
+    surfCount: number;
+    centroid: [number, number, number];
+  }
+
+  const builtSubmeshes: BuiltSubmesh[] = [];
+  const triMetaForSubclusters: {
+    surfIdx: number;
+    cx: number;
+    cy: number;
+    cz: number;
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    minZ: number;
+    maxZ: number;
+  }[] = [];
+
+  // Enforce Halo CE / OpenCE's hard `MAXIMUM_SURFACES_PER_STRUCTURE = 131,072` (0x20000) surface bitvector limit:
+  // If the model has more than `128,000 - oldSurfCount` triangles (e.g. mega-levels like `jak.glb`),
+  // automatically cull the smallest micro-detail/distant-backdrop triangles while preserving all major
+  // terrain, floor, building, and structural surfaces and guaranteeing at least 8 triangles per submesh chunk.
+  const maxAllowedNewSurfaces = Math.max(1000, 128000 - oldSurfCount);
+  const rawTotalChunkTris = parsed.submeshChunks.reduce(
+    (sum, c) => sum + Math.floor(c.indices.length / 3),
+    0,
+  );
+  const chunkKeepMask = new Map<number, Uint8Array>();
+  if (rawTotalChunkTris > maxAllowedNewSurfaces) {
+    const scoredTris: { cIdx: number; tIdx: number; score: number }[] = [];
+    for (let cIdx = 0; cIdx < parsed.submeshChunks.length; cIdx++) {
+      const ch = parsed.submeshChunks[cIdx]!;
+      const tCnt = Math.floor(ch.indices.length / 3);
+      const mask = new Uint8Array(tCnt);
+      mask.fill(1);
+      chunkKeepMask.set(cIdx, mask);
+      const minProtected = Math.min(tCnt, 8);
+      for (let t = minProtected; t < tCnt; t++) {
+        const i0 = ch.indices[t * 3 + 0]!;
+        const i1 = ch.indices[t * 3 + 1]!;
+        const i2 = ch.indices[t * 3 + 2]!;
+        const x0 = ch.positions[i0 * 3 + 0]!,
+          y0 = ch.positions[i0 * 3 + 1]!,
+          z0 = ch.positions[i0 * 3 + 2]!;
+        const x1 = ch.positions[i1 * 3 + 0]!,
+          y1 = ch.positions[i1 * 3 + 1]!,
+          z1 = ch.positions[i1 * 3 + 2]!;
+        const x2 = ch.positions[i2 * 3 + 0]!,
+          y2 = ch.positions[i2 * 3 + 1]!,
+          z2 = ch.positions[i2 * 3 + 2]!;
+        const dx = Math.max(x0, x1, x2) - Math.min(x0, x1, x2);
+        const dy = Math.max(y0, y1, y2) - Math.min(y0, y1, y2);
+        const dz = Math.max(z0, z1, z2) - Math.min(z0, z1, z2);
+        const isWalkableSlab = !ch.isPassThrough && dz < 0.25 && dx * dy > 0.2;
+        const weight = isWalkableSlab ? 8.0 : ch.isPassThrough ? 0.35 : 1.0;
+        const score = (dx * dx + dy * dy + dz * dz) * weight;
+        scoredTris.push({ cIdx, tIdx: t, score });
+      }
+    }
+    scoredTris.sort((a, b) => a.score - b.score);
+    const toDrop = rawTotalChunkTris - maxAllowedNewSurfaces;
+    for (let d = 0; d < toDrop && d < scoredTris.length; d++) {
+      const item = scoredTris[d]!;
+      const mask = chunkKeepMask.get(item.cIdx);
+      if (mask) mask[item.tIdx] = 0;
+    }
+  }
+
+  let runningSurfCount = oldSurfCount;
+  for (let chunkIdx = 0; chunkIdx < parsed.submeshChunks.length; chunkIdx++) {
+    const chunk = parsed.submeshChunks[chunkIdx]!;
+    const keepMask = chunkKeepMask.get(chunkIdx);
+    const sh = materialShaderMap.get(chunk.materialIndex) ?? fallbackShader;
+    const rawTriCount = Math.floor(chunk.indices.length / 3);
+    let keptTriCount = rawTriCount;
+    if (keepMask) {
+      keptTriCount = 0;
+      for (let t = 0; t < rawTriCount; t++) {
+        if (keepMask[t]) keptTriCount++;
+      }
+    }
+    if (keptTriCount === 0) continue;
+
+    // Compact vertex buffer when triangles were culled by `keepMask`, and enforce `<= 32,766` vertices per submesh
+    const origVCount = Math.floor(chunk.positions.length / 3);
+    let vertRemap: Int32Array | null = null;
+    let keptOrigVerts: number[] | null = null;
+    if (keepMask) {
+      vertRemap = new Int32Array(origVCount).fill(-1);
+      keptOrigVerts = [];
+      for (let t = 0; t < rawTriCount; t++) {
+        if (!keepMask[t]) continue;
+        for (let k = 0; k < 3; k++) {
+          const ov = chunk.indices[t * 3 + k]!;
+          if (vertRemap[ov] === -1) {
+            vertRemap[ov] = keptOrigVerts.length;
+            keptOrigVerts.push(ov);
+          }
+        }
+      }
+    }
+    const vCount = keptOrigVerts ? keptOrigVerts.length : origVCount;
+    const vBuf = Buffer.alloc(vCount * 56, 0);
+    for (let v = 0; v < vCount; v++) {
+      const srcV = keptOrigVerts ? keptOrigVerts[v]! : v;
+      const pBase = srcV * 3;
+      const uvBase = srcV * 2;
+      const px = chunk.positions[pBase + 0]!;
+      const py = chunk.positions[pBase + 1]!;
+      const pz = chunk.positions[pBase + 2]!;
+      const nx = chunk.normals[pBase + 0]!;
+      const ny = chunk.normals[pBase + 1]!;
+      const nz = chunk.normals[pBase + 2]!;
+      const u = chunk.uvs[uvBase + 0]!;
+      const vCoord = chunk.uvs[uvBase + 1]!;
+
+      const refX = Math.abs(nz) < 0.9 ? 0 : 1;
+      const refZ = Math.abs(nz) < 0.9 ? 1 : 0;
+      let tx = -refZ * ny;
+      let ty = refZ * nx - refX * nz;
+      let tz = refX * ny;
+      const tLen = Math.hypot(tx, ty, tz) || 1;
+      tx /= tLen;
+      ty /= tLen;
+      tz /= tLen;
+      const bx = ny * tz - nz * ty;
+      const by = nz * tx - nx * tz;
+      const bz = nx * ty - ny * tx;
+
+      const vo = v * 56;
+      vBuf.writeFloatLE(px, vo + 0);
+      vBuf.writeFloatLE(py, vo + 4);
+      vBuf.writeFloatLE(pz, vo + 8);
+      vBuf.writeFloatLE(nx, vo + 12);
+      vBuf.writeFloatLE(ny, vo + 16);
+      vBuf.writeFloatLE(nz, vo + 20);
+      vBuf.writeFloatLE(bx, vo + 24);
+      vBuf.writeFloatLE(by, vo + 28);
+      vBuf.writeFloatLE(bz, vo + 32);
+      vBuf.writeFloatLE(tx, vo + 36);
+      vBuf.writeFloatLE(ty, vo + 40);
+      vBuf.writeFloatLE(tz, vo + 44);
+      vBuf.writeFloatLE(u, vo + 48);
+      vBuf.writeFloatLE(vCoord, vo + 52);
+    }
+
+    const wantTwoSided =
+      autoAlphaAndTwoSided && (chunk.doubleSided || chunk.isPassThrough);
+    // In Halo CE's D3D9 shader_environment renderer, hardware backface culling (D3DCULL_CCW) is always active.
+    // Emit back-face triangles (i0, i1, i2) alongside front-face triangles (i0, i2, i1) for two-sided/cutout
+    // submeshes (matching tool.exe '%' material compilation) when total surfaces fit within Halo CE's 131,072 cap.
+    const emitBackfaces =
+      !keepMask && wantTwoSided && runningSurfCount + keptTriCount * 2 <= 128000;
+    const emittedTriCount = emitBackfaces ? keptTriCount * 2 : keptTriCount;
+    const sBuf = Buffer.alloc(emittedTriCount * 6);
+    let localSurfWriteIdx = 0;
+    for (let t = 0; t < rawTriCount; t++) {
+      if (keepMask && !keepMask[t]) continue;
+      const rawI0 = chunk.indices[t * 3 + 0]!;
+      const rawI1 = chunk.indices[t * 3 + 1]!;
+      const rawI2 = chunk.indices[t * 3 + 2]!;
+      const i0 = vertRemap ? vertRemap[rawI0]! : rawI0;
+      const i1 = vertRemap ? vertRemap[rawI1]! : rawI1;
+      const i2 = vertRemap ? vertRemap[rawI2]! : rawI2;
+      // Halo CE ScenarioStructureBSP render surfaces use Clockwise winding: (i0, i2, i1)
+      sBuf.writeUInt16LE(i0, localSurfWriteIdx * 6 + 0);
+      sBuf.writeUInt16LE(i2, localSurfWriteIdx * 6 + 2);
+      sBuf.writeUInt16LE(i1, localSurfWriteIdx * 6 + 4);
+
+      const x0 = chunk.positions[rawI0 * 3 + 0]!,
+        y0 = chunk.positions[rawI0 * 3 + 1]!,
+        z0 = chunk.positions[rawI0 * 3 + 2]!;
+      const x1 = chunk.positions[rawI1 * 3 + 0]!,
+        y1 = chunk.positions[rawI1 * 3 + 1]!,
+        z1 = chunk.positions[rawI1 * 3 + 2]!;
+      const x2 = chunk.positions[rawI2 * 3 + 0]!,
+        y2 = chunk.positions[rawI2 * 3 + 1]!,
+        z2 = chunk.positions[rawI2 * 3 + 2]!;
+      const cx = (x0 + x1 + x2) / 3;
+      const cy = (y0 + y1 + y2) / 3;
+      const cz = (z0 + z1 + z2) / 3;
+      const minX = Math.min(x0, x1, x2);
+      const maxX = Math.max(x0, x1, x2);
+      const minY = Math.min(y0, y1, y2);
+      const maxY = Math.max(y0, y1, y2);
+      const minZ = Math.min(z0, z1, z2);
+      const maxZ = Math.max(z0, z1, z2);
+
+      triMetaForSubclusters.push({
+        surfIdx: runningSurfCount + localSurfWriteIdx,
+        cx,
+        cy,
+        cz,
+        minX,
+        maxX,
+        minY,
+        maxY,
+        minZ,
+        maxZ,
+      });
+      localSurfWriteIdx++;
+
+      if (emitBackfaces) {
+        sBuf.writeUInt16LE(i0, localSurfWriteIdx * 6 + 0);
+        sBuf.writeUInt16LE(i1, localSurfWriteIdx * 6 + 2);
+        sBuf.writeUInt16LE(i2, localSurfWriteIdx * 6 + 4);
+        triMetaForSubclusters.push({
+          surfIdx: runningSurfCount + localSurfWriteIdx,
+          cx,
+          cy,
+          cz,
+          minX,
+          maxX,
+          minY,
+          maxY,
+          minZ,
+          maxZ,
+        });
+        localSurfWriteIdx++;
+      }
+    }
+
+    builtSubmeshes.push({
+      shaderTagId: sh.tagId,
+      shaderPathPtr: sh.pathPtr,
+      shaderClassFourCC: sh.classFourCC,
+      vertBuf: vBuf,
+      vertCount: vCount,
+      surfBuf: sBuf,
+      surfStart: runningSurfCount,
+      surfCount: emittedTriCount,
+      centroid: chunk.centroid,
+    });
+    runningSurfCount += emittedTriCount;
+  }
+
+  // Write surfaces array
+  const combinedSurfRel = alloc(runningSurfCount * 6);
+  if (injectionMode === 'merge' && oldSurfacesBuf.length > 0) {
+    oldSurfacesBuf.copy(bspBuf, combinedSurfRel);
+  }
+  let surfWriteOff = combinedSurfRel + oldSurfCount * 6;
+  for (const sm of builtSubmeshes) {
+    sm.surfBuf.copy(bspBuf, surfWriteOff);
+    surfWriteOff += sm.surfBuf.length;
+  }
+  bspBuf.writeUInt32LE(runningSurfCount, rootOff + 0xf8);
+  bspBuf.writeUInt32LE(baseAddress + combinedSurfRel, rootOff + 0xfc);
+
+  // Write `ScenarioStructureBSPMaterial` entries + uncompressed vertex buffers
+  const newMatsRel = alloc(builtSubmeshes.length * matStructSize);
+  for (let i = 0; i < builtSubmeshes.length; i++) {
+    const sm = builtSubmeshes[i]!;
+    const mOff = newMatsRel + i * matStructSize;
+    templateMatBuf.copy(bspBuf, mOff, 0, matStructSize);
+    bspBuf.writeUInt32LE(sm.shaderClassFourCC >>> 0, mOff + 0x00);
+    bspBuf.writeUInt32LE(sm.shaderPathPtr >>> 0, mOff + 0x04);
+    bspBuf.writeUInt32LE(0, mOff + 0x08);
+    bspBuf.writeUInt32LE(sm.shaderTagId >>> 0, mOff + 0x0c);
+    bspBuf.writeInt16LE(0, mOff + 0x10);
+    bspBuf.writeUInt16LE(0, mOff + 0x12);
+    bspBuf.writeInt32LE(sm.surfStart, mOff + 0x14);
+    bspBuf.writeInt32LE(sm.surfCount, mOff + 0x18);
+    bspBuf.writeFloatLE(sm.centroid[0], mOff + 0x1c);
+    bspBuf.writeFloatLE(sm.centroid[1], mOff + 0x20);
+    bspBuf.writeFloatLE(sm.centroid[2], mOff + 0x24);
+    bspBuf.writeInt16LE(-1, mOff + 0xac);
+
+    const vRel = alloc(sm.vertBuf.length);
+    sm.vertBuf.copy(bspBuf, vRel);
+    bspBuf.writeUInt16LE(0, mOff + 0xb0);
+    bspBuf.writeUInt32LE(sm.vertCount, mOff + 0xb4);
+    bspBuf.writeUInt32LE(0, mOff + 0xb8);
+    bspBuf.writeUInt32LE(0, mOff + 0xc8); // 0 lightmap vertices
+    bspBuf.writeUInt32LE(sm.vertBuf.length, mOff + 0xd8);
+    bspBuf.writeUInt32LE(0, mOff + 0xdc);
+    bspBuf.writeUInt32LE(0, mOff + 0xe0);
+    bspBuf.writeUInt32LE(baseAddress + vRel, mOff + 0xe4);
+    bspBuf.fill(0, mOff + 0xec, mOff + 0x100);
+  }
+
+  // Write `ScenarioStructureBSPLightmap` (`bitmap = -1` for full-brightness diffuse rendering)
+  const keptOldLmCount = injectionMode === 'merge' ? oldLmCount : 0;
+  const newLmCount = keptOldLmCount + 1;
+  const combinedLmRel = alloc(newLmCount * lmStructSize);
+  if (injectionMode === 'merge' && oldLmBuf.length > 0) {
+    oldLmBuf.copy(bspBuf, combinedLmRel);
+  }
+  const newLmOff = combinedLmRel + keptOldLmCount * lmStructSize;
+  bspBuf.writeInt16LE(-1, newLmOff + 0x00); // bitmap = -1 (full-brightness diffuse mode)
+  bspBuf.writeUInt16LE(0, newLmOff + 0x02);
+  bspBuf.fill(0, newLmOff + 0x04, newLmOff + 0x14);
+  bspBuf.writeUInt32LE(builtSubmeshes.length, newLmOff + 0x14);
+  bspBuf.writeUInt32LE(baseAddress + newMatsRel, newLmOff + 0x18);
+  bspBuf.writeUInt32LE(0, newLmOff + 0x1c);
+
+  bspBuf.writeUInt32LE(newLmCount, rootOff + 0x104);
+  bspBuf.writeUInt32LE(baseAddress + combinedLmRel, rootOff + 0x108);
+
+  if (injectionMode === 'replace' && fullBrightnessLightmap) {
+    // Clear `lightmaps bitmap` TagDependency at rootOff + 0x00 so OpenCE uses _rasterizer_lightmap_mode_no_lightmap
+    bspBuf.writeUInt32LE(0, rootOff + 0x04);
+    bspBuf.writeUInt32LE(0, rootOff + 0x08);
+    bspBuf.writeUInt32LE(0xffffffff, rootOff + 0x0c);
+  }
+
+  const scaledBoundsTuple = toBoundsTuple(parsed.scaledBounds);
+  const playableScaledBoundsTuple = toBoundsTuple(parsed.playableScaledBounds);
+
+  // 4B. Partition triangles into spatially-sorted tight-AABB Subclusters in Cluster 0
+  if (clustersRel >= 0 && triMetaForSubclusters.length > 0) {
+    const spanX = scaledBoundsTuple[3] - scaledBoundsTuple[0];
+    const spanY = scaledBoundsTuple[4] - scaledBoundsTuple[1];
+    const primaryIsX = spanX >= spanY;
+    const sortedTris = [...triMetaForSubclusters].sort((a, b) => {
+      const pA = primaryIsX ? a.cx : a.cy;
+      const pB = primaryIsX ? b.cx : b.cy;
+      const bandA = Math.floor(pA / 12.0);
+      const bandB = Math.floor(pB / 12.0);
+      if (bandA !== bandB) return bandA - bandB;
+      const sA = Math.floor((primaryIsX ? a.cy : a.cx) / 8.0);
+      const sB = Math.floor((primaryIsX ? b.cy : b.cx) / 8.0);
+      if (sA !== sB) return sA - sB;
+      const zA = Math.floor(a.cz / 4.0);
+      const zB = Math.floor(b.cz / 4.0);
+      if (zA !== zB) return zA - zB;
+      return pA - pB;
+    });
+
+    const maxNewSubclusters = Math.max(1, 3800 - oldScCount);
+    const trisPerSc = Math.max(128, Math.ceil(sortedTris.length / maxNewSubclusters));
+    const numNewSc = Math.ceil(sortedTris.length / trisPerSc);
+    const totalScCount = oldScCount + numNewSc;
+
+    const newScRel = alloc(totalScCount * 36);
+    if (injectionMode === 'merge' && oldScBuf.length > 0) {
+      oldScBuf.copy(bspBuf, newScRel);
+    }
+    const allSurfIndicesRel = alloc(sortedTris.length * 4);
+    for (let sc = 0; sc < numNewSc; sc++) {
+      const sStart = sc * trisPerSc;
+      const sCount = Math.min(trisPerSc, sortedTris.length - sStart);
+      const surfIndicesOff = allSurfIndicesRel + sStart * 4;
+      let bMinX = Infinity,
+        bMaxX = -Infinity;
+      let bMinY = Infinity,
+        bMaxY = -Infinity;
+      let bMinZ = Infinity,
+        bMaxZ = -Infinity;
+      for (let s = 0; s < sCount; s++) {
+        const tm = sortedTris[sStart + s]!;
+        bspBuf.writeInt32LE(tm.surfIdx, surfIndicesOff + s * 4);
+        if (tm.minX < bMinX) bMinX = tm.minX;
+        if (tm.maxX > bMaxX) bMaxX = tm.maxX;
+        if (tm.minY < bMinY) bMinY = tm.minY;
+        if (tm.maxY > bMaxY) bMaxY = tm.maxY;
+        if (tm.minZ < bMinZ) bMinZ = tm.minZ;
+        if (tm.maxZ > bMaxZ) bMaxZ = tm.maxZ;
+      }
+      const scOff = newScRel + (oldScCount + sc) * 36;
+      bspBuf.writeFloatLE(bMinX - 0.05, scOff + 0x00);
+      bspBuf.writeFloatLE(bMaxX + 0.05, scOff + 0x04);
+      bspBuf.writeFloatLE(bMinY - 0.05, scOff + 0x08);
+      bspBuf.writeFloatLE(bMaxY + 0.05, scOff + 0x0c);
+      bspBuf.writeFloatLE(bMinZ - 0.05, scOff + 0x10);
+      bspBuf.writeFloatLE(bMaxZ + 0.05, scOff + 0x14);
+      bspBuf.writeUInt32LE(sCount, scOff + 0x18);
+      bspBuf.writeUInt32LE(baseAddress + surfIndicesOff, scOff + 0x1c);
+      bspBuf.writeUInt32LE(0, scOff + 0x20);
+    }
+
+    bspBuf.writeInt16LE(-1, clustersRel + 0x0c);
+    bspBuf.writeInt16LE(0, clustersRel + 0x0e);
+    bspBuf.writeUInt32LE(totalScCount, clustersRel + 0x34);
+    bspBuf.writeUInt32LE(baseAddress + newScRel, clustersRel + 0x38);
+    bspBuf.writeUInt32LE(0, clustersRel + 0x3c);
+    bspBuf.fill(0, clustersRel + 0x44, clustersRel + 0x68);
+    for (let c = 1; c < clustersRefl.count; c++) {
+      const cOff = clustersRel + c * 104;
+      bspBuf.writeInt16LE(-1, cOff + 0x0c);
+      bspBuf.writeInt16LE(0, cOff + 0x0e);
+      bspBuf.writeUInt32LE(0, cOff + 0x34);
+      bspBuf.writeUInt32LE(0, cOff + 0x38);
+      bspBuf.writeUInt32LE(0, cOff + 0x3c);
+      bspBuf.fill(0, cOff + 0x44, cOff + 0x68);
+    }
+    bspBuf.fill(0, rootOff + 0xbc, rootOff + 0xc8); // zero 3D render nodes
+    bspBuf.fill(0, rootOff + 0xec, rootOff + 0xf8); // zero leaf surfaces
+    bspBuf.fill(0, rootOff + 0x150, rootOff + 0x160); // zero cluster portals
+    bspBuf.fill(0, rootOff + 0x1e4, rootOff + 0x1fc); // zero pathfinding surfaces & edges
+    if (injectionMode === 'replace') {
+      bspBuf.fill(0, rootOff + 0x128, rootOff + 0x134); // zero lens flare markers
+      bspBuf.fill(0, rootOff + 0x168, rootOff + 0x174); // zero breakable surfaces
+      bspBuf.fill(0, rootOff + 0x240, rootOff + 0x24c); // zero markers
+    }
+
+    // Fill PVS (`cluster data` at rootOff + 0x140) with 0xFF so Cluster 0 is visible everywhere
+    const totalClusters = clustersRefl.count;
+    const pvsBytesPerCluster = totalClusters > 0 ? Math.ceil(totalClusters / 32) * 4 : 4;
+    const pvsTotalSize = Math.max(4, totalClusters * pvsBytesPerCluster);
+    const pvsRel = alloc(pvsTotalSize);
+    bspBuf.fill(0xff, pvsRel, pvsRel + pvsTotalSize);
+    bspBuf.writeUInt32LE(pvsTotalSize, rootOff + 0x140);
+    bspBuf.writeUInt32LE(baseAddress + pvsRel, rootOff + 0x14c);
+  }
+
+  // 4C. Write CollisionBSP (8 child arrays) and `ScenarioStructureBSPLeaf` array
+  const oldN3dCount = injectionMode === 'merge' ? rawOldN3dCount : 0;
+  const oldPlnCount = injectionMode === 'merge' ? rawOldPlnCount : 0;
+  const oldLeafCount = injectionMode === 'merge' ? rawOldLeafCount : 0;
+  const oldRef2dCount = injectionMode === 'merge' ? rawOldRef2dCount : 0;
+  const oldNode2dCount = injectionMode === 'merge' ? rawOldNode2dCount : 0;
+  const oldCSurfCount = injectionMode === 'merge' ? rawOldCSurfCount : 0;
+  const oldCEdgeCount = injectionMode === 'merge' ? rawOldCEdgeCount : 0;
+  const oldCVertCount = injectionMode === 'merge' ? rawOldCVertCount : 0;
+
+  const bx = getBnds(decodedBsp, 'world bounds x');
+  const by = getBnds(decodedBsp, 'world bounds y');
+  const bz = getBnds(decodedBsp, 'world bounds z');
+
+  const candidateBoxPlanes: { plane: [number, number, number, number]; needed: boolean }[] =
+    injectionMode === 'merge' && oldN3dCount > 0
+      ? [
+          { plane: [1, 0, 0, scaledBoundsTuple[3] + 3.5], needed: bx[1] > scaledBoundsTuple[3] + 1.0 },
+          { plane: [-1, 0, 0, -(scaledBoundsTuple[0] - 3.5)], needed: bx[0] < scaledBoundsTuple[0] - 1.0 },
+          { plane: [0, 1, 0, scaledBoundsTuple[4] + 3.5], needed: by[1] > scaledBoundsTuple[4] + 1.0 },
+          { plane: [0, -1, 0, -(scaledBoundsTuple[1] - 3.5)], needed: by[0] < scaledBoundsTuple[1] - 1.0 },
+          { plane: [0, 0, 1, scaledBoundsTuple[5] + 5.0], needed: bz[1] > scaledBoundsTuple[5] + 1.0 },
+          { plane: [0, 0, -1, -(scaledBoundsTuple[2] - 3.5)], needed: bz[0] < scaledBoundsTuple[2] - 1.0 },
+        ]
+      : [];
+  const maxAllowedOldCopies =
+    oldN3dCount > 0
+      ? Math.max(1, Math.min(6, Math.floor((125000 - compiledColl.bsp3dNodes.length - 6) / oldN3dCount)))
+      : 0;
+  const neededPlanes = candidateBoxPlanes.filter((c) => c.needed).map((c) => c.plane);
+  const boxPlanes: [number, number, number, number][] =
+    injectionMode === 'merge' && oldN3dCount > 0
+      ? (neededPlanes.length > 0 ? neededPlanes : [candidateBoxPlanes[0]!.plane]).slice(0, maxAllowedOldCopies)
+      : [];
+
+  const boxNodeCount = boxPlanes.length;
+  const oldCopyCount = boxNodeCount;
+  const oldNodeShift = boxNodeCount;
+  const procNodeShift = boxNodeCount + oldCopyCount * oldN3dCount;
+  const totalN3d = procNodeShift + compiledColl.bsp3dNodes.length;
+
+  const boxPlaneShift = oldPlnCount;
+  const procPlaneShift = oldPlnCount + boxPlanes.length;
+  const totalPlanes = procPlaneShift + compiledColl.planes.length;
+
+  const procLeafShift = oldLeafCount;
+  const totalLeaves = oldLeafCount + compiledColl.leaves.length;
+
+  const procRef2dShift = oldRef2dCount;
+  const totalRef2d = oldRef2dCount + compiledColl.bsp2dReferences.length;
+
+  const procNode2dShift = oldNode2dCount;
+  const totalNode2d = oldNode2dCount + compiledColl.bsp2dNodes.length;
+
+  const procSurfShift = oldCSurfCount;
+  const totalCSurf = oldCSurfCount + compiledColl.surfaces.length;
+
+  const procEdgeShift = oldCEdgeCount;
+  const totalCEdge = oldCEdgeCount + compiledColl.edges.length;
+
+  const procVertShift = oldCVertCount;
+  const totalCVert = oldCVertCount + compiledColl.vertices.length;
+
+  const newN3dRel = alloc(Math.max(1, totalN3d) * 12);
+  const newPlnRel = alloc(Math.max(1, totalPlanes) * 16);
+  const newLeafRel = alloc(Math.max(1, totalLeaves) * 8);
+  const newRef2dRel = alloc(Math.max(1, totalRef2d) * 8);
+  const newNode2dRel = alloc(Math.max(1, totalNode2d) * 20);
+  const newCSurfRel = alloc(Math.max(1, totalCSurf) * 12);
+  const newCEdgeRel = alloc(Math.max(1, totalCEdge) * 24);
+  const newCVertRel = alloc(Math.max(1, totalCVert) * 16);
+  const newSbspLeavesRel = alloc(Math.max(1, totalLeaves) * 16);
+
+  // bsp3d_nodes (strict tree: each boxPlane `b` has its own dedicated shifted copy of `oldN3d` so no node is reached twice)
+  for (let b = 0; b < boxNodeCount; b++) {
+    const nOff = newN3dRel + b * 12;
+    const copyRoot = oldNodeShift + b * oldN3dCount;
+    bspBuf.writeInt32LE(boxPlaneShift + b, nOff + 0);
+    bspBuf.writeInt32LE(b === boxNodeCount - 1 ? procNodeShift : b + 1, nOff + 4);
+    bspBuf.writeInt32LE(copyRoot, nOff + 8);
+  }
+  for (let b = 0; b < oldCopyCount; b++) {
+    const copyShift = oldNodeShift + b * oldN3dCount;
+    for (let n = 0; n < oldN3dCount; n++) {
+      const srcOff = n * 12;
+      const dstOff = newN3dRel + (copyShift + n) * 12;
+      const pl = oldN3dBuf.readInt32LE(srcOff + 0);
+      const backC = oldN3dBuf.readInt32LE(srcOff + 4);
+      const frontC = oldN3dBuf.readInt32LE(srcOff + 8);
+      bspBuf.writeInt32LE(pl, dstOff + 0);
+      bspBuf.writeInt32LE(backC >= 0 ? backC + copyShift : backC, dstOff + 4);
+      bspBuf.writeInt32LE(frontC >= 0 ? frontC + copyShift : frontC, dstOff + 8);
+    }
+  }
+  for (let n = 0; n < compiledColl.bsp3dNodes.length; n++) {
+    const node = compiledColl.bsp3dNodes[n]!;
+    const dstOff = newN3dRel + (procNodeShift + n) * 12;
+    const rawPlane = node[0];
+    const pSign = rawPlane & 0x80000000;
+    const pIdx = ((rawPlane & 0x7fffffff) + procPlaneShift) | pSign;
+    const mapProcChild = (ch: number): number => {
+      const signed = ch | 0;
+      if (signed === -1) return -1;
+      if (signed < 0) return (((signed & 0x7fffffff) + procLeafShift) | 0x80000000) | 0;
+      return signed + procNodeShift;
+    };
+    bspBuf.writeInt32LE(pIdx, dstOff + 0);
+    bspBuf.writeInt32LE(mapProcChild(node[1]), dstOff + 4);
+    bspBuf.writeInt32LE(mapProcChild(node[2]), dstOff + 8);
+  }
+
+  // planes
+  if (oldPlnCount > 0 && oldPlnBuf.length > 0) {
+    oldPlnBuf.copy(bspBuf, newPlnRel);
+  }
+  for (let b = 0; b < boxPlanes.length; b++) {
+    const pOff = newPlnRel + (boxPlaneShift + b) * 16;
+    bspBuf.writeFloatLE(boxPlanes[b]![0], pOff + 0);
+    bspBuf.writeFloatLE(boxPlanes[b]![1], pOff + 4);
+    bspBuf.writeFloatLE(boxPlanes[b]![2], pOff + 8);
+    bspBuf.writeFloatLE(boxPlanes[b]![3], pOff + 12);
+  }
+  for (let p = 0; p < compiledColl.planes.length; p++) {
+    const pl = compiledColl.planes[p]!;
+    const pOff = newPlnRel + (procPlaneShift + p) * 16;
+    bspBuf.writeFloatLE(pl[0], pOff + 0);
+    bspBuf.writeFloatLE(pl[1], pOff + 4);
+    bspBuf.writeFloatLE(pl[2], pOff + 8);
+    bspBuf.writeFloatLE(pl[3], pOff + 12);
+  }
+
+  // collision leaves
+  if (oldLeafCount > 0 && oldLeafBuf.length > 0) {
+    oldLeafBuf.copy(bspBuf, newLeafRel);
+  }
+  for (let l = 0; l < compiledColl.leaves.length; l++) {
+    const lf = compiledColl.leaves[l]!;
+    const lOff = newLeafRel + (procLeafShift + l) * 8;
+    bspBuf.writeUInt16LE(lf[0] & 0xffff, lOff + 0);
+    bspBuf.writeUInt16LE(lf[1] & 0xffff, lOff + 2);
+    bspBuf.writeInt32LE(lf[1] > 0 ? lf[2] + procRef2dShift : 0, lOff + 4);
+  }
+
+  // bsp2d_references
+  if (oldRef2dCount > 0 && oldRef2dBuf.length > 0) {
+    oldRef2dBuf.copy(bspBuf, newRef2dRel);
+  }
+  for (let r = 0; r < compiledColl.bsp2dReferences.length; r++) {
+    const ref = compiledColl.bsp2dReferences[r]!;
+    const rOff = newRef2dRel + (procRef2dShift + r) * 8;
+    const rawPlane = ref[0] | 0;
+    const pSign = rawPlane & 0x80000000;
+    const pIdx = ((rawPlane & 0x7fffffff) + procPlaneShift) | pSign;
+    const rawNode = ref[1] | 0;
+    const mappedNode =
+      rawNode < 0
+        ? (((rawNode & 0x7fffffff) + procSurfShift) | 0x80000000) | 0
+        : rawNode + procNode2dShift;
+    bspBuf.writeInt32LE(pIdx, rOff + 0);
+    bspBuf.writeInt32LE(mappedNode, rOff + 4);
+  }
+
+  // bsp2d_nodes
+  if (oldNode2dCount > 0 && oldNode2dBuf.length > 0) {
+    oldNode2dBuf.copy(bspBuf, newNode2dRel);
+  }
+  for (let n = 0; n < compiledColl.bsp2dNodes.length; n++) {
+    const n2 = compiledColl.bsp2dNodes[n]!;
+    const nOff = newNode2dRel + (procNode2dShift + n) * 20;
+    const map2d = (ch: number): number => {
+      const signed = ch | 0;
+      if (signed === -1) return -1;
+      if (signed < 0) return (((signed & 0x7fffffff) + procSurfShift) | 0x80000000) | 0;
+      return signed + procNode2dShift;
+    };
+    bspBuf.writeFloatLE(n2.planeI, nOff + 0);
+    bspBuf.writeFloatLE(n2.planeJ, nOff + 4);
+    bspBuf.writeFloatLE(n2.planeD, nOff + 8);
+    bspBuf.writeInt32LE(map2d(n2.leftChild), nOff + 12);
+    bspBuf.writeInt32LE(map2d(n2.rightChild), nOff + 16);
+  }
+
+  // collision surfaces
+  if (oldCSurfCount > 0 && oldCSurfBuf.length > 0) {
+    oldCSurfBuf.copy(bspBuf, newCSurfRel);
+  }
+  for (let s = 0; s < compiledColl.surfaces.length; s++) {
+    const sf = compiledColl.surfaces[s]!;
+    const sOff = newCSurfRel + (procSurfShift + s) * 12;
+    const rawPlane = sf.planeDesignator | 0;
+    const pSign = rawPlane & 0x80000000;
+    const pIdx = ((rawPlane & 0x7fffffff) + procPlaneShift) | pSign;
+    bspBuf.writeInt32LE(pIdx, sOff + 0);
+    bspBuf.writeInt32LE(sf.firstEdgeIndex + procEdgeShift, sOff + 4);
+    bspBuf.writeUInt8(sf.flags & 0xff, sOff + 8);
+    bspBuf.writeUInt8(0xff, sOff + 9);
+    bspBuf.writeInt16LE(0, sOff + 10);
+  }
+
+  // collision edges
+  if (oldCEdgeCount > 0 && oldCEdgeBuf.length > 0) {
+    oldCEdgeBuf.copy(bspBuf, newCEdgeRel);
+  }
+  for (let e = 0; e < compiledColl.edges.length; e++) {
+    const ed = compiledColl.edges[e]!;
+    const eOff = newCEdgeRel + (procEdgeShift + e) * 24;
+    bspBuf.writeInt32LE(ed.vertexIndices[0] + procVertShift, eOff + 0);
+    bspBuf.writeInt32LE(ed.vertexIndices[1] + procVertShift, eOff + 4);
+    bspBuf.writeInt32LE(
+      ed.edgeIndices[0] >= 0 ? ed.edgeIndices[0] + procEdgeShift : e + procEdgeShift,
+      eOff + 8,
+    );
+    bspBuf.writeInt32LE(
+      ed.edgeIndices[1] >= 0 ? ed.edgeIndices[1] + procEdgeShift : e + procEdgeShift,
+      eOff + 12,
+    );
+    bspBuf.writeInt32LE(
+      ed.surfaceIndices[0] >= 0 ? ed.surfaceIndices[0] + procSurfShift : -1,
+      eOff + 16,
+    );
+    bspBuf.writeInt32LE(
+      ed.surfaceIndices[1] >= 0 ? ed.surfaceIndices[1] + procSurfShift : -1,
+      eOff + 20,
+    );
+  }
+
+  // collision vertices
+  if (oldCVertCount > 0 && oldCVertBuf.length > 0) {
+    oldCVertBuf.copy(bspBuf, newCVertRel);
+  }
+  for (let v = 0; v < compiledColl.vertices.length; v++) {
+    const vt = compiledColl.vertices[v]!;
+    const vOff = newCVertRel + (procVertShift + v) * 16;
+    bspBuf.writeFloatLE(vt.point[0], vOff + 0);
+    bspBuf.writeFloatLE(vt.point[1], vOff + 4);
+    bspBuf.writeFloatLE(vt.point[2], vOff + 8);
+    bspBuf.writeInt32LE(vt.firstEdgeIndex + procEdgeShift, vOff + 12);
+  }
+
+  // Update 96-byte CollisionBSP header
+  bspBuf.writeUInt32LE(totalN3d, collRel + 0x00);
+  bspBuf.writeUInt32LE(baseAddress + newN3dRel, collRel + 0x04);
+  bspBuf.writeUInt32LE(totalPlanes, collRel + 0x0c);
+  bspBuf.writeUInt32LE(baseAddress + newPlnRel, collRel + 0x10);
+  bspBuf.writeUInt32LE(totalLeaves, collRel + 0x18);
+  bspBuf.writeUInt32LE(baseAddress + newLeafRel, collRel + 0x1c);
+  bspBuf.writeUInt32LE(totalRef2d, collRel + 0x24);
+  bspBuf.writeUInt32LE(baseAddress + newRef2dRel, collRel + 0x28);
+  bspBuf.writeUInt32LE(totalNode2d, collRel + 0x30);
+  bspBuf.writeUInt32LE(baseAddress + newNode2dRel, collRel + 0x34);
+  bspBuf.writeUInt32LE(totalCSurf, collRel + 0x3c);
+  bspBuf.writeUInt32LE(baseAddress + newCSurfRel, collRel + 0x40);
+  bspBuf.writeUInt32LE(totalCEdge, collRel + 0x48);
+  bspBuf.writeUInt32LE(baseAddress + newCEdgeRel, collRel + 0x4c);
+  bspBuf.writeUInt32LE(totalCVert, collRel + 0x54);
+  bspBuf.writeUInt32LE(baseAddress + newCVertRel, collRel + 0x58);
+
+  // ScenarioStructureBSPLeaf array (16 bytes per leaf, all mapped to Cluster 0)
+  for (let l = 0; l < totalLeaves; l++) {
+    const lOff = newSbspLeavesRel + l * 16;
+    bspBuf.fill(0, lOff, lOff + 16);
+    bspBuf.writeUInt8(255, lOff + 1);
+    bspBuf.writeUInt8(255, lOff + 3);
+    bspBuf.writeUInt8(255, lOff + 5);
+    bspBuf.writeInt16LE(0, lOff + 8); // cluster = 0
+  }
+  bspBuf.writeUInt32LE(totalLeaves, rootOff + 0xe0);
+  bspBuf.writeUInt32LE(baseAddress + newSbspLeavesRel, rootOff + 0xe4);
+
+  // Strip DOBC & Runtime Decals if requested
+  let strippedDobc = false;
+  let strippedDecals = false;
+  if (stripDobcAndDecals) {
+    bspBuf.writeUInt32LE(0, rootOff + 0x24c);
+    bspBuf.writeUInt32LE(0, rootOff + 0x250);
+    bspBuf.writeUInt32LE(0, rootOff + 0x258);
+    bspBuf.writeUInt32LE(0, rootOff + 0x25c);
+    strippedDobc = true;
+    strippedDecals = true;
+  }
+
+  // Update world bounds and vehicle floor/ceiling
+  const finalBounds: [number, number, number, number, number, number] =
+    injectionMode === 'merge'
+      ? [
+          Math.min(bx[0], scaledBoundsTuple[0] - 2),
+          Math.min(by[0], scaledBoundsTuple[1] - 2),
+          Math.min(bz[0], scaledBoundsTuple[2] - 2),
+          Math.max(bx[1], scaledBoundsTuple[3] + 2),
+          Math.max(by[1], scaledBoundsTuple[4] + 2),
+          Math.max(bz[1], scaledBoundsTuple[5] + 2),
+        ]
+      : [
+          scaledBoundsTuple[0] - 2,
+          scaledBoundsTuple[1] - 2,
+          scaledBoundsTuple[2] - 2,
+          scaledBoundsTuple[3] + 2,
+          scaledBoundsTuple[4] + 2,
+          scaledBoundsTuple[5] + 2,
+        ];
+  bspBuf.writeFloatLE(finalBounds[0], rootOff + 0xc8);
+  bspBuf.writeFloatLE(finalBounds[3], rootOff + 0xcc);
+  bspBuf.writeFloatLE(finalBounds[1], rootOff + 0xd0);
+  bspBuf.writeFloatLE(finalBounds[4], rootOff + 0xd4);
+  bspBuf.writeFloatLE(finalBounds[2], rootOff + 0xd8);
+  bspBuf.writeFloatLE(finalBounds[5], rootOff + 0xdc);
+  bspBuf.writeFloatLE(finalBounds[2] - 5.0, rootOff + 0x10); // vehicle floor
+  bspBuf.writeFloatLE(finalBounds[5] + 25.0, rootOff + 0x14); // vehicle ceiling
+
+  // 5. Finalize BSP buffer & rebase pointers to the target cache ceiling
+  const finalBspSize = (cursor + 511) & ~511;
+  const finalBspBuf = Buffer.alloc(finalBspSize);
+  bspBuf.copy(finalBspBuf, 0, 0, finalBspSize);
+
+  const CE_STOCK_CEILING = 0x41b40000;
+  const CE_EXTENDED_CEILING = 0x47e40000; // 0x40440000 + 0x07A00000 (122 MiB OpenCE lifted ceiling)
+  const needsExtended =
+    cacheCeilingMode === 'expanded_opence' ||
+    header.tagDataSize + finalBspSize + 512_000 > 23 * 1024 * 1024;
+  const ceiling = needsExtended ? CE_EXTENDED_CEILING : CE_STOCK_CEILING;
+  const newBspAddress = (ceiling - finalBspSize) & ~511;
+  rebaseStructureBspPointers(finalBspBuf, baseAddress, newBspAddress);
+
+  // 6. Splice `finalBspBuf` into `workMapBuf` at `oldBspStart` and shift downstream offsets
+  const delta = finalBspSize - oldBspSize;
+  const newFileSize = workMapBuf.length + delta;
+  let outMap: Buffer = Buffer.alloc(newFileSize);
+
+  workMapBuf.copy(outMap, 0, 0, oldBspStart);
+  finalBspBuf.copy(outMap, oldBspStart, 0, finalBspSize);
+  workMapBuf.copy(outMap, oldBspStart + finalBspSize, oldBspStart + oldBspSize);
+
+  outMap.writeUInt32LE(newFileSize >>> 0, 0x08);
+  const oldTagDataOffset = workMapBuf.readUInt32LE(0x10);
+  const newTagDataOffset = oldTagDataOffset + delta;
+  outMap.writeUInt32LE(newTagDataOffset >>> 0, 0x10);
+
+  if (header.engine !== 5 && newTagDataOffset + 0x28 <= outMap.length) {
+    const oldModelDataOffset = workMapBuf.readUInt32LE(oldTagDataOffset + 0x14);
+    if (oldModelDataOffset >= oldBspStart + oldBspSize) {
+      outMap.writeUInt32LE((oldModelDataOffset + delta) >>> 0, newTagDataOffset + 0x14);
+    }
+  }
+
+  const newBspArrayOffset = bspsArrayOffset + delta;
+  for (let i = 0; i < bspsField.value.count; i++) {
+    const eOff = newBspArrayOffset + i * scenarioBspSize;
+    if (i === effectiveBspIdx) {
+      outMap.writeUInt32LE(oldBspStart >>> 0, eOff + 0x00);
+      outMap.writeUInt32LE(finalBspSize >>> 0, eOff + 0x04);
+      outMap.writeUInt32LE(newBspAddress >>> 0, eOff + 0x08);
+    } else {
+      const otherStart = outMap.readUInt32LE(eOff + 0x00);
+      if (otherStart >= oldBspStart + oldBspSize) {
+        outMap.writeUInt32LE((otherStart + delta) >>> 0, eOff + 0x00);
+      }
+    }
+  }
+
+  shiftExistingRawDataOffsets(
+    outMap,
+    newTagDataOffset,
+    tagIndex,
+    oldBspStart + oldBspSize,
+    delta,
+  );
+
+  const afterSplice = inspectCustomEditionMap(outMap);
+  if (afterSplice.status === 'ok') {
+    reinspected = afterSplice;
+  }
+
+  // Populate post-splice `pathPointer` (+0x04) on all TagDependency fields inside the spliced BSP
+  {
+    const identityTagIdMap = new Map<number, number>();
+    for (const e of reinspected.tagIndex.entries) {
+      if (e.tagId !== 0xffffffff) {
+        identityTagIdMap.set(e.tagId, e.tagId);
+        identityTagIdMap.set(e.index, e.tagId);
+      }
+    }
+    const metaPointer = outMap.readUInt32LE(oldBspStart + 0);
+    const bspRootOffset = oldBspStart + (metaPointer - newBspAddress);
+    if (bspRootOffset >= oldBspStart && bspRootOffset < oldBspStart + finalBspSize) {
+      rewriteBspDependencies(
+        outMap,
+        'ScenarioStructureBSP',
+        bspRootOffset,
+        oldBspStart,
+        finalBspSize,
+        newBspAddress,
+        identityTagIdMap,
+        new Set<number>(),
+        reinspected.header.tagDataOffset,
+      );
+    }
+  }
+
+  // 7. Clear existing scenery placements if requested, and relocate player spawns/flags/equipment/vehicles onto solid ground
+  let relocatedSpawns = 0;
+  const latestTagDataOffset = reinspected.header.tagDataOffset;
+  const latestBaseAddr = reinspected.tagIndex.baseMemoryAddress;
+  const latestScnrEntry =
+    reinspected.tagIndex.entries[reinspected.tagIndex.scenarioTagId & 0xffff];
+
+  if (latestScnrEntry) {
+    const latestScnrOffset =
+      latestTagDataOffset +
+      (latestScnrEntry.tagDataPointerOrResourceIndex - latestBaseAddr);
+
+    if (clearExistingPlacements && injectionMode === 'replace') {
+      // Clear placed scenery (+0x210), sound scenery (+0x2dc), light fixtures (+0x2c4), decals (+0x42c)
+      const clearOffsets = [0x210, 0x2c4, 0x2dc, 0x42c];
+      for (const off of clearOffsets) {
+        outMap.writeUInt32LE(0, latestScnrOffset + off);
+        outMap.writeUInt32LE(0, latestScnrOffset + off + 4);
+      }
+    }
+
+    if (relocateGroundObjects) {
+      const snapper = createGroundSnapper(
+        parsed.solidRaycastTriangles,
+        playableScaledBoundsTuple,
+      );
+      const latestDecodedScnr = decodeStruct(outMap, latestScnrOffset, 'Scenario');
+
+      // Player starting locations (+0x354, 52B each)
+      const spawnsRefl = latestDecodedScnr.get('player starting locations');
+      if (spawnsRefl && spawnsRefl.kind === 'reflexive' && spawnsRefl.value.count > 0) {
+        const spawnsOffset =
+          latestTagDataOffset + (spawnsRefl.value.pointerLow - latestBaseAddr);
+        for (let s = 0; s < spawnsRefl.value.count; s++) {
+          const sOff = spawnsOffset + s * 52;
+          const curX = outMap.readFloatLE(sOff + 0);
+          const curY = outMap.readFloatLE(sOff + 4);
+          const [nx, ny, gz] = snapper.snapXYToGround(curX, curY, s);
+          outMap.writeFloatLE(nx, sOff + 0);
+          outMap.writeFloatLE(ny, sOff + 4);
+          outMap.writeFloatLE(gz + 0.3, sOff + 8);
+          outMap.writeInt16LE(effectiveBspIdx, sOff + 18);
+          relocatedSpawns++;
+        }
+      }
+
+      // Netgame flags (+0x378, 148B each)
+      const flagsRefl = decodeReflexive(outMap, latestScnrOffset + 0x378);
+      if (flagsRefl.count > 0) {
+        const flagsOffset = latestTagDataOffset + (flagsRefl.pointerLow - latestBaseAddr);
+        for (let f = 0; f < flagsRefl.count; f++) {
+          const fOff = flagsOffset + f * 148;
+          const curX = outMap.readFloatLE(fOff + 0);
+          const curY = outMap.readFloatLE(fOff + 4);
+          const [nx, ny, gz] = snapper.snapXYToGround(curX, curY, f + 16);
+          outMap.writeFloatLE(nx, fOff + 0);
+          outMap.writeFloatLE(ny, fOff + 4);
+          outMap.writeFloatLE(gz + 0.3, fOff + 8);
+          relocatedSpawns++;
+        }
+      }
+
+      // Netgame equipment (+0x384, 144B each, position at +64..+72)
+      const equipRefl = latestDecodedScnr.get('netgame equipment');
+      if (equipRefl && equipRefl.kind === 'reflexive' && equipRefl.value.count > 0) {
+        const equipOffset =
+          latestTagDataOffset + (equipRefl.value.pointerLow - latestBaseAddr);
+        for (let e = 0; e < equipRefl.value.count; e++) {
+          const eOff = equipOffset + e * 144;
+          const curX = outMap.readFloatLE(eOff + 64);
+          const curY = outMap.readFloatLE(eOff + 68);
+          const [nx, ny, gz] = snapper.snapXYToGround(curX, curY, e + 32);
+          outMap.writeFloatLE(nx, eOff + 64);
+          outMap.writeFloatLE(ny, eOff + 68);
+          outMap.writeFloatLE(gz + 0.35, eOff + 72);
+          relocatedSpawns++;
+        }
+      }
+
+      // Vehicles (+0x240, 120B each, position at +8..+16)
+      const vehRefl = decodeReflexive(outMap, latestScnrOffset + 0x240);
+      if (vehRefl.count > 0) {
+        const vehOffset = latestTagDataOffset + (vehRefl.pointerLow - latestBaseAddr);
+        for (let v = 0; v < vehRefl.count; v++) {
+          const vOff = vehOffset + v * 120;
+          const curX = outMap.readFloatLE(vOff + 8);
+          const curY = outMap.readFloatLE(vOff + 12);
+          const [nx, ny, gz] = snapper.snapXYToGround(curX, curY, v + 64);
+          outMap.writeFloatLE(nx, vOff + 8);
+          outMap.writeFloatLE(ny, vOff + 12);
+          outMap.writeFloatLE(gz + 0.65, vOff + 16);
+          relocatedSpawns++;
+        }
+      }
+
+      // Scenery (+0x210, 72B each, position at +8..+16) if not cleared
+      if (!clearExistingPlacements || injectionMode === 'merge') {
+        const scenRefl = decodeReflexive(outMap, latestScnrOffset + 0x210);
+        if (scenRefl.count > 0) {
+          const scenOffset = latestTagDataOffset + (scenRefl.pointerLow - latestBaseAddr);
+          for (let s = 0; s < scenRefl.count; s++) {
+            const sOff = scenOffset + s * 72;
+            const curX = outMap.readFloatLE(sOff + 8);
+            const curY = outMap.readFloatLE(sOff + 12);
+            const [nx, ny, gz] = snapper.snapXYToGround(curX, curY, s + 96);
+            outMap.writeFloatLE(nx, sOff + 8);
+            outMap.writeFloatLE(ny, sOff + 12);
+            outMap.writeFloatLE(gz + 0.05, sOff + 16);
+          }
+        }
+      }
+    }
+  }
+
+  // 8. Optional scenario rename & Custom Edition header CRC32 recalculation
+  if (options.newScenarioName && options.newScenarioName.trim().length > 0) {
+    const nameStr = options.newScenarioName.trim().slice(0, 31);
+    const nameBuf = Buffer.alloc(32, 0);
+    nameBuf.write(nameStr, 'ascii');
+    nameBuf.copy(outMap, 0x20);
+  }
+
+  try {
+    const finalInspected = inspectCustomEditionMap(outMap);
+    if (finalInspected.status === 'ok' && finalInspected.header.engine === 609) {
+      const crc = computeCacheCrc32(
+        outMap,
+        ceCrcRegions(outMap, finalInspected.header, finalInspected.tagIndex),
+      );
+      outMap.writeUInt32LE(crc >>> 0, 0x64);
+    }
+  } catch {
+    // Non-fatal if CRC calculation is skipped on non-CE header
+  }
+
+  return {
+    ok: true,
+    buffer: outMap,
+    summary: {
+      modelFileName: parsed.modelName,
+      targetBspName: dstBsp.path,
+      injectionMode,
+      oldSize: targetMapBuffer.length,
+      newSize: outMap.length,
+      delta: outMap.length - targetMapBuffer.length,
+      weldedVertices: parsed.weldedVertexCount,
+      totalTriangles: parsed.totalTriangleCount,
+      solidCollisionTriangles: parsed.solidTriangleCount,
+      foliageTriangles: parsed.passThroughTriangleCount,
+      submeshChunks: parsed.submeshChunks.length,
+      injectedBitmaps,
+      injectedShaders,
+      collisionNodes3d: totalN3d,
+      collisionSurfaces: totalCSurf,
+      relocatedSpawns,
+      strippedDobc,
+      strippedDecals,
+      newBspAddress,
+      newBspSize: finalBspSize,
+      worldBounds: finalBounds,
     },
   };
 }

@@ -1612,12 +1612,14 @@ export default function ScenarioViewport({ header, bspIndex = 0, tagCount, onSel
     };
     refreshScenario();
     window.addEventListener('opence:scenario-updated', refreshScenario);
+    window.addEventListener('opence:bsp-updated', handleRefreshViewport);
 
     return () => {
       active = false;
       window.removeEventListener('opence:scenario-updated', refreshScenario);
+      window.removeEventListener('opence:bsp-updated', handleRefreshViewport);
     };
-  }, [header.scenarioName, header.crc32, tagCount]);
+  }, [header.scenarioName, header.crc32, tagCount, handleRefreshViewport]);
 
   // Model geometry loader helper
   const loadModelGeometry = useCallback((modelTagId: number): Promise<ModelRenderGeometry | null> => {

@@ -811,7 +811,27 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    const unsubLog = window.opence?.onTagTestLog?.((entry) => {
+      if (!entry?.text?.startsWith('[HUDKEY] ')) return;
+      const keyName = entry.text.slice(9).trim();
+      const keyMap: Record<string, { key: string; code: string }> = {
+        Backslash: { key: '\\', code: 'Backslash' },
+        ArrowUp: { key: 'ArrowUp', code: 'ArrowUp' },
+        ArrowDown: { key: 'ArrowDown', code: 'ArrowDown' },
+        ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft' },
+        ArrowRight: { key: 'ArrowRight', code: 'ArrowRight' },
+        Enter: { key: 'Enter', code: 'Enter' },
+        Backspace: { key: 'Backspace', code: 'Backspace' },
+      };
+      const mapped = keyMap[keyName];
+      if (mapped) {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: mapped.key, code: mapped.code, bubbles: true }));
+      }
+    });
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      unsubLog?.();
+    };
   }, [
     open,
     captureElementId,
@@ -843,31 +863,42 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
 
   return (
     <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        backgroundColor: 'rgba(2, 6, 14, 0.84)',
-        zIndex: 9500,
-        display: 'flex',
-        flexDirection: 'column',
-        userSelect: 'none',
-        fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
-      }}
+      data-testid="live-hud-editor-dialog"
+      style={
+        {
+          position: 'fixed',
+          top: 67,
+          left: 0,
+          right: 0,
+          bottom: 28,
+          backgroundColor: 'rgba(2, 6, 14, 0.88)',
+          zIndex: 900,
+          display: 'flex',
+          flexDirection: 'column',
+          userSelect: 'none',
+          fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
+          WebkitAppRegion: 'no-drag',
+        } as React.CSSProperties
+      }
     >
       {/* Top Control Bar */}
       <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '8px 16px',
-          backgroundColor: '#001122',
-          borderBottom: '2px solid #2896ff',
-          color: '#e2e8f0',
-          gap: 12,
-        }}
+        style={
+          {
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '8px 16px',
+            backgroundColor: '#001122',
+            borderBottom: '2px solid #2896ff',
+            color: '#e2e8f0',
+            gap: 12,
+            flexWrap: 'wrap',
+            WebkitAppRegion: 'no-drag',
+          } as React.CSSProperties
+        }
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <span
             style={{
               fontWeight: 800,
@@ -895,111 +926,174 @@ export const LiveHudEditorDialog: React.FC<LiveHudEditorDialogProps> = ({
             }}
           >
             {isRunning
-              ? `🟢 LIVE IN-GAME (PID ${liveStatus.pid ?? 'active'} · 0x40440000 60FPS Memory Bridge)`
+              ? `🟢 LIVE IN-GAME (PID ${liveStatus.pid ?? 'active'} · Single-Player Dev Mode + HUD Hook Active)`
               : isLaunching
-                ? '⏳ Launching OpenCE / Faber Live HUD Session...'
+                ? '⏳ Launching OpenCE Single-Player Dev Mode + HUD Hook...'
                 : '⚪ OpenCE Stopped'}
           </span>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <label
-            style={{
+        <div
+          style={
+            {
               display: 'flex',
               alignItems: 'center',
-              gap: 5,
-              fontSize: 11,
-              color: '#93c5fd',
-              cursor: 'pointer',
+              gap: 8,
+              flexWrap: 'wrap',
+              WebkitAppRegion: 'no-drag',
+            } as React.CSSProperties
+          }
+        >
+          <button
+            type="button"
+            data-testid="live-hud-sync-toggle-btn"
+            onClick={() => {
+              setAutoSyncInGame((prev) => {
+                const next = !prev;
+                setStatusToast(
+                  next
+                    ? 'Sync to Held Weapon / Vehicle enabled (automatically tracks your held weapon in-game).'
+                    : 'Sync to Held Weapon / Vehicle paused (manual target selection locked).',
+                );
+                return next;
+              });
             }}
-            title="Automatically switch the active HUD target when you switch weapons (Tab) or enter a vehicle (E) in-game"
-          >
-            <input
-              type="checkbox"
-              checked={autoSyncInGame}
-              onChange={(e) => setAutoSyncInGame(e.target.checked)}
-            />
-            Sync to Held Weapon / Vehicle In-Game
-          </label>
-
-          {isRunning && (
-            <button
-              onClick={() => {
-                void window.opence.spawnAllLiveHudArsenal?.();
-                setStatusToast('Spawned all Spartan-holdable weapons & vehicles around player in-game!');
-              }}
-              style={{
+            style={
+              {
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
                 padding: '4px 10px',
                 fontSize: 11,
                 fontWeight: 700,
                 borderRadius: 5,
-                border: '1px solid #2896ff',
-                backgroundColor: '#002244',
-                color: '#ffffff',
+                border: `1px solid ${autoSyncInGame ? '#38bdf8' : '#475569'}`,
+                backgroundColor: autoSyncInGame ? 'rgba(56, 189, 248, 0.2)' : 'rgba(30, 41, 59, 0.7)',
+                color: autoSyncInGame ? '#bae6fd' : '#94a3b8',
                 cursor: 'pointer',
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties
+            }
+            title="Automatically switch the active HUD target when you switch weapons (Tab) or enter a vehicle (E) in-game"
+          >
+            <span>{autoSyncInGame ? '🔄 Sync Held Weapon: ON' : '⚪ Sync Held Weapon: OFF'}</span>
+          </button>
+
+          {isRunning && (
+            <button
+              type="button"
+              data-testid="live-hud-spawn-arsenal-btn"
+              onClick={() => {
+                void window.opence.spawnAllLiveHudArsenal?.();
+                setStatusToast('Spawned all Spartan-holdable weapons & vehicles around player in-game!');
               }}
+              style={
+                {
+                  padding: '4px 10px',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  borderRadius: 5,
+                  border: '1px solid #2896ff',
+                  backgroundColor: '#002244',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  WebkitAppRegion: 'no-drag',
+                } as React.CSSProperties
+              }
             >
               🎁 Spawn All Weapons & Vehicles
             </button>
           )}
 
           <button
-            onClick={() =>
+            type="button"
+            data-testid="live-hud-inject-bitmap-btn"
+            onClick={() => {
+              const fallbackHudIdx =
+                activeHudChain[0]?.hudTagIndex ??
+                (targetList[selectedTargetIdx] as any)?.hudChain?.[0]?.hudTagIndex ??
+                catalog?.weapons?.[0]?.hudChain?.[0]?.hudTagIndex ??
+                catalog?.vehicles?.[0]?.hudChain?.[0]?.hudTagIndex ??
+                catalog?.generalHuds?.[0]?.tagIndex;
               onOpenBitmapInjector?.({
                 category: targetType === 'weapon' ? 'weapon' : targetType === 'vehicle' ? 'vehicle' : 'general',
                 targetTagIndex: targetList[selectedTargetIdx]?.tagIndex,
-                hudTagIndex: activeHudChain[0]?.hudTagIndex,
-              })
-            }
-            style={{
-              padding: '4px 10px',
-              fontSize: 11,
-              fontWeight: 700,
-              borderRadius: 5,
-              border: '1px solid #38bdf8',
-              backgroundColor: 'rgba(14, 116, 144, 0.35)',
-              color: '#e0f2fe',
-              cursor: 'pointer',
+                hudTagIndex: fallbackHudIdx,
+              });
             }}
+            style={
+              {
+                padding: '4px 10px',
+                fontSize: 11,
+                fontWeight: 700,
+                borderRadius: 5,
+                border: '1px solid #38bdf8',
+                backgroundColor: 'rgba(14, 116, 144, 0.35)',
+                color: '#e0f2fe',
+                cursor: 'pointer',
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties
+            }
           >
             🖼️ Inject HUD Bitmap...
           </button>
 
           <button
-            onClick={() => {
+            type="button"
+            data-testid="live-hud-launch-btn"
+            onClick={async () => {
               if (isRunning) {
-                void window.opence.tagTestHotReload();
-                setStatusToast('Hot-reloaded staged map in OpenCE!');
+                setStatusToast('Hot-reloading staged map in OpenCE...');
+                const res = await window.opence.tagTestHotReload();
+                if (!res.ok) {
+                  setStatusToast(`Hot-reload failed: ${res.error ?? 'Unknown error'}`);
+                } else {
+                  setStatusToast('Hot-reloaded staged map in OpenCE!');
+                }
               } else {
-                void window.opence.tagTestLaunch({ windowed: true, liveHudMode: true });
+                setStatusToast('Launching OpenCE in Single-Player Dev Mode with Live HUD Hook...');
+                const res = await window.opence.tagTestLaunch({ windowed: true, liveHudMode: true });
+                if (!res.ok) {
+                  setStatusToast(`Launch failed: ${res.error ?? 'Verify OpenCE executable path in Settings.'}`);
+                } else {
+                  setStatusToast('OpenCE launched in Single-Player Dev Mode with Live HUD Hook active!');
+                }
               }
             }}
-            style={{
-              padding: '4px 12px',
-              fontSize: 11,
-              fontWeight: 700,
-              borderRadius: 5,
-              border: '1px solid #22c55e',
-              backgroundColor: isRunning ? '#14532d' : '#052e16',
-              color: '#86efac',
-              cursor: 'pointer',
-            }}
+            style={
+              {
+                padding: '4px 12px',
+                fontSize: 11,
+                fontWeight: 700,
+                borderRadius: 5,
+                border: '1px solid #22c55e',
+                backgroundColor: isRunning ? '#14532d' : '#052e16',
+                color: '#86efac',
+                cursor: 'pointer',
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties
+            }
           >
-            {isRunning ? '⚡ Hot-Reload Map' : '▶ Launch In-Game HUD Session'}
+            {isRunning ? '⚡ Hot-Reload Map' : isLaunching ? '⏳ Launching Halo...' : '▶ Launch In-Game HUD Session'}
           </button>
 
           <button
+            type="button"
+            data-testid="live-hud-close-btn"
             onClick={onClose}
-            style={{
-              padding: '4px 12px',
-              fontSize: 11,
-              fontWeight: 700,
-              borderRadius: 5,
-              border: '1px solid #475569',
-              backgroundColor: '#1e293b',
-              color: '#f8fafc',
-              cursor: 'pointer',
-            }}
+            style={
+              {
+                padding: '4px 12px',
+                fontSize: 11,
+                fontWeight: 700,
+                borderRadius: 5,
+                border: '1px solid #475569',
+                backgroundColor: '#1e293b',
+                color: '#f8fafc',
+                cursor: 'pointer',
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties
+            }
           >
             ✕ Close
           </button>

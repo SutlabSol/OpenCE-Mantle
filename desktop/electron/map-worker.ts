@@ -73,7 +73,11 @@ import {
   CacheFileEngine,
   bspSwapPreflight,
   performBspSwap,
+  preflightModelBspSwap,
+  swapMapBspFromModelFile,
+  internalizeBrokenExternalBitmaps,
   type BspSwapOptions,
+  type BspModelSwapOptions,
   inspectBitmapTag,
   replaceBitmapImageData,
   encodeBitmapWithMipmaps,
@@ -157,6 +161,7 @@ import {
   analyzeHudMessageTextSafety,
   exportUnicodeStringsToCsv,
   previewUnicodeStringsCsvImport,
+  runMapFixAction,
 } from '../../core/src/index';
 import { deployMccModPackage } from './mcc-deploy';
 import type { CacheFileHeader, TagIndex, OceContainer, InjectionPlan, ResourceMapConfig, WalkerWarning, FinalizeResult, RandomAccessFile, ConversionResourceFiles, ResourceKind, ResourceMapIdentity } from '../../core/src/index';
@@ -247,8 +252,31 @@ export interface LoadedMap {
   diskStat?: { size: number; mtimeMs: number } | null;
 }
 
+/** Clear Windows ReadOnly attribute on a file if it exists, returning true if it was previously read-only. */
+export function ensureFileWritableOnDisk(targetPath: string): boolean {
+  try {
+    if (!fs.existsSync(targetPath)) return false;
+    const st = fs.statSync(targetPath);
+    const wasReadOnly = (st.mode & 0o200) === 0;
+    fs.chmodSync(targetPath, 0o666);
+    return wasReadOnly;
+  } catch {
+    return false;
+  }
+}
+
 /** File operations used to write maps; replaceable in tests to simulate a full disk or a locked file. */
-const realMapFs = { writeFileSync: fs.writeFileSync, renameSync: fs.renameSync };
+const realMapFs = {
+  writeFileSync: (file: fs.PathOrFileDescriptor, data: string | NodeJS.ArrayBufferView, options?: fs.WriteFileOptions) => {
+    if (typeof file === 'string') ensureFileWritableOnDisk(file);
+    fs.writeFileSync(file, data, options);
+  },
+  renameSync: (oldPath: fs.PathLike, newPath: fs.PathLike) => {
+    if (typeof oldPath === 'string') ensureFileWritableOnDisk(oldPath);
+    if (typeof newPath === 'string') ensureFileWritableOnDisk(newPath);
+    fs.renameSync(oldPath, newPath);
+  },
+};
 let mapFs = realMapFs;
 export function __setMapFsForTest(ops: Partial<typeof realMapFs> | null): void {
   mapFs = ops ? { ...realMapFs, ...ops } : realMapFs;
@@ -540,7 +568,6 @@ export function runActivateMapSession(task: { requestId: string; sessionId: stri
   activeSessionId = task.sessionId;
   currentMap = target;
   currentInject = null;
-  modelGeometryCache.clear();
   sendResult(task.requestId, { ok: true, map: summarizeOpenMap(target) });
 }
 
@@ -639,10 +666,15 @@ export function runExtractTags(task: {
   const tempPath = `${task.outputPath}.tmp-${randomUUID()}`;
   const pendingTemps: string[] = [];
   const resources = openConversionResources(
-    resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
-      bitmaps: task.resourceMapPaths?.bitmaps,
-      sounds: task.resourceMapPaths?.sounds,
-    }),
+    currentMap
+      ? resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+          bitmaps: task.resourceMapPaths?.bitmaps,
+          sounds: task.resourceMapPaths?.sounds,
+        })
+      : {
+          bitmaps: task.resourceMapPaths?.bitmaps,
+          sounds: task.resourceMapPaths?.sounds,
+        },
   );
   try {
     const isOceTagsTarget =
@@ -1315,7 +1347,7 @@ export function runPlanInject(task: {
     if (currentMap.header.engine === 609) {
       const compactedBuf = reclaimOrphanedScriptSyntaxBlocks(currentMap.buffer);
       if (compactedBuf.length < currentMap.buffer.length) {
-        reloadCurrentMapFromBuffer(compactedBuf);
+        refreshCurrentMapBuffer(compactedBuf);
       }
     }
 
@@ -1594,8 +1626,14 @@ export function runStageTagTestMap(task: {
         resources.close();
       }
     } else {
-      repairTruncatedBitmapMipmaps(bufferCopy, currentMap.header, currentMap.tagIndex);
-      repairCorruptedModelPartStrips(bufferCopy, currentMap.header, currentMap.tagIndex);
+      const compactedBuf = reclaimOrphanedScriptSyntaxBlocks(bufferCopy);
+      if (compactedBuf.length < bufferCopy.length) {
+        bufferCopy = Buffer.from(compactedBuf);
+      }
+      const stagedHdr = parseCacheFileHeader(bufferCopy);
+      const stagedTi = parseTagIndex(bufferCopy, stagedHdr);
+      repairTruncatedBitmapMipmaps(bufferCopy, stagedHdr, stagedTi);
+      repairCorruptedModelPartStrips(bufferCopy, stagedHdr, stagedTi);
     }
 
     let liveHudSetup: LiveHudSessionSetupInfo | undefined;
@@ -1870,9 +1908,10 @@ export function runSetDependencySlot(task: { requestId: string; tagIndex: number
 }
 
 let cachedBitmapsMap: { filePath: string; mtimeMs: number; buffer: Buffer } | null = null;
-function getBitmapsBuffer(bitmapsPath?: string): Buffer | undefined {
-  const isCeMap = currentMap?.header?.engine === 609;
-  const isMccMap = currentMap?.header?.engine === CacheFileEngine.MCC_CEA;
+function getBitmapsBuffer(bitmapsPath?: string, engineOverride?: number): Buffer | undefined {
+  const targetEngine = engineOverride ?? currentMap?.header?.engine;
+  const isCeMap = targetEngine === 609;
+  const isMccMap = targetEngine === CacheFileEngine.MCC_CEA;
   const isCompatibleBitmaps = (p: string): boolean => {
     try {
       if (!fs.existsSync(p)) return false;
@@ -1883,7 +1922,7 @@ function getBitmapsBuffer(bitmapsPath?: string): Buffer | undefined {
       return false;
     }
   };
-  const preResolved = resolveMapResourcePaths(currentMap?.filePath, currentMap?.header?.engine, { bitmaps: bitmapsPath }).bitmaps;
+  const preResolved = resolveMapResourcePaths(currentMap?.filePath, targetEngine, { bitmaps: bitmapsPath }).bitmaps;
   let resolved = preResolved && isCompatibleBitmaps(preResolved) ? preResolved : undefined;
   if (!resolved && currentMap?.filePath) {
     const mapDir = path.dirname(currentMap.filePath);
@@ -2346,7 +2385,7 @@ export function runGetModelGeometry(task: { requestId: string; modelTagId: numbe
   if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
   try {
     const lod = task.lod ?? 4;
-    const cacheKey = `${task.modelTagId}:${lod}`;
+    const cacheKey = `${activeSessionId ?? currentMap.filePath}:${task.modelTagId}:${lod}`;
     if (modelGeometryCache.has(cacheKey)) {
       return sendResult(task.requestId, { ok: true, geometry: modelGeometryCache.get(cacheKey)! } satisfies GetModelRenderGeometryResult);
     }
@@ -2695,7 +2734,49 @@ export async function runGetSourceBspMesh(task: {
       return sendError(task.requestId, 'INVALID_MAP', 'Failed to inspect source map.');
     }
     const mesh = extractBspRenderMesh(sourceBuffer, inspected.header, inspected.tagIndex, task.bspIndex ?? 0);
-    sendResult(task.requestId, { ok: true, mesh } satisfies GetBspRenderMeshResult);
+    const shaderTextures: Record<string, { width: number; height: number; rgbaData: Uint8Array }> = {};
+    const srcDir = path.dirname(task.sourceFilePath);
+    const srcParentDir = path.dirname(srcDir);
+    const donorBitmapsCandidates = [
+      path.join(srcDir, 'bitmaps.map'),
+      path.join(srcParentDir, 'custom_maps', 'bitmaps.map'),
+      path.join(srcParentDir, 'custom edition', 'bitmaps.map'),
+      path.join(srcParentDir, 'maps', 'bitmaps.map'),
+      path.join(srcDir, 'PC', 'bitmaps.map'),
+      path.join(srcParentDir, 'PC', 'bitmaps.map'),
+      path.join(srcParentDir, 'bitmaps.map'),
+    ];
+    let donorBitmapsPath: string | undefined;
+    for (const cand of donorBitmapsCandidates) {
+      if (fs.existsSync(cand)) {
+        donorBitmapsPath = cand;
+        break;
+      }
+    }
+    const externalBitmaps = getBitmapsBuffer(donorBitmapsPath, inspected.header.engine) ?? getBitmapsBuffer();
+    const seenShaders = new Set<number>();
+    for (const sub of mesh.submeshes) {
+      if (!sub.shaderPath || sub.shaderTagId === 0xffffffff || seenShaders.has(sub.shaderTagId)) continue;
+      seenShaders.add(sub.shaderTagId);
+      try {
+        const bmpTagId = resolveShaderBaseBitmapTagId(sourceBuffer, inspected.header, inspected.tagIndex, sub.shaderTagId);
+        if (bmpTagId !== null) {
+          const decoded = decodeBitmapTagImage(sourceBuffer, inspected.header, inspected.tagIndex, bmpTagId, 0, externalBitmaps);
+          const texEntry = {
+            width: decoded.width,
+            height: decoded.height,
+            rgbaData: decoded.rgbaData,
+          };
+          shaderTextures[sub.shaderPath] = texEntry;
+          shaderTextures[sub.shaderPath.toLowerCase()] = texEntry;
+        }
+      } catch {
+        // best-effort donor shader texture decode
+      }
+    }
+    sendResult(task.requestId, { ok: true, mesh, shaderTextures } as GetBspRenderMeshResult & {
+      shaderTextures?: Record<string, { width: number; height: number; rgbaData: Uint8Array }>;
+    });
   } catch (err: any) {
     sendError(task.requestId, 'BSP_MESH_ERROR', err?.message || 'Failed to extract source BSP mesh.');
   }
@@ -2812,6 +2893,69 @@ export async function runPerformBspSwap(task: {
   }
 }
 
+/** Part 2: Preflight a 3D Model File (.glb / .gltf / .obj / .jms) for BSP replacement or merge. */
+export function runBspModelPreflight(task: {
+  requestId: string;
+  modelPath: string;
+  targetBspIndex?: number;
+  options?: BspModelSwapOptions;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    const result = preflightModelBspSwap(
+      task.modelPath,
+      currentMap.buffer,
+      task.targetBspIndex ?? 0,
+      task.options ?? {},
+    );
+    sendResult(task.requestId, result);
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
+/** Part 2: Replace or merge a 3D Model File (.glb / .gltf / .obj / .jms) + original textures into the open map's Structure BSP. */
+export function runBspSwapFromModelFile(task: {
+  requestId: string;
+  modelPath: string;
+  options?: BspModelSwapOptions;
+}) {
+  if (!currentMap) return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open.');
+  try {
+    progress(task.requestId, `Parsing 3D model ${path.basename(task.modelPath)} & extracting textures...`, 20);
+    const result = swapMapBspFromModelFile(task.modelPath, currentMap.buffer, task.options ?? {});
+    if (!result.ok) {
+      return sendError(
+        task.requestId,
+        'BSP_MODEL_SWAP_ERROR',
+        result.error || 'Failed to inject 3D model into Structure BSP.',
+      );
+    }
+    currentMap.buffer = result.buffer;
+    const reInspected = inspectCustomEditionMap(currentMap.buffer);
+    if (reInspected.status !== 'ok') {
+      return sendError(
+        task.requestId,
+        'BSP_MODEL_SWAP_ERROR',
+        'Failed to inspect map after model BSP injection.',
+      );
+    }
+    modelGeometryCache.clear();
+    currentMap.header = reInspected.header;
+    currentMap.tagIndex = reInspected.tagIndex;
+    currentMap.modified = true;
+    progress(task.requestId, 'Model BSP injection complete', 100);
+    sendResult(task.requestId, {
+      ok: true,
+      buffer: Buffer.alloc(0),
+      summary: result.summary,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    handleTaskError(task.requestId, err);
+  }
+}
+
 /** M13.4: Compiles a custom 3D object tag set (.obj + .png/.dds) into an .ocetags file and/or injects it directly into the open map. */
 export function runBuildCustomObjectTag(task: {
   requestId: string;
@@ -2824,10 +2968,15 @@ export function runBuildCustomObjectTag(task: {
     return sendError(task.requestId, 'NO_MAP_LOADED', 'No map is open to inject into.');
   }
   const resources = openConversionResources(
-    resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
-      bitmaps: task.resourceMapPaths?.bitmaps,
-      sounds: task.resourceMapPaths?.sounds,
-    }),
+    currentMap
+      ? resolveMapResourcePaths(currentMap.filePath, currentMap.header.engine, {
+          bitmaps: task.resourceMapPaths?.bitmaps,
+          sounds: task.resourceMapPaths?.sounds,
+        })
+      : {
+          bitmaps: task.resourceMapPaths?.bitmaps,
+          sounds: task.resourceMapPaths?.sounds,
+        },
   );
   try {
     progress(task.requestId, 'Reading 3D mesh (.obj / .jms / .dae)...', 10);
@@ -3794,11 +3943,137 @@ function runInjectProceduralWorldBsp(task: Extract<WorkerRequest, { type: 'injec
     return sendResult(task.requestId, { ok: false, message: 'No map is currently open.' });
   }
   try {
+    const donorMapFilePath = (task as any).donorMapFilePath as string | undefined;
+    if (donorMapFilePath && fs.existsSync(donorMapFilePath)) {
+      try {
+        const existingShaderPaths = new Set(currentMap.tagIndex.entries.map((e) => e.path.toLowerCase()));
+        const neededDonorShaderPaths = new Set<string>();
+        for (const tri of task.worldMesh.triangles) {
+          if (tri.shaderPath && !existingShaderPaths.has(tri.shaderPath.toLowerCase())) {
+            neededDonorShaderPaths.add(tri.shaderPath.toLowerCase());
+          }
+        }
+        if (neededDonorShaderPaths.size > 0) {
+          const donorBuf = ensureXboxMapDecompressed(fs.readFileSync(donorMapFilePath));
+          const donorInspected = inspectCustomEditionMap(donorBuf);
+          if (donorInspected.status === 'ok') {
+            const rootIndices: number[] = [];
+            for (const entry of donorInspected.tagIndex.entries) {
+              if (neededDonorShaderPaths.has(entry.path.toLowerCase())) {
+                rootIndices.push(entry.index);
+              }
+            }
+            if (rootIndices.length > 0) {
+              const mapDir = path.dirname(currentMap.filePath);
+              const srcDir = path.dirname(donorMapFilePath);
+              const findResourceCandidate = (kind: 'bitmaps' | 'sounds', requireCeFormat: boolean): string | undefined => {
+                const preRes = resolveMapResourcePaths(donorMapFilePath, donorInspected.header.engine, {})[kind];
+                const candidates = [
+                  preRes,
+                  path.join(srcDir, `${kind}.map`),
+                  path.resolve(srcDir, '..', 'custom_maps', `${kind}.map`),
+                  path.resolve(srcDir, '..', 'custom edition', `${kind}.map`),
+                  path.resolve(srcDir, '..', `${kind}.map`),
+                  path.join(mapDir, `${kind}.map`),
+                  path.resolve(mapDir, '..', 'custom_maps', `${kind}.map`),
+                  path.resolve(mapDir, '..', 'custom edition', `${kind}.map`),
+                  path.resolve(mapDir, '..', `${kind}.map`),
+                  path.resolve(process.cwd(), 'sample_maps', 'custom edition', `${kind}.map`),
+                  path.resolve(process.cwd(), 'sample_maps', `${kind}.map`),
+                  path.resolve(process.cwd(), '..', 'sample_maps', 'custom edition', `${kind}.map`),
+                  path.resolve(process.cwd(), '..', 'sample_maps', `${kind}.map`),
+                  `C:\\Users\\LeviB\\Desktop\\Halo CE Related\\OpenCE\\custom_maps\\${kind}.map`,
+                  `C:\\Program Files (x86)\\Microsoft Games\\Halo Custom Edition\\maps\\${kind}.map`,
+                  `C:\\Program Files\\Microsoft Games\\Halo Custom Edition\\maps\\${kind}.map`,
+                ].filter((p): p is string => !!p && fs.existsSync(p));
+                for (const cand of candidates) {
+                  if (!requireCeFormat) return cand;
+                  try {
+                    const res = openConversionResources({ [kind]: cand });
+                    try {
+                      const file = res.files[kind];
+                      if (file) {
+                        const hdr = file.read(0, 16);
+                        const pathsOff = hdr.readUInt32LE(4);
+                        const tableOff = hdr.readUInt32LE(8);
+                        if (pathsOff >= 16 && tableOff > pathsOff && tableOff <= file.size) {
+                          const samplePaths = file.read(pathsOff, Math.min(4096, tableOff - pathsOff)).toString('latin1');
+                          if (samplePaths.includes('__pixels') || samplePaths.includes('__permutations')) {
+                            return cand;
+                          }
+                        }
+                      }
+                    } finally {
+                      res.close();
+                    }
+                  } catch {
+                    /* ignore unreadable candidate */
+                  }
+                }
+                return undefined;
+              };
+
+              const donorRes = openConversionResources({
+                bitmaps: findResourceCandidate('bitmaps', false),
+                sounds: findResourceCandidate('sounds', false),
+              });
+              const ceResources = openConversionResources({
+                bitmaps: findResourceCandidate('bitmaps', true),
+                sounds: findResourceCandidate('sounds', true),
+              });
+              try {
+                const extracted = extractTagSet(
+                  donorBuf,
+                  donorInspected.header,
+                  donorInspected.tagIndex,
+                  rootIndices,
+                  { resourceFiles: donorRes.files },
+                );
+                if (extracted.tags.length > 0) {
+                  const containerBytes = serializeContainer(extracted, path.basename(donorMapFilePath));
+                  const container = deserializeContainer(containerBytes);
+                  autoLinkExternalResourceMapsInContainer(container, ceResources.files);
+                  hydrateExternalRawDataInContainer(container, donorRes.files);
+                  const plan = planAddInjection(currentMap, container, {}, {
+                    allowEmbeddedRelocation: true,
+                    allowGbxmodelGeometryRelocation: true,
+                    allowExpandedTagSpace: true,
+                  });
+                  if (plan.kind === 'ok') {
+                    let injectedBuf = applyAddInjection(
+                      currentMap.buffer,
+                      currentMap.header,
+                      currentMap.tagIndex,
+                      container,
+                      plan,
+                      {
+                        allowEmbeddedRelocation: true,
+                        allowGbxmodelGeometryRelocation: true,
+                        allowExpandedTagSpace: true,
+                      },
+                    );
+                    injectedBuf = internalizeBrokenExternalBitmaps(injectedBuf, donorRes.files);
+                    refreshCurrentMapBuffer(injectedBuf);
+                  }
+                }
+              } finally {
+                donorRes.close();
+                ceResources.close();
+              }
+            }
+          }
+        }
+      } catch {
+        // Best-effort donor shader injection; fallback shaders will be used for any uninjected shader
+      }
+    }
+
     const res = injectProceduralWorldIntoMapBsp(currentMap.buffer, task.worldMesh, {
       bspIndex: task.bspIndex,
       shaderBindings: task.shaderBindings as any,
       collisionMode: task.collisionMode,
     });
+    modelGeometryCache.clear();
     refreshCurrentMapBuffer(res.mapBuffer);
     sendResult(task.requestId, {
       ok: true,
@@ -4155,7 +4430,12 @@ function runExportReflexiveTsv(task: Extract<WorkerRequest, { type: 'exportRefle
       task.tagIndex,
     );
     const res = exportReflexiveBlockToTsv(fields, task.reflexivePath);
-    sendResult(task.requestId, { ok: true, tsvText: res.tsv, ...res });
+    sendResult(task.requestId, {
+      ok: true,
+      tsvText: res.tsv,
+      columnHeaders: res.columnNames,
+      ...res,
+    });
   } catch (err) {
     sendResult(task.requestId, { ok: false, message: err instanceof Error ? err.message : String(err) });
   }
@@ -4187,6 +4467,7 @@ function runImportReflexiveTsv(task: Extract<WorkerRequest, { type: 'importRefle
     sendResult(task.requestId, {
       ok: true,
       updatedRows: res.updatedRows,
+      rowCount: res.updatedRows,
       updatedCells: res.updatedCells,
       fields,
       map: summarizeOpenMap(currentMap),
@@ -4244,6 +4525,216 @@ function runPreviewStringsCsvImport(task: Extract<WorkerRequest, { type: 'previe
   }
 }
 
+function autoDiscoverFixerResourcePaths(
+  mapFilePath: string | undefined,
+  action: 'ce' | 'mcc' | 'demo' | 'halomd' | 'xbox',
+  explicit: {
+    bitmapsPath?: string;
+    soundsPath?: string;
+    locPath?: string;
+    ceBitmapsPath?: string;
+    ceSoundsPath?: string;
+    ceLocPath?: string;
+  },
+): {
+  sourcePaths: Partial<Record<ResourceKind, string | undefined>>;
+  cePaths: Partial<Record<ResourceKind, string | undefined>>;
+} {
+  const mapDir = mapFilePath ? path.dirname(mapFilePath) : '';
+  const candidateRoots = [
+    process.cwd(),
+    path.resolve(process.cwd(), '..'),
+    path.resolve(__dirname, '..'),
+    path.resolve(__dirname, '../..'),
+    'C:\\Users\\LeviB\\Projects\\OpenCE-Mantle',
+  ];
+
+  const findSampleResource = (subDir: string, filename: string): string | undefined => {
+    for (const root of candidateRoots) {
+      const candidate = path.join(root, 'sample_maps', subDir, filename);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    return undefined;
+  };
+
+  const resolveSourceKind = (kind: ResourceKind, explicitPath?: string): string | undefined => {
+    if (explicitPath && fs.existsSync(explicitPath)) return explicitPath;
+    const filename = `${kind}.map`;
+    if (mapDir) {
+      const sibling = path.join(mapDir, filename);
+      if (fs.existsSync(sibling)) return sibling;
+      const parentSibling = path.join(path.dirname(mapDir), filename);
+      if (fs.existsSync(parentSibling)) return parentSibling;
+    }
+    if (action === 'demo') {
+      return findSampleResource('MacDemo', filename) ?? findSampleResource('PC', filename);
+    }
+    if (action === 'halomd') {
+      return findSampleResource('HaloMD', filename) ?? findSampleResource('PC', filename);
+    }
+    return undefined;
+  };
+
+  const resolveCeKind = (kind: ResourceKind, explicitPath?: string): string | undefined => {
+    if (explicitPath && fs.existsSync(explicitPath)) return explicitPath;
+    const filename = `${kind}.map`;
+    return (
+      findSampleResource('custom edition', filename) ??
+      findSampleResource('PC', filename) ??
+      (kind === 'sounds' ? SOUNDS_FALLBACK_CANDIDATES.find((c) => fs.existsSync(c)) : undefined)
+    );
+  };
+
+  return {
+    sourcePaths: {
+      bitmaps: resolveSourceKind('bitmaps', explicit.bitmapsPath),
+      sounds: resolveSourceKind('sounds', explicit.soundsPath),
+    },
+    cePaths: {
+      bitmaps: resolveCeKind('bitmaps', explicit.ceBitmapsPath),
+      sounds: resolveCeKind('sounds', explicit.ceSoundsPath),
+    },
+  };
+}
+
+function runWorkerMapFixAction(task: Extract<WorkerRequest, { type: 'runMapFixAction' }>): void {
+  let srcResources: ReturnType<typeof openConversionResources> | null = null;
+  let ceResources: ReturnType<typeof openConversionResources> | null = null;
+
+  try {
+    const targetPath = task.filePath || currentMap?.filePath;
+    if (!targetPath) {
+      return sendResult(task.requestId, {
+        ok: false,
+        code: 'NO_MAP_LOADED',
+        message: 'No map is currently open and no .map file path was provided.',
+      });
+    }
+
+    progress(task.requestId, 'Preparing map file & clearing ReadOnly flags', 10);
+    const readOnlyCleared = ensureFileWritableOnDisk(targetPath);
+
+    const useInMemoryBuffer =
+      currentMap &&
+      samePath(currentMap.filePath, targetPath) &&
+      (!fs.existsSync(targetPath) || currentMap.modified);
+
+    const sourceBuffer = useInMemoryBuffer ? Buffer.from(currentMap!.buffer) : fs.readFileSync(targetPath);
+
+    // Automatically create a `.bak` backup before modifying the `.map` file in-place
+    const outputPath = task.outputPath || targetPath;
+    let backupPath: string | undefined;
+    if (samePath(outputPath, targetPath) && !isBackupFilePath(targetPath) && fs.existsSync(targetPath)) {
+      const candidateBak = `${targetPath}.bak`;
+      ensureFileWritableOnDisk(candidateBak);
+      if (!fs.existsSync(candidateBak)) {
+        const tmpBak = `${candidateBak}.tmp-${randomUUID()}`;
+        fs.copyFileSync(targetPath, tmpBak);
+        ensureFileWritableOnDisk(tmpBak);
+        fs.renameSync(tmpBak, candidateBak);
+      }
+      backupPath = candidateBak;
+    }
+
+    const discovered = autoDiscoverFixerResourcePaths(targetPath, task.action, {
+      bitmapsPath: task.bitmapsPath,
+      soundsPath: task.soundsPath,
+      locPath: task.locPath,
+      ceBitmapsPath: task.ceBitmapsPath,
+      ceSoundsPath: task.ceSoundsPath,
+      ceLocPath: task.ceLocPath,
+    });
+    srcResources = openConversionResources(discovered.sourcePaths);
+    ceResources = openConversionResources(discovered.cePaths);
+
+    progress(task.requestId, `Running ${task.action.toUpperCase()} map fixer...`, 35);
+    const fixResult = runMapFixAction(task.action, sourceBuffer, {
+      resources: srcResources.files,
+      ceResources: ceResources.files,
+    });
+
+    if (!fixResult.buffer) {
+      return sendResult(task.requestId, {
+        ...fixResult,
+        ok: true,
+        filePath: outputPath,
+        backupPath,
+        readOnlyCleared,
+      });
+    }
+
+    progress(task.requestId, 'Writing fixed Custom Edition map to disk', 80);
+    ensureFileWritableOnDisk(outputPath);
+    const tmpOut = `${outputPath}.tmp-${randomUUID()}`;
+    try {
+      mapFs.writeFileSync(tmpOut, fixResult.buffer);
+      ensureFileWritableOnDisk(tmpOut);
+      mapFs.renameSync(tmpOut, outputPath);
+    } catch (writeErr) {
+      removeTempFile(tmpOut);
+      throw writeErr;
+    }
+
+    // Load the fixed map as the active map in the worker
+    currentMap = reparse(outputPath, fixResult.buffer, false, diskStatOf(outputPath));
+    modelGeometryCache.clear();
+    const sid = outputPath.toLowerCase();
+    activeSessionId = sid;
+    loadedMapSessions.set(sid, currentMap);
+
+    const extraDetails = [...fixResult.details];
+    if (readOnlyCleared) {
+      extraDetails.unshift(`Cleared Windows ReadOnly attribute on '${path.basename(targetPath)}'.`);
+    }
+    if (backupPath) {
+      extraDetails.unshift(`Verified backup '${path.basename(backupPath)}'.`);
+    }
+
+    progress(task.requestId, 'Done', 100);
+    const { buffer: _omitBuffer, ...reportWithoutBuffer } = fixResult;
+    const normalizedScriptFix = reportWithoutBuffer.scriptFix
+      ? {
+          ...reportWithoutBuffer.scriptFix,
+          nodesAlreadyFixed:
+            reportWithoutBuffer.scriptFix.nodesAlreadyFixed ??
+            reportWithoutBuffer.scriptFix.alreadyFixedNodes ??
+            0,
+          alreadyFixedNodes:
+            reportWithoutBuffer.scriptFix.alreadyFixedNodes ??
+            reportWithoutBuffer.scriptFix.nodesAlreadyFixed ??
+            0,
+          fixedNodes:
+            reportWithoutBuffer.scriptFix.fixedNodes ??
+            reportWithoutBuffer.scriptFix.mutations ??
+            [],
+          mutations:
+            reportWithoutBuffer.scriptFix.mutations ??
+            reportWithoutBuffer.scriptFix.fixedNodes ??
+            [],
+        }
+      : undefined;
+    sendResult(task.requestId, {
+      ...reportWithoutBuffer,
+      scriptFix: normalizedScriptFix,
+      ok: true,
+      filePath: outputPath,
+      backupPath,
+      readOnlyCleared,
+      details: extraDetails,
+      map: summarizeOpenMap(currentMap),
+    });
+  } catch (err) {
+    sendResult(task.requestId, {
+      ok: false,
+      code: 'FIX_FAILED',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    srcResources?.close();
+    ceResources?.close();
+  }
+}
+
 parentPort?.on('message', async (task: WorkerRequest) => {
   try {
     if (task.type === 'cancel') {
@@ -4287,6 +4778,8 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'getSourceBspMesh') await runGetSourceBspMesh(task);
     else if (task.type === 'bspSwapPreflight') await runBspSwapPreflight(task);
     else if (task.type === 'performBspSwap') await runPerformBspSwap(task);
+    else if (task.type === 'bspModelPreflight') runBspModelPreflight(task);
+    else if (task.type === 'bspSwapFromModelFile') runBspSwapFromModelFile(task);
     else if (task.type === 'stageTagTestMap') runStageTagTestMap(task);
     else if (task.type === 'getBitmapInfo') runGetBitmapInfo(task);
     else if (task.type === 'getBitmapRgba') runGetBitmapRgba(task);
@@ -4344,6 +4837,7 @@ parentPort?.on('message', async (task: WorkerRequest) => {
     else if (task.type === 'analyzeHudMessageSafety') runAnalyzeHudMessageSafety(task);
     else if (task.type === 'exportStringsCsv') runExportStringsCsv(task);
     else if (task.type === 'previewStringsCsvImport') runPreviewStringsCsvImport(task);
+    else if (task.type === 'runMapFixAction') runWorkerMapFixAction(task);
     if (activeSessionId && currentMap) {
       loadedMapSessions.set(activeSessionId, currentMap);
     }

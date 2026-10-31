@@ -62,6 +62,13 @@ export async function backupOnOpenFlow(mapPath: string, deps: BackupDeps): Promi
   const backupName = path.basename(backupPath);
 
   try {
+    try {
+      if (f === fs && fs.existsSync(mapPath)) {
+        fs.chmodSync(mapPath, 0o666);
+      }
+    } catch {
+      /* best-effort clear ReadOnly on source map */
+    }
     const exists = f.existsSync(backupPath);
     if (exists && f.statSync(backupPath).size === f.statSync(mapPath).size && f.readFileSync(backupPath).equals(f.readFileSync(mapPath))) {
       deps.log('info', `Backup already up to date: ${backupName} is identical to ${mapName}.`);
@@ -88,6 +95,14 @@ export async function backupOnOpenFlow(mapPath: string, deps: BackupDeps): Promi
     const tempPath = `${backupPath}.tmp-${randomUUID()}`;
     try {
       f.copyFileSync(mapPath, tempPath);
+      try {
+        if (f === fs) {
+          if (fs.existsSync(tempPath)) fs.chmodSync(tempPath, 0o666);
+          if (fs.existsSync(backupPath)) fs.chmodSync(backupPath, 0o666);
+        }
+      } catch {
+        /* best-effort clear ReadOnly on backup target */
+      }
       const expected = f.statSync(mapPath).size;
       const copied = f.statSync(tempPath).size;
       if (copied !== expected) throw new Error(`the copy is ${copied} bytes, the map is ${expected} bytes`);

@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as net from 'net';
 import { spawn, ChildProcess } from 'child_process';
@@ -33,6 +34,11 @@ export class TagTestRunner {
   private heldWeaponTagId: number | null = null;
   private drivenVehicleTagId: number | null = null;
   private haloWindowRect: { left: number; top: number; width: number; height: number } | null = null;
+  private stagedMapLoading = false;
+  private stagedMapLoaded = false;
+  private mainMenuMusicStarted = false;
+  private launchTimeMs = 0;
+  private initRestoreTimer: NodeJS.Timeout | null = null;
 
   public setHaloAlwaysOnTop(topmost: boolean): void {
     this.haloAlwaysOnTop = topmost;
@@ -152,19 +158,53 @@ if ($wshell.AppActivate('Halo')) {
       }
     }
 
-    // Auto-close tag test when player leaves game / quits to main menu
+    // Track when the staged map starts and finishes loading in Single Player Dev Mode
+    if (
+      text.includes("loading 'd:\\custom_maps\\_opence_tag_test") ||
+      text.includes("init: map_name") ||
+      text.includes("starting precaching of map custom_maps\\_opence_tag_test")
+    ) {
+      this.stagedMapLoading = true;
+      if (this.activeOpenCeDir) {
+        this.restoreInitForDir(this.activeOpenCeDir);
+      }
+    }
+    if (
+      this.stagedMapLoading &&
+      ((text.includes("structure culling:") && !text.includes("for 0 surfaces")) ||
+        text.includes("the saved game is not taken:") ||
+        text.includes("custom edition: the structure BSP") ||
+        text.includes("loaded ") && text.includes(" tags cleanly"))
+    ) {
+      this.stagedMapLoaded = true;
+    }
+
+    // Fallback: if ui.map finished initial boot ("starting main menu music") and the staged map hasn't started loading yet,
+    // immediately trigger `map_name custom_maps\<slot>` over Telnet so OpenCE boots straight into Single Player Dev Mode.
+    if (
+      !this.stagedMapLoaded &&
+      !this.stagedMapLoading &&
+      text.includes("starting main menu music")
+    ) {
+      this.mainMenuMusicStarted = true;
+      setTimeout(() => {
+        if (!this.stagedMapLoaded && !this.stagedMapLoading) {
+          this.triggerBootMapLoad();
+        }
+      }, 150);
+      return;
+    }
+
+    // Auto-close tag test ONLY when the player quits back to main menu AFTER the staged map has already loaded
     if (
       this.statusState === 'running' &&
+      this.stagedMapLoaded &&
+      Date.now() - this.launchTimeMs > 4000 &&
       (text.includes("loading 'd:\\ui.map'") ||
-        text.includes("ui.map") ||
-        text.includes("levels\\ui\\ui") ||
+        text.includes("this is 'levels\\ui\\ui'") ||
         text.includes("game_dispose") ||
         text.includes("stop_game") ||
-        text.includes("unload_all_structures") ||
-        text.includes("starting main menu music") ||
-        text.includes("begining filesystem checks") ||
-        text.includes("local player 0, weapon (0x0), deleted unexpectedly") ||
-        text.includes("Couldn't read map file 'd:\\ui.map'"))
+        text.includes("starting main menu music"))
     ) {
       setTimeout(() => {
         if (this.statusState === 'running') {
@@ -172,6 +212,14 @@ if ($wshell.AppActivate('Halo')) {
         }
       }, 300);
     }
+  }
+
+  private triggerBootMapLoad(): void {
+    if (!this.telnetConnected || !this.currentMapName || this.stagedMapLoading || this.stagedMapLoaded) return;
+    this.stagedMapLoading = true;
+    const hsCmd = `map_name custom_maps\\${this.currentMapName}`;
+    this.emitLog('stdout', `[TagTest] Launching Single-Player Dev Mode via Telnet: ${hsCmd}`);
+    this.sendCommand(hsCmd);
   }
 
   public getOpenCeConfig(): { directory: string | null; executable: string | null; exists: boolean } {
@@ -195,6 +243,10 @@ if ($wshell.AppActivate('Halo')) {
   }
 
   private restoreInitForDir(dir: string): void {
+    if (this.initRestoreTimer) {
+      clearTimeout(this.initRestoreTimer);
+      this.initRestoreTimer = null;
+    }
     const scriptPath = path.join(dir, '_opence_tag_test.txt');
     try {
       if (fs.existsSync(scriptPath)) {
@@ -276,6 +328,14 @@ if ($wshell.AppActivate('Halo')) {
     this.liveHudMode = Boolean(options.liveHudMode);
     this.arsenalSpawnedForCurrentLoad = false;
     this.unitSpawned = false;
+    this.stagedMapLoading = false;
+    this.stagedMapLoaded = false;
+    this.mainMenuMusicStarted = false;
+    this.launchTimeMs = Date.now();
+    if (this.initRestoreTimer) {
+      clearTimeout(this.initRestoreTimer);
+      this.initRestoreTimer = null;
+    }
     this.heldWeaponTagId = null;
     this.drivenVehicleTagId = null;
     this.statusState = 'launching';
@@ -322,7 +382,7 @@ if ($wshell.AppActivate('Halo')) {
           /* best effort */
         }
       }
-      const initContent = `game_console_log all\r\ndisplay_framerate true\r\nmap_name custom_maps\\${mapSlot}\r\n`;
+      const initContent = `display_framerate true\r\nmap_name custom_maps\\${mapSlot}\r\n`;
       fs.writeFileSync(initPath, initContent, 'utf-8');
 
       // 3. Track debug.txt size so we only report new logs
@@ -340,6 +400,7 @@ if ($wshell.AppActivate('Halo')) {
         HALO_TELNET_CONSOLE_PORT: '2323',
         HALO_CONSOLE_LOG: 'all',
         HALO_DISPLAY_MODE: options.windowed !== false ? 'windowed' : 'fullscreen',
+        HALO_WINDOW_SIZE: '1280x960',
         HALO_UPDATE_ANSWER: 'no',
       };
 
@@ -352,7 +413,12 @@ if ($wshell.AppActivate('Halo')) {
       });
       this.child = child;
       if (child.pid) {
-        this.startMemoryBridge(child.pid);
+        try {
+          this.startMemoryBridge(child.pid);
+        } catch (bridgeErr) {
+          const bMsg = bridgeErr instanceof Error ? bridgeErr.message : String(bridgeErr);
+          this.emitLog('stdout', `[TagTest Warning] Memory bridge failed to start: ${bMsg}`);
+        }
       }
 
       child.stdout?.on('data', (chunk) => {
@@ -395,11 +461,10 @@ if ($wshell.AppActivate('Halo')) {
         }
       }, 1200);
 
-      // 8. Restore/remove temporary init.txt once halo.exe has booted (3s fallback in addition to Telnet connect)
-      // so that even if Halo CE or Mantle is force-closed or standard CE is launched later, init.txt is already clean.
-      setTimeout(() => {
+      // 8. Safety fallback: restore/remove temporary init.txt after 60s if debug.txt didn't already trigger cleanup
+      this.initRestoreTimer = setTimeout(() => {
         this.restoreInitForDir(openCeDir);
-      }, 3000);
+      }, 60000);
 
       return { ok: true };
     } catch (err) {
@@ -427,11 +492,14 @@ if ($wshell.AppActivate('Halo')) {
         this.telnetSocket = sock;
         this.telnetConnected = true;
         this.statusState = 'running';
-        if (this.activeOpenCeDir) {
-          this.restoreInitForDir(this.activeOpenCeDir);
-        }
         this.emitStatus();
         this.emitLog('telnet', '[Telnet Bridge] Connected to OpenCE telnet console on port 2323.');
+        // Note: Do NOT delete init.txt or spam map_name here!
+        // telnet_console_initialize() binds port 2323 inside game_initialize() BEFORE console_startup() reads init.txt,
+        // and TELNET_CLIENT_BUFFER_SIZE is 128 bytes. Let console_startup() -> main_setup_connection() load init.txt natively.
+        if (this.mainMenuMusicStarted && !this.stagedMapLoaded && !this.stagedMapLoading) {
+          this.triggerBootMapLoad();
+        }
         if (this.liveHudMode) {
           this.maybeAutoSpawnLiveHudArsenal();
         }
@@ -539,6 +607,9 @@ if ($wshell.AppActivate('Halo')) {
       this.liveHudSetup = stageResult.liveHudSetup ?? null;
       this.arsenalSpawnedForCurrentLoad = false;
       this.unitSpawned = false;
+      this.stagedMapLoading = true;
+      this.stagedMapLoaded = false;
+      this.launchTimeMs = Date.now();
       this.currentMapName = nextSlot;
       // Send map_name command over telnet
       const hsCmd = `map_name custom_maps\\${nextSlot}`;
@@ -593,6 +664,10 @@ public class HaloMemBridge {
   public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
   [DllImport("user32.dll")]
   public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")]
+  public static extern short GetAsyncKeyState(int vKey);
 
   [StructLayout(LayoutKind.Sequential)]
   public struct RECT { public int Left, Top, Right, Bottom; }
@@ -682,6 +757,9 @@ public class HaloMemBridge {
 
     Task.Run(() => {
       string lastJson = "";
+      int[] watchedVKeys = new int[] { 0xDC, 0x26, 0x28, 0x25, 0x27, 0x0D, 0x08 };
+      string[] watchedNames = new string[] { "Backslash", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Backspace" };
+      bool[] prevDown = new bool[7];
       while (true) {
         try {
           Process p = Process.GetProcessById(targetPid);
@@ -739,6 +817,17 @@ public class HaloMemBridge {
               top = pt.Y;
               width = Math.Max(0, rc.Right - rc.Left);
               height = Math.Max(0, rc.Bottom - rc.Top);
+            }
+            if (GetForegroundWindow() == hWnd) {
+              for (int ki = 0; ki < watchedVKeys.Length; ki++) {
+                bool isDown = (GetAsyncKeyState(watchedVKeys[ki]) & 0x8000) != 0;
+                if (isDown && !prevDown[ki]) {
+                  EmitLine("HUDKEY " + watchedNames[ki]);
+                }
+                prevDown[ki] = isDown;
+              }
+            } else {
+              for (int ki = 0; ki < watchedVKeys.Length; ki++) prevDown[ki] = false;
             }
           }
 
@@ -938,12 +1027,24 @@ public class HaloMemBridge {
 [HaloMemBridge]::Run(${pid})
 `;
 
-    const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
-    const proc = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
+    const scriptPath = path.join(os.tmpdir(), `_opence_mem_bridge_${pid}.ps1`);
+    try {
+      fs.writeFileSync(scriptPath, psScript, 'utf-8');
+    } catch (writeErr) {
+      const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+      this.emitLog('stdout', `[MemBridge Warning] Could not write bridge script: ${msg}`);
+      return;
+    }
+
+    const proc = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
       stdio: ['pipe', 'pipe', 'ignore'],
       windowsHide: true,
     });
     this.memBridgeProc = proc;
+
+    proc.on('error', (err) => {
+      this.emitLog('stdout', `[MemBridge Warning] Process error: ${err.message}`);
+    });
 
     let stdoutBuf = '';
     proc.stdout?.on('data', (chunk: Buffer) => {
@@ -958,6 +1059,13 @@ public class HaloMemBridge {
             const parsed = JSON.parse(trimmed.slice(6));
             const wasSpawned = this.unitSpawned;
             this.unitSpawned = Boolean(parsed.unitSpawned);
+            if (this.unitSpawned) {
+              this.stagedMapLoading = true;
+              this.stagedMapLoaded = true;
+              if (this.activeOpenCeDir) {
+                this.restoreInitForDir(this.activeOpenCeDir);
+              }
+            }
             const nextWeap = typeof parsed.weaponTagId === 'number' && parsed.weaponTagId >= 0 ? parsed.weaponTagId : null;
             const nextVeh = typeof parsed.vehicleTagId === 'number' && parsed.vehicleTagId >= 0 ? parsed.vehicleTagId : null;
             const nextRect =
@@ -978,6 +1086,11 @@ public class HaloMemBridge {
             }
           } catch {
             // ignore JSON error
+          }
+        } else if (trimmed.startsWith('HUDKEY ')) {
+          const keyName = trimmed.slice(7).trim();
+          if (keyName) {
+            this.emitLog('stdout', `[HUDKEY] ${keyName}`);
           }
         } else if (trimmed === 'ARSENAL_READY') {
           this.sendCommand('cheat_deathless_player 1');
@@ -1005,6 +1118,13 @@ public class HaloMemBridge {
     });
 
     proc.on('exit', () => {
+      try {
+        if (fs.existsSync(scriptPath)) {
+          fs.unlinkSync(scriptPath);
+        }
+      } catch {
+        // ignore temp script cleanup error
+      }
       if (this.memBridgeProc === proc) {
         this.memBridgeProc = null;
       }

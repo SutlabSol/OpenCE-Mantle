@@ -65,6 +65,10 @@ export * from './map/live-hud-editor';
 export * from './map/baboon-features';
 export * from './map/native-tool-compiler';
 export * from './render/bsp-wireframe-thumbnail';
+export * from './map/map-fixer';
+export * from './render/glb-model-importer';
+
+
 
 
 

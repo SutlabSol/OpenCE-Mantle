@@ -1749,6 +1749,8 @@ export default function Bitmap3dStudioPanel({ allTags, onOpenTagEditor }: Props)
     return () => cancelAnimationFrame(id);
   }, [show3dView, show2dView, splitPercent]);
 
+  const lastCenteredGeometryRef = useRef<ModelRenderGeometry | null>(null);
+
   // Populate 3D meshes when modelGeometry or shaderSlots change
   useEffect(() => {
     const modelGroup = modelGroupRef.current;
@@ -1822,8 +1824,9 @@ export default function Bitmap3dStudioPanel({ allTags, onOpenTagEditor }: Props)
       meshListRef.current.push({ mesh, wire, shaderTagId: sub.shaderTagId });
     }
 
-    // Center camera on model bounding box
-    if (camera && controls) {
+    // Center camera on model bounding box only when a new modelGeometry is loaded
+    if (camera && controls && lastCenteredGeometryRef.current !== modelGeometry) {
+      lastCenteredGeometryRef.current = modelGeometry;
       const box = new THREE.Box3().setFromObject(modelGroup);
       if (!box.isEmpty()) {
         const center = box.getCenter(new THREE.Vector3());
@@ -2518,16 +2521,68 @@ export default function Bitmap3dStudioPanel({ allTags, onOpenTagEditor }: Props)
     activeSlot.canvas.height = newH;
     activeSlot.width = newW;
     activeSlot.height = newH;
+
+    // Dispose the old WebGL texture (which has immutable texStorage2D dimensions in WebGL2)
+    // and allocate a fresh THREE.CanvasTexture sized to (newW, newH) so live 3D painting continues seamlessly!
+    const oldTex = activeSlot.threeTexture;
+    const freshTex = new THREE.CanvasTexture(activeSlot.canvas);
+    freshTex.flipY = false;
+    freshTex.wrapS = THREE.RepeatWrapping;
+    freshTex.wrapT = THREE.RepeatWrapping;
+    freshTex.colorSpace = THREE.SRGBColorSpace;
+    activeSlot.threeTexture = freshTex;
+
     compositeSlotLayers(activeSlot);
+    freshTex.needsUpdate = true;
+
     const ctx = activeSlot.canvas.getContext('2d')!;
-    activeSlot.originalImageData = ctx.getImageData(0, 0, newW, newH);
+    const freshOriginal = ctx.getImageData(0, 0, newW, newH);
+    activeSlot.originalImageData = freshOriginal;
     activeSlot.undoStack = [];
     activeSlot.redoStack = [];
+
+    // Update any other shader slots that share the same underlying canvas / bitmap
+    for (const s of shaderSlots) {
+      if (s === activeSlot || s.canvas === activeSlot.canvas) {
+        s.width = newW;
+        s.height = newH;
+        s.threeTexture = freshTex;
+        s.originalImageData = freshOriginal;
+      }
+    }
+
+    // Rebind live 3D mesh materials immediately so 3D viewport painting updates on every stroke
+    for (const item of meshListRef.current) {
+      const mat = item.mesh.material as THREE.MeshStandardMaterial;
+      const matchingSlot = shaderSlots.find((s) => s.shaderTagId === item.shaderTagId) ?? shaderSlots[0];
+      if (mat && (mat.map === oldTex || matchingSlot?.threeTexture === freshTex)) {
+        mat.map = freshTex;
+        mat.needsUpdate = true;
+      }
+    }
+    try {
+      oldTex?.dispose();
+    } catch {
+      /* ignore dispose errors */
+    }
+
+    // Scale active UV bounding-box mask if one is set so strokes aren't clipped to old resolution bounds
+    if (bboxMask) {
+      const sx = newW / Math.max(1, curW);
+      const sy = newH / Math.max(1, curH);
+      setBboxMask({
+        x: Math.round(bboxMask.x * sx),
+        y: Math.round(bboxMask.y * sy),
+        w: Math.round(bboxMask.w * sx),
+        h: Math.round(bboxMask.h * sy),
+      });
+    }
+
     setShaderSlots([...shaderSlots]);
     setLayerVersion((v) => v + 1);
     redraw2dCanvas();
     setStatusMessage(
-      `Upscaled texture canvas and all layers to ${newW}×${newH}px HD! You can now paint ultra-fine lines down to 0.5px width.`,
+      `Upscaled texture canvas and all layers to ${newW}×${newH}px HD! Live 3D model texture rebound and ready for painting.`,
     );
   };
 

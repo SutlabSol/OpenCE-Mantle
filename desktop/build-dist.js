@@ -174,9 +174,11 @@ async function main() {
     console.log('Artifact:', latestYmlPath);
   }
 
-  // Only sync resources/app.asar into %LOCALAPPDATA%\Programs\opence-desktop when --sync-installed is explicitly passed
-  if (process.argv.includes('--sync-installed')) {
-    const unpackedResources = path.join(__dirname, 'release', 'win-unpacked', 'resources');
+  // Sync win-unpacked binary + resources/app.asar into %LOCALAPPDATA%\Programs\opence-desktop by default
+  if (!process.argv.includes('--no-sync-installed')) {
+    const unpackedDir = path.join(__dirname, 'release', 'win-unpacked');
+    const unpackedResources = path.join(unpackedDir, 'resources');
+    const unpackedExe = path.join(unpackedDir, 'OpenCE Mantle.exe');
     const installedCandidates = [
       path.join(process.env.LOCALAPPDATA || '', 'Programs', 'opence-desktop'),
       path.join(process.env.LOCALAPPDATA || '', 'Programs', 'OpenCE Mantle'),
@@ -186,14 +188,17 @@ async function main() {
       if (fs.existsSync(instRes) && fs.existsSync(unpackedResources)) {
         try {
           fs.cpSync(unpackedResources, instRes, { recursive: true, force: true });
-          console.log(`Synced latest app bundle into installed directory: ${instRes}`);
+          if (fs.existsSync(unpackedExe)) {
+            fs.copyFileSync(unpackedExe, path.join(instDir, 'OpenCE Mantle.exe'));
+          }
+          console.log(`Synced latest app bundle into installed directory: ${instDir}`);
         } catch (err) {
-          console.warn(`Could not sync to ${instRes} (app may be running):`, err.message || err);
+          console.warn(`Could not sync to ${instDir} (app may be running):`, err.message || err);
         }
       }
     }
   } else {
-    console.log('Skipping sync to installed directory (preserving installed build for auto-update testing).');
+    console.log('Skipping sync to installed directory (--no-sync-installed passed).');
   }
 
   const portableExe = path.join(__dirname, 'release', `OpenCE Mantle ${displayVersion}.exe`);

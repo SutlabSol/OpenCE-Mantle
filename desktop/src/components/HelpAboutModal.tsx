@@ -123,7 +123,7 @@ export default function HelpAboutModal({
                     borderRadius: 2,
                   }}
                 >
-                  v{appVersion || '0.6.9'}
+                  v{appVersion || '0.8.6'}
                 </span>
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4, lineHeight: 1.45 }}>

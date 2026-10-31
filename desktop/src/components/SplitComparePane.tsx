@@ -1,63 +1,52 @@
-import { useMemo, useState } from 'react';
-import type { OpenMapTabSession } from '../../electron/shared-types';
+import { useState } from 'react';
+import type { OpenMapTabSession, TagEntrySummary } from '../../electron/shared-types';
+import TagBrowser from './TagBrowser';
+import CenterWorkspace, { type CenterWorkspaceTab } from './CenterWorkspace';
+import PropertiesPalette, { type PropertiesPaletteTab } from './PropertiesPalette';
+import TagEditorDialog from './TagEditorDialog';
+import BitmapEditorDialog from './BitmapEditorDialog';
+import SoundAuditorDialog from './SoundAuditorDialog';
+import HudPreviewerDialog from './HudPreviewerDialog';
+import TagActionDialog, { type TagActionType } from './TagActionDialog';
 
 interface SplitComparePaneProps {
   sessions: OpenMapTabSession[];
   primarySession: OpenMapTabSession | null;
   secondarySession: OpenMapTabSession | null;
+  isActiveInstance?: boolean;
+  onFocusInstance?: () => void;
   onSelectSecondarySession: (sessionId: string) => void;
   onActivateSessionAsPrimary: (sessionId: string, focusTagPath?: string) => void;
   onFocusMatchingTagInPrimary: (tagPath: string, groupName: string) => void;
   onOpenAnotherMap: () => void;
   onDetachSessionToWindow: (sessionId: string) => void;
   onCloseSplitView: () => void;
+  onRequestExtractFromSecondary?: (indices: number[]) => void;
+  onRequestBatchExtractFromSecondary?: () => void;
 }
 
 export default function SplitComparePane({
   sessions,
-  primarySession,
   secondarySession,
+  isActiveInstance = false,
+  onFocusInstance,
   onSelectSecondarySession,
-  onActivateSessionAsPrimary,
   onFocusMatchingTagInPrimary,
   onOpenAnotherMap,
   onDetachSessionToWindow,
   onCloseSplitView,
+  onRequestExtractFromSecondary,
+  onRequestBatchExtractFromSecondary,
 }: SplitComparePaneProps) {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [classFilter, setClassFilter] = useState<string>('ALL');
-  const [onlyDifferences, setOnlyDifferences] = useState(false);
-
-  const primaryTagPathSet = useMemo(() => {
-    const s = new Set<string>();
-    if (primarySession?.map?.tags) {
-      for (const t of primarySession.map.tags) {
-        s.add(`${t.primaryClassName}:${t.path}`);
-      }
-    }
-    return s;
-  }, [primarySession]);
-
-  const classGroups = useMemo(() => {
-    const counts = new Map<string, number>();
-    if (secondarySession?.map?.tags) {
-      for (const t of secondarySession.map.tags) {
-        counts.set(t.primaryClassName, (counts.get(t.primaryClassName) ?? 0) + 1);
-      }
-    }
-    return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [secondarySession]);
-
-  const filteredTags = useMemo(() => {
-    if (!secondarySession?.map?.tags) return [];
-    const q = searchQuery.trim().toLowerCase();
-    return secondarySession.map.tags.filter((t) => {
-      if (classFilter !== 'ALL' && t.primaryClassName !== classFilter) return false;
-      if (onlyDifferences && primaryTagPathSet.has(`${t.primaryClassName}:${t.path}`)) return false;
-      if (!q) return true;
-      return t.path.toLowerCase().includes(q) || t.primaryClassName.toLowerCase().includes(q);
-    });
-  }, [secondarySession, searchQuery, classFilter, onlyDifferences, primaryTagPathSet]);
+  const [focusedTag, setFocusedTag] = useState<TagEntrySummary | null>(null);
+  const [selectedTagIndices, setSelectedTagIndices] = useState<Set<number>>(new Set());
+  const [centerTab, setCenterTab] = useState<CenterWorkspaceTab>('overview');
+  const [propertiesPaletteTab, setPropertiesPaletteTab] = useState<PropertiesPaletteTab>('overview');
+  const [editingTag, setEditingTag] = useState<TagEntrySummary | null>(null);
+  const [bitmapEditorTag, setBitmapEditorTag] = useState<TagEntrySummary | null>(null);
+  const [soundAuditorTag, setSoundAuditorTag] = useState<TagEntrySummary | null>(null);
+  const [hudPreviewerTag, setHudPreviewerTag] = useState<TagEntrySummary | null>(null);
+  const [tagAction, setTagAction] = useState<{ action: TagActionType; tag: TagEntrySummary } | null>(null);
 
   if (!secondarySession) {
     return (
@@ -76,11 +65,12 @@ export default function SplitComparePane({
         }}
       >
         <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--text-primary)' }}>
-          Side-by-Side Map Comparison Pane
+          Dual-Instance Side-by-Side Workspace (Autodesk Inventor Style)
         </div>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', maxWidth: 380, textAlign: 'center', lineHeight: 1.45 }}>
-          Open a second <code style={{ color: 'var(--accent-cyan)' }}>.map</code> file to compare tag hierarchies,
-          header metrics, and unique tags side-by-side with your active map.
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)', maxWidth: 420, textAlign: 'center', lineHeight: 1.45 }}>
+          Open a second <code style={{ color: 'var(--accent-cyan)' }}>.map</code> file to run two full Mantle workspace instances
+          (Tag Browser, 3D Viewport, 3D Studios &amp; Properties) side-by-side in one window. Clicking either side makes it the
+          active map controlled by the top toolbar.
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button
@@ -93,6 +83,7 @@ export default function SplitComparePane({
               fontWeight: 600,
               fontSize: 12,
               borderRadius: 2,
+              cursor: 'pointer',
             }}
           >
             + Open Second Map...
@@ -106,6 +97,7 @@ export default function SplitComparePane({
               color: 'var(--text-secondary)',
               fontSize: 12,
               borderRadius: 2,
+              cursor: 'pointer',
             }}
           >
             Close Split View
@@ -115,28 +107,37 @@ export default function SplitComparePane({
     );
   }
 
+  const secTags = secondarySession.map.tags;
+
   return (
     <div
       data-testid="split-compare-pane"
+      onMouseDownCapture={() => {
+        onFocusInstance?.();
+      }}
       style={{
         flex: 1,
         background: 'var(--bg-panel)',
         display: 'flex',
         flexDirection: 'column',
         minWidth: 0,
+        minHeight: 0,
         overflow: 'hidden',
+        outline: isActiveInstance ? '2px solid var(--accent-cyan)' : '1px solid var(--border)',
+        outlineOffset: -2,
       }}
     >
-      {/* Top Header of Secondary Comparison Pane */}
+      {/* Top Instance Header Bar of Right Mantle Workspace Instance */}
       <div
         style={{
-          padding: '6px 10px',
-          background: 'var(--bg-panel-header)',
-          borderBottom: '1px solid var(--border)',
+          padding: '4px 10px',
+          background: isActiveInstance ? 'rgba(0, 212, 255, 0.12)' : 'var(--bg-panel-header)',
+          borderBottom: `1px solid ${isActiveInstance ? 'var(--accent-cyan)' : 'var(--border)'}`,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           gap: 8,
+          flexShrink: 0,
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
@@ -145,20 +146,21 @@ export default function SplitComparePane({
               fontFamily: 'var(--mono-font)',
               fontSize: 10,
               fontWeight: 700,
-              padding: '1px 5px',
-              background: 'var(--accent-gold)',
+              padding: '1px 6px',
+              background: isActiveInstance ? 'var(--accent-cyan)' : 'var(--accent-gold)',
               color: '#060a10',
               borderRadius: 2,
+              whiteSpace: 'nowrap',
             }}
           >
-            RIGHT PANE
+            {isActiveInstance ? '● RIGHT INSTANCE (ACTIVE)' : 'RIGHT INSTANCE'}
           </span>
           <select
             value={secondarySession.sessionId}
             onChange={(e) => onSelectSecondarySession(e.target.value)}
             style={{
-              padding: '3px 8px',
-              fontSize: 12,
+              padding: '2px 8px',
+              fontSize: 11.5,
               fontFamily: 'var(--mono-font)',
               background: 'var(--bg-control)',
               border: '1px solid var(--border)',
@@ -172,33 +174,40 @@ export default function SplitComparePane({
               </option>
             ))}
           </select>
+          <span style={{ fontSize: 10.5, color: 'var(--text-dim)', fontFamily: 'var(--mono-font)', whiteSpace: 'nowrap' }}>
+            {secTags.length.toLocaleString()} tags
+          </span>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
-          <button
-            onClick={() => onActivateSessionAsPrimary(secondarySession.sessionId)}
-            title="Make this map the active primary editor map"
-            style={{
-              padding: '3px 8px',
-              fontSize: 11,
-              background: 'var(--selection-bg)',
-              border: '1px solid var(--border-active)',
-              color: 'var(--accent-cyan)',
-              borderRadius: 2,
-            }}
-          >
-            ⇄ Make Active
-          </button>
+          {focusedTag && (
+            <button
+              onClick={() => onFocusMatchingTagInPrimary(focusedTag.path, focusedTag.primaryClassName)}
+              title="Jump to matching tag path in Left Instance"
+              style={{
+                padding: '2px 7px',
+                fontSize: 10.5,
+                background: 'var(--selection-bg)',
+                border: '1px solid var(--border-active)',
+                color: 'var(--accent-cyan)',
+                borderRadius: 2,
+                cursor: 'pointer',
+              }}
+            >
+              🔍 Focus in Left
+            </button>
+          )}
           <button
             onClick={() => onDetachSessionToWindow(secondarySession.sessionId)}
             title="Tear off this map into a second monitor window"
             style={{
-              padding: '3px 8px',
-              fontSize: 11,
+              padding: '2px 7px',
+              fontSize: 10.5,
               background: 'var(--bg-control)',
               border: '1px solid var(--border)',
               color: 'var(--text-secondary)',
               borderRadius: 2,
+              cursor: 'pointer',
             }}
           >
             ↗ 2nd Window
@@ -207,12 +216,13 @@ export default function SplitComparePane({
             onClick={onCloseSplitView}
             title="Close side-by-side split view"
             style={{
-              padding: '3px 7px',
-              fontSize: 11,
+              padding: '2px 6px',
+              fontSize: 10.5,
               background: 'var(--bg-control)',
               border: '1px solid var(--border)',
               color: 'var(--text-secondary)',
               borderRadius: 2,
+              cursor: 'pointer',
             }}
           >
             ✕
@@ -220,208 +230,113 @@ export default function SplitComparePane({
         </div>
       </div>
 
-      {/* Header Metrics Comparison Strip */}
-      <div
-        style={{
-          padding: '8px 10px',
-          background: 'var(--bg-control)',
-          borderBottom: '1px solid var(--border)',
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: 8,
-          fontFamily: 'var(--mono-font)',
-          fontSize: 10.5,
-        }}
-      >
-        <div>
-          <div style={{ color: 'var(--text-dim)', fontSize: 9.5 }}>SCENARIO</div>
-          <div style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
-            {secondarySession.map.header.scenarioName}
-          </div>
-        </div>
-        <div>
-          <div style={{ color: 'var(--text-dim)', fontSize: 9.5 }}>TAG COUNT</div>
-          <div style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>
-            {secondarySession.map.tags.length.toLocaleString()} tags
-          </div>
-        </div>
-        <div>
-          <div style={{ color: 'var(--text-dim)', fontSize: 9.5 }}>CRC32</div>
-          <div style={{ color: 'var(--text-secondary)' }}>
-            0x{(secondarySession.map.header.crc32 >>> 0).toString(16).toUpperCase().padStart(8, '0')}
-          </div>
-        </div>
-        <div>
-          <div style={{ color: 'var(--text-dim)', fontSize: 9.5 }}>SIZE</div>
-          <div style={{ color: 'var(--text-secondary)' }}>
-            {(secondarySession.map.header.fileSizeOnDisk / (1024 * 1024)).toFixed(2)} MB
-          </div>
-        </div>
-      </div>
+      {/* Full Second Mantle Instance Workspace: TagBrowser + CenterWorkspace + PropertiesPalette */}
+      <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0 }}>
+        <TagBrowser
+          tags={secTags}
+          focusedTag={focusedTag}
+          onFocusTag={setFocusedTag}
+          selected={selectedTagIndices}
+          onSelectedChange={setSelectedTagIndices}
+          onExtractRequested={(indices) => {
+            onFocusInstance?.();
+            onRequestExtractFromSecondary?.(indices);
+          }}
+          extractDisabledReason={selectedTagIndices.size === 0 ? 'Select at least one tag first.' : null}
+          onExtractWholeMap={() => {
+            onFocusInstance?.();
+            onRequestBatchExtractFromSecondary?.();
+          }}
+          canExtractWholeMap={true}
+          onEditTag={setEditingTag}
+          onFindReferences={(tag) => {
+            setFocusedTag(tag);
+            setSelectedTagIndices(new Set([tag.index]));
+            setPropertiesPaletteTab('references');
+          }}
+          onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
+          onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
+          onDeleteTag={(tag) => setTagAction({ action: 'delete', tag })}
+          onOpenBitmapEditor={setBitmapEditorTag}
+          onOpenSoundAuditor={setSoundAuditorTag}
+          onOpenHudPreviewer={setHudPreviewerTag}
+        />
 
-      {/* Filter Bar */}
-      <div
-        style={{
-          padding: '6px 10px',
-          borderBottom: '1px solid var(--border)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          flexWrap: 'wrap',
-        }}
-      >
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search tags in right pane..."
-          style={{
-            flex: 1,
-            minWidth: 130,
-            padding: '4px 8px',
-            fontSize: 11.5,
-            background: 'var(--bg-control)',
-            border: '1px solid var(--border)',
-            color: 'var(--text-primary)',
-            borderRadius: 2,
-            outline: 'none',
+        <CenterWorkspace
+          key={`right-instance-${secondarySession.sessionId}`}
+          header={secondarySession.map.header}
+          allTags={secTags}
+          onActiveTabChange={(nextTab) => {
+            onFocusInstance?.();
+            setCenterTab(nextTab);
+          }}
+          onSelectObjectTag={(tagId, objectPath) => {
+            const target =
+              secTags.find((t) => t.tagId === tagId) ??
+              secTags.find((t) => (t.tagId & 0xffff) === (tagId & 0xffff)) ??
+              (objectPath ? secTags.find((t) => t.path.toLowerCase() === objectPath.toLowerCase()) : undefined);
+            if (target) {
+              setFocusedTag(target);
+              setSelectedTagIndices(new Set([target.index]));
+            }
+          }}
+          onOpenTagEditor={(tagIndexOrPath) => {
+            const target =
+              typeof tagIndexOrPath === 'number'
+                ? (secTags.find((t) => t.index === tagIndexOrPath) ?? secTags[tagIndexOrPath])
+                : secTags.find(
+                    (t) =>
+                      t.path.toLowerCase() === tagIndexOrPath.toLowerCase() ||
+                      t.path.toLowerCase().endsWith(tagIndexOrPath.toLowerCase()),
+                  );
+            if (target) {
+              setFocusedTag(target);
+              setSelectedTagIndices(new Set([target.index]));
+              setEditingTag(target);
+            }
           }}
         />
-        <select
-          value={classFilter}
-          onChange={(e) => setClassFilter(e.target.value)}
-          style={{
-            padding: '4px 6px',
-            fontSize: 11,
-            fontFamily: 'var(--mono-font)',
-            background: 'var(--bg-control)',
-            border: '1px solid var(--border)',
-            color: 'var(--text-primary)',
-            borderRadius: 2,
-          }}
-        >
-          <option value="ALL">All Classes ({secondarySession.map.tags.length})</option>
-          {classGroups.map(([cls, count]) => (
-            <option key={cls} value={cls}>
-              {cls} ({count})
-            </option>
-          ))}
-        </select>
-        <label
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 4,
-            fontSize: 11,
-            color: onlyDifferences ? 'var(--accent-gold)' : 'var(--text-secondary)',
-            cursor: 'pointer',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={onlyDifferences}
-            onChange={(e) => setOnlyDifferences(e.target.checked)}
+
+        {centerTab !== 'bitmap-3d' && centerTab !== 'bsp-model-studio' && (
+          <PropertiesPalette
+            focusedTag={focusedTag}
+            allTags={secTags}
+            activeTab={propertiesPaletteTab}
+            onTabChange={setPropertiesPaletteTab}
+            onSelectTag={(idx) => {
+              const t = secTags.find((tag) => tag.index === idx) ?? secTags[idx];
+              if (t) {
+                setFocusedTag(t);
+                setSelectedTagIndices(new Set([t.index]));
+              }
+            }}
           />
-          Unique to Right Map
-        </label>
+        )}
       </div>
 
-      {/* Tag List */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: 6 }}>
-        {filteredTags.map((tag) => {
-          const existsInLeft = primaryTagPathSet.has(`${tag.primaryClassName}:${tag.path}`);
-          return (
-            <div
-              key={tag.index}
-              style={{
-                padding: '4px 8px',
-                borderBottom: '1px solid var(--border)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 8,
-                fontFamily: 'var(--mono-font)',
-                fontSize: 11,
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, overflow: 'hidden' }}>
-                <span
-                  style={{
-                    padding: '0 4px',
-                    background: 'var(--bg-panel-header)',
-                    border: '1px solid var(--border)',
-                    color: 'var(--accent-cyan)',
-                    fontSize: 10,
-                    borderRadius: 2,
-                    flexShrink: 0,
-                  }}
-                >
-                  {tag.primaryClassName}
-                </span>
-                <span
-                  title={tag.path}
-                  style={{
-                    color: 'var(--text-primary)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {tag.path}
-                </span>
-                {!existsInLeft && (
-                  <span
-                    style={{
-                      fontSize: 9.5,
-                      padding: '0 4px',
-                      background: 'var(--warn-bg)',
-                      border: '1px solid var(--warn-border)',
-                      color: 'var(--warn-text)',
-                      borderRadius: 2,
-                      flexShrink: 0,
-                    }}
-                  >
-                    UNIQUE
-                  </span>
-                )}
-              </div>
+      {editingTag && (
+        <TagEditorDialog
+          tag={editingTag}
+          allTags={secTags}
+          onClose={() => setEditingTag(null)}
+          onOpenBitmapEditor={setBitmapEditorTag}
+          onOpenSoundAuditor={setSoundAuditorTag}
+          onOpenHudPreviewer={setHudPreviewerTag}
+        />
+      )}
 
-              <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                {existsInLeft && (
-                  <button
-                    onClick={() => onFocusMatchingTagInPrimary(tag.path, tag.primaryClassName)}
-                    title="Select the matching tag in the Left Pane editor"
-                    style={{
-                      padding: '1px 6px',
-                      fontSize: 10,
-                      background: 'var(--bg-control)',
-                      border: '1px solid var(--border)',
-                      color: 'var(--text-secondary)',
-                      borderRadius: 2,
-                    }}
-                  >
-                    Match Left
-                  </button>
-                )}
-                <button
-                  onClick={() => onActivateSessionAsPrimary(secondarySession.sessionId, tag.path)}
-                  title="Switch to this map and open this tag in the full editor"
-                  style={{
-                    padding: '1px 6px',
-                    fontSize: 10,
-                    background: 'var(--selection-bg)',
-                    border: '1px solid var(--border-active)',
-                    color: 'var(--accent-cyan)',
-                    borderRadius: 2,
-                  }}
-                >
-                  Inspect
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+      {bitmapEditorTag && <BitmapEditorDialog tag={bitmapEditorTag} onClose={() => setBitmapEditorTag(null)} />}
+      {soundAuditorTag && <SoundAuditorDialog tag={soundAuditorTag} onClose={() => setSoundAuditorTag(null)} />}
+      {hudPreviewerTag && <HudPreviewerDialog tag={hudPreviewerTag} onClose={() => setHudPreviewerTag(null)} />}
+
+      {tagAction && (
+        <TagActionDialog
+          action={tagAction.action}
+          tag={tagAction.tag}
+          onClose={() => setTagAction(null)}
+          onSuccess={() => setTagAction(null)}
+        />
+      )}
     </div>
   );
 }

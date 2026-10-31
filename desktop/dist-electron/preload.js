@@ -44,6 +44,9 @@ var api = {
   bspSwapPreflight: (sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices) => import_electron.ipcRenderer.invoke("bsp:swapPreflight", sourceFilePath, sourceBspIndex, targetBspIndex, sourceBspIndices),
   getSourceBspMesh: (sourceFilePath, bspIndex) => import_electron.ipcRenderer.invoke("bsp:getSourceMesh", sourceFilePath, bspIndex),
   performBspSwap: (sourceFilePath, options) => import_electron.ipcRenderer.invoke("bsp:performSwap", sourceFilePath, options),
+  pickBspModelFile: () => import_electron.ipcRenderer.invoke("dialog:pickBspModelFile"),
+  bspModelPreflight: (modelPath, targetBspIndex, options) => import_electron.ipcRenderer.invoke("bsp:modelPreflight", modelPath, targetBspIndex, options),
+  bspSwapFromModelFile: (modelPath, options) => import_electron.ipcRenderer.invoke("bsp:swapFromModelFile", modelPath, options),
   getBspRenderMesh: (bspIndex) => import_electron.ipcRenderer.invoke("render:getBspMesh", bspIndex),
   getBitmapTexture: (bitmapTagId, imageIndex) => import_electron.ipcRenderer.invoke("render:getBitmapTexture", bitmapTagId, imageIndex),
   getScenarioObjects: () => import_electron.ipcRenderer.invoke("render:getScenarioObjects"),
@@ -245,7 +248,8 @@ var api = {
     const listener = (_, payload) => cb(payload);
     import_electron.ipcRenderer.on("map:sessionsChanged", listener);
     return () => import_electron.ipcRenderer.removeListener("map:sessionsChanged", listener);
-  }
+  },
+  runMapFixAction: (action, options) => import_electron.ipcRenderer.invoke("map:runFixAction", action, options)
 };
 import_electron.contextBridge.exposeInMainWorld("opence", api);
 //# sourceMappingURL=preload.js.map

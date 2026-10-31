@@ -271,7 +271,7 @@ export function hydrateExternalRawDataInContainer(
         const assetIndex = t.embeddedRawDataAssets.length;
         t.embeddedRawDataAssets.push({ kind: 'bitmap', data: rawData.toString('base64') });
         t.embeddedRawDataPatches.push({ assetIndex, patchOffset: patchOff, patchWidth: 4 });
-        dataBuf.writeUInt16LE(flags & ~0x100, elemOff + 14);
+        dataBuf.writeUInt16LE(((flags & 0x007f) | 0x0080) >>> 0, elemOff + 14);
         existingPatchOffsets.add(patchOff);
         mutated = true;
       }
@@ -391,7 +391,9 @@ export interface ClassConflictInfo {
   localIndex: number;
   path: string;
   group: string;
+  containerGroup?: string;
   existingGroups: string[];
+  targetGroup?: string;
 }
 
 export interface InjectionPlan {
@@ -479,6 +481,10 @@ export interface InjectionOptions {
    * Enabled by default (Stage 2).
    */
   allowGbxmodelGeometryRelocation?: boolean;
+  /**
+   * Allow tag + BSP space up to OpenCE's expanded 122 MiB cache ceiling (`0x47E40000`) instead of stock 23 MiB (`CE_TAG_SPACE_SIZE`).
+   */
+  allowExpandedTagSpace?: boolean;
 }
 
 /**
@@ -524,7 +530,9 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
           localIndex: li,
           path: t.path,
           group: t.group,
+          containerGroup: t.group,
           existingGroups: [...otherGroups],
+          targetGroup: [...otherGroups].join(', '),
         });
       }
     }
@@ -753,11 +761,12 @@ export function planInjection(mode: InjectionMode, target: InjectionTarget, cont
     const newTagDataSize = layout.newFileLength - target.header.tagDataOffset;
     const bsps = ceStructureBspRegions(target.buffer, target.header, targetTagIndex, 'Cannot check the tag space');
     const largestBsp = bsps.reduce((n, r) => Math.max(n, r.size), 0);
-    if (newTagDataSize + largestBsp > CE_TAG_SPACE_SIZE) {
+    const maxTagSpace = options.allowExpandedTagSpace ? 122 * 1024 * 1024 : CE_TAG_SPACE_SIZE;
+    if (newTagDataSize + largestBsp > maxTagSpace) {
       const mib = (n: number) => `${(n / (1024 * 1024)).toFixed(2)} MiB`;
       return {
         kind: 'refused',
-        reason: `The result would not fit in the game's tag space: tag data would be ${mib(newTagDataSize)} (now ${mib(target.header.tagDataSize)}) and the largest BSP is ${mib(largestBsp)}, ${mib(newTagDataSize + largestBsp)} in total; the limit is ${mib(CE_TAG_SPACE_SIZE)}. Inject fewer tags.`,
+        reason: `The result would not fit in the game's tag space: tag data would be ${mib(newTagDataSize)} (now ${mib(target.header.tagDataSize)}) and the largest BSP is ${mib(largestBsp)}, ${mib(newTagDataSize + largestBsp)} in total; the limit is ${mib(maxTagSpace)}. Inject fewer tags.`,
       };
     }
   }

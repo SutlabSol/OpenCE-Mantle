@@ -30,6 +30,15 @@ export default function CenterWorkspace({
   }, [tab, onActiveTabChange]);
 
   useEffect(() => {
+    const onSwitchTab = (e: Event) => {
+      const next = (e as CustomEvent<CenterWorkspaceTab>).detail;
+      if (next) setTab(next);
+    };
+    window.addEventListener('opence:switch-center-tab', onSwitchTab);
+    return () => window.removeEventListener('opence:switch-center-tab', onSwitchTab);
+  }, []);
+
+  useEffect(() => {
     window.opence.tagTestGetStatus().then(setTagTestStatus);
     const unsubStatus = window.opence.onTagTestStatusChange((s) => setTagTestStatus(s));
     const unsubHotkey = (window.opence as { onTagTestHotkeyAction?: (cb: (e: { action: string }) => void) => () => void }).onTagTestHotkeyAction?.((evt) => {

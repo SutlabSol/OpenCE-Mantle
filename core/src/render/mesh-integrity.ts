@@ -17,6 +17,9 @@
  */
 
 export interface MeshIntegrityReview {
+  totalVertices: number;
+  totalTriangles: number;
+  isWaterTightManifold: boolean;
   checkedTriangles: number;
   duplicateFaces: number;
   shortEdges: number;
@@ -65,10 +68,36 @@ function pushSample(out: number[], index: number): void {
 /**
  * Audits an indexed 3D triangle mesh for 2-manifold BSP/collision topology defects and T-junctions.
  */
-export function auditMeshIntegrity(mesh: {
-  positions: ArrayLike<number>;
-  indices: ArrayLike<number>;
-}): MeshIntegrityReview {
+export function auditMeshIntegrity(
+  meshOrVertices:
+    | {
+        positions: ArrayLike<number>;
+        indices: ArrayLike<number>;
+      }
+    | Array<[number, number, number]>,
+  maybeTriangles?: Array<[number, number, number]>,
+): MeshIntegrityReview {
+  let mesh: { positions: ArrayLike<number>; indices: ArrayLike<number> };
+  if (Array.isArray(meshOrVertices)) {
+    const tris = maybeTriangles ?? [];
+    const flatPos = new Float32Array(meshOrVertices.length * 3);
+    for (let i = 0; i < meshOrVertices.length; i++) {
+      const v = meshOrVertices[i];
+      flatPos[i * 3] = v[0];
+      flatPos[i * 3 + 1] = v[1];
+      flatPos[i * 3 + 2] = v[2];
+    }
+    const flatIdx = new Uint32Array(tris.length * 3);
+    for (let i = 0; i < tris.length; i++) {
+      const t = tris[i];
+      flatIdx[i * 3] = t[0];
+      flatIdx[i * 3 + 1] = t[1];
+      flatIdx[i * 3 + 2] = t[2];
+    }
+    mesh = { positions: flatPos, indices: flatIdx };
+  } else {
+    mesh = meshOrVertices;
+  }
   const posLen = mesh.positions.length;
   const idxLen = mesh.indices.length;
   if (!posLen || !idxLen || posLen % 3 !== 0 || idxLen % 3 !== 0) {
@@ -308,6 +337,14 @@ export function auditMeshIntegrity(mesh: {
   }
 
   return {
+    totalVertices: vertexCount,
+    totalTriangles: triangleCount,
+    isWaterTightManifold:
+      boundaryEdges === 0 &&
+      nonManifoldEdges === 0 &&
+      windingConflicts === 0 &&
+      duplicateFaces === 0 &&
+      degenerateTriangles === 0,
     checkedTriangles: triangleCount,
     duplicateFaces,
     shortEdges,

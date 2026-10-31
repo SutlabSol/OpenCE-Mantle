@@ -1431,6 +1431,7 @@ export function applyTsvToReflexiveBlockInMap(
 export type BlamPeriodicFunctionType =
   | 'one'
   | 'zero'
+  | 'sine'
   | 'cosine'
   | 'cosine (variable period)'
   | 'diagonal wave'
@@ -1477,6 +1478,8 @@ function evalPeriodicWave(fnName: string, t: number): number {
       return 1;
     case 'zero':
       return 0;
+    case 'sine':
+      return 0.5 * (1 + Math.sin(2 * Math.PI * u));
     case 'cosine':
     case 'cosine (variable period)':
       return 0.5 * (1 + Math.cos(2 * Math.PI * u));
@@ -1627,7 +1630,10 @@ export interface HudMessageSafetyReport {
   usage: 'global' | 'mission' | 'both' | 'unreferenced';
   referencedByPaths: string[];
   fixedIndexLocked: boolean;
+  isGlobalHudMessageText: boolean;
+  messageCount: number;
   warningMessage?: string;
+  warningBanner: string;
 }
 
 /**
@@ -1669,15 +1675,29 @@ export function analyzeHudMessageTextSafety(
           : 'unreferenced';
 
   const fixedIndexLocked = hasGlobal;
+  let messageCount = 0;
+  try {
+    const header = parseCacheFileHeader(buffer);
+    const tagIndex = parseTagIndex(buffer, header);
+    const fields = readTagFieldValues(buffer, header, tagIndex, hmtTagEntryIndex);
+    const msgRef = fields.fields.find((f) => f.name === 'messages' && f.kind === 'reflexive');
+    messageCount = msgRef && msgRef.kind === 'reflexive' ? (msgRef.children?.length ?? 0) : 0;
+  } catch {
+    // non-fatal
+  }
+  const warningMsg = fixedIndexLocked
+    ? 'This HUD message tag is referenced by hud_globals. The Halo engine indexes its slots by hardcoded slot numbers — edit message text in-place or append at the end, and never delete or reorder existing slots.'
+    : 'Mission-scoped HUD message text tag. If you reorder or delete slots, recompile scenario HaloScript (.hsc) so script message indices stay aligned.';
   return {
     hmtTagIndex: hmtTagEntryIndex,
     hmtTagPath: node.path,
     usage,
     referencedByPaths,
     fixedIndexLocked,
-    warningMessage: fixedIndexLocked
-      ? 'This HUD message tag is referenced by hud_globals. The Halo engine indexes its slots by hardcoded slot numbers — edit message text in-place or append at the end, and never delete or reorder existing slots.'
-      : undefined,
+    isGlobalHudMessageText: fixedIndexLocked,
+    messageCount,
+    warningMessage: fixedIndexLocked ? warningMsg : undefined,
+    warningBanner: warningMsg,
   };
 }
 
@@ -1841,14 +1861,18 @@ export interface StringsCsvImportPreview {
   mode: 'amend' | 'replace';
   mergedStrings: string[];
   addedCount: number;
+  appendedCount: number;
   modifiedCount: number;
+  updatedCount: number;
   removedCount: number;
   unchangedCount: number;
   diffs: Array<{
     index: number;
-    status: 'added' | 'modified' | 'removed' | 'unchanged';
+    status: 'added' | 'appended' | 'modified' | 'removed' | 'unchanged';
     before: string;
     after: string;
+    oldText: string | null;
+    newText: string;
   }>;
 }
 
@@ -1904,17 +1928,17 @@ export function previewUnicodeStringsCsvImport(
 
     if (mode === 'replace' && i > maxIndex) {
       removedCount++;
-      diffs.push({ index: i, status: 'removed', before: oldVal, after: '' });
+      diffs.push({ index: i, status: 'removed', before: oldVal, after: '', oldText: oldVal, newText: '' });
       continue;
     }
 
     mergedStrings.push(newVal);
     if (!hadOld) {
       addedCount++;
-      diffs.push({ index: i, status: 'added', before: '', after: newVal });
+      diffs.push({ index: i, status: 'added', before: '', after: newVal, oldText: null, newText: newVal });
     } else if (oldVal !== newVal) {
       modifiedCount++;
-      diffs.push({ index: i, status: 'modified', before: oldVal, after: newVal });
+      diffs.push({ index: i, status: 'modified', before: oldVal, after: newVal, oldText: oldVal, newText: newVal });
     } else {
       unchangedCount++;
     }
@@ -1924,7 +1948,9 @@ export function previewUnicodeStringsCsvImport(
     mode,
     mergedStrings,
     addedCount,
+    appendedCount: addedCount,
     modifiedCount,
+    updatedCount: modifiedCount,
     removedCount,
     unchangedCount,
     diffs,

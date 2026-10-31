@@ -40,6 +40,7 @@ import {
   planSwapInjection,
 } from './tag-injector';
 import { generateOpenCeModToml, type OpenCeModTomlConfig } from './mod-packager';
+import { recomputeCustomEditionHeaderCrc32, repairMccAndCeTagIssues } from './map-fixer';
 import type { RandomAccessFile } from './convert/resource-files';
 
 export const HEK_GROUP_VERSIONS: Record<string, number> = {
@@ -995,7 +996,7 @@ export function exportOpenCeModPackageFromMap(
             assets.push({ kind: 'bitmap', data: pixBytes.toString('base64') });
             patches.push({ assetIndex, patchOffset: elemOff + 24, patchWidth: 4 });
             const flags = structBytes.readUInt16LE(elemOff + 14);
-            structBytes.writeUInt16LE(flags & ~0x0100, elemOff + 14);
+            structBytes.writeUInt16LE(((flags & 0x007f) | 0x0080) >>> 0, elemOff + 14);
           }
         }
       }
@@ -1292,6 +1293,18 @@ export function parseHekLooseTagBuffer(
         const term = Buffer.from([0xff, 0xff, 0xff, 0xff]);
         const finalTriBytes = Buffer.concat([stripBytes, term]);
 
+        const prevPart = alloc.buf.readInt8(elemLocalInBuf + 6);
+        const nextPart = alloc.buf.readInt8(elemLocalInBuf + 7);
+        if (prevPart === 0 && nextPart === 0) {
+          alloc.buf.writeInt8(-1, elemLocalInBuf + 6);
+          alloc.buf.writeInt8(-1, elemLocalInBuf + 7);
+        }
+        const w0 = alloc.buf.readFloatLE(elemLocalInBuf + 12);
+        const w1 = alloc.buf.readFloatLE(elemLocalInBuf + 16);
+        if (w0 === 0 && w1 === 0) {
+          alloc.buf.writeFloatLE(1.0, elemLocalInBuf + 12);
+        }
+
         alloc.buf.writeUInt16LE(1, elemLocalInBuf + 68); // triangle buffer type = 1 (triangle strip)
         alloc.buf.writeUInt32LE(triCount, elemLocalInBuf + 72); // triangle count
         alloc.buf.writeUInt16LE(vType, elemLocalInBuf + 84); // vertex type
@@ -1310,27 +1323,32 @@ export function parseHekLooseTagBuffer(
       }
     }
 
-    if (structName === 'BitmapData' && count > 0 && bitmapProcessedPixelBuf.length > 0) {
+    if (structName === 'BitmapData' && count > 0) {
       for (let i = 0; i < count; i++) {
         const elemLocal = i * 48;
         const elemAbs = alloc.offset + elemLocal;
-        const pixOff = alloc.buf.readUInt32LE(elemLocal + 24);
-        const nextOff =
-          i + 1 < count
-            ? alloc.buf.readUInt32LE((i + 1) * 48 + 24)
-            : bitmapProcessedPixelBuf.length;
-        const plateSize = Math.max(0, nextOff - pixOff);
-        const plateBytes = bitmapProcessedPixelBuf.subarray(pixOff, pixOff + plateSize);
         const flags = alloc.buf.readUInt16LE(elemLocal + 14);
-        alloc.buf.writeUInt16LE(flags & ~0x0100, elemLocal + 14); // internal (external=0)
-        alloc.buf.writeUInt32LE(plateBytes.length, elemLocal + 28); // pixel data size
-        const assetIndex = embeddedRawDataAssets.length;
-        embeddedRawDataAssets.push({ kind: 'bitmap', data: plateBytes.toString('base64') });
-        embeddedRawDataPatches.push({
-          assetIndex,
-          patchOffset: elemAbs + 24,
-          patchWidth: 4,
-        });
+        if (bitmapProcessedPixelBuf.length > 0) {
+          const pixOff = alloc.buf.readUInt32LE(elemLocal + 24);
+          const nextOff =
+            i + 1 < count
+              ? alloc.buf.readUInt32LE((i + 1) * 48 + 24)
+              : bitmapProcessedPixelBuf.length;
+          const plateSize = Math.max(0, nextOff - pixOff);
+          const plateBytes = bitmapProcessedPixelBuf.subarray(pixOff, pixOff + plateSize);
+          // Internal (external=0, upper bits cleared) + _bitmap_cached_bit (0x0080) required by OpenCE texture cache
+          alloc.buf.writeUInt16LE(((flags & 0x007f) | 0x0080) >>> 0, elemLocal + 14);
+          alloc.buf.writeUInt32LE(plateBytes.length, elemLocal + 28); // pixel data size
+          const assetIndex = embeddedRawDataAssets.length;
+          embeddedRawDataAssets.push({ kind: 'bitmap', data: plateBytes.toString('base64') });
+          embeddedRawDataPatches.push({
+            assetIndex,
+            patchOffset: elemAbs + 24,
+            patchWidth: 4,
+          });
+        } else {
+          alloc.buf.writeUInt16LE(((flags & 0x01ff) | 0x0080) >>> 0, elemLocal + 14);
+        }
       }
     }
 
@@ -1339,6 +1357,61 @@ export function parseHekLooseTagBuffer(
 
   readStructArray(rootStructName, 1, () => tagPath);
   const fullLeData = Buffer.concat(leChunks);
+
+  // Normalize cache-only / runtime fields in root struct that HEK+/Refinery leave in Little-Endian inside loose tags
+  const objectExpectedTypeByGroup: Record<string, number> = {
+    biped: 0,
+    vehicle: 1,
+    weapon: 2,
+    equipment: 3,
+    garbage: 4,
+    projectile: 5,
+    scenery: 6,
+    device_machine: 7,
+    device_control: 8,
+    device_light_fixture: 9,
+    placeholder: 10,
+    sound_scenery: 11,
+  };
+  const shaderExpectedTypeByGroup: Record<string, number> = {
+    shader_environment: 3,
+    shader_model: 4,
+    shader_transparent_generic: 5,
+    shader_transparent_chicago: 6,
+    shader_transparent_chicago_extended: 7,
+    shader_transparent_water: 8,
+    shader_transparent_glass: 9,
+    shader_transparent_meter: 10,
+    shader_transparent_plasma: 11,
+  };
+  const expectedObjType = objectExpectedTypeByGroup[groupName];
+  if (expectedObjType !== undefined && fullLeData.length >= 4) {
+    fullLeData.writeInt16LE(expectedObjType, 0x00);
+  }
+  const expectedShaderType = shaderExpectedTypeByGroup[groupName];
+  if (expectedShaderType !== undefined && fullLeData.length >= 0x28) {
+    fullLeData.writeInt16LE(expectedShaderType, 0x24);
+    if (groupName === 'shader_model' && fullLeData.length >= 440) {
+      fullLeData.writeFloatLE(1.0, 0x184);
+      for (const scaleOff of [0x78, 0xa0, 0xa4, 0xdc, 0xf0]) {
+        const rawU32 = fullLeData.readUInt32LE(scaleOff);
+        if (rawU32 === 0 || rawU32 === 0x0000803f) {
+          fullLeData.writeFloatLE(1.0, scaleOff);
+        }
+      }
+    } else if (groupName === 'shader_environment' && fullLeData.length >= 836) {
+      for (const scaleOff of [0xb4, 0xc8, 0xfc, 0x124]) {
+        const rawU32 = fullLeData.readUInt32LE(scaleOff);
+        if (rawU32 === 0 || rawU32 === 0x0000803f) {
+          fullLeData.writeFloatLE(1.0, scaleOff);
+        }
+      }
+      const bumpScale = fullLeData.readFloatLE(0x124);
+      const validBump = Number.isFinite(bumpScale) && bumpScale > 1e-6 ? bumpScale : 1.0;
+      fullLeData.writeFloatLE(validBump, 0x138);
+      fullLeData.writeFloatLE(validBump, 0x13c);
+    }
+  }
 
   // Set standard secondary/tertiary class FourCCs for object/unit/item/device/shader hierarchies
   let secondaryClassFourCC: number | null = null;
@@ -2414,6 +2487,14 @@ export function importLegacyTagsIntoMap(
         if (st) importedPaths.push(`[~${st.group}] ${st.path}`);
       }
     }
+  }
+
+  // Final pass: repair any MCC/CE/loose tag compatibility issues and recompute the CE header CRC32 (0x64)
+  repairMccAndCeTagIssues(currentBuf);
+  try {
+    recomputeCustomEditionHeaderCrc32(currentBuf);
+  } catch {
+    // Ignore if map header/BSP regions cannot be parsed
   }
 
   return {

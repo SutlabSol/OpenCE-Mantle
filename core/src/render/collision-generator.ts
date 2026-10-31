@@ -1403,6 +1403,7 @@ export function buildCustomShaderModelTag(
   bitmapPath: string,
   bitmapLocalIndex: number,
   materialType = 7,
+  shaderFlags?: { twoSided?: boolean; alphaTested?: boolean },
 ): ExtractedTag {
   // ShaderModel is 440 bytes
   const buf = Buffer.alloc(440, 0);
@@ -1417,6 +1418,20 @@ export function buildCustomShaderModelTag(
   // Standard ShaderModel defaults verified from bloodgulch.map
   buf.writeUInt16LE(safeMat, 34); // material type (default 7 = metal thick)
   buf.writeUInt16LE(4, 36); // shader type = soso (4)
+  if (shaderFlags) {
+    // ShaderModelFlags at +40 (0x28):
+    // bit 1 (0x0002): two sided
+    // bit 2 (0x0004): not alpha tested (0 = alpha tested enabled, 0x0004 = not alpha tested)
+    // bit 5 (0x0020): disable two sided culling
+    let modelFlags = 0;
+    if (shaderFlags.twoSided || shaderFlags.alphaTested) {
+      modelFlags |= 0x0002 | 0x0020;
+    }
+    if (!shaderFlags.alphaTested) {
+      modelFlags |= 0x0004;
+    }
+    buf.writeUInt16LE(modelFlags, 40);
+  }
   buf.writeFloatLE(1.0, 116);
   buf.writeFloatLE(1.0, 156); // map u-scale
   buf.writeFloatLE(1.0, 160); // map v-scale
@@ -1443,6 +1458,93 @@ export function buildCustomShaderModelTag(
     group: 'shader_model',
     path: tagPath,
     structName: 'ShaderModel',
+    secondaryClassFourCC: fourCCFromString('shdr'),
+    tertiaryClassFourCC: null,
+    data: buf,
+    dependencies,
+    embeddedRawDataAssets: [],
+    embeddedRawDataPatches: [],
+    injectionBlockers: [],
+  };
+}
+
+/**
+ * Builds a standalone 836-byte `shader_environment` (`senv`) tag referencing a `bitmap` (`bitm`) base map.
+ * Used for custom `ScenarioStructureBSP` (`sbsp`) materials so Halo CE / OpenCE's `structure_render_lightmaps`
+ * and `rasterizer_environment` render all diffuse and alpha-tested BSP surfaces in-game and in the 3D viewport.
+ */
+export function buildCustomShaderEnvironmentTag(
+  tagPath: string,
+  originalIndex: number,
+  bitmapPath: string,
+  bitmapLocalIndex: number,
+  materialType = 0,
+  shaderFlags?: { alphaTested?: boolean },
+): ExtractedTag {
+  // ShaderEnvironment is 836 bytes (40-byte Shader base + 796-byte ShaderEnvironment body)
+  const buf = Buffer.alloc(836, 0);
+  const safeMat = materialType >= 0 && materialType < HALO_MATERIAL_TYPES.length ? materialType : 0;
+
+  // Initialize all 8 TagDependency fields in ShaderEnvironment
+  writeDependencyField(buf, 48, 'lens', NULL_TAG_ID); // lens flare
+  writeDependencyField(buf, 136, 'bitm', bitmapLocalIndex); // base map (+0x88)
+  writeDependencyField(buf, 184, 'bitm', NULL_TAG_ID); // primary detail map
+  writeDependencyField(buf, 204, 'bitm', NULL_TAG_ID); // secondary detail map
+  writeDependencyField(buf, 252, 'bitm', NULL_TAG_ID); // micro detail map
+  writeDependencyField(buf, 296, 'bitm', NULL_TAG_ID); // bump map
+  writeDependencyField(buf, 596, 'bitm', NULL_TAG_ID); // map (self-illumination)
+  writeDependencyField(buf, 804, 'bitm', NULL_TAG_ID); // reflection cube map
+
+  // Base Shader fields (+0..+39)
+  buf.writeUInt16LE(safeMat, 34); // material type
+  buf.writeUInt16LE(3, 36); // shader type = senv (3 = environment)
+
+  // ShaderEnvironmentFlags at +40 (0x28): bit 0 (0x0001) = alpha tested
+  if (shaderFlags?.alphaTested) {
+    buf.writeUInt16LE(0x0001, 40);
+  }
+  buf.writeUInt16LE(0, 42); // shader environment type = 0 (normal)
+
+  // Standard ShaderEnvironment scale & color defaults verified against stock Halo CE senv tags
+  buf.writeFloatLE(1.0, 180); // primary detail map scale
+  buf.writeFloatLE(1.0, 200); // secondary detail map scale
+  buf.writeFloatLE(1.0, 248); // micro detail map scale
+  buf.writeFloatLE(1.0, 268); // material color R
+  buf.writeFloatLE(1.0, 272); // material color G
+  buf.writeFloatLE(1.0, 276); // material color B
+  buf.writeFloatLE(1.0, 292); // bump map scale
+  buf.writeFloatLE(1.0, 312); // bump map scale xy.x (cacheOnly)
+  buf.writeFloatLE(1.0, 316); // bump map scale xy.y (cacheOnly)
+  buf.writeFloatLE(1.0, 340); // u animation period
+  buf.writeFloatLE(1.0, 344); // u animation scale
+  buf.writeFloatLE(1.0, 352); // v animation period
+  buf.writeFloatLE(1.0, 356); // v animation scale
+  buf.writeFloatLE(1.0, 440); // primary animation period
+  buf.writeFloatLE(1.0, 500); // secondary animation period
+  buf.writeFloatLE(1.0, 560); // plasma animation period
+  buf.writeFloatLE(1.0, 592); // map scale
+  buf.writeFloatLE(1.0, 680); // perpendicular color R
+  buf.writeFloatLE(1.0, 684); // perpendicular color G
+  buf.writeFloatLE(1.0, 688); // perpendicular color B
+  buf.writeFloatLE(1.0, 692); // parallel color R
+  buf.writeFloatLE(1.0, 696); // parallel color G
+  buf.writeFloatLE(1.0, 700); // parallel color B
+  buf.writeFloatLE(1.0, 724); // lightmap brightness scale
+
+  const internalMap = new Map<string, { group: string; path: string; localTagIndex: number }>();
+  internalMap.set(childFieldPath(tagPath, 'base map'), {
+    group: 'bitmap',
+    path: bitmapPath,
+    localTagIndex: bitmapLocalIndex,
+  });
+
+  const dependencies = buildTagDependenciesFromBuffer(buf, 'ShaderEnvironment', tagPath, internalMap);
+
+  return {
+    originalIndex,
+    group: 'shader_environment',
+    path: tagPath,
+    structName: 'ShaderEnvironment',
     secondaryClassFourCC: fourCCFromString('shdr'),
     tertiaryClassFourCC: null,
     data: buf,

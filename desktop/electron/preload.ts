@@ -63,6 +63,11 @@ const api: OpenceApi = {
     ipcRenderer.invoke('bsp:getSourceMesh', sourceFilePath, bspIndex),
   performBspSwap: (sourceFilePath: string, options: any) =>
     ipcRenderer.invoke('bsp:performSwap', sourceFilePath, options),
+  pickBspModelFile: () => ipcRenderer.invoke('dialog:pickBspModelFile'),
+  bspModelPreflight: (modelPath: string, targetBspIndex?: number, options?: any) =>
+    ipcRenderer.invoke('bsp:modelPreflight', modelPath, targetBspIndex, options),
+  bspSwapFromModelFile: (modelPath: string, options?: any) =>
+    ipcRenderer.invoke('bsp:swapFromModelFile', modelPath, options),
   getBspRenderMesh: (bspIndex?: number) => ipcRenderer.invoke('render:getBspMesh', bspIndex),
   getBitmapTexture: (bitmapTagId: number, imageIndex?: number) => ipcRenderer.invoke('render:getBitmapTexture', bitmapTagId, imageIndex),
   getScenarioObjects: () => ipcRenderer.invoke('render:getScenarioObjects'),
@@ -341,6 +346,7 @@ const api: OpenceApi = {
     ipcRenderer.on('map:sessionsChanged', listener);
     return () => ipcRenderer.removeListener('map:sessionsChanged', listener);
   },
+  runMapFixAction: (action, options) => ipcRenderer.invoke('map:runFixAction', action, options),
 };
 
 contextBridge.exposeInMainWorld('opence', api);

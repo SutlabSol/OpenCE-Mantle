@@ -122,29 +122,40 @@ export default function HudPreviewerDialog({ tag, onClose }: Props) {
       try {
         const depsRes = await window.opence.getDependencySlots(tag.index);
         if (!depsRes.ok || cancelled) return;
-        const bitmSlots = depsRes.slots.filter((s) => s.group === 'bitmap' && s.targetTagId !== 0xffffffff);
+        const bitmSlots = depsRes.slots.filter((s) => {
+          const grp = s.currentGroup ?? (s as any).group;
+          const tid = s.currentTagId ?? (s as any).targetTagId;
+          return grp === 'bitmap' && tid !== undefined && tid !== 0xffffffff;
+        });
         const uniqueByTagId = new Map<number, typeof bitmSlots[0]>();
         for (const s of bitmSlots) {
-          if (!uniqueByTagId.has(s.targetTagId)) uniqueByTagId.set(s.targetTagId, s);
+          const tid = s.currentTagId ?? (s as any).targetTagId;
+          if (!uniqueByTagId.has(tid)) uniqueByTagId.set(tid, s);
         }
         const decoded: LinkedHudBitmap[] = [];
         for (const slot of Array.from(uniqueByTagId.values()).slice(0, 8)) {
-          const prev = await window.opence.previewBitmap(slot.targetTagId, 0);
+          const tid = slot.currentTagId ?? (slot as any).targetTagId;
+          const tpath = slot.currentPath ?? (slot as any).targetPath ?? `0x${tid.toString(16)}`;
+          const prev = await window.opence.getBitmapTexture(tid, 0);
           if (cancelled) return;
-          if (prev.ok && prev.width > 0 && prev.height > 0) {
+          if (prev.ok && prev.texture && prev.texture.width > 0 && prev.texture.height > 0) {
             const offCanvas = document.createElement('canvas');
-            offCanvas.width = prev.width;
-            offCanvas.height = prev.height;
+            offCanvas.width = prev.texture.width;
+            offCanvas.height = prev.texture.height;
             const octx = offCanvas.getContext('2d');
             if (octx) {
-              const imgData = new ImageData(new Uint8ClampedArray(prev.rgba), prev.width, prev.height);
+              const imgData = new ImageData(
+                new Uint8ClampedArray(prev.texture.rgbaData),
+                prev.texture.width,
+                prev.texture.height,
+              );
               octx.putImageData(imgData, 0, 0);
               decoded.push({
                 fieldPath: slot.fieldPath.split('.').slice(-2).join('.'),
-                path: slot.targetPath,
-                tagId: slot.targetTagId,
-                width: prev.width,
-                height: prev.height,
+                path: tpath,
+                tagId: tid,
+                width: prev.texture.width,
+                height: prev.texture.height,
                 dataUrl: offCanvas.toDataURL(),
               });
             }

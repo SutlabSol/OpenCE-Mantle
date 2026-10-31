@@ -263,31 +263,38 @@ export const HudBitmapInjectorDialog: React.FC<HudBitmapInjectorDialogProps> = (
 
   return (
     <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        backgroundColor: 'rgba(2, 6, 14, 0.84)',
-        zIndex: 9600,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 20,
-        fontFamily: '"Segoe UI", Tahoma, sans-serif',
-      }}
+      data-testid="hud-bitmap-injector-dialog"
+      style={
+        {
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(2, 6, 14, 0.84)',
+          zIndex: 9800,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 20,
+          fontFamily: '"Segoe UI", Tahoma, sans-serif',
+          WebkitAppRegion: 'no-drag',
+        } as React.CSSProperties
+      }
     >
       <div
-        style={{
-          width: 'min(960px, 95vw)',
-          maxHeight: '90vh',
-          backgroundColor: '#001122',
-          border: '2px solid #2896ff',
-          borderRadius: 10,
-          boxShadow: '0 20px 60px rgba(0, 0, 0, 0.85)',
-          display: 'flex',
-          flexDirection: 'column',
-          color: '#e2e8f0',
-          overflow: 'hidden',
-        }}
+        style={
+          {
+            width: 'min(960px, 95vw)',
+            maxHeight: '90vh',
+            backgroundColor: '#001122',
+            border: '2px solid #2896ff',
+            borderRadius: 10,
+            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.85)',
+            display: 'flex',
+            flexDirection: 'column',
+            color: '#e2e8f0',
+            overflow: 'hidden',
+            WebkitAppRegion: 'no-drag',
+          } as React.CSSProperties
+        }
       >
         {/* Header */}
         <div

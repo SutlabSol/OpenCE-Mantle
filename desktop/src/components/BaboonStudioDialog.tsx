@@ -316,12 +316,18 @@ export default function BaboonStudioDialog({
     if (bitmapThumbs[tag.index] || typeof window.opence.getBitmapRgba !== 'function') return;
     const res = await window.opence.getBitmapRgba(tag.index, 0);
     if (!res.ok) return;
+    if (res.dataUrl) {
+      setBitmapThumbs((prev) => ({ ...prev, [tag.index]: res.dataUrl! }));
+      return;
+    }
+    const rawRgba = (res as any).rgba as Uint8Array | undefined;
+    if (!rawRgba || !res.width || !res.height) return;
     const canvas = document.createElement('canvas');
     canvas.width = res.width;
     canvas.height = res.height;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const imgData = new ImageData(new Uint8ClampedArray(res.rgba), res.width, res.height);
+    const imgData = new ImageData(new Uint8ClampedArray(rawRgba), res.width, res.height);
     ctx.putImageData(imgData, 0, 0);
     const dataUrl = canvas.toDataURL('image/png');
     setBitmapThumbs((prev) => ({ ...prev, [tag.index]: dataUrl }));

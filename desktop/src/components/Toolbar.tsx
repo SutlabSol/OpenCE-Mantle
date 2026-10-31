@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { CSSProperties } from 'react';
-import type { TagTestStatus } from '../../electron/shared-types';
+import type { MapFixActionKind, TagTestStatus } from '../../electron/shared-types';
 
 interface Props {
   onOpen: () => void;
@@ -10,10 +10,39 @@ interface Props {
   onExtract: () => void;
   onExtractWholeMap: () => void;
   onInject: () => void;
+  onRunMapFixAction?: (action: MapFixActionKind) => void;
   onOpenLiveHudEditor?: () => void;
   onOpenHudBitmapInjector?: () => void;
   onOpenUiMapStudio?: () => void;
 }
+
+const FIX_MENU_ITEMS: Array<{ action: MapFixActionKind; label: string; subtitle: string }> = [
+  {
+    action: 'ce',
+    label: 'Fix CE Map',
+    subtitle: 'HaloScript AST fixer (hs_syntax_data) + Custom Edition CRC32 (0x64)',
+  },
+  {
+    action: 'mcc',
+    label: 'Fix MCC Map',
+    subtitle: 'Convert Halo MCC CEA (v13 -> CE v609) + H1EK tag & AST fix + CRC32',
+  },
+  {
+    action: 'demo',
+    label: 'Fix Halo Demo Map',
+    subtitle: 'Convert Halo Trial / Mac Demo (v6 -> CE v609) + AST fix + CRC32',
+  },
+  {
+    action: 'halomd',
+    label: 'Fix Halo MD Map',
+    subtitle: 'Convert HaloMD Mac Retail (v7 -> CE v609) + AST fix + CRC32',
+  },
+  {
+    action: 'xbox',
+    label: 'Fix Xbox Map',
+    subtitle: 'Convert Original Halo Xbox (v5 -> CE v609) + AST fix + CRC32',
+  },
+];
 
 export default function Toolbar({
   onOpen,
@@ -23,16 +52,37 @@ export default function Toolbar({
   onExtract,
   onExtractWholeMap,
   onInject,
+  onRunMapFixAction,
   onOpenLiveHudEditor,
   onOpenHudBitmapInjector,
   onOpenUiMapStudio,
 }: Props) {
   const [tagTestStatus, setTagTestStatus] = useState<TagTestStatus>({ state: 'stopped', telnetConnected: false });
+  const [fixesMenuOpen, setFixesMenuOpen] = useState(false);
+  const fixesDropdownRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     window.opence.tagTestGetStatus().then(setTagTestStatus);
     return window.opence.onTagTestStatusChange((s) => setTagTestStatus(s));
   }, []);
+
+  useEffect(() => {
+    if (!fixesMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (fixesDropdownRef.current && !fixesDropdownRef.current.contains(e.target as Node)) {
+        setFixesMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFixesMenuOpen(false);
+    };
+    window.addEventListener('mousedown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [fixesMenuOpen]);
 
   const handleTagTestClick = async () => {
     if (tagTestStatus.state === 'running' && tagTestStatus.telnetConnected) {
@@ -61,6 +111,83 @@ export default function Toolbar({
       <ToolbarButton testid="toolbar-extract-button" label="Extract Tags" onClick={onExtract} disabled={!canExtract} />
       <ToolbarButton testid="toolbar-extract-whole-button" label="Extract Whole Map" onClick={onExtractWholeMap} disabled={!canExtractWholeMap} />
       <ToolbarButton testid="toolbar-inject-button" label="Inject Tags" onClick={onInject} disabled={!canInject} />
+      {onRunMapFixAction && (
+        <>
+          <Divider />
+          <div ref={fixesDropdownRef} style={{ position: 'relative' }}>
+            <button
+              data-testid="toolbar-fixes-dropdown-button"
+              onClick={() => setFixesMenuOpen((prev) => !prev)}
+              style={{
+                background: fixesMenuOpen ? 'var(--selection-bg)' : 'transparent',
+                color: fixesMenuOpen ? 'var(--accent-cyan)' : 'var(--text-primary)',
+                border: fixesMenuOpen ? '1px solid var(--border-active)' : '1px solid var(--border)',
+                borderRadius: 3,
+                padding: '4px 11px',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 5,
+              }}
+              title="Fixes Menu: Fix CE Map, Fix MCC Map, Fix Halo Demo Map, Fix Halo MD Map, Fix Xbox Map"
+            >
+              <span>🔧</span>
+              <span>Fixes</span>
+              <span style={{ fontSize: 10, opacity: 0.75 }}>▾</span>
+            </button>
+            {fixesMenuOpen && (
+              <div
+                data-testid="toolbar-fixes-dropdown-menu"
+                role="menu"
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 4px)',
+                  left: 0,
+                  minWidth: 320,
+                  background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 4,
+                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.75)',
+                  zIndex: 9999,
+                  padding: '4px 0',
+                }}
+              >
+                {FIX_MENU_ITEMS.map((item) => (
+                  <button
+                    key={item.action}
+                    data-testid={`toolbar-fix-${item.action}`}
+                    onClick={() => {
+                      setFixesMenuOpen(false);
+                      onRunMapFixAction(item.action);
+                    }}
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'flex-start',
+                      gap: 2,
+                      width: '100%',
+                      textAlign: 'left',
+                      background: 'transparent',
+                      border: 'none',
+                      padding: '8px 14px',
+                      color: 'var(--text-primary)',
+                      cursor: 'pointer',
+                      fontFamily: 'var(--ui-font)',
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--selection-bg)')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>{item.label}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{item.subtitle}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Spacer to push Live HUD Editing & Play in OpenCE all the way to the right side */}
       <div style={{ flex: 1 }} />

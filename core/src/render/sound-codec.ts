@@ -69,6 +69,9 @@ export interface SoundPermutationInfo {
   sampleOffset: number;
   isExternal: boolean;
   durationSeconds: number;
+  sampleRate?: number;
+  channels?: number;
+  permutationInfoIndex?: number;
 }
 
 export interface SoundPitchRangeInfo {
@@ -84,9 +87,16 @@ export interface SoundTagSummary {
   tagId: number;
   tagIndex: number;
   path: string;
+  tagPath?: string;
   soundClass: number;
   soundClassName: string;
   channelCount: number; // 1 = mono, 2 = stereo
+  encoding?: number;
+  encodingName?: string;
+  compression?: number;
+  compressionName?: string;
+  pitchRangeCount?: number;
+  permutationCount?: number;
   sampleRate: number; // 22050 or 44100
   isExternal: boolean;
   pitchRanges: SoundPitchRangeInfo[];
@@ -596,6 +606,8 @@ export function inspectSoundTag(
                 sampleOffset,
                 isExternal: permExternal,
                 durationSeconds: Math.round(durationSeconds * 100) / 100,
+                sampleRate,
+                channels: channelCount,
               });
             }
           }
@@ -613,13 +625,23 @@ export function inspectSoundTag(
     }
   }
 
+  const firstPermFormat = pitchRanges[0]?.permutations[0]?.format ?? srcBuf.readUInt16LE(tagStart + 0x6e);
+  const totalPerms = pitchRanges.reduce((acc, pr) => acc + pr.permutations.length, 0);
+
   return {
     tagId: soundTagId,
     tagIndex: entryIdx,
     path: entry.path,
+    tagPath: entry.path,
     soundClass,
     soundClassName: SOUND_CLASS_NAMES[soundClass] ?? `Class ${soundClass}`,
     channelCount,
+    encoding: channelCount === 2 ? 1 : 0,
+    encodingName: channelCount === 2 ? 'Stereo (2ch)' : 'Mono (1ch)',
+    compression: firstPermFormat,
+    compressionName: SOUND_FORMAT_NAMES[firstPermFormat] ?? `Format ${firstPermFormat}`,
+    pitchRangeCount: pitchRanges.length,
+    permutationCount: totalPerms,
     sampleRate,
     isExternal,
     pitchRanges,

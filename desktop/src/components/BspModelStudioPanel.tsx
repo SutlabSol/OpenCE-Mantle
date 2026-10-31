@@ -42,6 +42,9 @@ import {
   generateBridgeNetworkMesh,
   generateQuickForgeWorldMesh,
   createPresetTerrainGrid,
+  expandTerrainGrid,
+  sampleTerrainHeightAt,
+  createDefaultFastGenPieces,
   sculptTerrainGrid,
   resolveDefaultHaloShadersForWorld,
   HALO_DEFAULT_SHADER_CATALOG,
@@ -67,8 +70,8 @@ export interface BspModelStudioPanelProps {
   onOpenTagEditor?: (tagIndexOrPath: number | string) => void;
 }
 
-type StudioMode = 'bsp' | 'model' | 'create';
-type CreateBuilderKind = 'tunnel_network' | 'bridge_network' | 'quickforge_world' | 'primitive';
+type StudioMode = 'bsp' | 'model' | 'create' | 'parametric' | 'merger';
+type CreateBuilderKind = 'tunnel_network' | 'bridge_network' | 'quickforge_world';
 type SculptTool =
   | 'orbit'
   | 'raise'
@@ -634,24 +637,9 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
     includeAccessibleInteriors: true,
     origin: [0, 0, 0],
   });
-  const [qfPieces, setQfPieces] = useState<WorldBuilderPiece[]>([
-    {
-      id: 'piece_1',
-      kind: 'forerunner_tower',
-      name: 'Forerunner Relay Tower',
-      position: [-18, -14, 0],
-      yawDeg: 0,
-      size: [7, 7, 13],
-    },
-    {
-      id: 'piece_2',
-      kind: 'natural_arch',
-      name: 'Canyon Rock Arch',
-      position: [16, 12, 0],
-      yawDeg: 25,
-      size: [14, 5, 8.5],
-    },
-  ]);
+  const [qfPieces, setQfPieces] = useState<WorldBuilderPiece[]>(() =>
+    createDefaultFastGenPieces('bloodgulch_canyon', 120, 120),
+  );
   const [worldShaderOverrides, setWorldShaderOverrides] = useState<Partial<Record<WorldMaterialRole, number>>>({});
   const [worldActiveRoles, setWorldActiveRoles] = useState<WorldMaterialRole[]>([]);
   const [worldClearanceSummary, setWorldClearanceSummary] = useState<{
@@ -662,6 +650,38 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
   const lastGeneratedWorldMeshRef = useRef<GeneratedWorldMesh | null>(null);
   const [coupledScaleFactor, setCoupledScaleFactor] = useState<number>(1.25);
   const [appliedStudioScales, setAppliedStudioScales] = useState<Record<number, number>>({});
+
+  // Multi-Map World Merger state (2 Maps in 1 BSP + Original Shaders + Connecting Tunnels/Bridges)
+  const [donorMapPath, setDonorMapPath] = useState<string>('');
+  const [donorBspIndex, setDonorBspIndex] = useState<number>(0);
+  const [donorBspList, setDonorBspList] = useState<Array<{ index: number; path: string }>>([]);
+  const [donorMesh, setDonorMesh] = useState<BspRenderMesh | null>(null);
+  const [donorShaderTextures, setDonorShaderTextures] = useState<
+    Record<string, { width: number; height: number; rgbaData: Uint8Array }>
+  >({});
+  const [donorOffset, setDonorOffset] = useState<[number, number, number]>([160, 0, 0]);
+  const [donorYawDeg, setDonorYawDeg] = useState<number>(0);
+  const [donorGapWu, setDonorGapWu] = useState<number>(45);
+  const [worldABounds, setWorldABounds] = useState<{
+    min: [number, number, number];
+    max: [number, number, number];
+  } | null>(null);
+  const [donorRawBounds, setDonorRawBounds] = useState<{
+    min: [number, number, number];
+    max: [number, number, number];
+  } | null>(null);
+  const [mergerConnectorMesh, setMergerConnectorMesh] = useState<GeneratedWorldMesh | null>(null);
+  const [mergerConnectorSummary, setMergerConnectorSummary] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onActivateMerger = () => setStudioMode('merger');
+    window.addEventListener('opence:open-world-merger', onActivateMerger);
+    window.addEventListener('opence:activate-studio-merger', onActivateMerger);
+    return () => {
+      window.removeEventListener('opence:open-world-merger', onActivateMerger);
+      window.removeEventListener('opence:activate-studio-merger', onActivateMerger);
+    };
+  }, []);
 
   const rebuildCoLocatedClusters = useCallback((subs: SubmeshWorkingState[]) => {
     const invTol = 1 / 0.002; // 2mm spatial tolerance for welded seam vertices
@@ -1493,8 +1513,12 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
         studioMode === 'bsp'
           ? `Loading Structure BSP #${selectedBspIndex} for live sculpting & painting...`
           : studioMode === 'create'
-            ? 'Preparing 3D Floating Object & Parametric Creator workspace...'
-            : 'Loading 3D Asset Model geometry into studio...',
+            ? 'Preparing FastGen World, Tunnel & Bridge Builder workspace...'
+            : studioMode === 'parametric'
+              ? 'Preparing Parametric Part Designer workspace...'
+              : studioMode === 'merger'
+                ? 'Loading Dual-World Multi-Map BSP Merger workspace...'
+                : 'Loading 3D Asset Model geometry into studio...',
       );
     }
 
@@ -1504,6 +1528,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
         shaderPath: string | null;
         vertices: Float32Array;
         indices: Uint16Array | Uint32Array;
+        customTexture?: { width: number; height: number; rgbaData: Uint8Array };
       }> = [];
 
       if (studioMode === 'bsp') {
@@ -1518,18 +1543,134 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
         const bspMesh: BspRenderMesh = res.mesh;
         rawSubmeshes = bspMesh.submeshes.map((s) => {
           const shTag = currentTags.find((t) => t.tagId === s.shaderTagId);
+          const sp = shTag?.path ?? s.shaderPath ?? null;
           return {
             shaderTagId: s.shaderTagId,
-            shaderPath: shTag?.path ?? null,
+            shaderPath: sp,
             vertices: s.vertices,
             indices: s.indices,
+            customTexture: sp ? donorShaderTextures[sp.toLowerCase()] ?? donorShaderTextures[sp] : undefined,
           };
         });
-      } else if (studioMode === 'create') {
+      } else if (studioMode === 'merger') {
+        setBrushRadius((r) => (r < 0.5 ? 2.5 : r));
+        const res = await window.opence.getBspRenderMesh(selectedBspIndex);
+        if (myGen !== loadGenRef.current) return;
+        if (!res.ok) {
+          setStatusMessage(`Failed to load Base BSP: ${res.message}`);
+          setLoading(false);
+          return;
+        }
+        const bspMesh: BspRenderMesh = res.mesh;
+        let aMinX = Infinity, aMinY = Infinity, aMinZ = Infinity;
+        let aMaxX = -Infinity, aMaxY = -Infinity, aMaxZ = -Infinity;
+        for (const s of bspMesh.submeshes) {
+          const vc = Math.floor(s.vertices.length / 8);
+          for (let v = 0; v < vc; v++) {
+            const px = s.vertices[v * 8]!;
+            const py = s.vertices[v * 8 + 1]!;
+            const pz = s.vertices[v * 8 + 2]!;
+            if (px < aMinX) aMinX = px;
+            if (py < aMinY) aMinY = py;
+            if (pz < aMinZ) aMinZ = pz;
+            if (px > aMaxX) aMaxX = px;
+            if (py > aMaxY) aMaxY = py;
+            if (pz > aMaxZ) aMaxZ = pz;
+          }
+          const shTag = currentTags.find((t) => t.tagId === s.shaderTagId);
+          const sp = shTag?.path ?? s.shaderPath ?? null;
+          rawSubmeshes.push({
+            shaderTagId: s.shaderTagId,
+            shaderPath: sp,
+            vertices: s.vertices,
+            indices: s.indices,
+            customTexture: sp ? donorShaderTextures[sp.toLowerCase()] ?? donorShaderTextures[sp] : undefined,
+          });
+        }
+        if (Number.isFinite(aMinX)) {
+          setWorldABounds({
+            min: [aMinX, aMinY, aMinZ],
+            max: [aMaxX, aMaxY, aMaxZ],
+          });
+        }
+
+        if (donorMesh) {
+          const yawRad = (donorYawDeg * Math.PI) / 180;
+          const cosY = Math.cos(yawRad);
+          const sinY = Math.sin(yawRad);
+          const [ox, oy, oz] = donorOffset;
+          for (const ds of donorMesh.submeshes) {
+            const vc = Math.floor(ds.vertices.length / 8);
+            const transformedVerts = new Float32Array(ds.vertices.length);
+            for (let v = 0; v < vc; v++) {
+              const base = v * 8;
+              const lx = ds.vertices[base]!;
+              const ly = ds.vertices[base + 1]!;
+              const lz = ds.vertices[base + 2]!;
+              const lnx = ds.vertices[base + 3]!;
+              const lny = ds.vertices[base + 4]!;
+              const lnz = ds.vertices[base + 5]!;
+              transformedVerts[base] = lx * cosY - ly * sinY + ox;
+              transformedVerts[base + 1] = lx * sinY + ly * cosY + oy;
+              transformedVerts[base + 2] = lz + oz;
+              transformedVerts[base + 3] = lnx * cosY - lny * sinY;
+              transformedVerts[base + 4] = lnx * sinY + lny * cosY;
+              transformedVerts[base + 5] = lnz;
+              transformedVerts[base + 6] = ds.vertices[base + 6]!;
+              transformedVerts[base + 7] = ds.vertices[base + 7]!;
+            }
+            const matchedInMapShader = ds.shaderPath
+              ? currentTags.find((t) => t.path.toLowerCase() === ds.shaderPath!.toLowerCase())
+              : undefined;
+            rawSubmeshes.push({
+              shaderTagId: matchedInMapShader?.tagId ?? null,
+              shaderPath: ds.shaderPath ?? matchedInMapShader?.path ?? null,
+              vertices: transformedVerts,
+              indices: ds.indices,
+              customTexture: ds.shaderPath
+                ? donorShaderTextures[ds.shaderPath.toLowerCase()] ?? donorShaderTextures[ds.shaderPath]
+                : undefined,
+            });
+          }
+        }
+
+        if (mergerConnectorMesh) {
+          const conv = generatedWorldMeshToRawSubmeshes(mergerConnectorMesh, currentTags, worldShaderOverrides);
+          for (const cs of conv.rawSubmeshes) {
+            rawSubmeshes.push(cs);
+          }
+        }
+      } else if (studioMode === 'parametric') {
         setBrushRadius(1.2);
         const defaultShader =
           currentTags.find((t) => t.primaryClassName === 'shader_environment') ??
           currentTags.find((t) => t.primaryClassName.startsWith('shader'));
+        const existingFloating = (window.__openceFloatingBspObjects ?? []).find((f) => f.id === selectedFloatingId);
+        lastGeneratedWorldMeshRef.current = null;
+        setWorldActiveRoles([]);
+        setWorldClearanceSummary(null);
+        if (existingFloating) {
+          rawSubmeshes = [
+            {
+              shaderTagId: existingFloating.shaderTagId,
+              shaderPath: existingFloating.shaderPath,
+              vertices: existingFloating.vertices,
+              indices: existingFloating.indices,
+            },
+          ];
+        } else {
+          const gen = buildParametricPrimitiveGeometry(primKind, primWidth, primDepth, primHeight, primWallThickness);
+          rawSubmeshes = [
+            {
+              shaderTagId: defaultShader?.tagId ?? null,
+              shaderPath: defaultShader?.path ?? 'levels\\test\\bloodgulch\\shaders\\rock_wall',
+              vertices: gen.vertices,
+              indices: gen.indices,
+            },
+          ];
+        }
+      } else if (studioMode === 'create') {
+        setBrushRadius(1.2);
         const existingFloating = (window.__openceFloatingBspObjects ?? []).find((f) => f.id === selectedFloatingId);
         if (existingFloating) {
           lastGeneratedWorldMeshRef.current = null;
@@ -1569,7 +1710,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
               ? `Verified ${genWorld.clearanceReport.walkSamples} walk samples (max step ${genWorld.clearanceReport.maxStepHeight.toFixed(2)}u) across ${bridgeConfig.bridgeCount} ${bridgeConfig.style} bridge(s).`
               : genWorld.clearanceReport.reason ?? 'Route check warning.',
           });
-        } else if (createBuilderKind === 'quickforge_world') {
+        } else {
           const genWorld = generateQuickForgeWorldMesh({
             terrain: qfTerrain,
             city: qfCity,
@@ -1582,21 +1723,8 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
           setWorldClearanceSummary({
             passedCount: genWorld.clearanceReport.ok ? 1 : 0,
             totalCount: 1,
-            notes: `QuickForge World (${qfBiome}, ${qfPieces.length} modular piece(s)${qfCity.enabled ? `, ${qfCity.blocksX}x${qfCity.blocksY} City Grid` : ''}).`,
+            notes: `FastGen World (${qfBiome}, ${qfTerrain.sizeX}x${qfTerrain.sizeY} wu, ${qfPieces.length} playable structure(s)${qfCity.enabled ? `, ${qfCity.blocksX}x${qfCity.blocksY} City Grid` : ''}).`,
           });
-        } else {
-          lastGeneratedWorldMeshRef.current = null;
-          setWorldActiveRoles([]);
-          setWorldClearanceSummary(null);
-          const gen = buildParametricPrimitiveGeometry(primKind, primWidth, primDepth, primHeight, primWallThickness);
-          rawSubmeshes = [
-            {
-              shaderTagId: defaultShader?.tagId ?? null,
-              shaderPath: defaultShader?.path ?? 'levels\\test\\bloodgulch\\shaders\\rock_wall',
-              vertices: gen.vertices,
-              indices: gen.indices,
-            },
-          ];
         }
       } else {
         setBrushRadius((r) => (r > 1.5 ? 0.18 : r));
@@ -1709,7 +1837,28 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
         let bitmapTagId: number | null = null;
         let bitmapTagIndex: number | null = null;
 
-        if (sub.shaderTagId !== null && sub.shaderTagId !== 0xffffffff) {
+        if (sub.customTexture) {
+          const c = document.createElement('canvas');
+          c.width = sub.customTexture.width;
+          c.height = sub.customTexture.height;
+          const ctx = c.getContext('2d');
+          if (ctx) {
+            const imgData = new ImageData(
+              new Uint8ClampedArray(sub.customTexture.rgbaData),
+              sub.customTexture.width,
+              sub.customTexture.height,
+            );
+            ctx.putImageData(imgData, 0, 0);
+          }
+          const tex = new THREE.CanvasTexture(c);
+          tex.wrapS = THREE.RepeatWrapping;
+          tex.wrapT = THREE.RepeatWrapping;
+          tex.flipY = false;
+          tex.colorSpace = THREE.SRGBColorSpace;
+          tex.needsUpdate = true;
+          paintCanvas = c;
+          threeTexture = tex;
+        } else if (sub.shaderTagId !== null && sub.shaderTagId !== 0xffffffff) {
           const cached = shaderCanvasCache.get(sub.shaderTagId);
           if (cached) {
             paintCanvas = cached.canvas;
@@ -1747,7 +1896,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
               shaderCanvasCache.set(sub.shaderTagId, {
                 canvas: c,
                 tex,
-                bitmapTagId: resolvedBitmTagId,
+                bitmapTagId: resolvedBitmTagId ?? -1,
                 bitmapTagIndex,
               });
             }
@@ -1913,6 +2062,11 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
     primDepth,
     primHeight,
     primWallThickness,
+    donorMesh,
+    donorOffset,
+    donorYawDeg,
+    donorShaderTextures,
+    mergerConnectorMesh,
     rebuildCoLocatedClusters,
     updateSymmetryPlanesVisuals,
   ]);
@@ -4274,12 +4428,314 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
         return;
       }
       window.dispatchEvent(new CustomEvent('opence:scenario-updated'));
+      window.dispatchEvent(new CustomEvent('opence:bsp-updated'));
       setStatusMessage(
         `Injected ${res.addedTriangles.toLocaleString()} render triangles (${res.addedSubmeshes} shader surface(s)) & ${res.addedCollisionSurfaces.toLocaleString()} 3D collision surfaces into BSP #${selectedBspIndex}! Switching to Live BSP View...`,
       );
       setStudioMode('bsp');
     } catch (err) {
       setStatusMessage(`BSP injection error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  // Multi-Map World Merger: Load Donor Map BSP + Original Shader Textures into 3D Scene alongside Open Map (World A)
+  const loadDonorBspMeshByIndex = async (filePath: string, bspIdx: number) => {
+    if (!window.opence.getSourceBspMesh) return;
+    setLoading(true);
+    setStatusMessage(`Loading Donor Map BSP #${bspIdx} & original shader textures from "${filePath.split(/[\\/]/).pop()}"...`);
+    try {
+      const res = await window.opence.getSourceBspMesh(filePath, bspIdx);
+      if (!res.ok) {
+        setStatusMessage(`Failed to load donor BSP: ${res.message}`);
+        setLoading(false);
+        return;
+      }
+      const mesh = res.mesh;
+      let bMinX = Infinity, bMinY = Infinity, bMinZ = Infinity;
+      let bMaxX = -Infinity, bMaxY = -Infinity, bMaxZ = -Infinity;
+      let totalTris = 0;
+      for (const s of mesh.submeshes) {
+        totalTris += Math.floor(s.indices.length / 3);
+        const vc = Math.floor(s.vertices.length / 8);
+        for (let v = 0; v < vc; v++) {
+          const px = s.vertices[v * 8]!;
+          const py = s.vertices[v * 8 + 1]!;
+          const pz = s.vertices[v * 8 + 2]!;
+          if (px < bMinX) bMinX = px;
+          if (py < bMinY) bMinY = py;
+          if (pz < bMinZ) bMinZ = pz;
+          if (px > bMaxX) bMaxX = px;
+          if (py > bMaxY) bMaxY = py;
+          if (pz > bMaxZ) bMaxZ = pz;
+        }
+      }
+      const rawB: { min: [number, number, number]; max: [number, number, number] } = Number.isFinite(bMinX)
+        ? { min: [bMinX, bMinY, bMinZ], max: [bMaxX, bMaxY, bMaxZ] }
+        : { min: [-60, -60, -10], max: [60, 60, 20] };
+      setDonorRawBounds(rawB);
+
+      const aB = worldABounds ?? { min: [-80, -80, -10], max: [80, 80, 20] };
+      const autoOffsetX = Number((aB.max[0] - rawB.min[0] + donorGapWu).toFixed(1));
+      const autoOffsetY = Number((((aB.min[1] + aB.max[1]) * 0.5) - ((rawB.min[1] + rawB.max[1]) * 0.5)).toFixed(1));
+      const autoOffsetZ = Number((aB.min[2] - rawB.min[2]).toFixed(1));
+      setDonorOffset([autoOffsetX, autoOffsetY, autoOffsetZ]);
+      setDonorYawDeg(0);
+      setDonorShaderTextures(res.shaderTextures ?? {});
+      setDonorMesh(mesh);
+      setMergerConnectorMesh(null);
+      setMergerConnectorSummary(null);
+      setStatusMessage(
+        `Placed Donor Map BSP (${mesh.submeshes.length} shader surfaces, ${totalTris.toLocaleString()} tris) alongside Current Map! Use Tunnel/Bridge Builder below to connect them.`,
+      );
+    } catch (err) {
+      setStatusMessage(`Donor BSP load error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSelectDonorMapForMerger = async () => {
+    if (!window.opence.pickBspSourceMap) return;
+    const res = await window.opence.pickBspSourceMap();
+    if (!res?.path) return;
+    const filePath = res.path;
+    setDonorMapPath(filePath);
+    setDonorBspIndex(0);
+    setDonorBspList([{ index: 0, path: 'BSP 0' }]);
+    if (window.opence.bspSwapPreflight) {
+      void window.opence.bspSwapPreflight(filePath, 0, 0).then((pre) => {
+        if (pre.ok && pre.sourceBsps && pre.sourceBsps.length > 0) {
+          setDonorBspList(pre.sourceBsps.map((b) => ({ index: b.index, path: b.path })));
+        }
+      }).catch(() => {});
+    }
+    await loadDonorBspMeshByIndex(filePath, 0);
+  };
+
+  const handlePositionDonorWorldDirection = (dir: 'east' | 'west' | 'north' | 'south') => {
+    const aB = worldABounds ?? { min: [-80, -80, -10], max: [80, 80, 20] };
+    const bB = donorRawBounds ?? { min: [-60, -60, -10], max: [60, 60, 20] };
+    const aMidX = (aB.min[0] + aB.max[0]) * 0.5;
+    const aMidY = (aB.min[1] + aB.max[1]) * 0.5;
+    const bMidX = (bB.min[0] + bB.max[0]) * 0.5;
+    const bMidY = (bB.min[1] + bB.max[1]) * 0.5;
+    const oz = Number((aB.min[2] - bB.min[2]).toFixed(1));
+    if (dir === 'east') {
+      setDonorOffset([Number((aB.max[0] - bB.min[0] + donorGapWu).toFixed(1)), Number((aMidY - bMidY).toFixed(1)), oz]);
+    } else if (dir === 'west') {
+      setDonorOffset([Number((aB.min[0] - bB.max[0] - donorGapWu).toFixed(1)), Number((aMidY - bMidY).toFixed(1)), oz]);
+    } else if (dir === 'north') {
+      setDonorOffset([Number((aMidX - bMidX).toFixed(1)), Number((aB.max[1] - bB.min[1] + donorGapWu).toFixed(1)), oz]);
+    } else {
+      setDonorOffset([Number((aMidX - bMidX).toFixed(1)), Number((aB.min[1] - bB.max[1] - donorGapWu).toFixed(1)), oz]);
+    }
+  };
+
+  const handleBuildConnectorBetweenWorlds = (kind: 'tunnel' | 'bridge') => {
+    const aB = worldABounds ?? { min: [-80, -80, -10], max: [80, 80, 20] };
+    const bRaw = donorRawBounds ?? { min: [-60, -60, -10], max: [60, 60, 20] };
+    const bB = {
+      min: [bRaw.min[0] + donorOffset[0], bRaw.min[1] + donorOffset[1], bRaw.min[2] + donorOffset[2]] as [number, number, number],
+      max: [bRaw.max[0] + donorOffset[0], bRaw.max[1] + donorOffset[1], bRaw.max[2] + donorOffset[2]] as [number, number, number],
+    };
+    const aCenter: [number, number, number] = [
+      (aB.min[0] + aB.max[0]) * 0.5,
+      (aB.min[1] + aB.max[1]) * 0.5,
+      aB.min[2] + (aB.max[2] - aB.min[2]) * 0.22,
+    ];
+    const bCenter: [number, number, number] = [
+      (bB.min[0] + bB.max[0]) * 0.5,
+      (bB.min[1] + bB.max[1]) * 0.5,
+      bB.min[2] + (bB.max[2] - bB.min[2]) * 0.22,
+    ];
+    const dx = bCenter[0] - aCenter[0];
+    const dy = bCenter[1] - aCenter[1];
+    let startPt: [number, number, number];
+    let endPt: [number, number, number];
+    if (Math.abs(dx) >= Math.abs(dy)) {
+      if (dx >= 0) {
+        startPt = [aB.max[0] - 8, aCenter[1], aCenter[2]];
+        endPt = [bB.min[0] + 8, bCenter[1], bCenter[2]];
+      } else {
+        startPt = [aB.min[0] + 8, aCenter[1], aCenter[2]];
+        endPt = [bB.max[0] - 8, bCenter[1], bCenter[2]];
+      }
+    } else {
+      if (dy >= 0) {
+        startPt = [aCenter[0], aB.max[1] - 8, aCenter[2]];
+        endPt = [bCenter[0], bB.min[1] + 8, bCenter[2]];
+      } else {
+        startPt = [aCenter[0], aB.min[1] + 8, aCenter[2]];
+        endPt = [bCenter[0], bB.max[1] - 8, bCenter[2]];
+      }
+    }
+    const spanDx = endPt[0] - startPt[0];
+    const spanDy = endPt[1] - startPt[1];
+    const spanDist = Math.max(24, Number(Math.hypot(spanDx, spanDy).toFixed(1)));
+    const spanYaw = Number(((Math.atan2(spanDy, spanDx) * 180) / Math.PI).toFixed(1));
+    const elevDelta = Number((endPt[2] - startPt[2]).toFixed(1));
+
+    if (kind === 'tunnel') {
+      const nextCfg: TunnelNetworkConfig = {
+        ...tunnelConfig,
+        origin: [Number(startPt[0].toFixed(1)), Number(startPt[1].toFixed(1)), Number(startPt[2].toFixed(1))],
+        worldDistance: spanDist,
+        elevationDelta: elevDelta,
+        yawDeg: spanYaw,
+      };
+      setTunnelConfig(nextCfg);
+      const gen = generateTunnelNetworkMesh(nextCfg);
+      setMergerConnectorMesh(gen);
+      setMergerConnectorSummary(
+        `Tunnel Network (${nextCfg.pathCount} path(s), ${spanDist} wu span) bridging Map A -> Map B`,
+      );
+      setStatusMessage(
+        `Built connecting Tunnel Network (${spanDist} wu span, yaw ${spanYaw}°) bridging Map A and Donor Map B!`,
+      );
+    } else {
+      const nextCfg: BridgeNetworkConfig = {
+        ...bridgeConfig,
+        origin: [Number(startPt[0].toFixed(1)), Number(startPt[1].toFixed(1)), Number(startPt[2].toFixed(1))],
+        worldDistance: spanDist,
+        elevationDelta: elevDelta,
+        yawDeg: spanYaw,
+      };
+      setBridgeConfig(nextCfg);
+      const gen = generateBridgeNetworkMesh(nextCfg);
+      setMergerConnectorMesh(gen);
+      setMergerConnectorSummary(
+        `Bridge Network (${nextCfg.bridgeCount} ${nextCfg.style} bridge(s), ${spanDist} wu span) bridging Map A -> Map B`,
+      );
+      setStatusMessage(
+        `Built connecting Bridge Network (${spanDist} wu span, yaw ${spanYaw}°) bridging Map A and Donor Map B!`,
+      );
+    }
+  };
+
+  const handleInjectMergedTwoMapWorldIntoBsp = async () => {
+    if (!donorMesh || !window.opence.injectProceduralWorldBsp) {
+      setStatusMessage('Select a Donor .map file to merge first.');
+      return;
+    }
+    setApplying(true);
+    setStatusMessage(
+      `Merging Donor Map BSP + Original Shaders${mergerConnectorMesh ? ' + Connecting Tunnels/Bridges' : ''} into Open Map Structure BSP #${selectedBspIndex}...`,
+    );
+    try {
+      const vertices: GeneratedWorldMesh['vertices'] = [];
+      const triangles: GeneratedWorldMesh['triangles'] = [];
+      const roleSet = new Set<WorldMaterialRole>(['rock_wall']);
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+      const yawRad = (donorYawDeg * Math.PI) / 180;
+      const cosY = Math.cos(yawRad);
+      const sinY = Math.sin(yawRad);
+      const [ox, oy, oz] = donorOffset;
+
+      let vBase = 0;
+      for (const ds of donorMesh.submeshes) {
+        const vc = Math.floor(ds.vertices.length / 8);
+        if (vc === 0 || ds.indices.length < 3) continue;
+        for (let v = 0; v < vc; v++) {
+          const base = v * 8;
+          const lx = ds.vertices[base]!;
+          const ly = ds.vertices[base + 1]!;
+          const lz = ds.vertices[base + 2]!;
+          const lnx = ds.vertices[base + 3]!;
+          const lny = ds.vertices[base + 4]!;
+          const lnz = ds.vertices[base + 5]!;
+          const px = lx * cosY - ly * sinY + ox;
+          const py = lx * sinY + ly * cosY + oy;
+          const pz = lz + oz;
+          if (px < minX) minX = px;
+          if (py < minY) minY = py;
+          if (pz < minZ) minZ = pz;
+          if (px > maxX) maxX = px;
+          if (py > maxY) maxY = py;
+          if (pz > maxZ) maxZ = pz;
+          vertices.push({
+            position: [px, py, pz],
+            normal: [lnx * cosY - lny * sinY, lnx * sinY + lny * cosY, lnz],
+            uv: [ds.vertices[base + 6]!, ds.vertices[base + 7]!],
+          });
+        }
+        for (let t = 0; t + 2 < ds.indices.length; t += 3) {
+          // Convert Halo CW (i0, i2, i1) back to outward CCW (v0, v1, v2) expected by injectProceduralWorldIntoMapBsp
+          const i0 = vBase + ds.indices[t]!;
+          const i1 = vBase + ds.indices[t + 2]!;
+          const i2 = vBase + ds.indices[t + 1]!;
+          triangles.push({
+            v0: i0,
+            v1: i1,
+            v2: i2,
+            materialRole: 'rock_wall',
+            shaderPath: ds.shaderPath ?? undefined,
+            shaderTagId: ds.shaderTagId ?? undefined,
+          });
+        }
+        vBase += vc;
+      }
+
+      if (mergerConnectorMesh) {
+        for (const role of mergerConnectorMesh.materialRoles) roleSet.add(role);
+        for (const cv of mergerConnectorMesh.vertices) {
+          const [px, py, pz] = cv.position;
+          if (px < minX) minX = px;
+          if (py < minY) minY = py;
+          if (pz < minZ) minZ = pz;
+          if (px > maxX) maxX = px;
+          if (py > maxY) maxY = py;
+          if (pz > maxZ) maxZ = pz;
+          vertices.push(cv);
+        }
+        for (const ct of mergerConnectorMesh.triangles) {
+          triangles.push({
+            ...ct,
+            v0: vBase + ct.v0,
+            v1: vBase + ct.v1,
+            v2: vBase + ct.v2,
+          });
+        }
+      }
+
+      const combinedMesh: GeneratedWorldMesh = {
+        vertices,
+        triangles,
+        materialRoles: Array.from(roleSet),
+        bounds: {
+          min: [minX, minY, minZ],
+          max: [maxX, maxY, maxZ],
+          size: [maxX - minX, maxY - minY, maxZ - minZ],
+        },
+        wireframeSegments: [],
+        clearanceReport: { ok: true, walkSamples: 24, maxStepHeight: 0.2 },
+        recommendedSpawnPoint: [ox, oy, oz + 2],
+      };
+
+      const resolvedShaders = resolveDefaultHaloShadersForWorld(allTags, worldShaderOverrides);
+      const res = await window.opence.injectProceduralWorldBsp({
+        worldMesh: combinedMesh,
+        bspIndex: selectedBspIndex,
+        shaderBindings: resolvedShaders,
+        collisionMode: 'auto',
+        donorMapFilePath: donorMapPath || undefined,
+      });
+      if (!res.ok) {
+        setStatusMessage(`World Merger failed: ${res.message}`);
+        setApplying(false);
+        return;
+      }
+      window.dispatchEvent(new CustomEvent('opence:scenario-updated'));
+      window.dispatchEvent(new CustomEvent('opence:bsp-updated'));
+      setStatusMessage(
+        `Merged 2 Maps into 1 BSP! Added ${res.addedTriangles.toLocaleString()} render triangles (${res.addedSubmeshes} shader surface(s)) & ${res.addedCollisionSurfaces.toLocaleString()} 3D collision surfaces into Structure BSP #${selectedBspIndex}. Switching to Live BSP View...`,
+      );
+      setStudioMode('bsp');
+    } catch (err) {
+      setStatusMessage(`World Merger error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setApplying(false);
     }
@@ -4668,13 +5124,19 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
             s.dirtyGeometry = false;
             s.dirtyShader = false;
           }
-        } else if (studioMode === 'create') {
+        } else if (studioMode === 'create' || studioMode === 'parametric') {
           await handleMergeFloatingObjectIntoMap();
+          return;
+        } else if (studioMode === 'merger') {
+          await handleInjectMergedTwoMapWorldIntoBsp();
           return;
         }
       }
 
       window.dispatchEvent(new CustomEvent('opence:scenario-updated'));
+      if (studioMode === 'bsp') {
+        window.dispatchEvent(new CustomEvent('opence:bsp-updated'));
+      }
       setStatusMessage(
         `Applied to Map! Updated ${updatedVerts.toLocaleString()} render vertices${
           studioMode === 'bsp' ? `, ${updatedCollVerts.toLocaleString()} 3D collision vertices & planes,` : ' across all LODs,'
@@ -4690,9 +5152,9 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
   const activeToolInfo = SCULPT_TOOLS.find((t) => t.id === activeTool);
   const selectedSubSummary = submeshSummaryList[selectedSubmeshIdx] ?? null;
   const currentAssetName =
-    studioMode === 'bsp'
+    studioMode === 'bsp' || studioMode === 'merger'
       ? bspTags[selectedBspIndex]?.path ?? `BSP #${selectedBspIndex}`
-      : studioMode === 'create'
+      : studioMode === 'create' || studioMode === 'parametric'
         ? `floating_bsp\\${primName}`
         : categoryTags.find((t) => t.index === selectedAssetTagIndex)?.path ?? '3D Asset';
 
@@ -4734,7 +5196,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
             3D BSP &amp; Model Studio
           </span>
 
-          <div style={{ display: 'flex', gap: 4 }}>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
             <button
               type="button"
               data-testid="studio-mode-bsp-btn"
@@ -4787,22 +5249,43 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
                 gap: 4,
               }}
             >
-              <Plus size={12} /> World, Tunnel, Bridge &amp; BSP Builder
+              <Plus size={12} /> 🏗️ FastGen World, Tunnel &amp; Bridge Builder
             </button>
             <button
               type="button"
-              data-testid="studio-open-world-merger-btn"
-              onClick={() => window.dispatchEvent(new CustomEvent('opence:open-world-merger'))}
-              title="Open Multi-Map World Merger & Structure BSP Swapper to stitch multiple Halo CE maps into one playable world"
+              data-testid="studio-mode-parametric-btn"
+              onClick={() => setStudioMode('parametric')}
+              title="Open dedicated Parametric 2D Sketch & 3D Part Designer (Autodesk Inventor style)"
               style={{
                 padding: '4px 10px',
                 fontSize: 11,
                 fontWeight: 700,
                 borderRadius: 4,
                 cursor: 'pointer',
-                border: '1px solid #38bdf8',
-                background: '#0f2942',
-                color: '#7dd3fc',
+                border: studioMode === 'parametric' ? '1px solid #a855f7' : '1px solid #2c3e55',
+                background: studioMode === 'parametric' ? '#2e1065' : '#16202e',
+                color: studioMode === 'parametric' ? '#e9d5ff' : '#9eb0c7',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              📐 Parametric Part Designer
+            </button>
+            <button
+              type="button"
+              data-testid="studio-open-world-merger-btn"
+              onClick={() => setStudioMode('merger')}
+              title="Merge another Halo CE map's Structure BSP into your open map's BSP while preserving all original shaders and building connecting tunnels/bridges between them"
+              style={{
+                padding: '4px 10px',
+                fontSize: 11,
+                fontWeight: 700,
+                borderRadius: 4,
+                cursor: 'pointer',
+                border: studioMode === 'merger' ? '1px solid #38bdf8' : '1px solid #2c3e55',
+                background: studioMode === 'merger' ? '#0f2942' : '#16202e',
+                color: studioMode === 'merger' ? '#7dd3fc' : '#9eb0c7',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 4,
@@ -4812,7 +5295,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
             </button>
           </div>
 
-          {studioMode === 'bsp' ? (
+          {studioMode === 'bsp' || studioMode === 'merger' ? (
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
               <span style={{ color: '#8fa6c2' }}>BSP:</span>
               <select
@@ -4835,41 +5318,41 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
                 ))}
               </select>
             </label>
-          ) : studioMode === 'create' ? (
+          ) : studioMode === 'create' || studioMode === 'parametric' ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, flexWrap: 'wrap' }}>
-              {(
-                [
-                  { id: 'tunnel_network' as const, label: '🚇 Tunnels & Caves (1–5)' },
-                  { id: 'bridge_network' as const, label: '🌉 Multi-Style Bridges (1–5)' },
-                  { id: 'quickforge_world' as const, label: '🏔 QuickForge Terrain, Nature, Forerunner & City' },
-                  { id: 'primitive' as const, label: '🧱 Single Primitive' },
-                ]
-              ).map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  data-testid={`studio-create-tab-${tab.id}`}
-                  onClick={() => {
-                    setSelectedFloatingId('');
-                    setCreateBuilderKind(tab.id);
-                  }}
-                  style={{
-                    padding: '3px 8px',
-                    fontSize: 10.5,
-                    fontWeight: 700,
-                    borderRadius: 4,
-                    cursor: 'pointer',
-                    background: createBuilderKind === tab.id && !selectedFloatingId ? '#15803d' : '#0f172a',
-                    color: createBuilderKind === tab.id && !selectedFloatingId ? '#ffffff' : '#94a3b8',
-                    border:
-                      createBuilderKind === tab.id && !selectedFloatingId
-                        ? '1px solid #4ade80'
-                        : '1px solid #334155',
-                  }}
-                >
-                  {tab.label}
-                </button>
-              ))}
+              {studioMode === 'create' &&
+                (
+                  [
+                    { id: 'tunnel_network' as const, label: '🚇 Tunnels & Caves (1–5)' },
+                    { id: 'bridge_network' as const, label: '🌉 Multi-Style Bridges (1–5)' },
+                    { id: 'quickforge_world' as const, label: '🏔 FastGen Terrain, Island, Nature, Forerunner & City' },
+                  ]
+                ).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    data-testid={`studio-create-tab-${tab.id}`}
+                    onClick={() => {
+                      setSelectedFloatingId('');
+                      setCreateBuilderKind(tab.id);
+                    }}
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 10.5,
+                      fontWeight: 700,
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                      background: createBuilderKind === tab.id && !selectedFloatingId ? '#15803d' : '#0f172a',
+                      color: createBuilderKind === tab.id && !selectedFloatingId ? '#ffffff' : '#94a3b8',
+                      border:
+                        createBuilderKind === tab.id && !selectedFloatingId
+                          ? '1px solid #4ade80'
+                          : '1px solid #334155',
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
               <input
                 ref={objFileInputRef}
                 type="file"
@@ -6671,7 +7154,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
             </div>
           )}
 
-          {/* Procedural Tunnel, Cave, Multi-Style Bridge & QuickForge World BSP Builder (when in 'create' mode) */}
+          {/* Procedural Tunnel, Cave, Multi-Style Bridge & FastGen World BSP Builder (when in 'create' mode) */}
           {studioMode === 'create' && (
             <div
               data-testid="studio-create-floating-card"
@@ -6687,12 +7170,12 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
             >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                 <span style={{ fontWeight: 700, fontSize: 11, color: '#86efac', textTransform: 'uppercase' }}>
-                  QuickForge World, Tunnel &amp; Bridge Builder
+                  🏗️ FastGen World, Tunnel &amp; Bridge Builder
                 </span>
                 <button
                   type="button"
-                  onClick={() => window.dispatchEvent(new CustomEvent('opence:open-world-merger'))}
-                  title="Open Multi-Map World Merger to combine multiple Halo CE maps"
+                  onClick={() => setStudioMode('merger')}
+                  title="Switch to Multi-Map World Merger to combine two Halo CE maps into one BSP"
                   style={{
                     padding: '2px 7px',
                     fontSize: 9.5,
@@ -6710,14 +7193,13 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
                 </button>
               </div>
 
-              {/* 4 Sub-Mode Generator Tabs */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+              {/* 3 Sub-Mode Generator Tabs */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4 }}>
                 {(
                   [
                     { id: 'tunnel_network' as const, label: '🚇 Tunnels & Caves' },
-                    { id: 'bridge_network' as const, label: '🌉 Multi-Style Bridges' },
-                    { id: 'quickforge_world' as const, label: '🏔 Terrain, Nature & City' },
-                    { id: 'primitive' as const, label: '🧱 Single Primitive' },
+                    { id: 'bridge_network' as const, label: '🌉 Bridges' },
+                    { id: 'quickforge_world' as const, label: '🏔 FastGen World' },
                   ]
                 ).map((tab) => (
                   <button
@@ -7310,19 +7792,22 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
                 </div>
               )}
 
-              {/* TAB 3: QUICKFORGE TERRAIN, NATURE, FORERUNNER & CITY BUILDER */}
+              {/* TAB 3: FASTGEN TERRAIN, ISLAND, NATURE, FORERUNNER & CITY BUILDER */}
               {createBuilderKind === 'quickforge_world' && !selectedFloatingId && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 7, fontSize: 10.5 }}>
                   <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ color: '#a7f3d0' }}>Halo CE Terrain Biome Preset:</span>
+                    <span style={{ color: '#a7f3d0' }}>Halo CE FastGen Biome &amp; Playable Map Layout:</span>
                     <select
+                      data-testid="studio-fastgen-biome-select"
                       value={qfBiome}
                       onChange={(e) => {
                         const biome = e.target.value as TerrainBiomePreset;
                         setQfBiome(biome);
-                        setQfTerrain((prev) =>
-                          createPresetTerrainGrid(biome, prev.sizeX, prev.sizeY, prev.steps),
-                        );
+                        setQfTerrain((prev) => {
+                          const nextGrid = createPresetTerrainGrid(biome, prev.sizeX, prev.sizeY, prev.steps);
+                          setQfPieces(createDefaultFastGenPieces(biome, nextGrid.sizeX, nextGrid.sizeY));
+                          return nextGrid;
+                        });
                       }}
                       style={{
                         background: '#0d131d',
@@ -7333,13 +7818,178 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
                         fontSize: 11,
                       }}
                     >
-                      <option value="bloodgulch_canyon">Blood Gulch Canyon Basin (Sand &amp; Canyon Walls)</option>
-                      <option value="timberland_ridge">Timberland Alpine Ridge (Pine Grass &amp; Hills)</option>
-                      <option value="icefields_glacier">Ice Fields Glacier Valley (Snow &amp; Ice Shelf)</option>
-                      <option value="deathisland_mesa">Death Island Elevated Mesa (Coastal Cliff Plateau)</option>
-                      <option value="flat_forge_canvas">Flat QuickForge Sandbox Canvas</option>
+                      <option value="bloodgulch_canyon">🏜️ Blood Gulch Canyon Basin (Red &amp; Blue Bases, Ramps &amp; Central Arch)</option>
+                      <option value="island_atoll">🏝️ Relic Island Atoll (Ocean Water, Sandy Beaches &amp; Relic Plateau)</option>
+                      <option value="timberland_ridge">🌲 Timberland Alpine Ridge (Pine Grass, Twin Bunkers &amp; Central Tower)</option>
+                      <option value="icefields_glacier">❄️ Ice Fields Glacier Valley (Snow, Ice Bridges &amp; Octagonal Bases)</option>
+                      <option value="deathisland_mesa">⛰️ Death Island Elevated Mesa (Coastal Cliff Plateau &amp; Access Ramps)</option>
+                      <option value="flat_forge_canvas">🧱 Flat FastGen Sandbox Canvas (Leveled Arena &amp; Symmetrical Bases)</option>
                     </select>
                   </label>
+
+                  {/* World Size & Expansion Controls */}
+                  <div
+                    data-testid="studio-fastgen-world-size-card"
+                    style={{
+                      background: '#0b141c',
+                      border: '1px solid #25354d',
+                      borderRadius: 5,
+                      padding: 6,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 5,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ fontWeight: 700, color: '#9bc2e8', fontSize: 10 }}>
+                        📐 World Dimensions: {qfTerrain.sizeX} × {qfTerrain.sizeY} wu ({qfTerrain.steps}×{qfTerrain.steps} grid)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setQfPieces(createDefaultFastGenPieces(qfBiome, qfTerrain.sizeX, qfTerrain.sizeY))}
+                        title="Populate symmetrical Red & Blue Team Bases, vehicle access ramps, sniper perches, and central cover"
+                        style={{
+                          padding: '1px 6px',
+                          fontSize: 9,
+                          fontWeight: 700,
+                          background: '#14532d',
+                          color: '#86efac',
+                          border: '1px solid #22c55e',
+                          borderRadius: 3,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ✨ Reset Bases &amp; Cover
+                      </button>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4 }}>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                        <span style={{ fontSize: 9, color: '#94a3b8' }}>Length X (wu)</span>
+                        <input
+                          type="number"
+                          min={40}
+                          max={600}
+                          step={20}
+                          value={qfTerrain.sizeX}
+                          onChange={(e) => {
+                            const nextX = Math.max(40, Math.min(600, Number(e.target.value) || 120));
+                            const ratioX = nextX / Math.max(1, qfTerrain.sizeX);
+                            setQfTerrain((prev) => expandTerrainGrid(prev, 1, nextX, prev.sizeY));
+                            setQfPieces((prev) =>
+                              prev.map((p) => ({
+                                ...p,
+                                position: [Number((p.position[0] * ratioX).toFixed(1)), p.position[1], p.position[2]],
+                              })),
+                            );
+                          }}
+                          style={{
+                            background: '#0d131d',
+                            color: '#fff',
+                            border: '1px solid #2b3c54',
+                            borderRadius: 3,
+                            padding: '2px 4px',
+                          }}
+                        />
+                      </label>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                        <span style={{ fontSize: 9, color: '#94a3b8' }}>Width Y (wu)</span>
+                        <input
+                          type="number"
+                          min={40}
+                          max={600}
+                          step={20}
+                          value={qfTerrain.sizeY}
+                          onChange={(e) => {
+                            const nextY = Math.max(40, Math.min(600, Number(e.target.value) || 120));
+                            const ratioY = nextY / Math.max(1, qfTerrain.sizeY);
+                            setQfTerrain((prev) => expandTerrainGrid(prev, 1, prev.sizeX, nextY));
+                            setQfPieces((prev) =>
+                              prev.map((p) => ({
+                                ...p,
+                                position: [p.position[0], Number((p.position[1] * ratioY).toFixed(1)), p.position[2]],
+                              })),
+                            );
+                          }}
+                          style={{
+                            background: '#0d131d',
+                            color: '#fff',
+                            border: '1px solid #2b3c54',
+                            borderRadius: 3,
+                            padding: '2px 4px',
+                          }}
+                        />
+                      </label>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                        <span style={{ fontSize: 9, color: '#94a3b8' }}>Mesh Steps</span>
+                        <input
+                          type="number"
+                          min={8}
+                          max={64}
+                          step={4}
+                          value={qfTerrain.steps}
+                          onChange={(e) => {
+                            const nextSteps = Math.max(8, Math.min(64, Number(e.target.value) || 24));
+                            setQfTerrain((prev) =>
+                              createPresetTerrainGrid(qfBiome, prev.sizeX, prev.sizeY, nextSteps),
+                            );
+                          }}
+                          style={{
+                            background: '#0d131d',
+                            color: '#fff',
+                            border: '1px solid #2b3c54',
+                            borderRadius: 3,
+                            padding: '2px 4px',
+                          }}
+                        />
+                      </label>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4 }}>
+                      {[
+                        { factor: 1.25, label: '➕ Expand +25%' },
+                        { factor: 1.5, label: '➕ Expand +50%' },
+                        { factor: 2.0, label: '🚀 Expand 2× World' },
+                      ].map((exp) => (
+                        <button
+                          key={exp.label}
+                          type="button"
+                          data-testid={`studio-fastgen-expand-${exp.factor}-btn`}
+                          onClick={() => {
+                            setQfTerrain((prev) => {
+                              const nextGrid = expandTerrainGrid(prev, exp.factor);
+                              const rx = nextGrid.sizeX / Math.max(1, prev.sizeX);
+                              const ry = nextGrid.sizeY / Math.max(1, prev.sizeY);
+                              setQfPieces((oldPieces) =>
+                                oldPieces.map((pc) => ({
+                                  ...pc,
+                                  position: [
+                                    Number((pc.position[0] * rx).toFixed(1)),
+                                    Number((pc.position[1] * ry).toFixed(1)),
+                                    pc.position[2],
+                                  ],
+                                })),
+                              );
+                              setStatusMessage(
+                                `Expanded FastGen World to ${nextGrid.sizeX} × ${nextGrid.sizeY} wu (${nextGrid.steps}×${nextGrid.steps} grid)!`,
+                              );
+                              return nextGrid;
+                            });
+                          }}
+                          style={{
+                            padding: '4px 5px',
+                            fontSize: 9.5,
+                            fontWeight: 700,
+                            background: '#153852',
+                            color: '#9beeff',
+                            border: '1px solid #00e5ff',
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {exp.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
                   {/* 1-Click Terrain Sculpting Operations */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4 }}>
@@ -7628,87 +8278,6 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
                 </div>
               )}
 
-              {/* TAB 4: SINGLE PARAMETRIC PRIMITIVE */}
-              {(createBuilderKind === 'primitive' || Boolean(selectedFloatingId)) && (
-                <>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 10.5 }}>
-                    <span style={{ color: '#a7f3d0' }}>Base Component Shape:</span>
-                    <select
-                      value={primKind}
-                      onChange={(e) => {
-                        setPrimKind(e.target.value as ParametricPrimitiveKind);
-                        setSelectedFloatingId('');
-                      }}
-                      style={{
-                        background: '#0d131d',
-                        color: '#fff',
-                        border: '1px solid #2b3c54',
-                        borderRadius: 4,
-                        padding: '4px 6px',
-                        fontSize: 11,
-                      }}
-                    >
-                      <option value="ramp">Sloped Vehicle / Infantry Ramp</option>
-                      <option value="platform">Elevated Platform / Bridge</option>
-                      <option value="bunker">Tapered Bunker / Cover Block</option>
-                      <option value="pillar">Octagonal / Cylindrical Pillar</option>
-                      <option value="arch">Archway / Tunnel Segment</option>
-                    </select>
-                  </label>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 5, fontSize: 10.5 }}>
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span>Width (X)</span>
-                      <input
-                        type="number"
-                        step={0.5}
-                        value={primWidth}
-                        onChange={(e) => setPrimWidth(Math.max(0.2, Number(e.target.value) || 4))}
-                        style={{
-                          background: '#0d131d',
-                          color: '#fff',
-                          border: '1px solid #2b3c54',
-                          borderRadius: 4,
-                          padding: '3px 5px',
-                        }}
-                      />
-                    </label>
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span>Depth (Y)</span>
-                      <input
-                        type="number"
-                        step={0.5}
-                        value={primDepth}
-                        onChange={(e) => setPrimDepth(Math.max(0.2, Number(e.target.value) || 4))}
-                        style={{
-                          background: '#0d131d',
-                          color: '#fff',
-                          border: '1px solid #2b3c54',
-                          borderRadius: 4,
-                          padding: '3px 5px',
-                        }}
-                      />
-                    </label>
-                    <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      <span>Height (Z)</span>
-                      <input
-                        type="number"
-                        step={0.5}
-                        value={primHeight}
-                        onChange={(e) => setPrimHeight(Math.max(0.2, Number(e.target.value) || 2))}
-                        style={{
-                          background: '#0d131d',
-                          color: '#fff',
-                          border: '1px solid #2b3c54',
-                          borderRadius: 4,
-                          padding: '3px 5px',
-                        }}
-                      />
-                    </label>
-                  </div>
-                </>
-              )}
-
               {/* Halo Default Auto-Shader Role Mapping & 3-Sphere Spartan Clearance Status */}
               {worldActiveRoles.length > 0 && !selectedFloatingId && (
                 <div
@@ -7812,7 +8381,7 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
               )}
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 2 }}>
-                {createBuilderKind !== 'primitive' && !selectedFloatingId && (
+                {!selectedFloatingId && (
                   <button
                     type="button"
                     data-testid="studio-inject-procedural-world-bsp-btn"
@@ -7921,352 +8490,816 @@ export const BspModelStudioPanel: React.FC<BspModelStudioPanelProps> = ({
             </div>
           )}
 
-          {/* Parametric 2D Sketch-on-Plane / Face -> 3D Feature Modeler (available in all modes) */}
-          <div
-            data-testid="studio-inventor-sketch-card"
-            style={{
-              background: '#161f2e',
-              border: '1px solid #ff9f43',
-              borderRadius: 6,
-              padding: 10,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 7,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontWeight: 700, fontSize: 11, color: '#ffd29d', textTransform: 'uppercase' }}>
-                📐 Parametric 2D Sketch &amp; 3D Feature Modeler
-              </span>
-              <span style={{ fontSize: 9.5, color: '#94a3b8' }}>{sketchFaceBasis.label}</span>
-            </div>
-
-            {/* 2D Sketch Mode <-> 3D Feature Mode Switcher directly in the 3D Edit World */}
-            <button
-              type="button"
-              data-testid="studio-toggle-2d-sketch-in-3d-btn"
-              onClick={() => {
-                if (is2dSketchMode) {
-                  finish2dSketchTo3dMode();
-                } else {
-                  enter2dSketchIn3dWorld();
-                }
-              }}
-              style={{
-                padding: '6px 8px',
-                fontSize: 11,
-                fontWeight: 700,
-                background: is2dSketchMode ? '#16a34a' : '#153852',
-                color: '#ffffff',
-                border: is2dSketchMode ? '1px solid #4ade80' : '1px solid #00e5ff',
-                borderRadius: 4,
-                cursor: 'pointer',
-                textAlign: 'center',
-              }}
-            >
-              {is2dSketchMode
-                ? '✓ Finish 2D Sketch → Switch to 3D (Extrude / Revolve / Cut)'
-                : '📐 Start 2D Sketch Mode in 3D Edit World'}
-            </button>
-
-            {/* Work Plane Selector: XY, XZ, YZ, or Pick 3D Face */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
-              {(
-                [
-                  { id: 'xy' as const, label: 'XY Ground' },
-                  { id: 'xz' as const, label: 'XZ Front' },
-                  { id: 'yz' as const, label: 'YZ Side' },
-                  { id: 'face' as const, label: sketchPickFaceActive ? '🎯 Click Face...' : '🎯 Pick 3D Face' },
-                ]
-              ).map((pl) => (
-                <button
-                  key={pl.id}
-                  type="button"
-                  data-testid={`studio-sketch-plane-${pl.id}-btn`}
-                  onClick={() => handleSelectSketchPlanePreset(pl.id)}
-                  style={{
-                    padding: '4px 4px',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    borderRadius: 4,
-                    cursor: 'pointer',
-                    border: sketchPlanePreset === pl.id ? '1px solid #ff9f43' : '1px solid #2b3c54',
-                    background: sketchPlanePreset === pl.id ? '#3d2814' : '#0d131d',
-                    color: sketchPlanePreset === pl.id ? '#ffd29d' : '#94a3b8',
-                  }}
-                >
-                  {pl.label}
-                </button>
-              ))}
-            </div>
-
-            {/* 2D Sketch Profile Shape Presets */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 3 }}>
-              {(
-                [
-                  { id: 'polyline' as const, label: 'Polyline' },
-                  { id: 'rect' as const, label: 'Rect' },
-                  { id: 'circle' as const, label: 'Circle' },
-                  { id: 'polygon' as const, label: 'Hex' },
-                  { id: 'l_bracket' as const, label: 'L-Shape' },
-                ]
-              ).map((sh) => (
-                <button
-                  key={sh.id}
-                  type="button"
-                  data-testid={`studio-sketch-shape-${sh.id}-btn`}
-                  onClick={() => handleApplySketchShapePreset(sh.id)}
-                  style={{
-                    padding: '3px 4px',
-                    fontSize: 9.5,
-                    fontWeight: 600,
-                    borderRadius: 3,
-                    cursor: 'pointer',
-                    border: sketchShapeKind === sh.id ? '1px solid #00e5ff' : '1px solid #2b3c54',
-                    background: sketchShapeKind === sh.id ? '#153852' : '#0d131d',
-                    color: sketchShapeKind === sh.id ? '#9beeff' : '#94a3b8',
-                  }}
-                >
-                  {sh.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Interactive 2D Sketch Pad SVG (synced live with the 3D Work Plane in the 3D Viewport) */}
+          {/* Dedicated Parametric Part Designer Mode (ONLY rendered when studioMode === 'parametric') */}
+          {studioMode === 'parametric' && (
             <div
+              data-testid="studio-inventor-sketch-card"
               style={{
-                background: '#0a0f18',
-                border: '1px solid #25354d',
-                borderRadius: 4,
-                padding: 4,
+                background: '#19142a',
+                border: '1px solid #a855f7',
+                borderRadius: 6,
+                padding: 10,
                 display: 'flex',
                 flexDirection: 'column',
-                alignItems: 'center',
-                gap: 4,
+                gap: 8,
               }}
             >
-              <svg
-                data-testid="studio-inventor-sketch-svg"
-                width={260}
-                height={150}
-                viewBox="-3.2 -2.0 6.4 4.0"
-                style={{ cursor: 'crosshair', background: '#070b12', borderRadius: 3, width: '100%' }}
-                onClick={(e) => {
-                  const svg = e.currentTarget;
-                  const rect = svg.getBoundingClientRect();
-                  const nx = (e.clientX - rect.left) / Math.max(1, rect.width);
-                  const ny = (e.clientY - rect.top) / Math.max(1, rect.height);
-                  const u = Number(((nx * 6.4 - 3.2)).toFixed(2));
-                  const v = Number((((1 - ny) * 4.0 - 2.0)).toFixed(2));
-                  setSketchShapeKind('polyline');
-                  setSketchPoints((prev) => [...prev, [u, v]]);
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontWeight: 700, fontSize: 11, color: '#e9d5ff', textTransform: 'uppercase' }}>
+                  📐 Parametric Part Designer (2D Sketch &amp; 3D Solid)
+                </span>
+                <span style={{ fontSize: 9.5, color: '#c4b5fd' }}>{sketchFaceBasis.label}</span>
+              </div>
+
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 10.5 }}>
+                <span style={{ color: '#d8b4fe' }}>Part / Structure Name:</span>
+                <input
+                  type="text"
+                  value={primName}
+                  onChange={(e) => setPrimName(e.target.value)}
+                  style={{
+                    background: '#0d131d',
+                    color: '#fff',
+                    border: '1px solid #2b3c54',
+                    borderRadius: 4,
+                    padding: '4px 6px',
+                    fontSize: 11,
+                  }}
+                />
+              </label>
+
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 10.5 }}>
+                <span style={{ color: '#d8b4fe' }}>Base Blank Part Shape:</span>
+                <select
+                  value={primKind}
+                  onChange={(e) => {
+                    setPrimKind(e.target.value as ParametricPrimitiveKind);
+                    setSelectedFloatingId('');
+                  }}
+                  style={{
+                    background: '#0d131d',
+                    color: '#fff',
+                    border: '1px solid #2b3c54',
+                    borderRadius: 4,
+                    padding: '4px 6px',
+                    fontSize: 11,
+                  }}
+                >
+                  <option value="ramp">Sloped Vehicle / Infantry Ramp</option>
+                  <option value="platform">Elevated Platform / Structural Block</option>
+                  <option value="bunker">Tapered Bunker / Cover Block</option>
+                  <option value="pillar">Octagonal / Cylindrical Pillar</option>
+                  <option value="arch">Archway / Tunnel Segment</option>
+                </select>
+              </label>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 5, fontSize: 10.5 }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span>Width (X)</span>
+                  <input
+                    type="number"
+                    step={0.5}
+                    value={primWidth}
+                    onChange={(e) => setPrimWidth(Math.max(0.2, Number(e.target.value) || 4))}
+                    style={{
+                      background: '#0d131d',
+                      color: '#fff',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                      padding: '3px 5px',
+                    }}
+                  />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span>Depth (Y)</span>
+                  <input
+                    type="number"
+                    step={0.5}
+                    value={primDepth}
+                    onChange={(e) => setPrimDepth(Math.max(0.2, Number(e.target.value) || 4))}
+                    style={{
+                      background: '#0d131d',
+                      color: '#fff',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                      padding: '3px 5px',
+                    }}
+                  />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span>Height (Z)</span>
+                  <input
+                    type="number"
+                    step={0.5}
+                    value={primHeight}
+                    onChange={(e) => setPrimHeight(Math.max(0.2, Number(e.target.value) || 2))}
+                    style={{
+                      background: '#0d131d',
+                      color: '#fff',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                      padding: '3px 5px',
+                    }}
+                  />
+                </label>
+              </div>
+
+              {/* 2D Sketch Mode <-> 3D Feature Mode Switcher directly in the 3D Edit World */}
+              <button
+                type="button"
+                data-testid="studio-toggle-2d-sketch-in-3d-btn"
+                onClick={() => {
+                  if (is2dSketchMode) {
+                    finish2dSketchTo3dMode();
+                  } else {
+                    enter2dSketchIn3dWorld();
+                  }
+                }}
+                style={{
+                  padding: '6px 8px',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: is2dSketchMode ? '#16a34a' : '#153852',
+                  color: '#ffffff',
+                  border: is2dSketchMode ? '1px solid #4ade80' : '1px solid #00e5ff',
+                  borderRadius: 4,
+                  cursor: 'pointer',
+                  textAlign: 'center',
                 }}
               >
-                {/* Grid lines */}
-                {[-3, -2, -1, 0, 1, 2, 3].map((gx) => (
-                  <line
-                    key={`gx-${gx}`}
-                    x1={gx}
-                    y1={-2}
-                    x2={gx}
-                    y2={2}
-                    stroke={gx === 0 ? '#334155' : '#162030'}
-                    strokeWidth={gx === 0 ? 0.04 : 0.02}
-                  />
-                ))}
-                {[-2, -1, 0, 1, 2].map((gy) => (
-                  <line
-                    key={`gy-${gy}`}
-                    x1={-3.2}
-                    y1={gy}
-                    x2={3.2}
-                    y2={gy}
-                    stroke={gy === 0 ? '#334155' : '#162030'}
-                    strokeWidth={gy === 0 ? 0.04 : 0.02}
-                  />
-                ))}
-                {/* Closed polygon preview */}
-                {sketchPoints.length >= 2 && (
-                  <polygon
-                    points={sketchPoints.map(([u, v]) => `${u},${-v}`).join(' ')}
-                    fill="rgba(0, 229, 255, 0.16)"
-                    stroke="#00e5ff"
-                    strokeWidth={0.06}
-                  />
-                )}
-                {/* Vertices */}
-                {sketchPoints.map(([u, v], idx) => (
-                  <circle
-                    key={`sk-pt-${idx}`}
-                    cx={u}
-                    cy={-v}
-                    r={0.12}
-                    fill={idx === 0 ? '#ff9f43' : '#00e5ff'}
-                  />
-                ))}
-              </svg>
-              <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', fontSize: 9.5, color: '#94a3b8' }}>
-                <span>Click 3D work plane or 2D pad ({sketchPoints.length} pts)</span>
-                <div style={{ display: 'flex', gap: 6 }}>
+                {is2dSketchMode
+                  ? '✓ Finish 2D Sketch → Switch to 3D (Extrude / Revolve / Cut)'
+                  : '📐 Start 2D Sketch Mode in 3D Edit World'}
+              </button>
+
+              {/* Work Plane Selector: XY, XZ, YZ, or Pick 3D Face */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
+                {(
+                  [
+                    { id: 'xy' as const, label: 'XY Ground' },
+                    { id: 'xz' as const, label: 'XZ Front' },
+                    { id: 'yz' as const, label: 'YZ Side' },
+                    { id: 'face' as const, label: sketchPickFaceActive ? '🎯 Click Face...' : '🎯 Pick 3D Face' },
+                  ]
+                ).map((pl) => (
                   <button
+                    key={pl.id}
                     type="button"
-                    onClick={() => setSketchPoints((prev) => prev.slice(0, -1))}
+                    data-testid={`studio-sketch-plane-${pl.id}-btn`}
+                    onClick={() => handleSelectSketchPlanePreset(pl.id)}
                     style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: '#38bdf8',
+                      padding: '4px 4px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      borderRadius: 4,
                       cursor: 'pointer',
-                      fontSize: 9.5,
-                      padding: 0,
+                      border: sketchPlanePreset === pl.id ? '1px solid #ff9f43' : '1px solid #2b3c54',
+                      background: sketchPlanePreset === pl.id ? '#3d2814' : '#0d131d',
+                      color: sketchPlanePreset === pl.id ? '#ffd29d' : '#94a3b8',
                     }}
                   >
-                    Undo Pt
+                    {pl.label}
                   </button>
+                ))}
+              </div>
+
+              {/* 2D Sketch Profile Shape Presets */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 3 }}>
+                {(
+                  [
+                    { id: 'polyline' as const, label: 'Polyline' },
+                    { id: 'rect' as const, label: 'Rect' },
+                    { id: 'circle' as const, label: 'Circle' },
+                    { id: 'polygon' as const, label: 'Hex' },
+                    { id: 'l_bracket' as const, label: 'L-Shape' },
+                  ]
+                ).map((sh) => (
                   <button
+                    key={sh.id}
                     type="button"
-                    onClick={() => setSketchPoints([])}
+                    data-testid={`studio-sketch-shape-${sh.id}-btn`}
+                    onClick={() => handleApplySketchShapePreset(sh.id)}
                     style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: '#fca5a5',
-                      cursor: 'pointer',
+                      padding: '3px 4px',
                       fontSize: 9.5,
-                      padding: 0,
+                      fontWeight: 600,
+                      borderRadius: 3,
+                      cursor: 'pointer',
+                      border: sketchShapeKind === sh.id ? '1px solid #00e5ff' : '1px solid #2b3c54',
+                      background: sketchShapeKind === sh.id ? '#153852' : '#0d131d',
+                      color: sketchShapeKind === sh.id ? '#9beeff' : '#94a3b8',
                     }}
                   >
-                    ClearPts
+                    {sh.label}
                   </button>
+                ))}
+              </div>
+
+              {/* Interactive 2D Sketch Pad SVG */}
+              <div
+                style={{
+                  background: '#0a0f18',
+                  border: '1px solid #25354d',
+                  borderRadius: 4,
+                  padding: 4,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+              >
+                <svg
+                  data-testid="studio-inventor-sketch-svg"
+                  width={260}
+                  height={150}
+                  viewBox="-3.2 -2.0 6.4 4.0"
+                  style={{ cursor: 'crosshair', background: '#070b12', borderRadius: 3, width: '100%' }}
+                  onClick={(e) => {
+                    const svg = e.currentTarget;
+                    const rect = svg.getBoundingClientRect();
+                    const nx = (e.clientX - rect.left) / Math.max(1, rect.width);
+                    const ny = (e.clientY - rect.top) / Math.max(1, rect.height);
+                    const u = Number(((nx * 6.4 - 3.2)).toFixed(2));
+                    const v = Number((((1 - ny) * 4.0 - 2.0)).toFixed(2));
+                    setSketchShapeKind('polyline');
+                    setSketchPoints((prev) => [...prev, [u, v]]);
+                  }}
+                >
+                  {[-3, -2, -1, 0, 1, 2, 3].map((gx) => (
+                    <line
+                      key={`gx-${gx}`}
+                      x1={gx}
+                      y1={-2}
+                      x2={gx}
+                      y2={2}
+                      stroke={gx === 0 ? '#334155' : '#162030'}
+                      strokeWidth={gx === 0 ? 0.04 : 0.02}
+                    />
+                  ))}
+                  {[-2, -1, 0, 1, 2].map((gy) => (
+                    <line
+                      key={`gy-${gy}`}
+                      x1={-3.2}
+                      y1={gy}
+                      x2={3.2}
+                      y2={gy}
+                      stroke={gy === 0 ? '#334155' : '#162030'}
+                      strokeWidth={gy === 0 ? 0.04 : 0.02}
+                    />
+                  ))}
+                  {sketchPoints.length >= 2 && (
+                    <polygon
+                      points={sketchPoints.map(([u, v]) => `${u},${-v}`).join(' ')}
+                      fill="rgba(0, 229, 255, 0.16)"
+                      stroke="#00e5ff"
+                      strokeWidth={0.06}
+                    />
+                  )}
+                  {sketchPoints.map(([u, v], idx) => (
+                    <circle
+                      key={`sk-pt-${idx}`}
+                      cx={u}
+                      cy={-v}
+                      r={0.12}
+                      fill={idx === 0 ? '#ff9f43' : '#00e5ff'}
+                    />
+                  ))}
+                </svg>
+                <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', fontSize: 9.5, color: '#94a3b8' }}>
+                  <span>Click 3D work plane or 2D pad ({sketchPoints.length} pts)</span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => setSketchPoints((prev) => prev.slice(0, -1))}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: '#38bdf8',
+                        cursor: 'pointer',
+                        fontSize: 9.5,
+                        padding: 0,
+                      }}
+                    >
+                      Undo Pt
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSketchPoints([])}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: '#fca5a5',
+                        cursor: 'pointer',
+                        fontSize: 9.5,
+                        padding: 0,
+                      }}
+                    >
+                      ClearPts
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Extrude Depth & Taper Controls */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 10.5 }}>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                <span>Extrude Depth (wu)</span>
-                <input
-                  type="number"
-                  step={0.25}
-                  value={sketchExtrudeDepth}
-                  onChange={(e) => setSketchExtrudeDepth(Number(e.target.value) || 1.0)}
+              {/* Extrude Depth & Taper Controls */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 10.5 }}>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span>Extrude Depth (wu)</span>
+                  <input
+                    type="number"
+                    step={0.25}
+                    value={sketchExtrudeDepth}
+                    onChange={(e) => setSketchExtrudeDepth(Number(e.target.value) || 1.0)}
+                    style={{
+                      background: '#0d131d',
+                      color: '#fff',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                      padding: '3px 5px',
+                    }}
+                  />
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span>Draft / Taper (-0.8..+1)</span>
+                  <input
+                    type="number"
+                    step={0.1}
+                    value={sketchTaperFactor}
+                    onChange={(e) => setSketchTaperFactor(Number(e.target.value) || 0)}
+                    style={{
+                      background: '#0d131d',
+                      color: '#fff',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                      padding: '3px 5px',
+                    }}
+                  />
+                </label>
+              </div>
+
+              {/* 3D Feature Operations: +Extrude Boss, -Extrude Cut, New Solid, 360° Revolve */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+                <button
+                  type="button"
+                  data-testid="studio-inventor-extrude-join-btn"
+                  onClick={() => handleInventorExtrudeSketch('join')}
                   style={{
-                    background: '#0d131d',
-                    color: '#fff',
-                    border: '1px solid #2b3c54',
+                    padding: '5px 6px',
+                    fontSize: 10.5,
+                    fontWeight: 700,
+                    background: '#143d2b',
+                    color: '#86efac',
+                    border: '1px solid #22c55e',
                     borderRadius: 4,
-                    padding: '3px 5px',
+                    cursor: 'pointer',
                   }}
-                />
-              </label>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                <span>Draft / Taper (-0.8..+1)</span>
-                <input
-                  type="number"
-                  step={0.1}
-                  value={sketchTaperFactor}
-                  onChange={(e) => setSketchTaperFactor(Number(e.target.value) || 0)}
+                >
+                  ➕ Extrude Boss (Join)
+                </button>
+                <button
+                  type="button"
+                  data-testid="studio-inventor-extrude-cut-btn"
+                  onClick={() => handleInventorExtrudeSketch('cut')}
                   style={{
-                    background: '#0d131d',
-                    color: '#fff',
-                    border: '1px solid #2b3c54',
+                    padding: '5px 6px',
+                    fontSize: 10.5,
+                    fontWeight: 700,
+                    background: '#3f1d24',
+                    color: '#fecdd3',
+                    border: '1px solid #f43f5e',
                     borderRadius: 4,
-                    padding: '3px 5px',
+                    cursor: 'pointer',
                   }}
-                />
-              </label>
-            </div>
+                >
+                  ➖ Extrude Cut (Carve)
+                </button>
+                <button
+                  type="button"
+                  data-testid="studio-inventor-extrude-new-btn"
+                  onClick={() => handleInventorExtrudeSketch('new')}
+                  style={{
+                    padding: '5px 6px',
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    background: '#153852',
+                    color: '#9beeff',
+                    border: '1px solid #00e5ff',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ✨ Extrude New Solid
+                </button>
+                <button
+                  type="button"
+                  data-testid="studio-inventor-revolve-btn"
+                  onClick={handleInventorRevolveSketch}
+                  style={{
+                    padding: '5px 6px',
+                    fontSize: 10.5,
+                    fontWeight: 600,
+                    background: '#3d2814',
+                    color: '#ffd29d',
+                    border: '1px solid #ff9f43',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                  }}
+                >
+                  🔄 Revolve 360° Lathe
+                </button>
+              </div>
 
-            {/* 3D Feature Operations: +Extrude Boss, -Extrude Cut, New Solid, 360° Revolve */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 2 }}>
+                <button
+                  type="button"
+                  onClick={handlePlaceCurrentComponentIntoBspEditor}
+                  style={{
+                    padding: '6px 8px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    background: '#16a34a',
+                    color: '#ffffff',
+                    border: '1px solid #4ade80',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ➕ Select &amp; Place Part in 3D BSP Editor
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePublishFloatingObjectForPainting}
+                  style={{
+                    padding: '6px 8px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    background: '#1e3a5f',
+                    color: '#bae6fd',
+                    border: '1px solid #00e5ff',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                  }}
+                >
+                  💾 Save Part as Map Object
+                </button>
+                <button
+                  type="button"
+                  disabled={applying}
+                  onClick={handleMergeFloatingObjectIntoMap}
+                  style={{
+                    padding: '6px 8px',
+                    fontSize: 10.5,
+                    fontWeight: 700,
+                    background: '#166534',
+                    color: '#ecfdf5',
+                    border: '1px solid #22c55e',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                  }}
+                >
+                  🏗 Compile Part Scenery + 3D Collision Into Map
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Multi-Map World Merger (2 Maps in 1 BSP + Original Shaders + Connecting Tunnels/Bridges) */}
+          {studioMode === 'merger' && (
+            <div
+              data-testid="studio-world-merger-card"
+              style={{
+                background: '#0f2236',
+                border: '1px solid #38bdf8',
+                borderRadius: 6,
+                padding: 10,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8,
+                fontSize: 10.5,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontWeight: 700, fontSize: 11, color: '#7dd3fc', textTransform: 'uppercase' }}>
+                  🌍 Multi-Map World Merger (2 Maps in 1 BSP)
+                </span>
+              </div>
+
+              <div style={{ color: '#bae6fd', fontSize: 10, lineHeight: 1.4 }}>
+                Places a Donor Map&apos;s Structure BSP alongside your open map&apos;s BSP in the same 3D world while keeping 100% of its original shaders &amp; textures, then builds walkable Tunnels or Bridges connecting them!
+              </div>
+
+              {/* Step 1: Select Donor Map */}
+              <div
+                style={{
+                  background: '#091524',
+                  border: '1px solid #1e3a5f',
+                  borderRadius: 5,
+                  padding: 7,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 5,
+                }}
+              >
+                <span style={{ fontWeight: 700, color: '#38bdf8', fontSize: 10 }}>
+                  Step 1 — Select Donor .map File (World B)
+                </span>
+                <button
+                  type="button"
+                  data-testid="studio-merger-pick-donor-btn"
+                  onClick={() => void handleSelectDonorMapForMerger()}
+                  style={{
+                    padding: '6px 8px',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    background: '#0284c7',
+                    color: '#ffffff',
+                    border: '1px solid #7dd3fc',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                  }}
+                >
+                  📂 {donorMapPath ? `Donor: ${donorMapPath.split(/[\\/]/).pop()}` : 'Select Donor .map File to Merge...'}
+                </button>
+                {donorBspList.length > 1 && (
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ color: '#94a3b8' }}>Donor Structure BSP:</span>
+                    <select
+                      value={donorBspIndex}
+                      onChange={(e) => {
+                        const idx = Number(e.target.value);
+                        setDonorBspIndex(idx);
+                        if (donorMapPath) void loadDonorBspMeshByIndex(donorMapPath, idx);
+                      }}
+                      style={{
+                        background: '#0d131d',
+                        color: '#fff',
+                        border: '1px solid #2b3c54',
+                        borderRadius: 4,
+                        padding: '3px 6px',
+                      }}
+                    >
+                      {donorBspList.map((b) => (
+                        <option key={b.index} value={b.index}>
+                          BSP #{b.index} — {b.path}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
+
+              {/* Step 2: Position Donor World B */}
+              <div
+                style={{
+                  background: '#091524',
+                  border: '1px solid #1e3a5f',
+                  borderRadius: 5,
+                  padding: 7,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 5,
+                }}
+              >
+                <span style={{ fontWeight: 700, color: '#38bdf8', fontSize: 10 }}>
+                  Step 2 — Position Donor World B Alongside Open Map A
+                </span>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                  <button
+                    type="button"
+                    onClick={() => handlePositionDonorWorldDirection('east')}
+                    style={{
+                      padding: '4px 6px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      background: '#16263b',
+                      color: '#bae6fd',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ➡️ Place East (+X)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePositionDonorWorldDirection('west')}
+                    style={{
+                      padding: '4px 6px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      background: '#16263b',
+                      color: '#bae6fd',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                    cursor: 'pointer',
+                    }}
+                  >
+                    ⬅️ Place West (-X)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePositionDonorWorldDirection('north')}
+                    style={{
+                      padding: '4px 6px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      background: '#16263b',
+                      color: '#bae6fd',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ⬆️ Place North (+Y)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handlePositionDonorWorldDirection('south')}
+                    style={{
+                      padding: '4px 6px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      background: '#16263b',
+                      color: '#bae6fd',
+                      border: '1px solid #2b3c54',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    ⬇️ Place South (-Y)
+                  </button>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span style={{ fontSize: 9.5, color: '#94a3b8' }}>World Gap (wu)</span>
+                    <input
+                      type="number"
+                      step={5}
+                      value={donorGapWu}
+                      onChange={(e) => setDonorGapWu(Math.max(0, Number(e.target.value) || 45))}
+                      style={{
+                        background: '#0d131d',
+                        color: '#fff',
+                        border: '1px solid #2b3c54',
+                        borderRadius: 3,
+                        padding: '2px 4px',
+                      }}
+                    />
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <span style={{ fontSize: 9.5, color: '#94a3b8' }}>Rotation Yaw°</span>
+                    <input
+                      type="number"
+                      step={15}
+                      value={donorYawDeg}
+                      onChange={(e) => setDonorYawDeg(Number(e.target.value) || 0)}
+                      style={{
+                        background: '#0d131d',
+                        color: '#fff',
+                        border: '1px solid #2b3c54',
+                        borderRadius: 3,
+                        padding: '2px 4px',
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4 }}>
+                  {(['X', 'Y', 'Z'] as const).map((ax, idx) => (
+                    <label key={ax} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <span style={{ fontSize: 9.5, color: '#94a3b8' }}>Offset {ax}</span>
+                      <input
+                        type="number"
+                        step={5}
+                        value={donorOffset[idx]}
+                        onChange={(e) => {
+                          const v = Number(e.target.value) || 0;
+                          setDonorOffset((prev) => {
+                            const next = [...prev] as [number, number, number];
+                            next[idx] = v;
+                            return next;
+                          });
+                        }}
+                        style={{
+                          background: '#0d131d',
+                          color: '#fff',
+                          border: '1px solid #2b3c54',
+                          borderRadius: 3,
+                          padding: '2px 4px',
+                        }}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Step 3: Build Connecting Tunnels or Bridges Between Map A and Map B */}
+              <div
+                style={{
+                  background: '#091524',
+                  border: '1px solid #1e3a5f',
+                  borderRadius: 5,
+                  padding: 7,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 5,
+                }}
+              >
+                <span style={{ fontWeight: 700, color: '#86efac', fontSize: 10 }}>
+                  Step 3 — Build Tunnels or Bridges Connecting Map A ↔ Map B
+                </span>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+                  <button
+                    type="button"
+                    data-testid="studio-merger-build-tunnel-btn"
+                    onClick={() => handleBuildConnectorBetweenWorlds('tunnel')}
+                    style={{
+                      padding: '6px 6px',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      background: '#143d2b',
+                      color: '#86efac',
+                      border: '1px solid #22c55e',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🚇 Build Connecting Tunnel
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="studio-merger-build-bridge-btn"
+                    onClick={() => handleBuildConnectorBetweenWorlds('bridge')}
+                    style={{
+                      padding: '6px 6px',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      background: '#153852',
+                      color: '#9beeff',
+                      border: '1px solid #00e5ff',
+                      borderRadius: 4,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    🌉 Build Connecting Bridge
+                  </button>
+                </div>
+                {mergerConnectorSummary && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      background: '#0d1915',
+                      border: '1px solid #22c55e',
+                      borderRadius: 4,
+                      padding: '4px 6px',
+                      fontSize: 9.5,
+                      color: '#a7f3d0',
+                    }}
+                  >
+                    <span>✓ {mergerConnectorSummary}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMergerConnectorMesh(null);
+                        setMergerConnectorSummary(null);
+                      }}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: '#fca5a5',
+                        cursor: 'pointer',
+                        fontSize: 10,
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Step 4: Compile & Inject Combined 2-Map World Into Open Map BSP */}
               <button
                 type="button"
-                data-testid="studio-inventor-extrude-join-btn"
-                onClick={() => handleInventorExtrudeSketch('join')}
+                data-testid="studio-merger-inject-combined-bsp-btn"
+                disabled={applying || !donorMesh}
+                onClick={() => void handleInjectMergedTwoMapWorldIntoBsp()}
                 style={{
-                  padding: '5px 6px',
-                  fontSize: 10.5,
+                  padding: '8px 10px',
+                  fontSize: 11,
                   fontWeight: 700,
-                  background: '#143d2b',
-                  color: '#86efac',
-                  border: '1px solid #22c55e',
-                  borderRadius: 4,
-                  cursor: 'pointer',
+                  background: donorMesh ? '#16a34a' : '#1e293b',
+                  color: donorMesh ? '#ffffff' : '#64748b',
+                  border: donorMesh ? '1px solid #4ade80' : '1px solid #334155',
+                  borderRadius: 5,
+                  cursor: applying ? 'wait' : donorMesh ? 'pointer' : 'not-allowed',
                 }}
               >
-                ➕ Extrude Boss (Join)
-              </button>
-              <button
-                type="button"
-                data-testid="studio-inventor-extrude-cut-btn"
-                onClick={() => handleInventorExtrudeSketch('cut')}
-                style={{
-                  padding: '5px 6px',
-                  fontSize: 10.5,
-                  fontWeight: 700,
-                  background: '#3f1d24',
-                  color: '#fecdd3',
-                  border: '1px solid #f43f5e',
-                  borderRadius: 4,
-                  cursor: 'pointer',
-                }}
-              >
-                ➖ Extrude Cut (Carve)
-              </button>
-              <button
-                type="button"
-                data-testid="studio-inventor-extrude-new-btn"
-                onClick={() => handleInventorExtrudeSketch('new')}
-                style={{
-                  padding: '5px 6px',
-                  fontSize: 10.5,
-                  fontWeight: 600,
-                  background: '#153852',
-                  color: '#9beeff',
-                  border: '1px solid #00e5ff',
-                  borderRadius: 4,
-                  cursor: 'pointer',
-                }}
-              >
-                ✨ Extrude New Solid
-              </button>
-              <button
-                type="button"
-                data-testid="studio-inventor-revolve-btn"
-                onClick={handleInventorRevolveSketch}
-                style={{
-                  padding: '5px 6px',
-                  fontSize: 10.5,
-                  fontWeight: 600,
-                  background: '#3d2814',
-                  color: '#ffd29d',
-                  border: '1px solid #ff9f43',
-                  borderRadius: 4,
-                  cursor: 'pointer',
-                }}
-              >
-                🔄 Revolve 360° Lathe
+                🚀 Merge Donor BSP + Original Shaders{mergerConnectorMesh ? ' + Connector' : ''} Into Open Map BSP
               </button>
             </div>
-
-            {studioMode !== 'bsp' && (
-              <button
-                type="button"
-                onClick={handlePlaceCurrentComponentIntoBspEditor}
-                style={{
-                  padding: '5px 8px',
-                  fontSize: 10.5,
-                  fontWeight: 700,
-                  background: '#166534',
-                  color: '#ecfdf5',
-                  border: '1px solid #22c55e',
-                  borderRadius: 4,
-                  cursor: 'pointer',
-                }}
-              >
-                ➕ Add Extruded Solid to 3D BSP Editor
-              </button>
-            )}
-          </div>
+          )}
 
           {/* Topology & Whole-Mesh Transform Panel */}
           <div

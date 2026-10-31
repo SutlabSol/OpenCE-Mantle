@@ -41,6 +41,7 @@ export type WorldMaterialRole =
   | 'grass_ground'
   | 'sand_ground'
   | 'snow_ground'
+  | 'water_surface'
   | 'concrete_road'
   | 'sidewalk_concrete'
   | 'building_facade'
@@ -138,15 +139,16 @@ export type TerrainBiomePreset =
   | 'timberland_ridge'
   | 'icefields_glacier'
   | 'deathisland_mesa'
+  | 'island_atoll'
   | 'flat_forge_canvas';
 
 export interface TerrainGridConfig {
   enabled: boolean;
-  /** Total X size in world units (e.g. 60 .. 300). */
+  /** Total X size in world units (e.g. 60 .. 600). */
   sizeX: number;
-  /** Total Y size in world units (e.g. 60 .. 300). */
+  /** Total Y size in world units (e.g. 60 .. 600). */
   sizeY: number;
-  /** Subdivisions along X and Y (e.g. 16 .. 48). */
+  /** Subdivisions along X and Y (e.g. 16 .. 64). */
   steps: number;
   /** Flattened `(steps + 1) * (steps + 1)` Z heights array. */
   heights: number[];
@@ -154,6 +156,10 @@ export interface TerrainGridConfig {
   groundRole: WorldMaterialRole;
   /** Steep slope material role (`rock_wall`, `forerunner_wall`). */
   cliffRole: WorldMaterialRole;
+  /** Whether to generate an ocean/lake water plane at Z = 0 (enabled automatically for `island_atoll`). */
+  hasWaterPlane?: boolean;
+  /** Water surface Z elevation (default: 0). */
+  waterLevelZ?: number;
 }
 
 export type WorldAssetKind =
@@ -229,6 +235,12 @@ export interface GeneratedWorldTriangle {
   v1: number;
   v2: number;
   materialRole: WorldMaterialRole;
+  /** Optional explicit shader path from a merged donor BSP so original donor shaders are preserved. */
+  shaderPath?: string;
+  /** Optional explicit shader tagId in the target map. */
+  shaderTagId?: number;
+  /** Optional explicit shader class fourCC (e.g. 'senv', 'soso', 'swat', 'sgla', 'schi'). */
+  shaderClassFourCC?: string;
   /** True if this triangle is a visibility portal quad (`+portal`). */
   isPortal?: boolean;
 }
@@ -332,6 +344,13 @@ export const HALO_DEFAULT_SHADER_CATALOG: ReadonlyArray<{
     defaultPath: 'levels\\test\\icefields\\shaders\\snow',
     keywords: ['snow', 'ice', 'frost', 'glacier'],
     previewColorHex: '#e2e8f0',
+  },
+  {
+    role: 'water_surface',
+    label: 'Ocean / River Water Surface',
+    defaultPath: 'levels\\b30\\shaders\\water',
+    keywords: ['water', 'ocean', 'sea', 'wave', 'river', 'lake', 'pond', 'waterfall'],
+    previewColorHex: '#0284c7',
   },
   {
     role: 'concrete_road',
@@ -1492,13 +1511,92 @@ export function generateBridgeNetworkMesh(config: BridgeNetworkConfig): Generate
 }
 
 /**
- * Creates a default heightfield terrain configuration with a Halo CE biome preset.
+ * Samples the interpolated Z height of a `TerrainGridConfig` at world coordinates `(worldX, worldY)`.
+ */
+export function sampleTerrainHeightAt(terrain: TerrainGridConfig, worldX: number, worldY: number): number {
+  if (!terrain || !terrain.enabled || !terrain.heights || terrain.heights.length === 0) return 0;
+  const steps = Math.max(4, Math.min(64, Math.round(terrain.steps || 24)));
+  const stride = steps + 1;
+  const sizeX = Math.max(10, terrain.sizeX || 120);
+  const sizeY = Math.max(10, terrain.sizeY || 120);
+  const ux = Math.max(0, Math.min(1, (worldX + sizeX * 0.5) / sizeX));
+  const uy = Math.max(0, Math.min(1, (worldY + sizeY * 0.5) / sizeY));
+  const fx = ux * steps;
+  const fy = uy * steps;
+  const ix0 = Math.min(steps, Math.floor(fx));
+  const iy0 = Math.min(steps, Math.floor(fy));
+  const ix1 = Math.min(steps, ix0 + 1);
+  const iy1 = Math.min(steps, iy0 + 1);
+  const tx = fx - ix0;
+  const ty = fy - iy0;
+  const z00 = terrain.heights[iy0 * stride + ix0] ?? 0;
+  const z10 = terrain.heights[iy0 * stride + ix1] ?? 0;
+  const z01 = terrain.heights[iy1 * stride + ix0] ?? 0;
+  const z11 = terrain.heights[iy1 * stride + ix1] ?? 0;
+  const z0 = z00 + (z10 - z00) * tx;
+  const z1 = z01 + (z11 - z01) * tx;
+  return z0 + (z1 - z0) * ty;
+}
+
+/**
+ * Expands or resizes an existing `TerrainGridConfig` by `scaleFactor` (e.g. `1.25`, `1.5`, `2.0`)
+ * or to explicit `(newSizeX, newSizeY, newSteps)` while preserving all sculpted heightfield contours
+ * via bilinear resampling!
+ */
+export function expandTerrainGrid(
+  terrain: TerrainGridConfig,
+  scaleFactor = 1.25,
+  explicitSizeX?: number,
+  explicitSizeY?: number,
+  explicitSteps?: number,
+): TerrainGridConfig {
+  const factor = Math.max(0.5, Math.min(4.0, scaleFactor || 1.25));
+  const nextSizeX = Math.max(40, Math.min(600, Math.round(explicitSizeX ?? (terrain.sizeX || 120) * factor)));
+  const nextSizeY = Math.max(40, Math.min(600, Math.round(explicitSizeY ?? (terrain.sizeY || 120) * factor)));
+  const nextSteps = Math.max(
+    12,
+    Math.min(
+      64,
+      Math.round(
+        explicitSteps ??
+          Math.min(48, Math.max(terrain.steps || 24, Math.round((terrain.steps || 24) * Math.sqrt(factor)))),
+      ),
+    ),
+  );
+  const nextStride = nextSteps + 1;
+  const nextHeights = new Array<number>(nextStride * nextStride).fill(0);
+
+  for (let iy = 0; iy <= nextSteps; iy++) {
+    const uy = iy / nextSteps;
+    const oldWorldY = (uy - 0.5) * (terrain.sizeY || 120);
+    for (let ix = 0; ix <= nextSteps; ix++) {
+      const ux = ix / nextSteps;
+      const oldWorldX = (ux - 0.5) * (terrain.sizeX || 120);
+      nextHeights[iy * nextStride + ix] = Number(sampleTerrainHeightAt(terrain, oldWorldX, oldWorldY).toFixed(3));
+    }
+  }
+
+  return {
+    ...terrain,
+    sizeX: nextSizeX,
+    sizeY: nextSizeY,
+    steps: nextSteps,
+    heights: nextHeights,
+  };
+}
+
+/**
+ * Creates a practical, balanced, vehicle-drivable heightfield terrain configuration with a Halo CE biome preset:
+ * - Guaranteed flat Red & Blue Base Pads at `(-sizeX * 0.34, 0)` and `(+sizeX * 0.34, 0)` so bases and vehicles sit flush.
+ * - Smooth, drivable Warthog / Ghost combat valley floor & flanking lanes (`< 16°` slope).
+ * - Natural enclosing canyon rims (`bloodgulch_canyon`, `timberland_ridge`, `icefields_glacier`),
+ *   multi-tier tactical mesa (`deathisland_mesa`), or full ocean-surrounded coastal island (`island_atoll`).
  */
 export function createPresetTerrainGrid(
   preset: TerrainBiomePreset = 'bloodgulch_canyon',
   sizeX = 120,
   sizeY = 120,
-  steps = 24,
+  steps = 28,
 ): TerrainGridConfig {
   const safeSteps = Math.max(8, Math.min(64, Math.round(steps)));
   const stride = safeSteps + 1;
@@ -1506,53 +1604,114 @@ export function createPresetTerrainGrid(
 
   let groundRole: WorldMaterialRole = 'dirt_ground';
   let cliffRole: WorldMaterialRole = 'rock_wall';
+  let hasWaterPlane = false;
+  let waterLevelZ = 0;
 
-  // Multi-octave organic fBm displacement so generated terrain has natural ridges, gullies, and eroded hills
-  const fbm = (x: number, y: number): number => {
-    const o1 = Math.sin(x * 3.1 + Math.cos(y * 2.7)) * Math.cos(y * 3.3 - Math.sin(x * 2.4));
-    const o2 = 0.5 * Math.sin(x * 6.7 - y * 5.3 + 1.2) * Math.cos(x * 4.9 + y * 6.1);
-    const o3 = 0.25 * Math.cos(x * 13.1 + y * 11.7 - 0.7);
-    const o4 = 0.125 * Math.sin(x * 23.0 - y * 19.0);
-    return o1 + o2 + o3 + o4;
+  // Smooth low-frequency organic noise (avoids spiky unwalkable triangle vertices)
+  const smoothNoise = (x: number, y: number): number => {
+    const o1 = Math.sin(x * 2.4 + Math.cos(y * 2.1)) * Math.cos(y * 2.5 - Math.sin(x * 1.9));
+    const o2 = 0.35 * Math.sin(x * 4.8 - y * 4.1 + 0.9) * Math.cos(x * 3.7 + y * 4.5);
+    return o1 + o2;
+  };
+
+  // Smoothstep helper (0..1)
+  const smoothstep = (edge0: number, edge1: number, x: number): number => {
+    const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-5, edge1 - edge0)));
+    return t * t * (3 - 2 * t);
   };
 
   for (let iy = 0; iy <= safeSteps; iy++) {
     const ny = (iy / safeSteps) * 2 - 1; // -1 .. +1
     for (let ix = 0; ix <= safeSteps; ix++) {
       const nx = (ix / safeSteps) * 2 - 1; // -1 .. +1
-      const r = Math.hypot(nx, ny);
-      const detail = fbm(nx, ny);
+      const r = Math.hypot(nx * 0.92, ny * 1.08);
+      const detail = smoothNoise(nx, ny);
       let z = 0;
+
+      // Distance to Red Base (-0.64, 0) and Blue Base (+0.64, 0) in normalized (-1..1) space
+      const distRed = Math.hypot(nx + 0.64, ny);
+      const distBlue = Math.hypot(nx - 0.64, ny);
+      const basePadBlend = Math.max(
+        1 - smoothstep(0.14, 0.28, distRed),
+        1 - smoothstep(0.14, 0.28, distBlue),
+      );
+      // Central vehicle road corridor connecting Red & Blue bases along Y ≈ 0
+      const laneBlend = (1 - smoothstep(0.0, 0.72, Math.abs(nx))) * (1 - smoothstep(0.12, 0.36, Math.abs(ny)));
 
       if (preset === 'bloodgulch_canyon') {
         groundRole = 'sand_ground';
         cliffRole = 'rock_wall';
-        // Organic warped canyon rim + multi-tier rock ledges + rolling valley dunes
-        const canyonWarp = Math.abs(ny + 0.12 * Math.sin(nx * Math.PI * 1.8));
-        const canyonWall = Math.pow(Math.max(0, canyonWarp - 0.5) / 0.5, 1.65) * 15.5;
-        const terrace = canyonWall > 3.5 ? Math.round(canyonWall / 3.2) * 0.55 : 0;
-        const rollingDunes = detail * 1.45 + Math.sin(nx * Math.PI * 2.2) * 0.85;
-        z = canyonWall + terrace + rollingDunes;
+        // Wide box canyon with flat drivable valley floor, gentle central rolling hill, and enclosing rock canyon walls
+        const ovalDist = Math.max(Math.abs(nx) * 0.86, Math.abs(ny + 0.08 * Math.sin(nx * Math.PI * 1.5)));
+        const canyonWall = smoothstep(0.58, 0.96, ovalDist) * 14.5;
+        const sniperShelf = smoothstep(0.45, 0.58, Math.abs(ny)) * (1 - smoothstep(0.55, 0.8, Math.abs(nx))) * 2.4;
+        const valleyRoll = (1 - smoothstep(0.35, 0.65, ovalDist)) * (detail * 0.55 + Math.cos(nx * Math.PI * 2.0) * 0.4);
+        z = canyonWall + sniperShelf + valleyRoll;
+        // Flatten Red & Blue base pads to z = 0.2
+        z = z * (1 - basePadBlend) + 0.2 * basePadBlend;
       } else if (preset === 'timberland_ridge') {
         groundRole = 'grass_ground';
         cliffRole = 'rock_wall';
-        const rimWarp = r + 0.1 * Math.sin(Math.atan2(ny, nx) * 5 + r * 3);
-        const rim = Math.pow(Math.max(0, rimWarp - 0.48) / 0.52, 1.55) * 13.5;
-        const centralHill = Math.max(0, 1 - (r / 0.38) ** 2) * 4.2;
-        z = rim + centralHill + detail * 1.35;
+        // Alpine basin with outer pine ridge, walkable central tactical hill (3.2u high), and smooth vehicle ring road
+        const rimDist = Math.hypot(nx * 0.9, ny * 0.98) + 0.06 * Math.sin(Math.atan2(ny, nx) * 4);
+        const outerRim = smoothstep(0.62, 0.98, rimDist) * 13.0;
+        const centerHill = (1 - smoothstep(0.0, 0.26, Math.hypot(nx, ny))) * 2.8;
+        const meadowWave = detail * 0.5 * (1 - laneBlend * 0.6);
+        z = outerRim + centerHill + meadowWave;
+        z = z * (1 - basePadBlend) + 0.4 * basePadBlend;
       } else if (preset === 'icefields_glacier') {
         groundRole = 'snow_ground';
         cliffRole = 'rock_wall';
-        const gorgeDist = Math.abs(ny - 0.14 * Math.sin(nx * Math.PI * 1.5));
-        const gorge = gorgeDist < 0.26 ? -3.2 * (1 - gorgeDist / 0.26) : 0;
-        const ridge = Math.pow(gorgeDist, 1.45) * 9.5 + detail * 1.25;
-        z = gorge + ridge;
+        // Symmetrical snow valley with shallow frozen river channel down center (Y=0) and flanking glacier shelves
+        const outerWall = smoothstep(0.62, 0.98, Math.max(Math.abs(nx) * 0.88, Math.abs(ny))) * 12.5;
+        const riverChannel = (1 - smoothstep(0.0, 0.22, Math.abs(nx))) * -1.4;
+        const snowDrifts = detail * 0.45;
+        z = outerWall + riverChannel + snowDrifts;
+        z = z * (1 - basePadBlend) + 0.5 * basePadBlend;
       } else if (preset === 'deathisland_mesa') {
         groundRole = 'grass_ground';
         cliffRole = 'rock_wall';
-        const mesaR = r + 0.08 * detail;
-        const plateau = mesaR < 0.44 ? 7.2 : mesaR < 0.72 ? 7.2 * (1 - (mesaR - 0.44) / 0.28) : 0;
-        z = plateau + detail * 0.95;
+        // Elevated tactical plateau with wide vehicle ramps on East/West and flat base pads
+        const mesaR = Math.hypot(nx * 0.85, ny * 0.95);
+        const plateau = (1 - smoothstep(0.42, 0.78, mesaR)) * 4.8;
+        z = plateau + detail * 0.4 * (1 - basePadBlend);
+        const padTarget = (1 - smoothstep(0.42, 0.78, 0.64 * 0.85)) * 4.8;
+        z = z * (1 - basePadBlend) + padTarget * basePadBlend;
+      } else if (preset === 'island_atoll') {
+        // Relic / Death Island style Coastal Island surrounded by Ocean Water (z = 0)
+        groundRole = 'sand_ground';
+        cliffRole = 'rock_wall';
+        hasWaterPlane = true;
+        waterLevelZ = 0;
+
+        // Organic coastline radius: wider along X so Red & Blue coastal bases have generous land
+        const angle = Math.atan2(ny, nx);
+        const coastWarp = 0.06 * Math.cos(angle * 3) + 0.04 * Math.sin(angle * 5 + 0.8);
+        const islandR = Math.hypot(nx * 0.82, ny * 0.96) + coastWarp;
+
+        if (islandR > 0.86) {
+          // Deep ocean seabed outside shoreline
+          const seaDepth = smoothstep(0.86, 1.05, islandR);
+          z = -0.4 - seaDepth * 3.2;
+        } else if (islandR > 0.68) {
+          // Gently sloping sandy beach shoreline (-0.4u at water edge up to +1.5u inland) — 100% Warthog drivable!
+          const beachT = 1 - (islandR - 0.68) / 0.18;
+          z = -0.4 + smoothstep(0, 1, beachT) * 1.9 + detail * 0.18;
+        } else {
+          // Inland coastal grassland & central elevated Forerunner Relic plateau (+1.5u .. +4.2u)
+          const inlandBase = 1.5 + (1 - smoothstep(0.25, 0.68, islandR)) * 1.2;
+          // Central plateau with natural ramp corridors along X axis (ny near 0) so vehicles can drive up to the center!
+          const centerR = Math.hypot(nx * 1.15, ny * 1.25);
+          const centerPlateau = (1 - smoothstep(0.18, 0.38, centerR)) * 2.0;
+          z = inlandBase + centerPlateau + detail * 0.32 * (1 - basePadBlend);
+        }
+        // Level the Red & Blue coastal base pads at z = 2.0u
+        z = z * (1 - basePadBlend) + 2.0 * basePadBlend;
+      } else {
+        // flat_forge_canvas
+        groundRole = 'forerunner_floor';
+        cliffRole = 'forerunner_wall';
+        z = 0;
       }
 
       heights[iy * stride + ix] = Number(z.toFixed(3));
@@ -1567,8 +1726,123 @@ export function createPresetTerrainGrid(
     heights,
     groundRole,
     cliffRole,
+    hasWaterPlane,
+    waterLevelZ,
   };
 }
+
+/**
+ * Generates a balanced, symmetrical set of playable multiplayer bases, vehicle access ramps,
+ * central landmarks, sniper perches, and flanking boulder cover tailored to the chosen `TerrainBiomePreset` and world size.
+ */
+export function createDefaultFastGenPieces(
+  preset: TerrainBiomePreset = 'bloodgulch_canyon',
+  sizeX = 120,
+  sizeY = 120,
+): WorldBuilderPiece[] {
+  const baseX = Number((sizeX * 0.32).toFixed(1));
+  const rampX = Number((sizeX * 0.23).toFixed(1));
+  const flankY = Number((sizeY * 0.22).toFixed(1));
+  const perchX = Number((sizeX * 0.38).toFixed(1));
+  const perchY = Number((sizeY * 0.16).toFixed(1));
+
+  if (preset === 'flat_forge_canvas') {
+    return [
+      {
+        id: 'fg-red-base',
+        name: 'Red Team Base Bunker',
+        kind: 'forerunner_octagonal_room',
+        position: [-baseX, 0, 0],
+        size: [10, 10, 4.2],
+        yawDeg: 0,
+      },
+      {
+        id: 'fg-blue-base',
+        name: 'Blue Team Base Bunker',
+        kind: 'forerunner_octagonal_room',
+        position: [baseX, 0, 0],
+        size: [10, 10, 4.2],
+        yawDeg: 180,
+      },
+    ];
+  }
+
+  return [
+    {
+      id: 'fg-red-base',
+      name: 'Red Team Base (Walkable Bunker + Roof Deck)',
+      kind: 'forerunner_octagonal_room',
+      position: [-baseX, 0, 0],
+      size: [10, 10, 4.2],
+      yawDeg: 0,
+    },
+    {
+      id: 'fg-red-ramp',
+      name: 'Red Base Front Vehicle/Roof Ramp',
+      kind: 'forerunner_ramp',
+      position: [-rampX, 0, 0],
+      size: [7, 4.2, 4.2],
+      yawDeg: 180,
+    },
+    {
+      id: 'fg-blue-base',
+      name: 'Blue Team Base (Walkable Bunker + Roof Deck)',
+      kind: 'forerunner_octagonal_room',
+      position: [baseX, 0, 0],
+      size: [10, 10, 4.2],
+      yawDeg: 180,
+    },
+    {
+      id: 'fg-blue-ramp',
+      name: 'Blue Base Front Vehicle/Roof Ramp',
+      kind: 'forerunner_ramp',
+      position: [rampX, 0, 0],
+      size: [7, 4.2, 4.2],
+      yawDeg: 0,
+    },
+    {
+      id: 'fg-center-landmark',
+      name: preset === 'island_atoll' ? 'Central Relic Spire & Energy Core' : 'Central Tactical Archway & Cover',
+      kind: preset === 'island_atoll' ? 'forerunner_tower' : 'natural_arch',
+      position: [0, 0, 0],
+      size: preset === 'island_atoll' ? [9, 9, 11] : [14, 7, 5.5],
+      yawDeg: 90,
+    },
+    {
+      id: 'fg-north-boulders',
+      name: 'North Lane Cover Boulders',
+      kind: 'boulder_cluster',
+      position: [0, flankY, 0],
+      size: [8, 7, 3.8],
+      yawDeg: 25,
+    },
+    {
+      id: 'fg-south-boulders',
+      name: 'South Lane Cover Boulders',
+      kind: 'boulder_cluster',
+      position: [0, -flankY, 0],
+      size: [8, 7, 3.8],
+      yawDeg: 205,
+    },
+    {
+      id: 'fg-red-perch',
+      name: 'Red Flanking Sniper Perch',
+      kind: 'forerunner_sniper_perch',
+      position: [-perchX, perchY, 0],
+      size: [5, 5, 5.5],
+      yawDeg: 0,
+    },
+    {
+      id: 'fg-blue-perch',
+      name: 'Blue Flanking Sniper Perch',
+      kind: 'forerunner_sniper_perch',
+      position: [perchX, -perchY, 0],
+      size: [5, 5, 5.5],
+      yawDeg: 180,
+    },
+  ];
+}
+export const createDefaultQuickForgePieces = createDefaultFastGenPieces;
 
 /**
  * Applies an interactive terrain brush operation (`raise`, `lower`, `flatten`, `smooth`, `hills`, `canyon`, `crater`, `ridge`)
@@ -1663,18 +1937,19 @@ export function sculptTerrainGrid(
 }
 
 /**
- * Generates a complete QuickForge World BSP mesh combining:
- * 1. Sculptable Heightfield Terrain (hills, canyons, craters, natural slopes with cliff auto-texturing),
+ * Generates a complete FastGen / QuickForge World BSP mesh combining:
+ * 1. Sculptable Heightfield Terrain (hills, canyons, islands with ocean water plane, natural slopes with cliff & beach auto-texturing),
  * 2. Procedural Human City / Street Grid (roads, sidewalks, multi-story accessible buildings, highway overpass, street barricades),
- * 3. Modular Nature-Inspired & Forerunner-Styled Architectural Pieces.
+ * 3. Modular Nature-Inspired & Forerunner-Styled Architectural Pieces automatically snapped to the terrain surface with solid foundations.
  */
 export function generateQuickForgeWorldMesh(config: QuickForgeWorldConfig): GeneratedWorldMesh {
   const builder = new MeshBuilder([0, 0, 0], 0);
 
   // 1. Heightfield Terrain Mesh
   const t = config.terrain;
+  let minTerrainZ = 0;
   if (t && t.enabled) {
-    const steps = Math.max(4, Math.min(64, Math.round(t.steps || 20)));
+    const steps = Math.max(4, Math.min(64, Math.round(t.steps || 24)));
     const stride = steps + 1;
     const halfX = (t.sizeX || 120) * 0.5;
     const halfY = (t.sizeY || 120) * 0.5;
@@ -1685,6 +1960,7 @@ export function generateQuickForgeWorldMesh(config: QuickForgeWorldConfig): Gene
       const x = -halfX + ix * cellW;
       const y = -halfY + iy * cellH;
       const z = t.heights[iy * stride + ix] ?? 0;
+      if (z < minTerrainZ) minTerrainZ = z;
       return [x, y, z];
     };
 
@@ -1699,9 +1975,30 @@ export function generateQuickForgeWorldMesh(config: QuickForgeWorldConfig): Gene
           Math.abs(p11[2] - p00[2]),
           Math.abs(p01[2] - p00[2]),
         );
-        const role = maxDz / Math.max(0.5, Math.min(cellW, cellH)) > 0.65 ? t.cliffRole : t.groundRole;
+        const avgZ = (p00[2] + p10[2] + p11[2] + p01[2]) * 0.25;
+        let role: WorldMaterialRole = maxDz / Math.max(0.5, Math.min(cellW, cellH)) > 0.65 ? t.cliffRole : t.groundRole;
+        if ((t.hasWaterPlane || minTerrainZ < -0.5) && avgZ < 1.2 && role !== t.cliffRole) {
+          role = 'sand_ground';
+        }
         builder.addTriangle(p00, p10, p11, role, 0.18);
         builder.addTriangle(p00, p11, p01, role, 0.18);
+      }
+    }
+
+    // Generate Ocean / Lake Water Plane if enabled or if island seabed dips below Z = -0.5
+    if (t.hasWaterPlane || minTerrainZ < -0.5) {
+      const waterZ = t.waterLevelZ ?? 0.0;
+      const wSteps = 6;
+      const wStepX = (t.sizeX || 120) / wSteps;
+      const wStepY = (t.sizeY || 120) / wSteps;
+      for (let wy = 0; wy < wSteps; wy++) {
+        for (let wx = 0; wx < wSteps; wx++) {
+          const x0 = -halfX + wx * wStepX;
+          const x1 = x0 + wStepX;
+          const y0 = -halfY + wy * wStepY;
+          const y1 = y0 + wStepY;
+          builder.addQuad([x0, y0, waterZ], [x1, y0, waterZ], [x1, y1, waterZ], [x0, y1, waterZ], 'water_surface', 0.12);
+        }
       }
     }
   }
@@ -1896,16 +2193,33 @@ export function generateQuickForgeWorldMesh(config: QuickForgeWorldConfig): Gene
     }
   }
 
-  // 3. Modular Nature-Inspired, Forerunner & Human Pieces
+  // 3. Modular Nature-Inspired, Forerunner & Human Pieces (automatically snapped to terrain surface with solid foundations!)
   let pieceIdx = 0;
   for (const piece of config.pieces ?? []) {
     const pIdx = pieceIdx++;
-    const pBuilder = new MeshBuilder(piece.position, piece.yawDeg || 0);
+    const groundZ = t && t.enabled ? sampleTerrainHeightAt(t, piece.position[0], piece.position[1]) : 0;
+    const snappedPos: [number, number, number] = [
+      piece.position[0],
+      piece.position[1],
+      groundZ + (piece.position[2] || 0),
+    ];
+    const pBuilder = new MeshBuilder(snappedPos, piece.yawDeg || 0);
     const [sx, sy, sz] = [
       Math.max(1, piece.size[0] || 6),
       Math.max(1, piece.size[1] || 6),
       Math.max(0.5, piece.size[2] || 4),
     ];
+    // Solid foundation plinth extending 1.6u into terrain so pieces never float on sloped ground
+    if (
+      piece.kind === 'forerunner_bunker' ||
+      piece.kind === 'forerunner_octagonal_room' ||
+      piece.kind === 'forerunner_tower' ||
+      piece.kind === 'forerunner_sniper_perch' ||
+      piece.kind === 'forerunner_energy_core' ||
+      piece.kind === 'human_building'
+    ) {
+      pBuilder.addSolidBox(0, 0, -0.8, sx * 0.96, sy * 0.96, 1.6, 'forerunner_trim', 'forerunner_floor');
+    }
 
     switch (piece.kind) {
       case 'natural_arch': {
@@ -2043,15 +2357,22 @@ export function generateQuickForgeWorldMesh(config: QuickForgeWorldConfig): Gene
     }
   }
 
+  const spawnX = t && t.enabled ? -(t.sizeX || 120) * 0.28 : 0;
+  const spawnGroundZ = t && t.enabled ? sampleTerrainHeightAt(t, spawnX, 0) : 0;
+  const centerGroundZ = t && t.enabled ? sampleTerrainHeightAt(t, 0, 0) : 0;
+  const blueGroundZ = t && t.enabled ? sampleTerrainHeightAt(t, -spawnX, 0) : 0;
+
   return builder.finalize(
     [
-      [-10, 0, 0.5],
-      [0, 0, 0.5],
-      [10, 0, 0.5],
+      [spawnX, 0, spawnGroundZ + 0.5],
+      [0, 0, centerGroundZ + 0.5],
+      [-spawnX, 0, blueGroundZ + 0.5],
     ],
-    [0, 0, 2.0],
+    [spawnX, 0, spawnGroundZ + 1.8],
   );
 }
+export const generateFastGenWorldMesh = generateQuickForgeWorldMesh;
+export type FastGenWorldConfig = QuickForgeWorldConfig;
 
 /**
  * Exports a `GeneratedWorldMesh` to standard Wavefront `.OBJ` text with `usemtl <role>` groups,

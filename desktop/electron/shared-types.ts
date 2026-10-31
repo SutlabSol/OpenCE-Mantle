@@ -14,7 +14,15 @@ import type {
 import type { ModelRenderGeometry } from '../../core/src/render/model-geometry';
 import type { ReferencingTagSummary } from '../../core/src/map/tag-reverse-dependencies';
 import type { UnicodeStringItem, UnicodeStringListResult } from '../../core/src/map/unicode-string-editor';
-import type { BspInfo, BspSwapPreflightResult, BspSwapOptions, BspSwapResult } from '../../core/src/map/bsp-swapper';
+import type {
+  BspInfo,
+  BspSwapPreflightResult,
+  BspSwapOptions,
+  BspSwapResult,
+  BspModelSwapOptions,
+  BspModelPreflightResult,
+  BspModelSwapResult,
+} from '../../core/src/map/bsp-swapper';
 import type { BitmapTagSummary, BitmapImageInfo, BitmapSequenceInfo } from '../../core/src/render/bitmap-codec';
 import type { SoundTagSummary, SoundPitchRangeInfo, SoundPermutationInfo } from '../../core/src/render/sound-codec';
 import type { WrlDiagnostics, WrlPoint, WrlSegment, WrlFace, WrlSubmeshMatch, ToolDiagnostic, ToolLogReview } from '../../core/src/render/wrl-diagnostics';
@@ -76,6 +84,9 @@ export type {
   BspSwapPreflightResult,
   BspSwapOptions,
   BspSwapResult,
+  BspModelSwapOptions,
+  BspModelPreflightResult,
+  BspModelSwapResult,
   BitmapTagSummary,
   BitmapImageInfo,
   BitmapSequenceInfo,
@@ -761,6 +772,8 @@ export type WorkerRequest =
   | { type: 'bspSwapPreflight'; requestId: string; sourceFilePath: string; sourceBspIndex?: number; targetBspIndex?: number; sourceBspIndices?: number[] }
   | { type: 'getSourceBspMesh'; requestId: string; sourceFilePath: string; bspIndex?: number }
   | { type: 'performBspSwap'; requestId: string; sourceFilePath: string; options: BspSwapOptions; resourceMapPaths?: Partial<Record<ResourceMapKind, string | undefined>> }
+  | { type: 'bspModelPreflight'; requestId: string; modelPath: string; targetBspIndex?: number; options?: BspModelSwapOptions }
+  | { type: 'bspSwapFromModelFile'; requestId: string; modelPath: string; options?: BspModelSwapOptions }
   | { type: 'stageTagTestMap'; requestId: string; targetPath: string; bitmapsPath?: string; soundsPath?: string; liveHudMode?: boolean }
   | { type: 'getBitmapInfo'; requestId: string; tagIndex: number; bitmapsPath?: string }
   | { type: 'getBitmapRgba'; requestId: string; tagIndex: number; imageIndex: number; bitmapsPath?: string }
@@ -1027,7 +1040,75 @@ export type WorkerRequest =
       csvText: string;
       mode: 'amend' | 'replace';
     }
+  | {
+      type: 'runMapFixAction';
+      requestId: string;
+      action: MapFixActionKind;
+      filePath?: string;
+      outputPath?: string;
+      bitmapsPath?: string;
+      soundsPath?: string;
+      locPath?: string;
+      ceBitmapsPath?: string;
+      ceSoundsPath?: string;
+      ceLocPath?: string;
+    }
   | { type: 'cancel'; requestId: string };
+
+export type MapFixActionKind = 'ce' | 'mcc' | 'demo' | 'halomd' | 'xbox';
+
+export interface MapFixScriptMutationDto {
+  scriptName: string;
+  nodeIndex: number;
+  kind?: 'function_call' | 'global_set';
+  targetName?: string;
+  expression?: string;
+  reason?: string;
+  action: 'neutralized' | 'converted_to_game_revert' | 'already_fixed';
+}
+
+export interface MapFixReportDto {
+  action: MapFixActionKind;
+  ok: boolean;
+  isPlaceholder?: boolean;
+  message: string;
+  filePath?: string;
+  backupPath?: string;
+  readOnlyCleared?: boolean;
+  sourceEngineVersion?: number;
+  targetEngineVersion?: number;
+  mapName?: string;
+  previousCrc32?: number;
+  newCrc32?: number;
+  sourceByteLength?: number;
+  outputByteLength?: number;
+  pointersRebased?: number;
+  externalRangesInternalized?: number;
+  externalTagsLinkedToCe?: number;
+  modelsConverted?: number;
+  bspsDecompressed?: number;
+  bitmapsDeswizzled?: number;
+  p8BitmapsConverted?: number;
+  scriptFix?: {
+    totalScripts?: number;
+    scriptsChecked?: number;
+    totalGlobals?: number;
+    totalSyntaxNodes: number;
+    nodesNeutralized: number;
+    nodesConvertedToGameRevert: number;
+    nodesAlreadyFixed?: number;
+    alreadyFixedNodes?: number;
+    affectedScripts?: string[];
+    fixedNodes?: MapFixScriptMutationDto[];
+    mutations?: MapFixScriptMutationDto[];
+  };
+  details: string[];
+  map?: OpenMapSummary;
+}
+
+export type RunMapFixActionResult =
+  | ({ ok: true } & MapFixReportDto)
+  | { ok: false; cancelled?: boolean; code?: string; message: string };
 
 export interface DeprotectInspectionSummary {
   totalTags: number;
@@ -1151,7 +1232,11 @@ export type DeleteTagResult =
   | { ok: false; code: string; message: string };
 
 export type GetBspRenderMeshResult =
-  | { ok: true; mesh: BspRenderMesh }
+  | {
+      ok: true;
+      mesh: BspRenderMesh;
+      shaderTextures?: Record<string, { width: number; height: number; rgbaData: Uint8Array }>;
+    }
   | { ok: false; code: string; message: string };
 
 export type GetBitmapTextureResult =
@@ -1378,6 +1463,17 @@ export interface OpenceApi {
   getSourceBspMesh?(sourceFilePath: string, bspIndex?: number): Promise<GetBspRenderMeshResult>;
   /** Milestone 10: BSP Swapper - perform swap into currently open map. */
   performBspSwap(sourceFilePath: string, options: BspSwapOptions): Promise<BspSwapResult>;
+  /** Part 2: Direct 3D Model File (.glb / .gltf / .obj / .jms) BSP Replacement & Merge. */
+  pickBspModelFile(): Promise<{ path: string | null }>;
+  bspModelPreflight(
+    modelPath: string,
+    targetBspIndex?: number,
+    options?: BspModelSwapOptions,
+  ): Promise<BspModelPreflightResult>;
+  bspSwapFromModelFile(
+    modelPath: string,
+    options?: BspModelSwapOptions,
+  ): Promise<BspModelSwapResult & { map?: OpenMapSummary }>;
   /** Tools > Identify Resource Maps: reads and validates a bitmaps.map or sounds.map file for a specific Halo edition. */
   identifyResourceMap(filePath: string, expectedVersion?: HaloBitmapVersion, expectedKind?: 'bitmaps' | 'sounds'): Promise<BitmapIdentificationResult>;
   setResourceMapPath(kind: ResourceMapKind, filePath: string): Promise<{ ok: boolean }>;
@@ -1759,12 +1855,13 @@ export interface OpenceApi {
       }
     | { ok: false; cancelled?: boolean; message: string }
   >;
-  /** v0.6.8: Inject procedural Tunnel/Cave, Multi-Style Bridge, or QuickForge World mesh directly into the map's Structure BSP. */
+  /** v0.6.8: Inject procedural Tunnel/Cave, Multi-Style Bridge, or FastGen / Multi-Map World Merger mesh directly into the map's Structure BSP. */
   injectProceduralWorldBsp?(options: {
     worldMesh: any;
     bspIndex?: number;
     shaderBindings?: Record<string, { tagId: number; path: string; classFourCC: string }>;
     collisionMode?: 'auto' | 'exact';
+    donorMapFilePath?: string;
   }): Promise<
     | {
         ok: true;
@@ -2064,6 +2161,12 @@ export interface OpenceApi {
   onOpenMapSessionsChanged?(
     cb: (payload: { activeSessionId: string | null; sessions: OpenMapTabSession[] }) => void,
   ): () => void;
+
+  /** Toolbar -> Fixes dropdown actions (`Fix CE Map`, `Fix MCC Map`, `Fix Halo Demo Map`, `Fix Halo MD Map`, `Fix Xbox Map`). */
+  runMapFixAction(
+    action: MapFixActionKind,
+    options?: { useOpenMap?: boolean; filePath?: string; outputPath?: string },
+  ): Promise<RunMapFixActionResult>;
 }
 
 declare global {

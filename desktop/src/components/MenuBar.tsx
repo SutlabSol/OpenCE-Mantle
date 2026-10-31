@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import logoUrl from '../assets/logo.png';
 
 export interface MenuItem {
@@ -30,6 +30,7 @@ export default function MenuBar({
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [openSubmenu, setOpenSubmenu] = useState<string | null>(null);
   const [isMaximized, setIsMaximized] = useState(false);
+  const menuContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     window.opence?.windowIsMaximized?.().then((val) => setIsMaximized(Boolean(val))).catch(() => {});
@@ -44,6 +45,26 @@ export default function MenuBar({
     setOpenSubmenu(null);
   };
 
+  useEffect(() => {
+    if (!openMenu) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (menuContainerRef.current && !menuContainerRef.current.contains(e.target as Node)) {
+        handleMenuClose();
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        handleMenuClose();
+      }
+    };
+    window.addEventListener('mousedown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [openMenu]);
+
   return (
     <div
       data-testid="main-menu-bar"
@@ -56,9 +77,9 @@ export default function MenuBar({
         userSelect: 'none',
         position: 'relative',
         height: 29,
+        zIndex: 9990,
         WebkitAppRegion: 'drag',
       } as React.CSSProperties}
-      onMouseLeave={handleMenuClose}
     >
       <div
         style={{
@@ -77,6 +98,7 @@ export default function MenuBar({
 
       {/* Menu items (no-drag) */}
       <div
+        ref={menuContainerRef}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -89,12 +111,13 @@ export default function MenuBar({
           <div key={menu.label} style={{ position: 'relative', alignSelf: 'stretch', display: 'flex' }}>
             <div
               data-testid={`menu-${menu.label.toLowerCase()}`}
-              onClick={() => {
+              onMouseDown={(e) => {
+                e.stopPropagation();
                 setOpenMenu(openMenu === menu.label ? null : menu.label);
                 setOpenSubmenu(null);
               }}
               onMouseEnter={() => {
-                if (openMenu) {
+                if (openMenu && openMenu !== menu.label) {
                   setOpenMenu(menu.label);
                   setOpenSubmenu(null);
                 }
@@ -106,22 +129,27 @@ export default function MenuBar({
                 color: openMenu === menu.label ? 'var(--text-primary)' : 'var(--text-secondary)',
                 background: openMenu === menu.label ? 'var(--bg-hover)' : 'transparent',
                 cursor: 'pointer',
-              }}
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties}
             >
               {menu.label}
             </div>
             {openMenu === menu.label && (
               <div
+                role="menu"
+                onMouseDown={(e) => e.stopPropagation()}
                 style={{
                   position: 'absolute',
                   top: '100%',
                   left: 0,
-                  minWidth: 210,
+                  minWidth: 240,
                   background: 'var(--bg-panel)',
                   border: '1px solid var(--border)',
-                  boxShadow: '2px 4px 12px rgba(0,0,0,0.55)',
-                  zIndex: 1100,
-                }}
+                  boxShadow: '2px 6px 18px rgba(0,0,0,0.65)',
+                  zIndex: 9999,
+                  padding: '4px 0',
+                  WebkitAppRegion: 'no-drag',
+                } as React.CSSProperties}
               >
                 {menu.items.map((item, idx) => {
                   if (item.separator) {

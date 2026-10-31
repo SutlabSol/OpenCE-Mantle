@@ -176,7 +176,7 @@ export default function WorkspaceHome({
                 : 'Check Updates'}
             </div>
             <div style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--mono-font)', whiteSpace: 'nowrap' }}>
-              {updateAvailableVersion ? 'Click to download & install' : `Current v${appVersion || '0.7.0'}`}
+              {updateAvailableVersion ? 'Click to download & install' : `Current v${appVersion || '0.8.6'}`}
             </div>
           </div>
         </button>
@@ -301,7 +301,7 @@ export default function WorkspaceHome({
                 color: 'var(--text-primary)',
               }}
             >
-              MANTLE V{appVersion || '0.7.0'}
+              MANTLE V{appVersion || '0.8.6'}
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
               Halo CE Map &amp; Tag Studio
@@ -391,7 +391,7 @@ export default function WorkspaceHome({
           {/* 5 Bottom Navigation Buttons */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {[
-              { id: 'whats-new', label: "What's New", badge: `v${appVersion || '0.7.0'}`, onClick: onOpenWhatsNew },
+              { id: 'whats-new', label: "What's New", badge: `v${appVersion || '0.8.6'}`, onClick: onOpenWhatsNew },
               { id: 'help', label: 'Help', badge: 'About', onClick: onOpenHelp },
               { id: 'tutorials', label: 'Tutorials', badge: '16 Guides', onClick: onOpenTutorials },
               { id: 'glossary', label: 'Glossary', badge: 'UI Atlas', onClick: onOpenGlossary },

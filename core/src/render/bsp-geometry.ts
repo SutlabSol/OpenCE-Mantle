@@ -1,6 +1,7 @@
 import type { CacheFileHeader } from '../map/header';
 import type { TagIndex } from '../map/tag-index';
 import { resolveTagDataPointer } from '../map/tag-index';
+import { fourCCToString } from '../constants/tag-classes';
 import { decodeStruct, resolveStruct } from '../map/definitions/engine';
 import { locateStructureBsp } from '../map/definitions/validate-tag';
 
@@ -41,6 +42,10 @@ export interface BspSubmesh {
   lightmapBitmapIndex: number;
   /** Tag ID of the shader tag (e.g. senv/soso/schi/etc). */
   shaderTagId: number;
+  /** Optional tag path of the shader tag (e.g. 'levels\\test\\bloodgulch\\shaders\\ground'). */
+  shaderPath?: string;
+  /** Optional 4-char class FourCC of the shader tag (e.g. 'senv'). */
+  shaderClassFourCC?: string;
   /** Shader permutation index. */
   shaderPermutation: number;
   /** Number of vertices in this submesh. */
@@ -401,11 +406,14 @@ export function extractBspRenderMesh(
         maxZ === -Infinity ? 0 : maxZ,
       ];
 
+      const shaderEntry = shaderTagId !== 0xffffffff ? tagIndex.entries[shaderTagId & 0xffff] : undefined;
       submeshes.push({
         submeshIndex: submeshCounter++,
         lightmapIndex: lmIdx,
         lightmapBitmapIndex,
         shaderTagId,
+        shaderPath: shaderEntry?.path || undefined,
+        shaderClassFourCC: shaderEntry ? fourCCToString(shaderEntry.primaryClassFourCC) : undefined,
         shaderPermutation,
         vertexCount,
         vertices,

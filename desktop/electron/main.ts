@@ -126,6 +126,9 @@ import type {
   BspSwapPreflightResult,
   BspSwapOptions,
   BspSwapResult,
+  BspModelSwapOptions,
+  BspModelPreflightResult,
+  BspModelSwapResult,
   Export3dResult,
   GetBitmapInfoResult,
   GetBitmapRgbaResult,
@@ -144,6 +147,8 @@ import type {
   SpoofMapCrc32Result,
   AppThemeId,
   OpenMapTabSession,
+  MapFixActionKind,
+  RunMapFixActionResult,
 } from './shared-types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -2414,6 +2419,90 @@ async function performBspSwapFlow(sourceFilePath: string, options: BspSwapOption
   }
 }
 
+async function pickBspModelFileFlow(): Promise<{ path: string | null }> {
+  if (!mainWindow) return { path: null };
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select 3D Model File (.glb, .gltf, .obj, .jms) for BSP Injection',
+    filters: [
+      { name: '3D Model Files (*.glb, *.gltf, *.obj, *.jms)', extensions: ['glb', 'gltf', 'obj', 'jms'] },
+      { name: 'glTF 2.0 (*.glb, *.gltf)', extensions: ['glb', 'gltf'] },
+      { name: 'Wavefront OBJ (*.obj)', extensions: ['obj'] },
+      { name: 'Halo CE JMS (*.jms)', extensions: ['jms'] },
+      { name: 'All Files (*.*)', extensions: ['*'] },
+    ],
+    properties: ['openFile'],
+  });
+  if (canceled || filePaths.length === 0) return { path: null };
+  return { path: filePaths[0] };
+}
+
+async function bspModelPreflightFlow(
+  modelPath: string,
+  targetBspIndex?: number,
+  options?: BspModelSwapOptions,
+): Promise<BspModelPreflightResult> {
+  const { promise } = sendWorkerRequest<BspModelPreflightResult>(
+    { type: 'bspModelPreflight', modelPath, targetBspIndex, options },
+    sendLog,
+  );
+  return promise;
+}
+
+async function bspSwapFromModelFileFlow(
+  modelPath: string,
+  options?: BspModelSwapOptions,
+): Promise<BspModelSwapResult & { map?: OpenMapSummary }> {
+  const { promise } = sendWorkerRequest<BspModelSwapResult & { map?: OpenMapSummary }>(
+    { type: 'bspSwapFromModelFile', modelPath, options },
+    sendLog,
+    (stage, percent) =>
+      mainWindow?.webContents.send('map:progress', { taskId: 'bspSwapFromModelFile', stage, percent }),
+  );
+  try {
+    const result = await promise;
+    if (result.ok && result.map) {
+      setOpenMapState(result.map);
+      mainWindow?.webContents.send('map:updated', result.map);
+      sendLog(
+        'info',
+        `Injected 3D model "${result.summary.modelFileName}" (${result.summary.injectionMode}) into BSP "${result.summary.targetBspName}" (${result.summary.totalTriangles.toLocaleString()} tris, ${result.summary.injectedBitmaps} bitmaps, ${result.summary.injectedShaders} shaders). Use File > Save to write changes.`,
+      );
+    }
+    return result;
+  } catch (err) {
+    const e = err as Error & { code?: string };
+    sendLog('error', `Model BSP injection failed: ${e.message}`);
+    return {
+      ok: false,
+      buffer: Buffer.alloc(0),
+      summary: {
+        modelFileName: path.basename(modelPath),
+        targetBspName: '',
+        injectionMode: options?.injectionMode === 'merge' ? 'merge' : 'replace',
+        oldSize: 0,
+        newSize: 0,
+        delta: 0,
+        weldedVertices: 0,
+        totalTriangles: 0,
+        solidCollisionTriangles: 0,
+        foliageTriangles: 0,
+        submeshChunks: 0,
+        injectedBitmaps: 0,
+        injectedShaders: 0,
+        collisionNodes3d: 0,
+        collisionSurfaces: 0,
+        relocatedSpawns: 0,
+        strippedDobc: false,
+        strippedDecals: false,
+        newBspAddress: 0,
+        newBspSize: 0,
+        worldBounds: [0, 0, 0, 0, 0, 0],
+      },
+      error: e.message,
+    };
+  }
+}
+
 /** Main-process side of File > Save (native menu, renderer IPC, unsaved-changes prompt). Logic lives in save-map.ts. */
 const saveMapDeps: SaveMapDeps = {
   getOpenMap: () =>
@@ -2836,6 +2925,17 @@ app.whenReady().then(() => {
   );
   ipcMain.handle('bsp:performSwap', (_e, sourceFilePath: string, options: BspSwapOptions) =>
     performBspSwapFlow(sourceFilePath, options),
+  );
+  ipcMain.handle('dialog:pickBspModelFile', () => pickBspModelFileFlow());
+  ipcMain.handle(
+    'bsp:modelPreflight',
+    (_e, modelPath: string, targetBspIndex?: number, options?: BspModelSwapOptions) =>
+      bspModelPreflightFlow(modelPath, targetBspIndex, options),
+  );
+  ipcMain.handle(
+    'bsp:swapFromModelFile',
+    (_e, modelPath: string, options?: BspModelSwapOptions) =>
+      bspSwapFromModelFileFlow(modelPath, options),
   );
   ipcMain.handle('render:getBspMesh', (_e, bspIndex?: number) => getBspRenderMeshFlow(bspIndex));
   ipcMain.handle('render:getBitmapTexture', (_e, bitmapTagId: number, imageIndex?: number) => getBitmapTextureFlow(bitmapTagId, imageIndex));
@@ -4153,6 +4253,7 @@ app.whenReady().then(() => {
         bspIndex?: number;
         shaderBindings?: Record<string, { tagId: number; path: string; classFourCC: string }>;
         collisionMode?: 'auto' | 'exact';
+        donorMapFilePath?: string;
       },
     ) => {
       if (!currentMapPath || currentMapCompressed) {
@@ -4165,7 +4266,8 @@ app.whenReady().then(() => {
           bspIndex: options.bspIndex,
           shaderBindings: options.shaderBindings,
           collisionMode: options.collisionMode,
-        },
+          donorMapFilePath: options.donorMapFilePath,
+        } as any,
         sendLog,
       );
       const res = await promise;
@@ -5155,6 +5257,107 @@ if ($proc) {
     mainWindow?.focus();
     return { ok: true };
   });
+
+  ipcMain.handle(
+    'map:runFixAction',
+    async (
+      _evt,
+      action: MapFixActionKind,
+      options?: { useOpenMap?: boolean; filePath?: string; outputPath?: string },
+    ): Promise<RunMapFixActionResult> => {
+      const actionLabelMap: Record<MapFixActionKind, { title: string; expectedEngine: number }> = {
+        ce: { title: 'Fix CE Map (Halo Custom Edition v609)', expectedEngine: 609 },
+        mcc: { title: 'Fix MCC Map (Halo MCC CEA v13 / H1EK -> CE v609)', expectedEngine: 13 },
+        demo: { title: 'Fix Halo Demo Map (Halo Trial / Mac Demo v6 -> CE v609)', expectedEngine: 6 },
+        halomd: { title: 'Fix Halo MD Map (HaloMD / Retail v7 -> CE v609)', expectedEngine: 7 },
+        xbox: { title: 'Fix Xbox Map (Original Xbox v5 -> CE v609)', expectedEngine: 5 },
+      };
+      const meta = actionLabelMap[action];
+
+      let targetFilePath = options?.filePath;
+      if (!targetFilePath) {
+        if (options?.useOpenMap && currentMapPath) {
+          targetFilePath = currentMapPath;
+        } else if (
+          currentMapPath &&
+          currentOpenMapSummary &&
+          (currentOpenMapSummary.header.engine === meta.expectedEngine ||
+            (action === 'mcc' && currentOpenMapSummary.header.engine === 609))
+        ) {
+          const openName = path.basename(currentMapPath);
+          const { response } = await dialog.showMessageBox(mainWindow!, {
+            type: 'question',
+            buttons: [`Fix Open Map (${openName})`, 'Browse for Another .map File...', 'Cancel'],
+            defaultId: 0,
+            cancelId: 2,
+            noLink: true,
+            title: meta.title,
+            message: `Run "${meta.title}" on the currently open map (${openName})?`,
+            detail:
+              'A .bak backup will be created automatically and any Windows ReadOnly attribute will be cleared before writing.',
+          });
+          if (response === 2) {
+            return { ok: false, cancelled: true, message: 'Cancelled by user.' };
+          }
+          if (response === 0) {
+            targetFilePath = currentMapPath;
+          }
+        }
+      }
+
+      if (!targetFilePath) {
+        const pick = await dialog.showOpenDialog(mainWindow!, {
+          title: `Select .map File — ${meta.title}`,
+          filters: [{ name: 'Halo Cache Map (*.map)', extensions: ['map'] }],
+          properties: ['openFile'],
+        });
+        if (pick.canceled || pick.filePaths.length === 0) {
+          return { ok: false, cancelled: true, message: 'Cancelled by user.' };
+        }
+        targetFilePath = pick.filePaths[0]!;
+      }
+
+      const settings = getSettings();
+      const ceRes = settings.versionResourceMaps?.ce ?? settings.resourceMaps ?? {};
+      const srcVerKey = action === 'demo' ? 'demo' : action === 'halomd' ? 'pc' : 'ce';
+      const srcRes = settings.versionResourceMaps?.[srcVerKey] ?? settings.resourceMaps ?? {};
+
+      sendLog('info', `Running ${meta.title} on ${path.basename(targetFilePath)}...`);
+      try {
+        const { promise } = sendWorkerRequest<RunMapFixActionResult>(
+          {
+            type: 'runMapFixAction',
+            action,
+            filePath: targetFilePath,
+            outputPath: options?.outputPath,
+            bitmapsPath: srcRes.bitmaps,
+            soundsPath: srcRes.sounds,
+            locPath: srcRes.loc,
+            ceBitmapsPath: ceRes.bitmaps,
+            ceSoundsPath: ceRes.sounds,
+            ceLocPath: ceRes.loc,
+          },
+          sendLog,
+          (stage, percent) => {
+            mainWindow?.webContents.send('app:progress', { stage, percent });
+          },
+        );
+        const res = await promise;
+        if (res.ok && res.map) {
+          setOpenMapState(res.map);
+          addRecentMap(res.map.filePath);
+          sendLog('info', res.message);
+        } else if (!res.ok) {
+          sendLog('error', `Map fix failed: ${res.message}`);
+        }
+        return res;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendLog('error', `Map fix failed: ${msg}`);
+        return { ok: false, code: 'FIX_FAILED', message: msg };
+      }
+    },
+  );
 
   // Ensure any previous uncleaned init.txt from crashes is restored to normal
   try {

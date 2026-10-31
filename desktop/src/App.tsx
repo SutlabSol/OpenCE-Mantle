@@ -47,7 +47,9 @@ import type {
   AppThemeId,
   BatchExtractPreflightResult,
   HaloBitmapVersion,
+  MapFixActionKind,
   OpenMapTabSession,
+  RunMapFixActionResult,
   UpdateCheckResult,
   UpdateDownloadProgressEvent,
 } from '../electron/shared-types';
@@ -103,7 +105,7 @@ export default function App() {
   const [skippedPromptMapPaths, setSkippedPromptMapPaths] = useState<Set<string>>(new Set());
   const [updateBanner, setUpdateBanner] = useState<Extract<UpdateCheckResult, { ok: true }> | null>(null);
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<UpdateDownloadProgressEvent | null>(null);
-  const [appVersion, setAppVersion] = useState<string>('0.7.0');
+  const [appVersion, setAppVersion] = useState<string>('0.8.6');
   const [currentTheme, setCurrentTheme] = useState<AppThemeId>('dark');
   const [showLauncherHome, setShowLauncherHome] = useState<boolean>(true);
   const [themeModalOpen, setThemeModalOpen] = useState(false);
@@ -114,9 +116,11 @@ export default function App() {
   const [communityModalOpen, setCommunityModalOpen] = useState(false);
   const [openSessions, setOpenSessions] = useState<OpenMapTabSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [leftSessionId, setLeftSessionId] = useState<string | null>(null);
   const [secondarySessionId, setSecondarySessionId] = useState<string | null>(null);
   const [splitViewEnabled, setSplitViewEnabled] = useState(false);
-  const [splitRatio, setSplitRatio] = useState(0.58);
+  const [activeSplitSide, setActiveSplitSide] = useState<'left' | 'right'>('left');
+  const [splitRatio, setSplitRatio] = useState(0.5);
   const [isCheckingUpdatesManual, setIsCheckingUpdatesManual] = useState(false);
   const [launcherUpdateStatusMsg, setLauncherUpdateStatusMsg] = useState<string | null>(null);
   const detachedSessionIdParam =
@@ -208,10 +212,36 @@ export default function App() {
     resetSelectionState();
   };
 
+  const handleFocusSplitSide = async (side: 'left' | 'right', targetSessionId?: string | null) => {
+    setActiveSplitSide(side);
+    const sid =
+      targetSessionId ??
+      (side === 'left'
+        ? (leftSessionId ?? activeSessionId)
+        : (secondarySessionId ?? openSessions.find((s) => s.sessionId !== (leftSessionId ?? activeSessionId))?.sessionId ?? null));
+    if (!sid || sid === activeSessionId) return;
+    const res = await window.opence.switchActiveMapSession?.(sid);
+    if (res?.ok && res.session) {
+      setActiveSessionId(sid);
+      setMapState(res.session.map);
+    }
+  };
+
   const handleSwitchSession = async (sessionId: string, focusTagPath?: string) => {
     const res = await window.opence.switchActiveMapSession?.(sessionId);
     if (res?.ok && res.session) {
       setActiveSessionId(sessionId);
+      if (!splitViewEnabled) {
+        setLeftSessionId(sessionId);
+      } else if (sessionId === leftSessionId) {
+        setActiveSplitSide('left');
+      } else if (sessionId === secondarySessionId) {
+        setActiveSplitSide('right');
+      } else if (activeSplitSide === 'right') {
+        setSecondarySessionId(sessionId);
+      } else {
+        setLeftSessionId(sessionId);
+      }
       setMapState(res.session.map);
       setShowLauncherHome(false);
       resetSelectionState();
@@ -232,6 +262,9 @@ export default function App() {
     if (!res?.ok) return;
     setOpenSessions(res.sessions);
     setActiveSessionId(res.activeSessionId);
+    if (leftSessionId === sessionId) {
+      setLeftSessionId(res.activeSessionId);
+    }
     if (res.activeSessionId) {
       const next = res.sessions.find((s) => s.sessionId === res.activeSessionId);
       if (next) {
@@ -266,6 +299,9 @@ export default function App() {
         if (!res) return;
         setOpenSessions(res.sessions);
         setActiveSessionId(res.activeSessionId);
+        if (res.activeSessionId) {
+          setLeftSessionId((prev) => prev ?? res.activeSessionId);
+        }
         if (detachedSessionIdParam) {
           const detSession = res.sessions.find((s) => s.sessionId === detachedSessionIdParam);
           if (detSession) {
@@ -279,13 +315,19 @@ export default function App() {
     const offSessions = window.opence.onOpenMapSessionsChanged?.((payload) => {
       setOpenSessions(payload.sessions);
       setActiveSessionId(payload.activeSessionId);
+      setLeftSessionId((prev) => {
+        if (prev && payload.sessions.some((s) => s.sessionId === prev)) {
+          return prev;
+        }
+        return payload.activeSessionId ?? payload.sessions[0]?.sessionId ?? null;
+      });
       if (payload.sessions.length >= 2) {
         setSecondarySessionId((prev) => {
-          if (prev && payload.sessions.some((s) => s.sessionId === prev && s.sessionId !== payload.activeSessionId)) {
+          if (prev && payload.sessions.some((s) => s.sessionId === prev)) {
             return prev;
           }
           const other = payload.sessions.find((s) => s.sessionId !== payload.activeSessionId);
-          return other?.sessionId ?? null;
+          return other?.sessionId ?? payload.sessions[1]?.sessionId ?? null;
         });
       }
     });
@@ -316,7 +358,14 @@ export default function App() {
   };
 
   useEffect(() => {
-    const onOpenWorldMerger = () => setBspSwapperOpen(true);
+    const onOpenWorldMerger = () => {
+      setShowLauncherHome(false);
+      setCenterTab('bsp-model-studio');
+      window.dispatchEvent(new CustomEvent('opence:switch-center-tab', { detail: 'bsp-model-studio' }));
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('opence:activate-studio-merger'));
+      }, 30);
+    };
     window.addEventListener('opence:open-world-merger', onOpenWorldMerger);
     return () => window.removeEventListener('opence:open-world-merger', onOpenWorldMerger);
   }, []);
@@ -534,6 +583,32 @@ export default function App() {
     }
   };
 
+  const [mapFixBusy, setMapFixBusy] = useState<MapFixActionKind | null>(null);
+  const [mapFixResult, setMapFixResult] = useState<RunMapFixActionResult | null>(null);
+
+  const handleRunMapFixAction = async (action: MapFixActionKind) => {
+    try {
+      setMapFixBusy(action);
+      const res = await window.opence.runMapFixAction(action);
+      setMapFixBusy(null);
+      if (!res.ok && res.cancelled) {
+        return;
+      }
+      if (res.ok && res.map) {
+        setMapState(res.map);
+        setShowLauncherHome(false);
+        resetSelectionState();
+      }
+      setMapFixResult(res);
+    } catch (err) {
+      setMapFixBusy(null);
+      setMapFixResult({
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
   let extractDisabledReason: string | null = null;
   if (!canExtract) extractDisabledReason = 'Open (and decompress, if needed) a map first.';
   else if (isWalkOrExtractRunning) extractDisabledReason = 'A dependency walk or extraction is already running.';
@@ -587,11 +662,13 @@ export default function App() {
           {
             label: 'Tools',
             items: [
-              { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
-              { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
-              { label: 'HaloScript (.hsc) IDE & Sample Scripts...', onClick: () => setScriptEditorOpen(true), disabled: !canExtract },
-              { label: 'Universal Converter, Scanner & Mod Studio...', onClick: () => setModdingStudioOpen(true), disabled: !canExtract },
-              { label: 'Compare With Another .map File...', onClick: () => setMapCompareOpen(true), disabled: !canExtract },
+              {
+                label: '🐒 Baboon / Foundry Parity & Loose tags/ Studio...',
+                onClick: () => {
+                  setBaboonStudioTab('loose-workspace');
+                  setBaboonStudioOpen(true);
+                },
+              },
               {
                 label: '🧭 Content Explorer, Dependency Auto-Fix & Refactoring...',
                 onClick: () => {
@@ -615,8 +692,30 @@ export default function App() {
                 },
                 disabled: !canExtract,
               },
+              { label: '', separator: true },
+              {
+                label: '🌍 Multi-Map World Merger (2 Maps in 1 BSP + Tunnels/Bridges)...',
+                onClick: () => window.dispatchEvent(new CustomEvent('opence:open-world-merger')),
+                disabled: !canExtract,
+              },
+              { label: '🔄 Swap Structure BSP...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
+              { label: '', separator: true },
+              { label: 'Extract to OpenCE Forge...', onClick: () => setForgeExportOpen(true), disabled: !canExtract },
+              { label: 'Build New Object Tag...', onClick: () => setBuildObjectTagOpen(true) },
+              { label: 'HaloScript (.hsc) IDE & Sample Scripts...', onClick: () => setScriptEditorOpen(true), disabled: !canExtract },
+              { label: 'Universal Converter, Scanner & Mod Studio...', onClick: () => setModdingStudioOpen(true), disabled: !canExtract },
+              { label: 'Compare With Another .map File...', onClick: () => setMapCompareOpen(true), disabled: !canExtract },
               { label: 'Verify Embedded Data...', onClick: () => setVerifyDialogOpen(true), disabled: !canVerifyEmbeddedData },
-              { label: '🌍 Swap BSP & Multi-Map World Merger...', onClick: () => setBspSwapperOpen(true), disabled: !canExtract },
+            ],
+          },
+          {
+            label: 'Fixes',
+            items: [
+              { label: 'Fix CE Map', onClick: () => void handleRunMapFixAction('ce') },
+              { label: 'Fix MCC Map', onClick: () => void handleRunMapFixAction('mcc') },
+              { label: 'Fix Halo Demo Map', onClick: () => void handleRunMapFixAction('demo') },
+              { label: 'Fix Halo MD Map', onClick: () => void handleRunMapFixAction('halomd') },
+              { label: 'Fix Xbox Map', onClick: () => void handleRunMapFixAction('xbox') },
             ],
           },
           {
@@ -643,6 +742,7 @@ export default function App() {
           onExtract={() => requestExtract(Array.from(selectedTagIndices))}
           onExtractWholeMap={() => void handleBatchExtract()}
           onInject={() => setInjectDialogOpen(true)}
+          onRunMapFixAction={(action) => void handleRunMapFixAction(action)}
           onOpenLiveHudEditor={() => setLiveHudEditorOpen(true)}
           onOpenHudBitmapInjector={() => {
             setHudBitmapInjectorInitial(null);
@@ -864,159 +964,269 @@ export default function App() {
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {!showLauncherHome && mapState?.status === 'ok' ? (
-          <>
-            <div
-              style={{
-                flex: splitViewEnabled ? `0 0 ${Math.round(splitRatio * 100)}%` : 1,
-                display: 'flex',
-                minWidth: 0,
-                minHeight: 0,
-              }}
-            >
-              <TagBrowser
-                tags={mapState.tags}
-                focusedTag={focusedTag}
-                onFocusTag={setFocusedTag}
-                selected={selectedTagIndices}
-                onSelectedChange={setSelectedTagIndices}
-                onExtractRequested={requestExtract}
-                extractDisabledReason={extractDisabledReason}
-                onExtractWholeMap={handleBatchExtract}
-                canExtractWholeMap={canExtract}
-                onEditTag={setEditingTag}
-                onFindReferences={(tag) => {
-                  setFocusedTag(tag);
-                  setSelectedTagIndices(new Set([tag.index]));
-                  setPropertiesPaletteTab('references');
-                }}
-                onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
-                onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
-                onDeleteTag={(tag) => setTagAction({ action: 'delete', tag })}
-                onOpenBitmapEditor={setBitmapEditorTag}
-                onOpenSoundAuditor={setSoundAuditorTag}
-                onOpenHudPreviewer={setHudPreviewerTag}
-              />
-              <CenterWorkspace
-                header={mapState.header}
-                allTags={mapState.tags}
-                onActiveTabChange={setCenterTab}
-                onSelectObjectTag={(tagId, objectPath) => {
-                  if (mapState?.status !== 'ok') return;
-                  const target =
-                    mapState.tags.find((t) => t.tagId === tagId) ??
-                    mapState.tags.find((t) => (t.tagId & 0xffff) === (tagId & 0xffff)) ??
-                    (objectPath
-                      ? mapState.tags.find((t) => t.path.toLowerCase() === objectPath.toLowerCase())
-                      : undefined);
-                  if (target) {
-                    setFocusedTag(target);
-                    setSelectedTagIndices(new Set([target.index]));
-                  }
-                }}
-                onOpenTagEditor={(tagIndexOrPath) => {
-                  if (mapState?.status !== 'ok') return;
-                  const target =
-                    typeof tagIndexOrPath === 'number'
-                      ? (mapState.tags.find((t) => t.index === tagIndexOrPath) ?? mapState.tags[tagIndexOrPath])
-                      : mapState.tags.find(
-                          (t) =>
-                            t.path.toLowerCase() === tagIndexOrPath.toLowerCase() ||
-                            t.path.toLowerCase().endsWith(tagIndexOrPath.toLowerCase()),
-                        );
-                  if (target) {
-                    setFocusedTag(target);
-                    setSelectedTagIndices(new Set([target.index]));
-                    setEditingTag(target);
-                  }
-                }}
-              />
-              {centerTab !== 'bitmap-3d' && centerTab !== 'bsp-model-studio' && (
-                <PropertiesPalette
-                  focusedTag={focusedTag}
-                  allTags={mapState.tags}
-                  activeTab={propertiesPaletteTab}
-                  onTabChange={setPropertiesPaletteTab}
-                  onSelectTag={(idx) => {
-                    const t = mapState.tags.find((tag) => tag.index === idx) ?? mapState.tags[idx];
-                    if (t) {
-                      setFocusedTag(t);
-                      setSelectedTagIndices(new Set([t.index]));
-                    }
-                  }}
-                />
-              )}
-            </div>
-
-            {splitViewEnabled && (
+          (() => {
+            const pinnedLeftSession =
+              openSessions.find((s) => s.sessionId === leftSessionId) ??
+              openSessions.find((s) => s.sessionId === activeSessionId) ??
+              openSessions[0] ??
+              null;
+            const leftMap = splitViewEnabled && pinnedLeftSession?.map ? pinnedLeftSession.map : mapState;
+            const isLeftActive = !splitViewEnabled || activeSplitSide === 'left';
+            const pinnedRightSession =
+              openSessions.find((s) => s.sessionId === secondarySessionId) ??
+              openSessions.find((s) => s.sessionId !== (pinnedLeftSession?.sessionId ?? activeSessionId)) ??
+              null;
+            return (
               <>
-                {/* Draggable Vertical Center Divider */}
                 <div
-                  data-testid="split-view-divider"
-                  title="Drag horizontally to resize side-by-side map comparison panes"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    const onMove = (moveEvt: MouseEvent) => {
-                      const next = Math.max(0.3, Math.min(0.75, moveEvt.clientX / window.innerWidth));
-                      setSplitRatio(next);
-                    };
-                    const onUp = () => {
-                      window.removeEventListener('mousemove', onMove);
-                      window.removeEventListener('mouseup', onUp);
-                    };
-                    window.addEventListener('mousemove', onMove);
-                    window.addEventListener('mouseup', onUp);
+                  data-testid="split-left-instance-pane"
+                  onMouseDownCapture={() => {
+                    if (splitViewEnabled && activeSplitSide !== 'left') {
+                      void handleFocusSplitSide('left', pinnedLeftSession?.sessionId);
+                    }
                   }}
                   style={{
-                    width: 6,
-                    cursor: 'col-resize',
-                    background: 'var(--bg-panel-header)',
-                    borderLeft: '1px solid var(--border)',
-                    borderRight: '1px solid var(--border)',
+                    flex: splitViewEnabled ? `0 0 ${Math.round(splitRatio * 100)}%` : 1,
                     display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: 'var(--accent-cyan)',
-                    fontSize: 9,
-                    userSelect: 'none',
-                    flexShrink: 0,
+                    flexDirection: 'column',
+                    minWidth: 0,
+                    minHeight: 0,
+                    outline: splitViewEnabled
+                      ? isLeftActive
+                        ? '2px solid var(--accent-cyan)'
+                        : '1px solid var(--border)'
+                      : 'none',
+                    outlineOffset: -2,
                   }}
                 >
-                  ⋮
+                  {splitViewEnabled && (
+                    <div
+                      style={{
+                        padding: '4px 10px',
+                        background: isLeftActive ? 'rgba(0, 212, 255, 0.12)' : 'var(--bg-panel-header)',
+                        borderBottom: `1px solid ${isLeftActive ? 'var(--accent-cyan)' : 'var(--border)'}`,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <span
+                          style={{
+                            fontFamily: 'var(--mono-font)',
+                            fontSize: 10,
+                            fontWeight: 700,
+                            padding: '1px 6px',
+                            background: isLeftActive ? 'var(--accent-cyan)' : 'var(--bg-control)',
+                            color: isLeftActive ? '#060a10' : 'var(--text-secondary)',
+                            borderRadius: 2,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {isLeftActive ? '● LEFT INSTANCE (ACTIVE)' : 'LEFT INSTANCE'}
+                        </span>
+                        {openSessions.length > 0 && (
+                          <select
+                            value={pinnedLeftSession?.sessionId ?? ''}
+                            onChange={(e) => {
+                              const nextSid = e.target.value;
+                              setLeftSessionId(nextSid);
+                              void handleFocusSplitSide('left', nextSid);
+                            }}
+                            style={{
+                              padding: '2px 8px',
+                              fontSize: 11.5,
+                              fontFamily: 'var(--mono-font)',
+                              background: 'var(--bg-control)',
+                              border: '1px solid var(--border)',
+                              color: 'var(--text-primary)',
+                              borderRadius: 2,
+                            }}
+                          >
+                            {openSessions.map((s) => (
+                              <option key={s.sessionId} value={s.sessionId}>
+                                {s.fileName} ({s.scenarioName})
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <span
+                          style={{
+                            fontSize: 10.5,
+                            color: 'var(--text-dim)',
+                            fontFamily: 'var(--mono-font)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {leftMap.tags.length.toLocaleString()} tags
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0 }}>
+                    <TagBrowser
+                      tags={leftMap.tags}
+                      focusedTag={focusedTag}
+                      onFocusTag={setFocusedTag}
+                      selected={selectedTagIndices}
+                      onSelectedChange={setSelectedTagIndices}
+                      onExtractRequested={requestExtract}
+                      extractDisabledReason={extractDisabledReason}
+                      onExtractWholeMap={handleBatchExtract}
+                      canExtractWholeMap={canExtract}
+                      onEditTag={setEditingTag}
+                      onFindReferences={(tag) => {
+                        setFocusedTag(tag);
+                        setSelectedTagIndices(new Set([tag.index]));
+                        setPropertiesPaletteTab('references');
+                      }}
+                      onRenameTag={(tag) => setTagAction({ action: 'rename', tag })}
+                      onDuplicateTag={(tag) => setTagAction({ action: 'duplicate', tag })}
+                      onDeleteTag={(tag) => setTagAction({ action: 'delete', tag })}
+                      onOpenBitmapEditor={setBitmapEditorTag}
+                      onOpenSoundAuditor={setSoundAuditorTag}
+                      onOpenHudPreviewer={setHudPreviewerTag}
+                    />
+                    <CenterWorkspace
+                      key={`left-instance-${pinnedLeftSession?.sessionId ?? leftMap.filePath}`}
+                      header={leftMap.header}
+                      allTags={leftMap.tags}
+                      onActiveTabChange={(nextTab) => {
+                        if (splitViewEnabled && activeSplitSide !== 'left') {
+                          void handleFocusSplitSide('left', pinnedLeftSession?.sessionId);
+                        }
+                        setCenterTab(nextTab);
+                      }}
+                      onSelectObjectTag={(tagId, objectPath) => {
+                        const target =
+                          leftMap.tags.find((t) => t.tagId === tagId) ??
+                          leftMap.tags.find((t) => (t.tagId & 0xffff) === (tagId & 0xffff)) ??
+                          (objectPath
+                            ? leftMap.tags.find((t) => t.path.toLowerCase() === objectPath.toLowerCase())
+                            : undefined);
+                        if (target) {
+                          setFocusedTag(target);
+                          setSelectedTagIndices(new Set([target.index]));
+                        }
+                      }}
+                      onOpenTagEditor={(tagIndexOrPath) => {
+                        const target =
+                          typeof tagIndexOrPath === 'number'
+                            ? (leftMap.tags.find((t) => t.index === tagIndexOrPath) ?? leftMap.tags[tagIndexOrPath])
+                            : leftMap.tags.find(
+                                (t) =>
+                                  t.path.toLowerCase() === tagIndexOrPath.toLowerCase() ||
+                                  t.path.toLowerCase().endsWith(tagIndexOrPath.toLowerCase()),
+                              );
+                        if (target) {
+                          setFocusedTag(target);
+                          setSelectedTagIndices(new Set([target.index]));
+                          setEditingTag(target);
+                        }
+                      }}
+                    />
+                    {centerTab !== 'bitmap-3d' && centerTab !== 'bsp-model-studio' && (
+                      <PropertiesPalette
+                        focusedTag={focusedTag}
+                        allTags={leftMap.tags}
+                        activeTab={propertiesPaletteTab}
+                        onTabChange={setPropertiesPaletteTab}
+                        onSelectTag={(idx) => {
+                          const t = leftMap.tags.find((tag) => tag.index === idx) ?? leftMap.tags[idx];
+                          if (t) {
+                            setFocusedTag(t);
+                            setSelectedTagIndices(new Set([t.index]));
+                          }
+                        }}
+                      />
+                    )}
+                  </div>
                 </div>
 
-                <SplitComparePane
-                  sessions={openSessions}
-                  primarySession={openSessions.find((s) => s.sessionId === activeSessionId) ?? null}
-                  secondarySession={
-                    openSessions.find((s) => s.sessionId === secondarySessionId) ??
-                    openSessions.find((s) => s.sessionId !== activeSessionId) ??
-                    null
-                  }
-                  onSelectSecondarySession={(sid) => setSecondarySessionId(sid)}
-                  onActivateSessionAsPrimary={(sid, focusPath) => {
-                    void handleSwitchSession(sid, focusPath);
-                  }}
-                  onFocusMatchingTagInPrimary={(tagPath, groupName) => {
-                    if (mapState?.status !== 'ok') return;
-                    const match = mapState.tags.find(
-                      (t) =>
-                        t.primaryClassName === groupName &&
-                        t.path.toLowerCase() === tagPath.toLowerCase(),
-                    );
-                    if (match) {
-                      setFocusedTag(match);
-                      setSelectedTagIndices(new Set([match.index]));
-                    }
-                  }}
-                  onOpenAnotherMap={() => void handleOpen()}
-                  onDetachSessionToWindow={(sid) => {
-                    void window.opence.detachMapTabToWindow?.(sid);
-                  }}
-                  onCloseSplitView={() => setSplitViewEnabled(false)}
-                />
+                {splitViewEnabled && (
+                  <>
+                    {/* Draggable Vertical Center Divider */}
+                    <div
+                      data-testid="split-view-divider"
+                      title="Drag horizontally to resize side-by-side Mantle workspace instances"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        const onMove = (moveEvt: MouseEvent) => {
+                          const next = Math.max(0.25, Math.min(0.75, moveEvt.clientX / window.innerWidth));
+                          setSplitRatio(next);
+                        };
+                        const onUp = () => {
+                          window.removeEventListener('mousemove', onMove);
+                          window.removeEventListener('mouseup', onUp);
+                        };
+                        window.addEventListener('mousemove', onMove);
+                        window.addEventListener('mouseup', onUp);
+                      }}
+                      style={{
+                        width: 6,
+                        cursor: 'col-resize',
+                        background: 'var(--bg-panel-header)',
+                        borderLeft: '1px solid var(--border)',
+                        borderRight: '1px solid var(--border)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--accent-cyan)',
+                        fontSize: 9,
+                        userSelect: 'none',
+                        flexShrink: 0,
+                      }}
+                    >
+                      ⋮
+                    </div>
+
+                    <SplitComparePane
+                      sessions={openSessions}
+                      primarySession={pinnedLeftSession}
+                      secondarySession={pinnedRightSession}
+                      isActiveInstance={activeSplitSide === 'right'}
+                      onFocusInstance={() => {
+                        if (activeSplitSide !== 'right') {
+                          void handleFocusSplitSide('right', pinnedRightSession?.sessionId);
+                        }
+                      }}
+                      onSelectSecondarySession={(sid) => {
+                        setSecondarySessionId(sid);
+                        void handleFocusSplitSide('right', sid);
+                      }}
+                      onActivateSessionAsPrimary={(sid, focusPath) => {
+                        void handleSwitchSession(sid, focusPath);
+                      }}
+                      onFocusMatchingTagInPrimary={(tagPath, groupName) => {
+                        const match = leftMap.tags.find(
+                          (t) =>
+                            t.primaryClassName === groupName &&
+                            t.path.toLowerCase() === tagPath.toLowerCase(),
+                        );
+                        if (match) {
+                          setFocusedTag(match);
+                          setSelectedTagIndices(new Set([match.index]));
+                        }
+                      }}
+                      onOpenAnotherMap={() => void handleOpen()}
+                      onDetachSessionToWindow={(sid) => {
+                        void window.opence.detachMapTabToWindow?.(sid);
+                      }}
+                      onCloseSplitView={() => {
+                        setSplitViewEnabled(false);
+                        void handleFocusSplitSide('left', pinnedLeftSession?.sessionId);
+                      }}
+                      onRequestExtractFromSecondary={(indices) => requestExtract(indices)}
+                      onRequestBatchExtractFromSecondary={() => void handleBatchExtract()}
+                    />
+                  </>
+                )}
               </>
-            )}
-          </>
+            );
+          })()
         ) : (
           <WorkspaceHome
             appVersion={appVersion}
@@ -1343,6 +1553,259 @@ export default function App() {
             { label: 'Cancel', autoFocus: true, testId: 'large-selection-confirm-cancel', onClick: () => setLargeSelectionConfirm(null) },
           ]}
         />
+      )}
+
+      {(mapFixBusy || mapFixResult) && (
+        <div
+          data-testid="map-fix-result-modal"
+          onClick={() => {
+            if (!mapFixBusy) setMapFixResult(null);
+          }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.72)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 10050,
+            padding: 20,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: '100%',
+              maxWidth: mapFixResult && mapFixResult.ok && mapFixResult.isPlaceholder ? 520 : 720,
+              maxHeight: '86vh',
+              background: 'var(--bg-panel)',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              boxShadow: '0 14px 40px rgba(0, 0, 0, 0.85)',
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                padding: '12px 16px',
+                background: 'var(--bg-panel-header)',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+            >
+              <span style={{ fontWeight: 700, fontSize: 13.5, color: 'var(--text-primary)' }}>
+                {mapFixBusy
+                  ? `🔧 Running Fix ${mapFixBusy.toUpperCase()} Map...`
+                  : mapFixResult?.ok
+                    ? mapFixResult.isPlaceholder
+                      ? 'ℹ️ Fix MCC Map'
+                      : `✅ Map Fix Complete (${(mapFixResult.action ?? 'ce').toUpperCase()})`
+                    : '❌ Map Fix Failed'}
+              </span>
+              {!mapFixBusy && (
+                <button
+                  data-testid="map-fix-modal-close"
+                  onClick={() => setMapFixResult(null)}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--text-dim)',
+                    cursor: 'pointer',
+                    fontSize: 14,
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <div style={{ padding: 16, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {mapFixBusy ? (
+                <div style={{ fontSize: 13, color: 'var(--text-secondary)', padding: '12px 0' }}>
+                  Processing map binary, clearing Windows ReadOnly flags, creating <code>.bak</code> backup, running HaloScript AST checks, and computing Custom Edition CRC32...
+                </div>
+              ) : mapFixResult ? (
+                <>
+                  <div
+                    style={{
+                      padding: '10px 12px',
+                      borderRadius: 4,
+                      background: mapFixResult.ok
+                        ? mapFixResult.isPlaceholder
+                          ? 'rgba(56, 189, 248, 0.1)'
+                          : 'rgba(74, 222, 128, 0.1)'
+                        : 'rgba(248, 113, 113, 0.12)',
+                      border: `1px solid ${
+                        mapFixResult.ok
+                          ? mapFixResult.isPlaceholder
+                            ? 'rgba(56, 189, 248, 0.35)'
+                            : 'rgba(74, 222, 128, 0.35)'
+                          : 'rgba(248, 113, 113, 0.4)'
+                      }`,
+                      color: 'var(--text-primary)',
+                      fontSize: 12.5,
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    {mapFixResult.message}
+                  </div>
+
+                  {mapFixResult.ok && !mapFixResult.isPlaceholder && (
+                    <>
+                      <div
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))',
+                          gap: 8,
+                          fontSize: 11.5,
+                        }}
+                      >
+                        {mapFixResult.mapName && (
+                          <div style={{ padding: 8, background: 'var(--bg-base)', borderRadius: 4, border: '1px solid var(--border)' }}>
+                            <div style={{ color: 'var(--text-dim)', fontSize: 10.5 }}>Scenario Name</div>
+                            <div style={{ fontFamily: 'var(--mono-font)', fontWeight: 600 }}>{mapFixResult.mapName}</div>
+                          </div>
+                        )}
+                        {mapFixResult.sourceEngineVersion !== undefined && (
+                          <div style={{ padding: 8, background: 'var(--bg-base)', borderRadius: 4, border: '1px solid var(--border)' }}>
+                            <div style={{ color: 'var(--text-dim)', fontSize: 10.5 }}>Cache Engine</div>
+                            <div style={{ fontFamily: 'var(--mono-font)', fontWeight: 600 }}>
+                              v{mapFixResult.sourceEngineVersion} → v{mapFixResult.targetEngineVersion ?? 609} (CE)
+                            </div>
+                          </div>
+                        )}
+                        {mapFixResult.newCrc32 !== undefined && mapFixResult.newCrc32 !== null && (
+                          <div style={{ padding: 8, background: 'var(--bg-base)', borderRadius: 4, border: '1px solid var(--border)' }}>
+                            <div style={{ color: 'var(--text-dim)', fontSize: 10.5 }}>Header CRC32 (0x64)</div>
+                            <div style={{ fontFamily: 'var(--mono-font)', fontWeight: 600, color: 'var(--accent-cyan)' }}>
+                              0x{(mapFixResult.newCrc32 >>> 0).toString(16).toUpperCase().padStart(8, '0')}
+                            </div>
+                          </div>
+                        )}
+                        {mapFixResult.scriptFix && (
+                          <div style={{ padding: 8, background: 'var(--bg-base)', borderRadius: 4, border: '1px solid var(--border)' }}>
+                            <div style={{ color: 'var(--text-dim)', fontSize: 10.5 }}>HaloScript AST Nodes</div>
+                            <div style={{ fontFamily: 'var(--mono-font)', fontWeight: 600 }}>
+                              {mapFixResult.scriptFix.nodesNeutralized ?? 0} neutralized,{' '}
+                              {mapFixResult.scriptFix.nodesConvertedToGameRevert ?? 0} → game_revert (
+                              {mapFixResult.scriptFix.nodesAlreadyFixed ?? mapFixResult.scriptFix.alreadyFixedNodes ?? 0} verified)
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {(() => {
+                        const scriptNodes =
+                          mapFixResult.scriptFix?.fixedNodes ??
+                          mapFixResult.scriptFix?.mutations ??
+                          [];
+                        if (scriptNodes.length === 0) return null;
+                        return (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                              HaloScript AST Node Actions ({scriptNodes.length})
+                            </div>
+                            <div
+                              style={{
+                                maxHeight: 170,
+                                overflowY: 'auto',
+                                background: 'var(--bg-base)',
+                                border: '1px solid var(--border)',
+                                borderRadius: 4,
+                                padding: 8,
+                                fontFamily: 'var(--mono-font)',
+                                fontSize: 11,
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 3,
+                              }}
+                            >
+                              {scriptNodes.map((m, idx) => (
+                                <div key={`${m.nodeIndex}-${idx}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                                  <span>
+                                    [{m.scriptName}] node #{m.nodeIndex}:{' '}
+                                    <strong>{m.expression ?? m.targetName ?? 'node'}</strong>
+                                    {m.reason || m.kind ? (
+                                      <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>
+                                        — {m.reason ?? m.kind}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <span style={{ color: 'var(--accent-cyan)', whiteSpace: 'nowrap' }}>{m.action}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {Array.isArray(mapFixResult.details) && mapFixResult.details.length > 0 && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                            Conversion & Verification Log
+                          </div>
+                          <div
+                            style={{
+                              maxHeight: 160,
+                              overflowY: 'auto',
+                              background: 'var(--bg-base)',
+                              border: '1px solid var(--border)',
+                              borderRadius: 4,
+                              padding: 8,
+                              fontFamily: 'var(--mono-font)',
+                              fontSize: 11,
+                              color: 'var(--text-secondary)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 4,
+                            }}
+                          >
+                            {mapFixResult.details.map((line, i) => (
+                              <div key={i}>• {line}</div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
+              ) : null}
+            </div>
+
+            {!mapFixBusy && (
+              <div
+                style={{
+                  padding: '10px 16px',
+                  borderTop: '1px solid var(--border)',
+                  background: 'var(--bg-panel-header)',
+                  display: 'flex',
+                  justifyContent: 'flex-end',
+                }}
+              >
+                <button
+                  data-testid="map-fix-modal-ok-button"
+                  onClick={() => setMapFixResult(null)}
+                  style={{
+                    background: 'var(--accent-cyan)',
+                    color: '#06202c',
+                    border: 'none',
+                    borderRadius: 3,
+                    padding: '6px 18px',
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  OK
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

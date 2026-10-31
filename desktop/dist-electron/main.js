@@ -34915,7 +34915,7 @@ function hydrateExternalRawDataInContainer(container, resourceFiles) {
         const assetIndex = t.embeddedRawDataAssets.length;
         t.embeddedRawDataAssets.push({ kind: "bitmap", data: rawData.toString("base64") });
         t.embeddedRawDataPatches.push({ assetIndex, patchOffset: patchOff, patchWidth: 4 });
-        dataBuf.writeUInt16LE(flags & ~256, elemOff + 14);
+        dataBuf.writeUInt16LE((flags & 127 | 128) >>> 0, elemOff + 14);
         existingPatchOffsets.add(patchOff);
         mutated = true;
       }
@@ -35033,7 +35033,9 @@ function planInjection(mode, target, container, resourceMapConfig = {}, options 
           localIndex: li,
           path: t.path,
           group: t.group,
-          existingGroups: [...otherGroups]
+          containerGroup: t.group,
+          existingGroups: [...otherGroups],
+          targetGroup: [...otherGroups].join(", ")
         });
       }
     }
@@ -35223,11 +35225,12 @@ function planInjection(mode, target, container, resourceMapConfig = {}, options 
     const newTagDataSize = layout.newFileLength - target.header.tagDataOffset;
     const bsps = ceStructureBspRegions(target.buffer, target.header, targetTagIndex, "Cannot check the tag space");
     const largestBsp = bsps.reduce((n, r) => Math.max(n, r.size), 0);
-    if (newTagDataSize + largestBsp > CE_TAG_SPACE_SIZE) {
+    const maxTagSpace = options.allowExpandedTagSpace ? 122 * 1024 * 1024 : CE_TAG_SPACE_SIZE;
+    if (newTagDataSize + largestBsp > maxTagSpace) {
       const mib = (n) => `${(n / (1024 * 1024)).toFixed(2)} MiB`;
       return {
         kind: "refused",
-        reason: `The result would not fit in the game's tag space: tag data would be ${mib(newTagDataSize)} (now ${mib(target.header.tagDataSize)}) and the largest BSP is ${mib(largestBsp)}, ${mib(newTagDataSize + largestBsp)} in total; the limit is ${mib(CE_TAG_SPACE_SIZE)}. Inject fewer tags.`
+        reason: `The result would not fit in the game's tag space: tag data would be ${mib(newTagDataSize)} (now ${mib(target.header.tagDataSize)}) and the largest BSP is ${mib(largestBsp)}, ${mib(newTagDataSize + largestBsp)} in total; the limit is ${mib(maxTagSpace)}. Inject fewer tags.`
       };
     }
   }
@@ -35787,6 +35790,24 @@ var MAX_BLOCKS_PER_LIST = 1 << 20;
 // ../core/src/map/convert/model-part-check.ts
 var PARTS_HAVE_LOCAL_NODES = 1 << 1;
 var MAXIMUM_COMPRESSIBLE_COMPONENT = Math.fround(1.005);
+
+// ../core/src/map/convert/scenario-tag.ts
+function scenarioEntryOf(tagIndex) {
+  const entry = tagIndex.entries[tagIndex.scenarioTagId & 65535];
+  return entry && entry.tagId >>> 0 === tagIndex.scenarioTagId >>> 0 && !entry.isExternal ? entry : null;
+}
+function renamedScenarioOf(tagIndex) {
+  const entry = scenarioEntryOf(tagIndex);
+  return entry && entry.primaryClassName !== "scenario" ? entry : null;
+}
+function readScenarioAsScenario(tagIndex) {
+  const renamed = renamedScenarioOf(tagIndex);
+  if (!renamed) return tagIndex;
+  return { ...tagIndex, entries: tagIndex.entries.map((e) => e.index === renamed.index ? { ...e, primaryClassName: "scenario" } : e) };
+}
+function parseTagIndexForConversion(buffer, header = parseCacheFileHeader(buffer)) {
+  return readScenarioAsScenario(parseTagIndex(buffer, header));
+}
 
 // ../core/src/map/convert/tag-data-repairs.ts
 var TAG_DATA_REPAIR_IDS = ["alignTagData", "scriptSyntaxData", "tagRootOutside", "blockOverlap"];
@@ -36652,11 +36673,14 @@ function extractBspRenderMesh(buffer, header, tagIndex, bspIndex = 0) {
         maxY === -Infinity ? 0 : maxY,
         maxZ === -Infinity ? 0 : maxZ
       ];
+      const shaderEntry = shaderTagId !== 4294967295 ? tagIndex.entries[shaderTagId & 65535] : void 0;
       submeshes.push({
         submeshIndex: submeshCounter++,
         lightmapIndex: lmIdx,
         lightmapBitmapIndex,
         shaderTagId,
+        shaderPath: shaderEntry?.path || void 0,
+        shaderClassFourCC: shaderEntry ? fourCCToString(shaderEntry.primaryClassFourCC) : void 0,
         shaderPermutation,
         vertexCount,
         vertices,
@@ -37406,7 +37430,28 @@ var TJUNCTION_DISTANCE_EPSILON = 5e-6;
 function pushSample(out, index) {
   if (out.length < SAMPLE_LIMIT) out.push(index);
 }
-function auditMeshIntegrity(mesh) {
+function auditMeshIntegrity(meshOrVertices, maybeTriangles) {
+  let mesh;
+  if (Array.isArray(meshOrVertices)) {
+    const tris = maybeTriangles ?? [];
+    const flatPos = new Float32Array(meshOrVertices.length * 3);
+    for (let i = 0; i < meshOrVertices.length; i++) {
+      const v = meshOrVertices[i];
+      flatPos[i * 3] = v[0];
+      flatPos[i * 3 + 1] = v[1];
+      flatPos[i * 3 + 2] = v[2];
+    }
+    const flatIdx = new Uint32Array(tris.length * 3);
+    for (let i = 0; i < tris.length; i++) {
+      const t = tris[i];
+      flatIdx[i * 3] = t[0];
+      flatIdx[i * 3 + 1] = t[1];
+      flatIdx[i * 3 + 2] = t[2];
+    }
+    mesh = { positions: flatPos, indices: flatIdx };
+  } else {
+    mesh = meshOrVertices;
+  }
   const posLen = mesh.positions.length;
   const idxLen = mesh.indices.length;
   if (!posLen || !idxLen || posLen % 3 !== 0 || idxLen % 3 !== 0) {
@@ -37612,6 +37657,9 @@ function auditMeshIntegrity(mesh) {
     else edgeClosedShellCandidates++;
   }
   return {
+    totalVertices: vertexCount,
+    totalTriangles: triangleCount,
+    isWaterTightManifold: boundaryEdges === 0 && nonManifoldEdges === 0 && windingConflicts === 0 && duplicateFaces === 0 && degenerateTriangles === 0,
     checkedTriangles: triangleCount,
     duplicateFaces,
     shortEdges,
@@ -38528,7 +38576,7 @@ var HALO_MATERIAL_TYPES = [
   "ice",
   "hunter shield"
 ];
-function buildCustomShaderModelTag(tagPath, originalIndex, bitmapPath, bitmapLocalIndex, materialType = 7) {
+function buildCustomShaderModelTag(tagPath, originalIndex, bitmapPath, bitmapLocalIndex, materialType = 7, shaderFlags) {
   const buf = Buffer.alloc(440, 0);
   const safeMat = materialType >= 0 && materialType < HALO_MATERIAL_TYPES.length ? materialType : 7;
   writeDependencyField(buf, 164, "bitm", bitmapLocalIndex);
@@ -38537,6 +38585,16 @@ function buildCustomShaderModelTag(tagPath, originalIndex, bitmapPath, bitmapLoc
   writeDependencyField(buf, 356, "bitm", NULL_TAG_ID);
   buf.writeUInt16LE(safeMat, 34);
   buf.writeUInt16LE(4, 36);
+  if (shaderFlags) {
+    let modelFlags = 0;
+    if (shaderFlags.twoSided || shaderFlags.alphaTested) {
+      modelFlags |= 2 | 32;
+    }
+    if (!shaderFlags.alphaTested) {
+      modelFlags |= 4;
+    }
+    buf.writeUInt16LE(modelFlags, 40);
+  }
   buf.writeFloatLE(1, 116);
   buf.writeFloatLE(1, 156);
   buf.writeFloatLE(1, 160);
@@ -40265,6 +40323,9 @@ var VALUE_TYPE_BY_NAME = Object.fromEntries(
   Object.entries(HS_VALUE_TYPES).map(([k, v]) => [v, Number(k)])
 );
 
+// ../core/src/render/glb-model-importer.ts
+var PNG_MAGIC = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+
 // ../core/src/render/sound-codec.ts
 var SoundCodecError = class extends Error {
   constructor(message) {
@@ -40762,6 +40823,292 @@ function convertColladaDaeToObjText(daeXml) {
 // ../core/src/map/legacy-tag-codec.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
+
+// ../core/src/map/map-fixer.ts
+function recomputeCustomEditionHeaderCrc32(buffer) {
+  const header = parseCacheFileHeader(buffer);
+  const tagIndex = parseTagIndexForConversion(buffer, header);
+  const crc = computeCacheCrc32(buffer, ceCrcRegions(buffer, header, tagIndex));
+  buffer.writeUInt32LE(crc >>> 0, 100);
+  return crc >>> 0;
+}
+var OBJECT_CLASS_EXPECTED_TYPE = /* @__PURE__ */ new Map([
+  [1651077220, 0],
+  // 'bipd'
+  [1986357353, 1],
+  // 'vehi'
+  [2003132784, 2],
+  // 'weap'
+  [1701931376, 3],
+  // 'eqip'
+  [1734439522, 4],
+  // 'garb'
+  [1886547818, 5],
+  // 'proj'
+  [1935893870, 6],
+  // 'scen'
+  [1835098984, 7],
+  // 'mach'
+  [1668575852, 8],
+  // 'ctrl'
+  [1818846825, 9],
+  // 'lifi'
+  [1886151011, 10],
+  // 'plac'
+  [1936941925, 11]
+  // 'ssce'
+]);
+var SHADER_CLASS_EXPECTED_TYPE = /* @__PURE__ */ new Map([
+  [1936027254, 3],
+  // 'senv' (shader_environment)
+  [1936683887, 4],
+  // 'soso' (shader_model)
+  [1936684146, 5],
+  // 'sotr' (shader_transparent_generic)
+  [1935894633, 6],
+  // 'schi' (shader_transparent_chicago)
+  [1935893880, 7],
+  // 'scex' (shader_transparent_chicago_extended)
+  [1937203572, 8],
+  // 'swat' (shader_transparent_water)
+  [1936157793, 9],
+  // 'sgla' (shader_transparent_glass)
+  [1936549236, 10],
+  // 'smet' (shader_transparent_meter)
+  [1936747617, 11]
+  // 'spla' (shader_transparent_plasma)
+]);
+var CE_MAX_HS_SYNTAX_NODES = 19001;
+var CE_MAX_HS_SYNTAX_DATA_BYTES = 56 + CE_MAX_HS_SYNTAX_NODES * 20;
+function repairMccAndCeTagIssues(buffer) {
+  const summary = {
+    headerFlagsCleared: false,
+    hsSyntaxClamped: false,
+    previousSyntaxDataSize: 0,
+    previousSyntaxMaxCount: 0,
+    objectTypesRepaired: 0,
+    fontCharsRepaired: 0,
+    bitmapSequencesRepaired: 0,
+    bitmapFlagsRepaired: 0,
+    shadersRepaired: 0,
+    modelPartsRepaired: 0
+  };
+  if (buffer.length < CACHE_FILE_HEADER_SIZE) return summary;
+  const headerFlags = buffer.readUInt32LE(104);
+  if (headerFlags !== 0) {
+    buffer.writeUInt32LE(0, 104);
+    summary.headerFlagsCleared = true;
+  }
+  const tagDataOffset = buffer.readUInt32LE(16);
+  const tagDataSize = buffer.readUInt32LE(20);
+  if (tagDataOffset < CACHE_FILE_HEADER_SIZE || tagDataOffset + TAG_DATA_HEADER_PC_SIZE > buffer.length) {
+    return summary;
+  }
+  const tagInstancesAddress = buffer.readUInt32LE(tagDataOffset + 0);
+  const baseAddress = tagInstancesAddress - TAG_DATA_HEADER_PC_SIZE >>> 0;
+  const scenarioDatumHandle = buffer.readUInt32LE(tagDataOffset + 4);
+  const scenarioTagIndex = scenarioDatumHandle & 65535;
+  const tagCount = buffer.readUInt32LE(tagDataOffset + 12);
+  const tagInstancesOffset = tagDataOffset + TAG_DATA_HEADER_PC_SIZE;
+  if (scenarioTagIndex < tagCount && tagInstancesOffset + (scenarioTagIndex + 1) * TAG_ENTRY_SIZE <= buffer.length) {
+    const scenarioEntryOffset = tagInstancesOffset + scenarioTagIndex * TAG_ENTRY_SIZE;
+    const scenarioAddress = buffer.readUInt32LE(scenarioEntryOffset + 20);
+    const scenarioOffset = tagDataOffset + (scenarioAddress - baseAddress | 0);
+    if (scenarioOffset >= tagDataOffset && scenarioOffset + 1456 <= buffer.length) {
+      const syntaxSize = buffer.readInt32LE(scenarioOffset + 1140);
+      const syntaxAddress = buffer.readUInt32LE(scenarioOffset + 1140 + 12);
+      summary.previousSyntaxDataSize = syntaxSize;
+      if (syntaxSize > CE_MAX_HS_SYNTAX_DATA_BYTES) {
+        buffer.writeInt32LE(CE_MAX_HS_SYNTAX_DATA_BYTES, scenarioOffset + 1140);
+        summary.hsSyntaxClamped = true;
+      }
+      if (syntaxAddress >= baseAddress && syntaxAddress < baseAddress + tagDataSize) {
+        const syntaxOffset = tagDataOffset + (syntaxAddress - baseAddress | 0);
+        if (syntaxOffset >= tagDataOffset && syntaxOffset + 56 <= buffer.length) {
+          const maxCount = buffer.readInt16LE(syntaxOffset + 32);
+          summary.previousSyntaxMaxCount = maxCount;
+          if (maxCount > CE_MAX_HS_SYNTAX_NODES) {
+            buffer.writeInt16LE(CE_MAX_HS_SYNTAX_NODES, syntaxOffset + 32);
+            summary.hsSyntaxClamped = true;
+          }
+          if (buffer.readUInt16LE(syntaxOffset + 44) > CE_MAX_HS_SYNTAX_NODES) {
+            buffer.writeUInt16LE(CE_MAX_HS_SYNTAX_NODES, syntaxOffset + 44);
+          }
+          if (buffer.readInt16LE(syntaxOffset + 46) > CE_MAX_HS_SYNTAX_NODES) {
+            buffer.writeInt16LE(CE_MAX_HS_SYNTAX_NODES, syntaxOffset + 46);
+          }
+          if (buffer.readInt16LE(syntaxOffset + 48) > CE_MAX_HS_SYNTAX_NODES) {
+            buffer.writeInt16LE(CE_MAX_HS_SYNTAX_NODES, syntaxOffset + 48);
+          }
+        }
+      }
+    }
+  }
+  const maxEntries = Math.min(tagCount, Math.floor((buffer.length - tagInstancesOffset) / TAG_ENTRY_SIZE));
+  for (let i = 0; i < maxEntries; i++) {
+    const eOff = tagInstancesOffset + i * TAG_ENTRY_SIZE;
+    const isExternal = buffer.readUInt32LE(eOff + 24) !== 0;
+    if (isExternal) continue;
+    const primaryFourCC = buffer.readUInt32LE(eOff + 0);
+    const dataAddress = buffer.readUInt32LE(eOff + 20);
+    if (dataAddress < baseAddress || dataAddress >= baseAddress + tagDataSize) continue;
+    const structOff = tagDataOffset + (dataAddress - baseAddress | 0);
+    const expectedObjType = OBJECT_CLASS_EXPECTED_TYPE.get(primaryFourCC);
+    const expectedShaderType = SHADER_CLASS_EXPECTED_TYPE.get(primaryFourCC);
+    if (expectedObjType !== void 0 && structOff + 4 <= buffer.length) {
+      const actualObjType = buffer.readInt16LE(structOff + 0);
+      if (actualObjType !== expectedObjType) {
+        buffer.writeInt16LE(expectedObjType, structOff + 0);
+        summary.objectTypesRepaired++;
+      }
+    } else if (expectedShaderType !== void 0 && structOff + 40 <= buffer.length) {
+      let shaderChanged = false;
+      const actualShaderType = buffer.readInt16LE(structOff + 36);
+      if (actualShaderType !== expectedShaderType) {
+        buffer.writeInt16LE(expectedShaderType, structOff + 36);
+        shaderChanged = true;
+      }
+      if (primaryFourCC === 1936683887 && structOff + 440 <= buffer.length) {
+        const unk184 = buffer.readUInt32LE(structOff + 388);
+        if (unk184 === 32831 || unk184 === 0) {
+          buffer.writeFloatLE(1, structOff + 388);
+          shaderChanged = true;
+        }
+        for (const scaleOff of [120, 160, 164, 220, 240]) {
+          const rawU32 = buffer.readUInt32LE(structOff + scaleOff);
+          if (rawU32 === 0 || rawU32 === 32831) {
+            buffer.writeFloatLE(1, structOff + scaleOff);
+            shaderChanged = true;
+          }
+        }
+      } else if (primaryFourCC === 1936027254 && structOff + 836 <= buffer.length) {
+        for (const scaleOff of [180, 200, 252, 292]) {
+          const rawU32 = buffer.readUInt32LE(structOff + scaleOff);
+          if (rawU32 === 0 || rawU32 === 32831) {
+            buffer.writeFloatLE(1, structOff + scaleOff);
+            shaderChanged = true;
+          }
+        }
+        const bumpScale = buffer.readFloatLE(structOff + 292);
+        const validBumpScale = Number.isFinite(bumpScale) && bumpScale > 1e-6 ? bumpScale : 1;
+        const rtBumpX = buffer.readFloatLE(structOff + 312);
+        const rtBumpY = buffer.readFloatLE(structOff + 316);
+        const rawRtX = buffer.readUInt32LE(structOff + 312);
+        const rawRtY = buffer.readUInt32LE(structOff + 316);
+        if (rawRtX === 0 || rawRtX === 32831 || !Number.isFinite(rtBumpX) || Math.abs(rtBumpX) < 1e-6 || Math.abs(rtBumpX - validBumpScale) > 1e-4) {
+          buffer.writeFloatLE(validBumpScale, structOff + 312);
+          shaderChanged = true;
+        }
+        if (rawRtY === 0 || rawRtY === 32831 || !Number.isFinite(rtBumpY) || Math.abs(rtBumpY) < 1e-6 || Math.abs(rtBumpY - validBumpScale) > 1e-4) {
+          buffer.writeFloatLE(validBumpScale, structOff + 316);
+          shaderChanged = true;
+        }
+      }
+      if (shaderChanged) {
+        summary.shadersRepaired++;
+      }
+    } else if (primaryFourCC === 1718578804 && structOff + 136 <= buffer.length) {
+      const charCount = buffer.readInt32LE(structOff + 124);
+      const charAddr = buffer.readUInt32LE(structOff + 128);
+      if (charCount > 0 && charAddr >= baseAddress && charAddr < baseAddress + tagDataSize) {
+        const charTableOff = tagDataOffset + (charAddr - baseAddress | 0);
+        if (charTableOff >= tagDataOffset && charTableOff + charCount * 20 <= buffer.length) {
+          for (let c = 0; c < charCount; c++) {
+            const cOff = charTableOff + c * 20;
+            const charWidth = buffer.readInt16LE(cOff + 2);
+            const bmWidth = buffer.readInt16LE(cOff + 4);
+            const bmHeight = buffer.readInt16LE(cOff + 6);
+            const pixelsOff = buffer.readInt32LE(cOff + 16);
+            if (charWidth < 0 || bmWidth < 0 || bmHeight < 0 || pixelsOff < 0) {
+              buffer.writeInt16LE(0, cOff + 2);
+              buffer.writeInt16LE(0, cOff + 4);
+              buffer.writeInt16LE(0, cOff + 6);
+              buffer.writeInt16LE(0, cOff + 8);
+              buffer.writeInt16LE(0, cOff + 10);
+              buffer.writeInt32LE(0, cOff + 16);
+              summary.fontCharsRepaired++;
+            }
+          }
+        }
+      }
+    } else if (primaryFourCC === 1651078253 && structOff + 108 <= buffer.length) {
+      const seqCount = buffer.readInt32LE(structOff + 84);
+      const seqAddr = buffer.readUInt32LE(structOff + 88);
+      const bitmapsCount = buffer.readInt32LE(structOff + 96);
+      const bitmapsAddr = buffer.readUInt32LE(structOff + 100);
+      if (seqCount > 0 && seqAddr >= baseAddress && seqAddr < baseAddress + tagDataSize) {
+        const seqTableOff = tagDataOffset + (seqAddr - baseAddress | 0);
+        if (seqTableOff >= tagDataOffset && seqTableOff + seqCount * 64 <= buffer.length) {
+          for (let s = 0; s < seqCount; s++) {
+            const sOff = seqTableOff + s * 64;
+            const firstIdx = buffer.readInt16LE(sOff + 32);
+            const bmCount = buffer.readInt16LE(sOff + 34);
+            if (firstIdx < 0 || bmCount < 0 || firstIdx + bmCount > bitmapsCount || bmCount > 0 && firstIdx >= bitmapsCount) {
+              buffer.writeInt16LE(0, sOff + 32);
+              buffer.writeInt16LE(0, sOff + 34);
+              summary.bitmapSequencesRepaired++;
+            }
+          }
+        }
+      }
+      if (bitmapsCount > 0 && bitmapsAddr >= baseAddress && bitmapsAddr < baseAddress + tagDataSize) {
+        const bmTableOff = tagDataOffset + (bitmapsAddr - baseAddress | 0);
+        if (bmTableOff >= tagDataOffset && bmTableOff + bitmapsCount * 48 <= buffer.length) {
+          for (let b = 0; b < bitmapsCount; b++) {
+            const bOff = bmTableOff + b * 48;
+            const flags = buffer.readUInt16LE(bOff + 14);
+            const repairedFlags = (flags & 511 | 128) >>> 0;
+            if (repairedFlags !== flags) {
+              buffer.writeUInt16LE(repairedFlags, bOff + 14);
+              summary.bitmapFlagsRepaired++;
+            }
+          }
+        }
+      }
+    } else if (primaryFourCC === 1836016690 && structOff + 232 <= buffer.length) {
+      const geomCount = buffer.readInt32LE(structOff + 208);
+      const geomAddr = buffer.readUInt32LE(structOff + 212);
+      if (geomCount > 0 && geomAddr >= baseAddress && geomAddr < baseAddress + tagDataSize) {
+        const geomTableOff = tagDataOffset + (geomAddr - baseAddress | 0);
+        if (geomTableOff >= tagDataOffset && geomTableOff + geomCount * 48 <= buffer.length) {
+          for (let g = 0; g < geomCount; g++) {
+            const gOff = geomTableOff + g * 48;
+            const partCount = buffer.readInt32LE(gOff + 36);
+            const partAddr = buffer.readUInt32LE(gOff + 40);
+            if (partCount > 0 && partAddr >= baseAddress && partAddr < baseAddress + tagDataSize) {
+              const partTableOff = tagDataOffset + (partAddr - baseAddress | 0);
+              if (partTableOff >= tagDataOffset && partTableOff + partCount * 132 <= buffer.length) {
+                for (let p = 0; p < partCount; p++) {
+                  const pOff = partTableOff + p * 132;
+                  let partChanged = false;
+                  const prevPart = buffer.readInt8(pOff + 6);
+                  const nextPart = buffer.readInt8(pOff + 7);
+                  if (prevPart === 0 && nextPart === 0) {
+                    buffer.writeInt8(-1, pOff + 6);
+                    buffer.writeInt8(-1, pOff + 7);
+                    partChanged = true;
+                  }
+                  const w0 = buffer.readFloatLE(pOff + 12);
+                  const w1 = buffer.readFloatLE(pOff + 16);
+                  if (w0 === 0 && w1 === 0) {
+                    buffer.writeFloatLE(1, pOff + 12);
+                    partChanged = true;
+                  }
+                  if (partChanged) {
+                    summary.modelPartsRepaired++;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return summary;
+}
+
+// ../core/src/map/legacy-tag-codec.ts
 var HEK_GROUP_VERSIONS = {
   actr: 2,
   actv: 2,
@@ -41396,6 +41743,17 @@ function parseHekLooseTagBuffer(buf, tagPath, overrideGroup) {
         const stripBytes = partTriangles.subarray(0, stripLen * 2);
         const term = Buffer.from([255, 255, 255, 255]);
         const finalTriBytes = Buffer.concat([stripBytes, term]);
+        const prevPart = alloc.buf.readInt8(elemLocalInBuf + 6);
+        const nextPart = alloc.buf.readInt8(elemLocalInBuf + 7);
+        if (prevPart === 0 && nextPart === 0) {
+          alloc.buf.writeInt8(-1, elemLocalInBuf + 6);
+          alloc.buf.writeInt8(-1, elemLocalInBuf + 7);
+        }
+        const w0 = alloc.buf.readFloatLE(elemLocalInBuf + 12);
+        const w1 = alloc.buf.readFloatLE(elemLocalInBuf + 16);
+        if (w0 === 0 && w1 === 0) {
+          alloc.buf.writeFloatLE(1, elemLocalInBuf + 12);
+        }
         alloc.buf.writeUInt16LE(1, elemLocalInBuf + 68);
         alloc.buf.writeUInt32LE(triCount, elemLocalInBuf + 72);
         alloc.buf.writeUInt16LE(vType, elemLocalInBuf + 84);
@@ -41412,30 +41770,87 @@ function parseHekLooseTagBuffer(buf, tagPath, overrideGroup) {
         });
       }
     }
-    if (structName === "BitmapData" && count > 0 && bitmapProcessedPixelBuf.length > 0) {
+    if (structName === "BitmapData" && count > 0) {
       for (let i = 0; i < count; i++) {
         const elemLocal = i * 48;
         const elemAbs = alloc.offset + elemLocal;
-        const pixOff = alloc.buf.readUInt32LE(elemLocal + 24);
-        const nextOff = i + 1 < count ? alloc.buf.readUInt32LE((i + 1) * 48 + 24) : bitmapProcessedPixelBuf.length;
-        const plateSize = Math.max(0, nextOff - pixOff);
-        const plateBytes = bitmapProcessedPixelBuf.subarray(pixOff, pixOff + plateSize);
         const flags = alloc.buf.readUInt16LE(elemLocal + 14);
-        alloc.buf.writeUInt16LE(flags & ~256, elemLocal + 14);
-        alloc.buf.writeUInt32LE(plateBytes.length, elemLocal + 28);
-        const assetIndex = embeddedRawDataAssets.length;
-        embeddedRawDataAssets.push({ kind: "bitmap", data: plateBytes.toString("base64") });
-        embeddedRawDataPatches.push({
-          assetIndex,
-          patchOffset: elemAbs + 24,
-          patchWidth: 4
-        });
+        if (bitmapProcessedPixelBuf.length > 0) {
+          const pixOff = alloc.buf.readUInt32LE(elemLocal + 24);
+          const nextOff = i + 1 < count ? alloc.buf.readUInt32LE((i + 1) * 48 + 24) : bitmapProcessedPixelBuf.length;
+          const plateSize = Math.max(0, nextOff - pixOff);
+          const plateBytes = bitmapProcessedPixelBuf.subarray(pixOff, pixOff + plateSize);
+          alloc.buf.writeUInt16LE((flags & 127 | 128) >>> 0, elemLocal + 14);
+          alloc.buf.writeUInt32LE(plateBytes.length, elemLocal + 28);
+          const assetIndex = embeddedRawDataAssets.length;
+          embeddedRawDataAssets.push({ kind: "bitmap", data: plateBytes.toString("base64") });
+          embeddedRawDataPatches.push({
+            assetIndex,
+            patchOffset: elemAbs + 24,
+            patchWidth: 4
+          });
+        } else {
+          alloc.buf.writeUInt16LE((flags & 511 | 128) >>> 0, elemLocal + 14);
+        }
       }
     }
     return alloc;
   };
   readStructArray(rootStructName, 1, () => tagPath);
   const fullLeData = Buffer.concat(leChunks);
+  const objectExpectedTypeByGroup = {
+    biped: 0,
+    vehicle: 1,
+    weapon: 2,
+    equipment: 3,
+    garbage: 4,
+    projectile: 5,
+    scenery: 6,
+    device_machine: 7,
+    device_control: 8,
+    device_light_fixture: 9,
+    placeholder: 10,
+    sound_scenery: 11
+  };
+  const shaderExpectedTypeByGroup = {
+    shader_environment: 3,
+    shader_model: 4,
+    shader_transparent_generic: 5,
+    shader_transparent_chicago: 6,
+    shader_transparent_chicago_extended: 7,
+    shader_transparent_water: 8,
+    shader_transparent_glass: 9,
+    shader_transparent_meter: 10,
+    shader_transparent_plasma: 11
+  };
+  const expectedObjType = objectExpectedTypeByGroup[groupName];
+  if (expectedObjType !== void 0 && fullLeData.length >= 4) {
+    fullLeData.writeInt16LE(expectedObjType, 0);
+  }
+  const expectedShaderType = shaderExpectedTypeByGroup[groupName];
+  if (expectedShaderType !== void 0 && fullLeData.length >= 40) {
+    fullLeData.writeInt16LE(expectedShaderType, 36);
+    if (groupName === "shader_model" && fullLeData.length >= 440) {
+      fullLeData.writeFloatLE(1, 388);
+      for (const scaleOff of [120, 160, 164, 220, 240]) {
+        const rawU32 = fullLeData.readUInt32LE(scaleOff);
+        if (rawU32 === 0 || rawU32 === 32831) {
+          fullLeData.writeFloatLE(1, scaleOff);
+        }
+      }
+    } else if (groupName === "shader_environment" && fullLeData.length >= 836) {
+      for (const scaleOff of [180, 200, 252, 292]) {
+        const rawU32 = fullLeData.readUInt32LE(scaleOff);
+        if (rawU32 === 0 || rawU32 === 32831) {
+          fullLeData.writeFloatLE(1, scaleOff);
+        }
+      }
+      const bumpScale = fullLeData.readFloatLE(292);
+      const validBump = Number.isFinite(bumpScale) && bumpScale > 1e-6 ? bumpScale : 1;
+      fullLeData.writeFloatLE(validBump, 312);
+      fullLeData.writeFloatLE(validBump, 316);
+    }
+  }
   let secondaryClassFourCC = null;
   let tertiaryClassFourCC = null;
   if (["biped", "vehicle"].includes(groupName)) {
@@ -42308,6 +42723,11 @@ function importLegacyTagsIntoMap(mapBuffer, inputPaths, resourceFiles, mode = "a
         if (st) importedPaths.push(`[~${st.group}] ${st.path}`);
       }
     }
+  }
+  repairMccAndCeTagIssues(currentBuf);
+  try {
+    recomputeCustomEditionHeaderCrc32(currentBuf);
+  } catch {
   }
   return {
     buffer: currentBuf,
@@ -43586,6 +44006,8 @@ function evalPeriodicWave(fnName, t) {
       return 1;
     case "zero":
       return 0;
+    case "sine":
+      return 0.5 * (1 + Math.sin(2 * Math.PI * u));
     case "cosine":
     case "cosine (variable period)":
       return 0.5 * (1 + Math.cos(2 * Math.PI * u));
@@ -47377,6 +47799,7 @@ Start-Process -FilePath '${finalLaunchEsc}'
 
 // electron/tag-test-runner.ts
 var fs8 = __toESM(require("fs"));
+var os2 = __toESM(require("os"));
 var path9 = __toESM(require("path"));
 var net = __toESM(require("net"));
 var import_child_process2 = require("child_process");
@@ -47459,6 +47882,11 @@ var TagTestRunner = class {
     this.heldWeaponTagId = null;
     this.drivenVehicleTagId = null;
     this.haloWindowRect = null;
+    this.stagedMapLoading = false;
+    this.stagedMapLoaded = false;
+    this.mainMenuMusicStarted = false;
+    this.launchTimeMs = 0;
+    this.initRestoreTimer = null;
     this.statusListeners = [];
     this.logListeners = [];
   }
@@ -47563,13 +47991,38 @@ if ($wshell.AppActivate('Halo')) {
       } catch {
       }
     }
-    if (this.statusState === "running" && (text.includes("loading 'd:\\ui.map'") || text.includes("ui.map") || text.includes("levels\\ui\\ui") || text.includes("game_dispose") || text.includes("stop_game") || text.includes("unload_all_structures") || text.includes("starting main menu music") || text.includes("begining filesystem checks") || text.includes("local player 0, weapon (0x0), deleted unexpectedly") || text.includes("Couldn't read map file 'd:\\ui.map'"))) {
+    if (text.includes("loading 'd:\\custom_maps\\_opence_tag_test") || text.includes("init: map_name") || text.includes("starting precaching of map custom_maps\\_opence_tag_test")) {
+      this.stagedMapLoading = true;
+      if (this.activeOpenCeDir) {
+        this.restoreInitForDir(this.activeOpenCeDir);
+      }
+    }
+    if (this.stagedMapLoading && (text.includes("structure culling:") && !text.includes("for 0 surfaces") || text.includes("the saved game is not taken:") || text.includes("custom edition: the structure BSP") || text.includes("loaded ") && text.includes(" tags cleanly"))) {
+      this.stagedMapLoaded = true;
+    }
+    if (!this.stagedMapLoaded && !this.stagedMapLoading && text.includes("starting main menu music")) {
+      this.mainMenuMusicStarted = true;
+      setTimeout(() => {
+        if (!this.stagedMapLoaded && !this.stagedMapLoading) {
+          this.triggerBootMapLoad();
+        }
+      }, 150);
+      return;
+    }
+    if (this.statusState === "running" && this.stagedMapLoaded && Date.now() - this.launchTimeMs > 4e3 && (text.includes("loading 'd:\\ui.map'") || text.includes("this is 'levels\\ui\\ui'") || text.includes("game_dispose") || text.includes("stop_game") || text.includes("starting main menu music"))) {
       setTimeout(() => {
         if (this.statusState === "running") {
           void this.stop();
         }
       }, 300);
     }
+  }
+  triggerBootMapLoad() {
+    if (!this.telnetConnected || !this.currentMapName || this.stagedMapLoading || this.stagedMapLoaded) return;
+    this.stagedMapLoading = true;
+    const hsCmd = `map_name custom_maps\\${this.currentMapName}`;
+    this.emitLog("stdout", `[TagTest] Launching Single-Player Dev Mode via Telnet: ${hsCmd}`);
+    this.sendCommand(hsCmd);
   }
   getOpenCeConfig() {
     const settings = getSettings();
@@ -47591,6 +48044,10 @@ if ($wshell.AppActivate('Halo')) {
     return { directory: dir, executable: exe, exists };
   }
   restoreInitForDir(dir) {
+    if (this.initRestoreTimer) {
+      clearTimeout(this.initRestoreTimer);
+      this.initRestoreTimer = null;
+    }
     const scriptPath = path9.join(dir, "_opence_tag_test.txt");
     try {
       if (fs8.existsSync(scriptPath)) {
@@ -47662,6 +48119,14 @@ if ($wshell.AppActivate('Halo')) {
     this.liveHudMode = Boolean(options.liveHudMode);
     this.arsenalSpawnedForCurrentLoad = false;
     this.unitSpawned = false;
+    this.stagedMapLoading = false;
+    this.stagedMapLoaded = false;
+    this.mainMenuMusicStarted = false;
+    this.launchTimeMs = Date.now();
+    if (this.initRestoreTimer) {
+      clearTimeout(this.initRestoreTimer);
+      this.initRestoreTimer = null;
+    }
     this.heldWeaponTagId = null;
     this.drivenVehicleTagId = null;
     this.statusState = "launching";
@@ -47700,8 +48165,7 @@ if ($wshell.AppActivate('Halo')) {
         } catch {
         }
       }
-      const initContent = `game_console_log all\r
-display_framerate true\r
+      const initContent = `display_framerate true\r
 map_name custom_maps\\${mapSlot}\r
 `;
       fs8.writeFileSync(initPath, initContent, "utf-8");
@@ -47717,6 +48181,7 @@ map_name custom_maps\\${mapSlot}\r
         HALO_TELNET_CONSOLE_PORT: "2323",
         HALO_CONSOLE_LOG: "all",
         HALO_DISPLAY_MODE: options.windowed !== false ? "windowed" : "fullscreen",
+        HALO_WINDOW_SIZE: "1280x960",
         HALO_UPDATE_ANSWER: "no"
       };
       const spawnArgs = ["-window", "-vidmode", "1280,960", "-console", "-devmode"];
@@ -47728,7 +48193,12 @@ map_name custom_maps\\${mapSlot}\r
       });
       this.child = child;
       if (child.pid) {
-        this.startMemoryBridge(child.pid);
+        try {
+          this.startMemoryBridge(child.pid);
+        } catch (bridgeErr) {
+          const bMsg = bridgeErr instanceof Error ? bridgeErr.message : String(bridgeErr);
+          this.emitLog("stdout", `[TagTest Warning] Memory bridge failed to start: ${bMsg}`);
+        }
       }
       child.stdout?.on("data", (chunk) => {
         const text = chunk.toString();
@@ -47760,9 +48230,9 @@ map_name custom_maps\\${mapSlot}\r
           this.setHaloAlwaysOnTop(true);
         }
       }, 1200);
-      setTimeout(() => {
+      this.initRestoreTimer = setTimeout(() => {
         this.restoreInitForDir(openCeDir);
-      }, 3e3);
+      }, 6e4);
       return { ok: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -47785,11 +48255,11 @@ map_name custom_maps\\${mapSlot}\r
         this.telnetSocket = sock;
         this.telnetConnected = true;
         this.statusState = "running";
-        if (this.activeOpenCeDir) {
-          this.restoreInitForDir(this.activeOpenCeDir);
-        }
         this.emitStatus();
         this.emitLog("telnet", "[Telnet Bridge] Connected to OpenCE telnet console on port 2323.");
+        if (this.mainMenuMusicStarted && !this.stagedMapLoaded && !this.stagedMapLoading) {
+          this.triggerBootMapLoad();
+        }
         if (this.liveHudMode) {
           this.maybeAutoSpawnLiveHudArsenal();
         }
@@ -47882,6 +48352,9 @@ map_name custom_maps\\${mapSlot}\r
       this.liveHudSetup = stageResult.liveHudSetup ?? null;
       this.arsenalSpawnedForCurrentLoad = false;
       this.unitSpawned = false;
+      this.stagedMapLoading = true;
+      this.stagedMapLoaded = false;
+      this.launchTimeMs = Date.now();
       this.currentMapName = nextSlot;
       const hsCmd = `map_name custom_maps\\${nextSlot}`;
       this.emitLog("stdout", `[TagTest] Switching map in OpenCE via Telnet: ${hsCmd}`);
@@ -47933,6 +48406,10 @@ public class HaloMemBridge {
   public static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
   [DllImport("user32.dll")]
   public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")]
+  public static extern short GetAsyncKeyState(int vKey);
 
   [StructLayout(LayoutKind.Sequential)]
   public struct RECT { public int Left, Top, Right, Bottom; }
@@ -48022,6 +48499,9 @@ public class HaloMemBridge {
 
     Task.Run(() => {
       string lastJson = "";
+      int[] watchedVKeys = new int[] { 0xDC, 0x26, 0x28, 0x25, 0x27, 0x0D, 0x08 };
+      string[] watchedNames = new string[] { "Backslash", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Backspace" };
+      bool[] prevDown = new bool[7];
       while (true) {
         try {
           Process p = Process.GetProcessById(targetPid);
@@ -48079,6 +48559,17 @@ public class HaloMemBridge {
               top = pt.Y;
               width = Math.Max(0, rc.Right - rc.Left);
               height = Math.Max(0, rc.Bottom - rc.Top);
+            }
+            if (GetForegroundWindow() == hWnd) {
+              for (int ki = 0; ki < watchedVKeys.Length; ki++) {
+                bool isDown = (GetAsyncKeyState(watchedVKeys[ki]) & 0x8000) != 0;
+                if (isDown && !prevDown[ki]) {
+                  EmitLine("HUDKEY " + watchedNames[ki]);
+                }
+                prevDown[ki] = isDown;
+              }
+            } else {
+              for (int ki = 0; ki < watchedVKeys.Length; ki++) prevDown[ki] = false;
             }
           }
 
@@ -48277,12 +48768,22 @@ public class HaloMemBridge {
 "@
 [HaloMemBridge]::Run(${pid})
 `;
-    const encoded = Buffer.from(psScript, "utf16le").toString("base64");
-    const proc = (0, import_child_process2.spawn)("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
+    const scriptPath = path9.join(os2.tmpdir(), `_opence_mem_bridge_${pid}.ps1`);
+    try {
+      fs8.writeFileSync(scriptPath, psScript, "utf-8");
+    } catch (writeErr) {
+      const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+      this.emitLog("stdout", `[MemBridge Warning] Could not write bridge script: ${msg}`);
+      return;
+    }
+    const proc = (0, import_child_process2.spawn)("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath], {
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true
     });
     this.memBridgeProc = proc;
+    proc.on("error", (err) => {
+      this.emitLog("stdout", `[MemBridge Warning] Process error: ${err.message}`);
+    });
     let stdoutBuf = "";
     proc.stdout?.on("data", (chunk) => {
       stdoutBuf += chunk.toString("utf8");
@@ -48296,6 +48797,13 @@ public class HaloMemBridge {
             const parsed = JSON.parse(trimmed.slice(6));
             const wasSpawned = this.unitSpawned;
             this.unitSpawned = Boolean(parsed.unitSpawned);
+            if (this.unitSpawned) {
+              this.stagedMapLoading = true;
+              this.stagedMapLoaded = true;
+              if (this.activeOpenCeDir) {
+                this.restoreInitForDir(this.activeOpenCeDir);
+              }
+            }
             const nextWeap = typeof parsed.weaponTagId === "number" && parsed.weaponTagId >= 0 ? parsed.weaponTagId : null;
             const nextVeh = typeof parsed.vehicleTagId === "number" && parsed.vehicleTagId >= 0 ? parsed.vehicleTagId : null;
             const nextRect = parsed.rect && parsed.rect.width > 0 && parsed.rect.height > 0 ? {
@@ -48312,6 +48820,11 @@ public class HaloMemBridge {
               this.maybeAutoSpawnLiveHudArsenal();
             }
           } catch {
+          }
+        } else if (trimmed.startsWith("HUDKEY ")) {
+          const keyName = trimmed.slice(7).trim();
+          if (keyName) {
+            this.emitLog("stdout", `[HUDKEY] ${keyName}`);
           }
         } else if (trimmed === "ARSENAL_READY") {
           this.sendCommand("cheat_deathless_player 1");
@@ -48338,6 +48851,12 @@ public class HaloMemBridge {
       }
     });
     proc.on("exit", () => {
+      try {
+        if (fs8.existsSync(scriptPath)) {
+          fs8.unlinkSync(scriptPath);
+        }
+      } catch {
+      }
       if (this.memBridgeProc === proc) {
         this.memBridgeProc = null;
       }
@@ -48624,6 +49143,12 @@ async function backupOnOpenFlow(mapPath, deps) {
   const mapName = path12.basename(mapPath);
   const backupName = path12.basename(backupPath);
   try {
+    try {
+      if (f === fs10 && fs10.existsSync(mapPath)) {
+        fs10.chmodSync(mapPath, 438);
+      }
+    } catch {
+    }
     const exists = f.existsSync(backupPath);
     if (exists && f.statSync(backupPath).size === f.statSync(mapPath).size && f.readFileSync(backupPath).equals(f.readFileSync(mapPath))) {
       deps.log("info", `Backup already up to date: ${backupName} is identical to ${mapName}.`);
@@ -48649,6 +49174,13 @@ async function backupOnOpenFlow(mapPath, deps) {
     const tempPath = `${backupPath}.tmp-${(0, import_crypto3.randomUUID)()}`;
     try {
       f.copyFileSync(mapPath, tempPath);
+      try {
+        if (f === fs10) {
+          if (fs10.existsSync(tempPath)) fs10.chmodSync(tempPath, 438);
+          if (fs10.existsSync(backupPath)) fs10.chmodSync(backupPath, 438);
+        }
+      } catch {
+      }
       const expected = f.statSync(mapPath).size;
       const copied = f.statSync(tempPath).size;
       if (copied !== expected) throw new Error(`the copy is ${copied} bytes, the map is ${expected} bytes`);
@@ -50801,6 +51333,79 @@ async function performBspSwapFlow(sourceFilePath, options) {
     };
   }
 }
+async function pickBspModelFileFlow() {
+  if (!mainWindow) return { path: null };
+  const { canceled, filePaths } = await import_electron4.dialog.showOpenDialog(mainWindow, {
+    title: "Select 3D Model File (.glb, .gltf, .obj, .jms) for BSP Injection",
+    filters: [
+      { name: "3D Model Files (*.glb, *.gltf, *.obj, *.jms)", extensions: ["glb", "gltf", "obj", "jms"] },
+      { name: "glTF 2.0 (*.glb, *.gltf)", extensions: ["glb", "gltf"] },
+      { name: "Wavefront OBJ (*.obj)", extensions: ["obj"] },
+      { name: "Halo CE JMS (*.jms)", extensions: ["jms"] },
+      { name: "All Files (*.*)", extensions: ["*"] }
+    ],
+    properties: ["openFile"]
+  });
+  if (canceled || filePaths.length === 0) return { path: null };
+  return { path: filePaths[0] };
+}
+async function bspModelPreflightFlow(modelPath, targetBspIndex, options) {
+  const { promise } = sendWorkerRequest(
+    { type: "bspModelPreflight", modelPath, targetBspIndex, options },
+    sendLog
+  );
+  return promise;
+}
+async function bspSwapFromModelFileFlow(modelPath, options) {
+  const { promise } = sendWorkerRequest(
+    { type: "bspSwapFromModelFile", modelPath, options },
+    sendLog,
+    (stage, percent) => mainWindow?.webContents.send("map:progress", { taskId: "bspSwapFromModelFile", stage, percent })
+  );
+  try {
+    const result = await promise;
+    if (result.ok && result.map) {
+      setOpenMapState(result.map);
+      mainWindow?.webContents.send("map:updated", result.map);
+      sendLog(
+        "info",
+        `Injected 3D model "${result.summary.modelFileName}" (${result.summary.injectionMode}) into BSP "${result.summary.targetBspName}" (${result.summary.totalTriangles.toLocaleString()} tris, ${result.summary.injectedBitmaps} bitmaps, ${result.summary.injectedShaders} shaders). Use File > Save to write changes.`
+      );
+    }
+    return result;
+  } catch (err) {
+    const e = err;
+    sendLog("error", `Model BSP injection failed: ${e.message}`);
+    return {
+      ok: false,
+      buffer: Buffer.alloc(0),
+      summary: {
+        modelFileName: path15.basename(modelPath),
+        targetBspName: "",
+        injectionMode: options?.injectionMode === "merge" ? "merge" : "replace",
+        oldSize: 0,
+        newSize: 0,
+        delta: 0,
+        weldedVertices: 0,
+        totalTriangles: 0,
+        solidCollisionTriangles: 0,
+        foliageTriangles: 0,
+        submeshChunks: 0,
+        injectedBitmaps: 0,
+        injectedShaders: 0,
+        collisionNodes3d: 0,
+        collisionSurfaces: 0,
+        relocatedSpawns: 0,
+        strippedDobc: false,
+        strippedDecals: false,
+        newBspAddress: 0,
+        newBspSize: 0,
+        worldBounds: [0, 0, 0, 0, 0, 0]
+      },
+      error: e.message
+    };
+  }
+}
 var saveMapDeps = {
   getOpenMap: () => mainWindow && currentMapPath ? { filePath: currentMapPath, compressed: currentMapCompressed, modified: currentMapModified, backedUp: currentMapBackedUp, overwriteConfirmed } : null,
   confirmOverwriteWithoutBackup: async (filePath) => {
@@ -51193,6 +51798,15 @@ import_electron4.app.whenReady().then(() => {
   import_electron4.ipcMain.handle(
     "bsp:performSwap",
     (_e, sourceFilePath, options) => performBspSwapFlow(sourceFilePath, options)
+  );
+  import_electron4.ipcMain.handle("dialog:pickBspModelFile", () => pickBspModelFileFlow());
+  import_electron4.ipcMain.handle(
+    "bsp:modelPreflight",
+    (_e, modelPath, targetBspIndex, options) => bspModelPreflightFlow(modelPath, targetBspIndex, options)
+  );
+  import_electron4.ipcMain.handle(
+    "bsp:swapFromModelFile",
+    (_e, modelPath, options) => bspSwapFromModelFileFlow(modelPath, options)
   );
   import_electron4.ipcMain.handle("render:getBspMesh", (_e, bspIndex) => getBspRenderMeshFlow(bspIndex));
   import_electron4.ipcMain.handle("render:getBitmapTexture", (_e, bitmapTagId, imageIndex) => getBitmapTextureFlow(bitmapTagId, imageIndex));
@@ -52196,7 +52810,8 @@ import_electron4.app.whenReady().then(() => {
           worldMesh: options.worldMesh,
           bspIndex: options.bspIndex,
           shaderBindings: options.shaderBindings,
-          collisionMode: options.collisionMode
+          collisionMode: options.collisionMode,
+          donorMapFilePath: options.donorMapFilePath
         },
         sendLog
       );
@@ -53084,6 +53699,92 @@ if ($proc) {
     mainWindow?.focus();
     return { ok: true };
   });
+  import_electron4.ipcMain.handle(
+    "map:runFixAction",
+    async (_evt, action, options) => {
+      const actionLabelMap = {
+        ce: { title: "Fix CE Map (Halo Custom Edition v609)", expectedEngine: 609 },
+        mcc: { title: "Fix MCC Map (Halo MCC CEA v13 / H1EK -> CE v609)", expectedEngine: 13 },
+        demo: { title: "Fix Halo Demo Map (Halo Trial / Mac Demo v6 -> CE v609)", expectedEngine: 6 },
+        halomd: { title: "Fix Halo MD Map (HaloMD / Retail v7 -> CE v609)", expectedEngine: 7 },
+        xbox: { title: "Fix Xbox Map (Original Xbox v5 -> CE v609)", expectedEngine: 5 }
+      };
+      const meta = actionLabelMap[action];
+      let targetFilePath = options?.filePath;
+      if (!targetFilePath) {
+        if (options?.useOpenMap && currentMapPath) {
+          targetFilePath = currentMapPath;
+        } else if (currentMapPath && currentOpenMapSummary && (currentOpenMapSummary.header.engine === meta.expectedEngine || action === "mcc" && currentOpenMapSummary.header.engine === 609)) {
+          const openName = path15.basename(currentMapPath);
+          const { response } = await import_electron4.dialog.showMessageBox(mainWindow, {
+            type: "question",
+            buttons: [`Fix Open Map (${openName})`, "Browse for Another .map File...", "Cancel"],
+            defaultId: 0,
+            cancelId: 2,
+            noLink: true,
+            title: meta.title,
+            message: `Run "${meta.title}" on the currently open map (${openName})?`,
+            detail: "A .bak backup will be created automatically and any Windows ReadOnly attribute will be cleared before writing."
+          });
+          if (response === 2) {
+            return { ok: false, cancelled: true, message: "Cancelled by user." };
+          }
+          if (response === 0) {
+            targetFilePath = currentMapPath;
+          }
+        }
+      }
+      if (!targetFilePath) {
+        const pick = await import_electron4.dialog.showOpenDialog(mainWindow, {
+          title: `Select .map File \u2014 ${meta.title}`,
+          filters: [{ name: "Halo Cache Map (*.map)", extensions: ["map"] }],
+          properties: ["openFile"]
+        });
+        if (pick.canceled || pick.filePaths.length === 0) {
+          return { ok: false, cancelled: true, message: "Cancelled by user." };
+        }
+        targetFilePath = pick.filePaths[0];
+      }
+      const settings = getSettings();
+      const ceRes = settings.versionResourceMaps?.ce ?? settings.resourceMaps ?? {};
+      const srcVerKey = action === "demo" ? "demo" : action === "halomd" ? "pc" : "ce";
+      const srcRes = settings.versionResourceMaps?.[srcVerKey] ?? settings.resourceMaps ?? {};
+      sendLog("info", `Running ${meta.title} on ${path15.basename(targetFilePath)}...`);
+      try {
+        const { promise } = sendWorkerRequest(
+          {
+            type: "runMapFixAction",
+            action,
+            filePath: targetFilePath,
+            outputPath: options?.outputPath,
+            bitmapsPath: srcRes.bitmaps,
+            soundsPath: srcRes.sounds,
+            locPath: srcRes.loc,
+            ceBitmapsPath: ceRes.bitmaps,
+            ceSoundsPath: ceRes.sounds,
+            ceLocPath: ceRes.loc
+          },
+          sendLog,
+          (stage, percent) => {
+            mainWindow?.webContents.send("app:progress", { stage, percent });
+          }
+        );
+        const res = await promise;
+        if (res.ok && res.map) {
+          setOpenMapState(res.map);
+          addRecentMap(res.map.filePath);
+          sendLog("info", res.message);
+        } else if (!res.ok) {
+          sendLog("error", `Map fix failed: ${res.message}`);
+        }
+        return res;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendLog("error", `Map fix failed: ${msg}`);
+        return { ok: false, code: "FIX_FAILED", message: msg };
+      }
+    }
+  );
   try {
     tagTestRunner.restoreInitBackupIfPresent();
   } catch {

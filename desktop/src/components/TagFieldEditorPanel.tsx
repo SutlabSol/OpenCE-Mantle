@@ -837,9 +837,10 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
       return;
     }
     try {
-      await navigator.clipboard.writeText(res.tsvText);
+      await navigator.clipboard.writeText((res as any).tsvText ?? res.tsv ?? '');
+      const colList = (res as any).columnHeaders ?? res.columnNames ?? [];
       setStatusMessage(
-        `Copied "${reflexiveFieldPath}" (${res.rowCount} rows × ${res.columnHeaders.length} columns) as TSV to clipboard (paste into Excel / Google Sheets).`,
+        `Copied "${reflexiveFieldPath}" (${res.rowCount} rows × ${colList.length} columns) as TSV to clipboard (paste into Excel / Google Sheets).`,
       );
     } catch {
       setStatusMessage(`Exported TSV (${res.rowCount} rows).`);
@@ -857,9 +858,9 @@ export default function TagFieldEditorPanel({ focusedTag, allTags = [] }: Props)
       setAddingChunkPath(reflexiveFieldPath);
       const res = await window.opence.importReflexiveTsv(focusedTag.index, reflexiveFieldPath, tsvText);
       if (res.ok) {
-        setFieldsResult(res.fields);
+        if ((res as any).fields) setFieldsResult((res as any).fields);
         setStatusMessage(
-          `Applied TSV spreadsheet paste to "${reflexiveFieldPath}" (${res.updatedCells} cell(s) updated across ${res.rowCount} row(s)).`,
+          `Applied TSV spreadsheet paste to "${reflexiveFieldPath}" (${res.updatedCells} cell(s) updated across ${(res as any).rowCount ?? res.updatedRows} row(s)).`,
         );
       } else {
         setStatusMessage(`Failed to paste TSV: ${res.message}`);
